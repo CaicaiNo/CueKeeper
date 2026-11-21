@@ -300,14 +300,55 @@ export const reportSchema = object({
   entries: T.Array(entry, { minItems: 1 }),
 });
 
+// A batch summary indexes the completed rows of one data table. Each indexed
+// row points at an ordinary v1 report and its bound flow, which stay packable.
+const batchIssue = object({
+  stepId: T.String({ minLength: 1, maxLength: 196 }),
+  code: T.Optional(T.String()),
+});
+const batchRow = object({
+  row: T.Integer({ minimum: 1, maximum: 1000 }),
+  status: T.Union([T.Literal('passed'), T.Literal('failed'), T.Literal('blocked')]),
+  parameters: T.Record(T.String({ minLength: 1, maxLength: 129 }), T.String()),
+  issues: T.Array(batchIssue, { maxItems: 2000 }),
+  report: T.Optional(T.String({ minLength: 1 })),
+  flow: T.Optional(T.String({ minLength: 1 })),
+});
+export const batchReportSchema = object({
+  format: T.Literal('cuekeeper-batch-report'),
+  version: T.Literal(1),
+  flowId: id,
+  mode: T.Union([T.Literal('replay'), T.Literal('dry-run')]),
+  startedAt: timestamp,
+  status: T.Union([
+    T.Literal('passed'), T.Literal('failed'), T.Literal('blocked'),
+    T.Literal('error'), T.Literal('interrupted'),
+  ]),
+  counts: object({
+    total: T.Integer({ minimum: 1, maximum: 1000 }),
+    passed: T.Integer({ minimum: 0, maximum: 1000 }),
+    failed: T.Integer({ minimum: 0, maximum: 1000 }),
+    blocked: T.Integer({ minimum: 0, maximum: 1000 }),
+    notCompleted: T.Integer({ minimum: 0, maximum: 1000 }),
+  }),
+  rows: T.Array(batchRow, { maxItems: 1000 }),
+  error: T.Optional(object({
+    code: T.String({ minLength: 1 }),
+    message: T.String({ minLength: 1 }),
+    row: T.Optional(T.Integer({ minimum: 1, maximum: 1000 })),
+  })),
+});
+
 export const schemas = {
   flow: flowSchema,
   behavior: object({ version: T.Literal(1), ...behavior.properties }),
   setup: object({ version: T.Literal(1), ...setup.properties }),
   report: reportSchema,
+  batch: batchReportSchema,
 };
 export const flowCheck = TypeCompiler.Compile(flowSchema);
 export const reportCheck = TypeCompiler.Compile(reportSchema);
+export const batchReportCheck = TypeCompiler.Compile(batchReportSchema);
 export const captureTargetCheck = TypeCompiler.Compile(targetSchema);
 export const captureActionCheck = TypeCompiler.Compile(action);
 
@@ -320,6 +361,7 @@ export type ElementLocator = Static<typeof element>;
 export type Check = Static<typeof check>;
 export type Target = Static<typeof targetSchema>;
 export type Report = Static<typeof reportSchema>;
+export type BatchReport = Static<typeof batchReportSchema>;
 export type Entry = Static<typeof entry>;
 export type AssertCheck = Static<typeof assertCheck>;
 export type WindowTarget = Static<typeof windowTarget>;

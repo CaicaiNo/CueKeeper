@@ -17,7 +17,7 @@
 
 ## 准备与录制
 
-1. 执行 `pnpm build:recorder`，生成 `dist/cuekeeper-capture`。agent-desktop 使用 1.3.1，`CUEKEEPER_AGENT_DESKTOP` 可指定可信二进制的绝对路径。
+1. 执行 `pnpm build:recorder`，生成 `dist/cuekeeper-capture`。先用 `node dist/cli.js doctor` 做只读自检（Node、文件、agent-desktop 1.3.1、录制器、辅助功能与输入监控）；发布包用 `cuekeeper doctor`。agent-desktop 使用 1.3.1，`CUEKEEPER_AGENT_DESKTOP` 可指定可信二进制的绝对路径。
 2. 只使用专用空白纯文本文档 `Cuekeeper-M1.txt`，保存到新建测试目录。确认窗口标题与文件名一致且唯一，并把专用文档选为当前 TextEdit 窗口。
 3. 在终端执行以下录制命令。看到 `INDICATOR_READY` 或 HUD「录制就绪」后开始操作。启动失败时保留 CLI 诊断。使用英文键盘输入，切回 TextEdit 可用 Cmd+Tab。暂停时 HUD 计时冻结，会话仍在 `--seconds` 到点时收尾。
 

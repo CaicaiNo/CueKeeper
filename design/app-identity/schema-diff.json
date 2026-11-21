@@ -1,0 +1,74 @@
+{
+  "schemas/flow.schema.json": [
+    {
+      "op": "test",
+      "path": "/properties/target/required",
+      "value": ["app", "window"]
+    },
+    {
+      "op": "test",
+      "path": "/properties/target/additionalProperties",
+      "value": false
+    },
+    {
+      "op": "test",
+      "path": "/properties/target/properties/appPath",
+      "value": { "minLength": 1, "maxLength": 4096, "type": "string" }
+    },
+    {
+      "op": "add",
+      "path": "/properties/target/properties/appPath/pattern",
+      "value": "^(?![\\s\\S]*[\\u0000-\\u001f\\u007f])(?:/(?!/)[\\s\\S]+|[A-Za-z]:[/\\\\][^/\\\\][\\s\\S]*|\\\\\\\\(?![?.]\\\\)[^/\\\\]+\\\\[^/\\\\]+\\\\[^/\\\\][\\s\\S]*)$"
+    }
+  ],
+  "schemas/report.schema.json": [
+    {
+      "op": "test",
+      "path": "/required",
+      "value": ["version", "flowId", "flowSha256", "startedAt", "mode", "status", "entries"]
+    },
+    {
+      "op": "test",
+      "path": "/additionalProperties",
+      "value": false
+    },
+    {
+      "op": "add",
+      "path": "/properties/appIdentity",
+      "value": {
+        "anyOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["app", "mode", "status"],
+            "properties": {
+              "app": { "type": "string", "minLength": 1, "maxLength": 256 },
+              "mode": { "enum": ["bundle_path", "legacy_bundle_id"] },
+              "status": { "enum": ["verified", "offline_unverified"] }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["app", "mode", "status", "code", "reason"],
+            "properties": {
+              "app": { "type": "string", "minLength": 1, "maxLength": 256 },
+              "mode": { "enum": ["bundle_path", "legacy_bundle_id"] },
+              "status": { "const": "blocked" },
+              "code": { "enum": ["APP_PATH_INVALID", "APP_AMBIGUOUS", "UNSUPPORTED_PLATFORM", "UNSAFE_POINT"] },
+              "reason": {
+                "enum": [
+                  "invalid_bundle_path", "bundle_id_mismatch", "unsupported_path_platform",
+                  "path_mismatch", "multiple_instances", "multiple_installed_copies",
+                  "identity_unproven", "instance_changed", "driver_target_unconfirmed",
+                  "fixture_path_mismatch", "untargeted_input"
+                ]
+              },
+              "entryId": { "type": "string", "minLength": 1, "maxLength": 196 }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

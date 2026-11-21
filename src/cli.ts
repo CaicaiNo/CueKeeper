@@ -3,6 +3,9 @@ import { parseArgs } from 'node:util';
 import { dirname, resolve } from 'node:path';
 import { realpath } from 'node:fs/promises';
 import { discoverAssets } from './assets.js';
+import { capturePreflight, diagnose, formatDoctor, preflightFault } from './doctor.js';
+import { buildInfo, versionLine } from './version.js';
+import { BatchError, batchExitCode, bindRows, readData, resolveBatchSecrets, runBatch } from './batch.js';
 import { captureTargetCheck } from './contracts.js';
 import { offlineDesktop, withDesktop } from './desktop.js';
 import { ensureNew, readJson, writeNew } from './files.js';
@@ -15,14 +18,16 @@ import { record } from './record.js';
 import { packReport } from './report.js';
 import { blockedShellReport, runFlow } from './run.js';
 import type { ShellRunOptions } from './run.js';
-import { reachableShells, shellGate } from './shell.js';
+import { flowHasShellDefinitions, reachableShells, shellGate } from './shell.js';
 import { parseTestItem, resolveSecrets } from './test-item.js';
 import { startWorkbench } from './workbench.js';
 
-const help = `Cuekeeper
+const help = `Cuekeeper ${buildInfo().version}
 
+  cuekeeper --version
+  cuekeeper doctor [--json]
   cuekeeper flow validate <flow.json|test.json> [--json]
-  cuekeeper run <flow.json|test.json> [--dry-run [--snapshot <snapshot.json>]] [--headed] [--report <report.json>] [--allow-shell] [--allow-sudo] [--capture-shell-output] [--json]
+  cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--report <report.json>] [--allow-shell] [--allow-sudo] [--capture-shell-output] [--json]
   cuekeeper workbench [run-directory] [--port <port>] [--library <directory>] [--allow-live-replay] [--allow-shell] [--allow-sudo]
   cuekeeper pick --app <bundle-id> --window <title> [--select <ref>] [--snapshot <snapshot.json>] [--json]
   cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--seconds 25] [--no-indicator] [--sound] [--trace-clicks] [--json]
@@ -79,7 +84,19 @@ async function main() {
     success({ usage: help }, help);
     return;
   }
+  if (argv[0] === '--version' || argv[0] === '-v' || argv[0] === 'version') {
+    const info = buildInfo();
+    success({ ...info }, versionLine(info));
+    return;
+  }
   const [command, ...rest] = argv;
+  if (command === 'doctor') {
+    const { positionals } = parseArgs({ args: rest, options: common, allowPositionals: true });
+    checkPositionals(positionals, 0);
+    const report = await diagnose();
+    success(report, formatDoctor(report), report.ok ? 0 : 1);
+    return;
+  }
   if (command === 'flow' && rest[0] === 'validate') {
     const { positionals } = parseArgs({ args: rest.slice(1), options: common, allowPositionals: true });
     checkPositionals(positionals, 1);
@@ -142,7 +159,7 @@ async function main() {
     const { values, positionals } = parseArgs({
       args: rest, allowPositionals: true, options: {
         ...common, 'dry-run': { type: 'boolean' }, headed: { type: 'boolean' },
-        report: { type: 'string' }, snapshot: { type: 'string' },
+        report: { type: 'string' }, snapshot: { type: 'string' }, data: { type: 'string' },
         'allow-shell': { type: 'boolean' }, 'allow-sudo': { type: 'boolean' },
         'capture-shell-output': { type: 'boolean' },
       },
@@ -162,10 +179,57 @@ async function main() {
       captureOutput: values['capture-shell-output'] ?? false,
     };
     const gate = dryRun ? undefined : shellGate(flow, planned, shell);
+    const baselineDir = resolve(dirname(input), 'baselines');
+
+    if (values.data) {
+      // Batch rows replay one flow repeatedly. Shell steps need the single-flow
+      // confirmation path, so a table with shell definitions is refused here.
+      if (flowHasShellDefinitions(flow)) {
+        throw new Error('Batch runs do not accept flows with shell steps yet');
+      }
+      // Preflight the whole table, then resolve secrets, before any desktop
+      // driver call or report artifact is created.
+      const table = await readData(values.data);
+      const rows = bindRows(flow, table, secrets);
+      const secretTexts = dryRun ? undefined : resolveBatchSecrets(flow, secrets, process.env);
+      if (values.report) await ensureNew(`${resolve(values.report)}.rows`);
+      const options = {
+        dryRun, signal, baselineDir,
+        ...(values.report ? { reportPath: resolve(values.report) } : {}),
+        ...(secretTexts ? { secretTexts } : {}),
+        omitEvidence: (secretTexts?.size ?? 0) > 0,
+      };
+      let summary;
+      if (values.snapshot) {
+        summary = await runBatch(rows, offlineDesktop(await readJson(values.snapshot), flow.target), options);
+      } else {
+        macOnly();
+        summary = await withDesktop({ headed: values.headed ?? false, signal },
+          desktop => runBatch(rows, desktop, options));
+      }
+      const lines = [
+        `${summary.mode} ${summary.status} · ${summary.counts.total} rows · ` +
+        `${summary.counts.passed} passed · ${summary.counts.failed} failed · ` +
+        `${summary.counts.blocked} blocked · ${summary.counts.notCompleted} not completed`,
+      ];
+      for (const row of summary.rows) {
+        if (row.status === 'passed') continue;
+        const issues = row.issues.map(issue => `${issue.stepId} ${issue.code ?? ''}`.trim()).join(', ');
+        lines.push(`row ${row.row} ${row.status}${issues ? ` — ${issues}` : ''}`);
+      }
+      if (summary.error) {
+        lines.push(`batch error${summary.error.row ? ` at row ${summary.error.row}` : ''} — ` +
+          `${summary.error.code}: ${summary.error.message}`);
+      }
+      if (values.report) lines.push(`Wrote ${resolve(values.report)}`);
+      success(summary, lines.join('\n'), batchExitCode(summary));
+      return;
+    }
+
     const options = {
       dryRun, signal,
       secretTexts: dryRun ? undefined : resolveSecrets(secrets, process.env),
-      baselineDir: resolve(dirname(input), 'baselines'),
+      baselineDir,
       shell,
       ...(values.report ? { evidenceDir: `${resolve(values.report)}.assets` } : {}),
     };
@@ -240,6 +304,8 @@ async function main() {
     const seconds = Number(values.seconds);
     if (!Number.isInteger(seconds) || seconds < 1 || seconds > 90) throw new Error('--seconds must be an integer from 1 to 90');
     macOnly();
+    const preflight = preflightFault(await capturePreflight());
+    if (preflight) throw preflight;
     await ensureNew(output);
     const options = { seconds, indicator: !values['no-indicator'], sound: values.sound ?? false,
       traceClicks: values['trace-clicks'] ?? false };
@@ -284,11 +350,14 @@ async function main() {
 try {
   await main();
 } catch (error) {
-  const code = signal.aborted ? 130 : error instanceof Fault && !error.dependency ? 1 : 2;
+  const code = signal.aborted ? 130 : error instanceof BatchError ? 2 :
+    error instanceof Fault && !error.dependency ? 1 : 2;
   const reason = error instanceof Error ? error.message : 'Unexpected error';
   if (machine) {
     console.log(JSON.stringify({ ok: false, error: {
-      code: signal.aborted ? 'INTERRUPTED' : error instanceof Fault ? error.code : 'INPUT_ERROR', message: reason,
+      code: signal.aborted ? 'INTERRUPTED' : error instanceof Fault ? error.code :
+        error instanceof BatchError ? error.code : 'INPUT_ERROR',
+      message: reason,
     } }));
   } else {
     console.error(reason);
