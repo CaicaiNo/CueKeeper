@@ -107,6 +107,7 @@ export const schemas = {
 export const flowCheck = TypeCompiler.Compile(flowSchema);
 export const reportCheck = TypeCompiler.Compile(reportSchema);
 export const captureTargetCheck = TypeCompiler.Compile(targetSchema);
+export const captureActionCheck = TypeCompiler.Compile(action);
 
 export type Flow = Static<typeof flowSchema>;
 export type Action = Static<typeof action>;

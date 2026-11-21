@@ -29,11 +29,11 @@ unzip -t out/textedit-dry.zip
 | 命令 | 用途 |
 | --- | --- |
 | `flow validate <flow.json>` | 检查 v1 结构、ID、行为引用和参数绑定 |
-| `record --app <bundle-id> --window <精确标题> --out <flow.json>` | 监听限定应用的测试窗口，编译为流程 |
+| `record --app <bundle-id> --window <精确标题> --out <flow.json>` | 录制目标窗口，显示计时 HUD，支持 `--no-indicator` 和 `--sound` |
 | `run <flow.json> --dry-run` | 用当前窗口解析定位器 |
 | `run <flow.json> --headed --report <report.json>` | 允许物理点击，回放并记录逐步结果 |
 | `report pack <report.json> --flow <flow.json> --out <report.zip>` | 验证报告与流程配对，生成 ZIP |
 
-所有命令支持 `--json`，标准输出提供单个 JSON 对象。错误有 `error.code` 和 `error.message`。生成的运行报告放在 `data` 中，失败报告的 `ok` 为 `false`。录制状态提示写标准错误。退出码为 `0` 完成、`1` 失败或阻塞、`2` 输入文件或依赖错误、`130` 中断。
+所有命令支持 `--json`，标准输出提供单个 JSON 对象。错误有 `error.code` 和 `error.message`。生成的运行报告放在 `data` 中，失败报告的 `ok` 为 `false`。录制状态提示写标准错误。跳过其他应用输入时，录制成功结果带有 `data.warnings`。中断或跳过目标动作时，已有步骤保存至 `--out`，CLI 返回 `data.partial: true` 及原因。退出码为 `0` 完成、`1` 失败、阻塞或部分录制、`2` 输入文件或依赖错误、`130` 中断。
 
 [架构与里程碑](docs/architecture.md)说明 schema、适配接口、录制限制与后续工作。

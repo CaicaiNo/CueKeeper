@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { TypeCompiler } from '@sinclair/typebox/compiler';
 import { unzipSync, strFromU8 } from 'fflate';
@@ -62,6 +63,93 @@ test('secure input cannot be added to a flow', () => {
   }), { code: 'SECURE_INPUT' });
   assert.throws(() => recording.finish(), { code: 'EMPTY_RECORDING' });
 });
+
+// Exercise the real CLI and output writer without invoking either live macOS executable.
+function recordFixture(t, events, captureExit = 0, flags = []) {
+  const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-record-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dist = join(dir, 'dist');
+  cpSync(new URL('../dist/', import.meta.url), dist, {
+    recursive: true, filter: source => !source.endsWith('/cuekeeper-capture'),
+  });
+  cpSync(new URL('../package.json', import.meta.url), join(dir, 'package.json'));
+  symlinkSync(fileURLToPath(new URL('../node_modules/', import.meta.url)), join(dir, 'node_modules'), 'dir');
+  const desktop = join(dir, 'desktop');
+  writeFileSync(desktop, `#!/usr/bin/env node
+const command = process.argv[2];
+const snapshots = ${JSON.stringify(fixture.data)};
+const data = command === 'version' ? { version: '1.3.1' } : snapshots;
+console.log(JSON.stringify({ version: '2.6', command, ok: true, data }));
+`, { mode: 0o700 });
+  writeFileSync(join(dist, 'cuekeeper-capture'), `#!/usr/bin/env node
+import assert from 'node:assert/strict';
+import { writeFileSync } from 'node:fs';
+assert.deepEqual(process.argv.slice(2), ${JSON.stringify([fixture.target.app, '1234', '1', ...flags])});
+const seen = Date.now();
+const messages = [{ kind: 'ready' }, ...${JSON.stringify(events)}];
+writeFileSync(1, messages.map((event, t) => JSON.stringify({ ...event, seen, t })).join('\\n') + '\\n');
+process.exitCode = ${captureExit};
+`, { mode: 0o700 });
+  const path = join(dir, 'recorded.flow.json');
+  const result = spawnSync(process.execPath, [join(dist, 'cli.js'), 'record',
+    '--app', fixture.target.app, '--window', fixture.target.window, '--out', path, '--seconds', '1',
+    '--json', ...flags], { env: { ...process.env, CUEKEEPER_AGENT_DESKTOP: desktop }, encoding: 'utf8', timeout: 10000 });
+  assert.match(result.stderr, /Ctrl\+Option\+X stops and saves/);
+  return { code: result.status, response: JSON.parse(result.stdout),
+    recorded: parseFlow(JSON.parse(readFileSync(path, 'utf8'))) };
+}
+
+const captureClick = { kind: 'click', point: [135, 165] };
+const captureSave = { kind: 'key', key: 's', modifiers: ['meta'] };
+
+test('record CLI saves click, type and save after leaving and returning to the target app',
+  { skip: process.platform !== 'darwin' }, t => {
+    const { code, response, recorded } = recordFixture(t, [
+      captureClick, { kind: 'text', chars: 'Cuekeeper' }, { kind: 'text', chars: ' M1' },
+      { kind: 'focus', active: false }, { kind: 'text', chars: 'Other app' },
+      { kind: 'focus', active: true }, { kind: 'boundary' }, captureSave,
+    ]);
+    assert.equal(code, 0);
+    assert.equal(response.ok, true);
+    assert.equal(response.data.actions, 3);
+    assert.equal(response.data.partial, undefined);
+    assert.deepEqual(response.data.warnings.map(warning => warning.code), ['FOCUS_CHANGED']);
+    assert.deepEqual(recorded.steps.map(step => step.kind), ['click', 'type', 'key']);
+    assert.equal(recorded.steps[1].text, 'Cuekeeper M1');
+    assert.deepEqual(recorded.steps[2].modifiers, ['meta']);
+    assert.equal(recorded.steps[2].key, 's');
+  });
+
+test('record CLI saves buffered text and reports partial capture after input permission loss',
+  { skip: process.platform !== 'darwin' }, t => {
+    const { code, response, recorded } = recordFixture(t, [
+      captureClick, { kind: 'text', chars: 'Already captured' },
+      { kind: 'error', code: 'INPUT_MONITORING_LOST' },
+    ], 1, ['--no-indicator', '--sound']);
+    assert.equal(code, 1);
+    assert.equal(response.ok, false);
+    assert.equal(response.error.code, 'INPUT_MONITORING_LOST');
+    assert.equal(response.data.partial, true);
+    assert.equal(response.data.flowId, recorded.id);
+    assert.deepEqual(recorded.steps.map(step => step.kind), ['click', 'type']);
+    assert.equal(recorded.steps[1].text, 'Already captured');
+  });
+
+test('record CLI flags skipped input and still writes actions received afterward',
+  { skip: process.platform !== 'darwin' }, t => {
+    const { code, response, recorded } = recordFixture(t, [
+      captureClick, { kind: 'warning', code: 'UNSUPPORTED_EVENT' },
+      { kind: 'key', key: 'unknown', modifiers: [] },
+      { kind: 'text', chars: 'After warning' }, captureSave,
+    ]);
+    assert.equal(code, 1);
+    assert.equal(response.error.code, 'PARTIAL_RECORDING');
+    assert.equal(response.data.partial, true);
+    assert.deepEqual(response.data.warnings.map(warning => warning.code),
+      ['UNSUPPORTED_EVENT', 'UNREPRESENTABLE_ACTION']);
+    assert.deepEqual(recorded.steps.map(step => step.kind), ['click', 'type', 'key']);
+    assert.equal(recorded.steps[1].text, 'After warning');
+  });
 
 test('ambiguous locators require an explicit index, and partial trees are rejected', () => {
   const twins = structuredClone(fixture);

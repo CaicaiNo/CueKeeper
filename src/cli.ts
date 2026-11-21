@@ -13,7 +13,7 @@ const help = `Cuekeeper
 
   cuekeeper flow validate <flow.json> [--json]
   cuekeeper run <flow.json> [--dry-run [--snapshot <snapshot.json>]] [--headed] [--report <report.json>] [--json]
-  cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--seconds 25] [--json]
+  cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--seconds 25] [--no-indicator] [--sound] [--json]
   cuekeeper report pack <report.json> --flow <flow.json> --out <report.zip> [--json]
 
 Exit codes
@@ -104,6 +104,7 @@ async function main() {
       args: rest, options: {
         ...common, app: { type: 'string' }, window: { type: 'string' },
         out: { type: 'string' }, seconds: { type: 'string', default: '25' },
+        'no-indicator': { type: 'boolean' }, sound: { type: 'boolean' },
       },
     });
     const target = { app: values.app, window: values.window };
@@ -115,10 +116,21 @@ async function main() {
     if (!Number.isInteger(seconds) || seconds < 1 || seconds > 60) throw new Error('--seconds must be an integer from 1 to 60');
     macOnly();
     await ensureNew(output);
-    const flow = await withDesktop({ headed: false, signal }, desktop => record(desktop, target, seconds, signal));
+    const options = { seconds, indicator: !values['no-indicator'], sound: values.sound ?? false };
+    const { flow, warnings, partial, failure } = await withDesktop({ headed: false, signal },
+      desktop => record(desktop, target, options, signal));
     await writeNew(output, JSON.stringify(flow, null, 2) + '\n');
-    success({ output, flowId: flow.id, actions: flow.steps.length },
-      `Saved ${flow.steps.length} actions to ${output}`);
+    const data = { output, flowId: flow.id, actions: flow.steps.length,
+      ...(partial ? { partial: true } : {}), ...(warnings.length ? { warnings } : {}) };
+    const message = `Saved ${flow.steps.length} actions to ${output}${partial ? ' (partial flow)' : ''}`;
+    const fault = failure ?? (partial ? new Fault('PARTIAL_RECORDING', 'Some input was skipped') : undefined);
+    if (fault && machine) {
+      console.log(JSON.stringify({ ok: false, data, error: { code: fault.code, message: fault.message } }));
+      process.exitCode = fault.code === 'INTERRUPTED' ? 130 : 1;
+    } else {
+      const details = [message, ...warnings.map(warning => warning.message), ...(fault ? [fault.message] : [])];
+      success(data, details.join('\n'), !fault ? 0 : fault.code === 'INTERRUPTED' ? 130 : 1);
+    }
     return;
   }
 

@@ -1,12 +1,12 @@
 # TextEdit 现场验收
 
-批准窗口内执行；原生构建和现场运行分开。一轮只构建一次。现场预计 5–10 分钟，涉及 TextEdit、测试专用文件、辅助功能和输入监控。预留两项授权操作，各最多一次，已有权限时通常为零。权限由操作者在 macOS 手动处理。若出现未预期的弹窗、前台切换或窗口错配，终止流程。
+在批准的时间窗内执行，原生构建和现场运行分开。一轮只构建一次。现场涉及 TextEdit、测试专用文件、辅助功能和输入监控。预留两项授权操作，各最多一次，已有权限时通常为零。权限由操作者在 macOS 手动处理。遇到额外弹窗或窗口错配时结束验收。
 
 ## 准备与录制
 
 1. 执行 `pnpm build:recorder`，生成 `dist/cuekeeper-capture`。agent-desktop 使用 1.3.1，`CUEKEEPER_AGENT_DESKTOP` 可指定可信二进制的绝对路径。
 2. 只使用专用空白纯文本文档 `Cuekeeper-M1.txt`，保存到新建测试目录。确认窗口标题和文件名一致，关闭测试无关的 TextEdit 窗口。
-3. 在终端执行以下命令，看到录制提示后切换到已保存的测试文档。点击正文一次，用英文键盘输入 `Cuekeeper M1` 并按 Cmd+S。停留在目标窗口，待 25 秒计时结束。Ctrl+C 会中止并且丢弃当前录制。
+3. 在终端执行以下命令。确认每块显示器都有边框和顶部 HUD，计时在走。切换到已保存的测试文档并点击正文，使用英文键盘输入 `Cuekeeper M1`。切到飞书，再用 Cmd+Tab 切回 TextEdit，按 Cmd+S，最后用 Ctrl+Option+X 停止。录制时可用 Ctrl+Option+P 暂停或继续。暂停时 HUD 计时冻结，会话仍在 `--seconds` 到点时收尾。
 
 ```sh
 mkdir -p out
@@ -16,7 +16,11 @@ node dist/cli.js flow validate out/recorded.flow.json --json
 node dist/cli.js run out/recorded.flow.json --dry-run --json
 ```
 
-确认实际录制的动作依次为 `click`、`type` 和 `key`，dry-run 每项为 `resolved`。
+4. 确认 flow 的三步依次为 `click`、`type` 和 `key`，输入文本与测试文件一致，CLI 返回一次 `FOCUS_CHANGED` 提示，dry-run 每项为 `resolved`。
+5. 单独录制一轮核对 HUD。把测试窗口放在 HUD 下方，点击 HUD 并观察鼠标事件是否穿透，再点击正文、输入、保存并停止。flow 应只包含正文点击、输入和保存。若有多个屏幕或 Space，确认切换时 HUD 仍可见。
+6. 另开一轮检查截图，可用 `--no-indicator` 关闭边框和 HUD。默认窗口设置为 `sharingType = .none`，较新的系统截图和录屏工具可能仍会拍到 HUD。此 CLI 生成的是动作 flow 与报告 ZIP。 [Apple 窗口共享说明](https://developer.apple.com/documentation/appkit/nswindow/sharingtype-swift.enum/none)
+
+默认静音，`--sound` 开启起止提示音。时间到点或按停止热键时，录制会保存动作。Ctrl+C 和运行中失去权限会写入已有动作，并在 CLI 标记部分录制。没有可用动作时，CLI 会报告具体原因。
 
 ## 回放与核对
 

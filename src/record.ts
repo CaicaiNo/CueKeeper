@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
+import { captureActionCheck, flowSchema } from './contracts.js';
 import type { Action, Flow, Locator, Target } from './contracts.js';
 import type { Desktop } from './desktop.js';
 import { parseFlow } from './flow.js';
@@ -17,6 +18,18 @@ type Recorded = { event: RawEvent; snapshot: Snapshot };
 
 const textGapMs = 1500;
 const editable = new Set(['textfield', 'textbox', 'textarea', 'searchfield', 'combobox']);
+const stepLimit = flowSchema.properties.steps.maxItems!;
+
+type CaptureOptions = { seconds: number; indicator: boolean; sound: boolean };
+type CaptureWarning = { code: string; message: string };
+type CaptureResult = { flow: Flow; warnings: CaptureWarning[]; partial: boolean; failure?: Fault };
+
+function validateAction(action: Action) {
+  if (!captureActionCheck.Check(action)) {
+    throw new Fault('UNREPRESENTABLE_ACTION', 'An input action could not be represented in the flow');
+  }
+  return action;
+}
 
 export class Recording {
   private steps: Action[] = [];
@@ -26,7 +39,7 @@ export class Recording {
 
   private nextId() { return `step-${this.steps.length + 1}`; }
 
-  private flush() {
+  endTextBurst() {
     if (!this.text) return;
     this.steps.push({ id: this.nextId(), kind: 'type', target: this.text.target, text: this.text.value });
     this.text = undefined;
@@ -39,20 +52,20 @@ export class Recording {
     }
 
     if (event.kind === 'click') {
-      this.flush();
+      this.endTextBurst();
       if (!contains(snapshot.tree.bounds, event.point)) {
         throw new Fault('OUTSIDE_WINDOW', 'Click fell outside the requested window');
       }
       const hit = hitTest(snapshot, event.point);
       if (hit?.node.secure) throw new Fault('SECURE_INPUT', 'Click hit a protected control');
       const target: Locator = hit ? toLocator(snapshot, hit) : { kind: 'point', point: event.point };
-      this.steps.push({ id: this.nextId(), kind: 'click', target });
+      this.steps.push(validateAction({ id: this.nextId(), kind: 'click', target }));
       return;
     }
 
     if (event.kind === 'key') {
-      this.flush();
-      this.steps.push({ id: this.nextId(), kind: 'key', key: event.key, modifiers: event.modifiers });
+      this.endTextBurst();
+      this.steps.push(validateAction({ id: this.nextId(), kind: 'key', key: event.key, modifiers: event.modifiers }));
       return;
     }
 
@@ -63,22 +76,28 @@ export class Recording {
     const locator = toLocator(snapshot, field);
     if (this.text && (this.text.ref !== field.node.ref || event.t - this.text.at > textGapMs ||
         this.text.value.length + event.chars.length > 4000)) {
-      this.flush();
+      this.endTextBurst();
     }
     // Re-resolution verifies the locator selected by the recorder against this same tree.
     resolve(snapshot, locator);
-    this.text ??= { at: event.t, target: locator, value: '', ref: field.node.ref };
+    if (!this.text) {
+      validateAction({ id: this.nextId(), kind: 'type', target: locator, text: event.chars });
+      this.text = { at: event.t, target: locator, value: '', ref: field.node.ref };
+    }
     this.text.value += event.chars;
     this.text.at = event.t;
   }
 
   finish(): Flow {
-    this.flush();
+    this.endTextBurst();
     if (!this.steps.length) throw new Fault('EMPTY_RECORDING', 'No supported actions were captured');
     return parseFlow({
-      version: 1, id: randomUUID(), name: this.target.window, target: this.target, steps: this.steps,
+      version: 1, id: randomUUID(), name: this.target.window, target: this.target,
+      steps: this.steps.slice(0, stepLimit),
     });
   }
+
+  get exceededStepLimit() { return this.steps.length > stepLimit; }
 }
 
 const modifiers = new Set(['meta', 'ctrl', 'alt', 'shift']);
@@ -102,65 +121,126 @@ function parseEvent(data: Record<string, unknown>): TimedEvent {
   throw new Fault('CAPTURE_PROTOCOL', 'Invalid input event from capture helper');
 }
 
+function captureCode(code: unknown) {
+  return typeof code === 'string' && /^[A-Z_]{1,48}$/.test(code) ? code : 'CAPTURE_FAILED';
+}
+
 export async function record(
-  desktop: Desktop, target: Target, seconds: number, signal: AbortSignal,
-): Promise<Flow> {
+  desktop: Desktop, target: Target, options: CaptureOptions, signal: AbortSignal,
+): Promise<CaptureResult> {
+  const { seconds, indicator, sound } = options;
   const initial = await desktop.snapshot(target);
+  const windowNumber = /^w-([1-9]\d*)$/.exec(initial.windowId)?.[1];
+  if (!windowNumber) throw new Fault('WINDOW_ID', 'Capture requires a macOS window number');
+  signal.throwIfAborted();
   const executable = fileURLToPath(new URL('./cuekeeper-capture', import.meta.url));
-  const child = spawn(executable, [target.app, String(seconds)], {
-    signal,
-    stdio: ['ignore', 'pipe', 'ignore'],
-  });
+  const args = [target.app, windowNumber, String(seconds)];
+  if (!indicator) args.push('--no-indicator');
+  if (sound) args.push('--sound');
+  const child = spawn(executable, args, { stdio: ['ignore', 'pipe', 'ignore'] });
   const completion = new Promise<number | null>(resolve => {
-    child.once('error', () => resolve(null));
+    child.once('error', () => { /* close also fires after a failed spawn. */ });
     child.once('close', resolve);
   });
+  const abort = () => child.kill();
+  signal.addEventListener('abort', abort, { once: true });
   const timeout = setTimeout(() => child.kill('SIGKILL'), (seconds + 5) * 1000);
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
   const recording = new Recording(target);
+  const warnings = new Map<string, CaptureWarning>();
 
   let ready = false;
+  let targetActive = true;
+  let failure: Fault | undefined;
   let burst: { at: number; snapshot: Snapshot } | undefined;
+  function endTextBurst() {
+    burst = undefined;
+    recording.endTextBurst();
+  }
+  function warn(code: string, message: string) {
+    warnings.set(code, { code, message });
+  }
+
   try {
     for await (const line of lines) {
       signal.throwIfAborted();
       const data = object(JSON.parse(line));
       if (data.kind === 'error') {
-        const code = typeof data.code === 'string' && /^[A-Z_]+$/.test(data.code) ? data.code : 'CAPTURE_FAILED';
-        throw new Fault(code, `Capture helper stopped: ${code}`, code === 'INPUT_MONITORING_REQUIRED');
+        const code = captureCode(data.code);
+        const dependency = code === 'INPUT_MONITORING_REQUIRED' || (!ready && code === 'TAP_UNAVAILABLE');
+        throw new Fault(code, `Capture helper stopped: ${code}`, dependency);
       }
       if (data.kind === 'ready' && !ready) {
         ready = true;
-        process.stderr.write(`Recording for ${seconds} seconds. Switch to the test window, then perform the steps.\n`);
+        process.stderr.write(`Recording for up to ${seconds} seconds. Ctrl+Option+P pauses or resumes. Ctrl+Option+X stops and saves.\n`);
         continue;
       }
       if (!ready) throw new Fault('CAPTURE_PROTOCOL', 'Input arrived before the helper was ready');
-      const event = parseEvent(data);
-      if (event.kind === 'text' && burst && event.t - burst.at <= textGapMs) {
-        recording.add({ event, snapshot: burst.snapshot });
-        burst.at = event.t;
+      if (data.kind === 'focus' && typeof data.active === 'boolean') {
+        endTextBurst();
+        targetActive = data.active;
+        if (!targetActive) warn('FOCUS_CHANGED', 'Input in other apps was skipped. Target actions were retained.');
         continue;
       }
-      if (Date.now() - event.seen > 2000) {
-        throw new Fault('STALE_CAPTURE', 'The accessibility snapshot could not keep up with input');
+      if (data.kind === 'boundary' || data.kind === 'warning') {
+        endTextBurst();
+        if (data.kind === 'warning') {
+          const code = captureCode(data.code);
+          warn(code, `Some input may have been skipped: ${code}`);
+        }
+        continue;
       }
-      const captured = await desktop.snapshot(target, 1200);
-      if (captured.windowId !== initial.windowId) {
-        throw new Fault('WINDOW_CHANGED', 'Capture switched away from the initial window');
+
+      const event = parseEvent(data);
+      if (!targetActive) continue;
+      try {
+        if (event.kind === 'text' && burst && event.t - burst.at <= textGapMs) {
+          recording.add({ event, snapshot: burst.snapshot });
+          burst.at = event.t;
+          continue;
+        }
+        if (Date.now() - event.seen > 2000) {
+          throw new Fault('STALE_CAPTURE', 'The accessibility snapshot could not keep up with input');
+        }
+        const captured = await desktop.snapshot(target, 1200);
+        if (captured.windowId !== initial.windowId) {
+          throw new Fault('WINDOW_CHANGED', 'Capture switched away from the initial window');
+        }
+        recording.add({ event, snapshot: captured });
+        burst = event.kind === 'text' ? { at: event.t, snapshot: captured } : undefined;
+      } catch (error) {
+        if (!(error instanceof Fault) || error.dependency || error.code === 'PERM_DENIED') throw error;
+        endTextBurst();
+        warn(error.code, error.message);
       }
-      recording.add({ event, snapshot: captured });
-      burst = event.kind === 'text' ? { at: event.t, snapshot: captured } : undefined;
     }
 
     const code = await completion;
     signal.throwIfAborted();
     if (!ready) throw new Fault('CAPTURE_DEPENDENCY', 'Capture helper unavailable. Build it with pnpm build:recorder', true);
     if (code !== 0) throw new Fault('CAPTURE_FAILED', 'Capture helper exited before recording finished');
-    return recording.finish();
+  } catch (error) {
+    failure = signal.aborted ? new Fault('INTERRUPTED', 'Recording interrupted') :
+      error instanceof Fault ? error : new Fault('CAPTURE_PROTOCOL', 'Could not read the capture stream');
   } finally {
     lines.close();
     child.kill();
     await completion;
     clearTimeout(timeout);
+    signal.removeEventListener('abort', abort);
   }
+
+  let flow: Flow;
+  try {
+    flow = recording.finish();
+  } catch (error) {
+    if (failure) throw failure;
+    if (error instanceof Fault && error.code === 'EMPTY_RECORDING' && warnings.size) {
+      throw new Fault(error.code, `${error.message}. ${[...warnings.keys()].join(', ')}`);
+    }
+    throw error;
+  }
+  if (recording.exceededStepLimit) warn('STEP_LIMIT', `The flow retains the first ${stepLimit} actions`);
+  const partial = !!failure || [...warnings.keys()].some(code => code !== 'FOCUS_CHANGED');
+  return { flow, warnings: [...warnings.values()], partial, failure };
 }
