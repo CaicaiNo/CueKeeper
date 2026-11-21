@@ -478,7 +478,7 @@ function runDialog() {
   openDialog('运行测试项', [
     field('运行方式', mode), confirmation,
     muted('离线运行读取快照。实时回放向目标窗口写入并可能触发 macOS 权限提示。'),
-    muted('实时回放使用后台模式。含坐标点击的测试项需要保存后使用 CLI 的 --headed 参数。'),
+    muted('前置条件修复可能启动应用或将窗口切到前台。含坐标点击的测试项需要保存后使用 CLI 的 --headed 参数。'),
   ], '开始运行', async () => {
     const selected = mode.value;
     if (selected === 'live' && !confirmed.checked) throw new Error('确认目标窗口后开始回放。');
