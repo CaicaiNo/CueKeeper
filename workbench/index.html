@@ -18,11 +18,11 @@
 
   <main class="workspace">
     <aside class="summary pane" aria-labelledby="session-title">
-      <h2 id="session-title">录制会话</h2>
+      <h2 id="session-title" class="section-title"><span class="sec">01</span>录制会话</h2>
       <div id="summary"></div>
-      <h3>应用筛选</h3>
+      <h3><span class="sec">02</span>应用筛选</h3>
       <div id="apps" class="app-list"></div>
-      <h3>前置条件</h3>
+      <h3><span class="sec">03</span>前置条件</h3>
       <div id="setup" class="setup-list"></div>
     </aside>
 
@@ -31,6 +31,9 @@
         <h2 id="timeline-title">动作时间线</h2>
         <span id="timeline-count" class="muted"></span>
         <label id="ignored-control" class="checkbox trailing" hidden><input type="checkbox" id="show-ignored">显示已忽略</label>
+      </div>
+      <div class="timeline-columns" aria-hidden="true">
+        <span></span><span>时间</span><span>类型</span><span>动作</span><span>耗时</span>
       </div>
       <div id="selection"></div>
       <div id="timeline" class="timeline-body" aria-label="会话动作"></div>

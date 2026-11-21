@@ -323,6 +323,10 @@ function renderOverview() {
       el('span', { className: `legend-dot seg-${Math.min(index, 4)}` }),
       el('span', { className: 'legend-kind' }, kind),
       el('span', { className: 'legend-count' }, String(count))))),
+    infoList([
+      ['目标', `${state.session.target.app} · ${state.session.target.window}`],
+      ['来源', short(state.session.directory.split('/').at(-1), 44)],
+    ], 'meta-grid'),
     muted('选择时间线中的动作查看定位器与整理操作。'));
 }
 
