@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { captureActionCheck, flowSchema } from './contracts.js';
 import type { Action, Flow, Locator, Target } from './contracts.js';
+import { AppIdentitySession, IdentityFault } from './app-identity.js';
 import type { Desktop } from './desktop.js';
 import { parseFlow } from './flow.js';
 import { Fault, contains, flatten, hitTest, object, resolve, toLocator } from './locator.js';
@@ -21,13 +22,18 @@ const textGapMs = 1500;
 const editable = new Set(['textfield', 'textbox', 'textarea', 'searchfield', 'combobox']);
 const stepLimit = flowSchema.properties.steps.maxItems!;
 
-type CaptureOptions = { seconds: number; indicator: boolean; sound: boolean; traceClicks?: boolean };
+type CaptureOptions = {
+  seconds: number; indicator: boolean; sound: boolean; traceClicks?: boolean;
+  /** Identity session for a path-fixed target; created from the target otherwise. */
+  identity?: AppIdentitySession;
+};
 type CaptureWarning = { code: string; message: string };
 type CaptureResult = { flow: Flow; warnings: CaptureWarning[]; partial: boolean; failure?: Fault };
 
 const pointerWarningMessages = new Map([
   ['MULTI_CLICK_COLLAPSED', 'Only the first click of a multi-click sequence can be replayed as a single click in v1'],
   ['DRAG_SKIPPED', 'A drag was skipped because v1 only records clicks'],
+  ['UNTARGETED_POINT', 'A click that could not be tied to an element was skipped in this path-bound recording'],
 ]);
 
 function validateAction(action: Action) {
@@ -41,7 +47,7 @@ export class Recording {
   private steps: Action[] = [];
   private text?: { at: number; target: Extract<Locator, { kind: 'element' }>; value: string; ref: string };
 
-  constructor(private target: Target) {}
+  constructor(private target: Target, private options: { requireElementLocator?: boolean } = {}) {}
 
   private nextId() { return `step-${this.steps.length + 1}`; }
 
@@ -51,7 +57,8 @@ export class Recording {
     this.text = undefined;
   }
 
-  add({ event, snapshot }: Recorded) {
+  /** Returns a warning code when the event was intentionally skipped. */
+  add({ event, snapshot }: Recorded): string | undefined {
     const focused = flatten(snapshot.tree).filter(entry => entry.node.states.includes('focused'));
     if (focused.some(entry => entry.node.secure)) {
       throw new Fault('SECURE_INPUT', 'Recording encountered a protected control');
@@ -64,6 +71,8 @@ export class Recording {
       }
       const hit = hitTest(snapshot, event.point);
       if (hit?.node.secure) throw new Fault('SECURE_INPUT', 'Click hit a protected control');
+      // A path-fixed flow cannot replay a global coordinate against one copy.
+      if (!hit && this.options.requireElementLocator) return 'UNTARGETED_POINT';
       const target: Locator = hit ? toLocator(snapshot, hit) : { kind: 'point', point: event.point };
       this.steps.push(validateAction({ id: this.nextId(), kind: 'click', target }));
       return;
@@ -151,15 +160,33 @@ export async function record(
   desktop: Desktop, target: Target, options: CaptureOptions, signal: AbortSignal,
 ): Promise<CaptureResult> {
   const { seconds, indicator, sound, traceClicks } = options;
-  const initial = await desktop.snapshot(target);
+  const identity = options.identity ?? new AppIdentitySession(target);
+  let initial: Snapshot;
+  let bound: { pid: number; bundlePath: string } | undefined;
+  if (target.appPath) {
+    // The recording must start from the selected copy, not whichever copy is
+    // frontmost under the same bundle ID.
+    await identity.preflight();
+    await identity.bindInstances(desktop);
+    initial = await identity.readWindow(desktop, target, { timeoutMs: 5000 });
+    const instance = identity.runningInstance;
+    const bundlePath = identity.canonicalPath;
+    if (!instance || !bundlePath) throw new Fault('APP_NOT_FOUND', 'The selected copy is not running');
+    bound = { pid: instance.pid, bundlePath };
+  } else {
+    initial = await desktop.snapshot(target);
+  }
   const windowNumber = /^w-([1-9]\d*)$/.exec(initial.windowId)?.[1];
   if (!windowNumber) throw new Fault('WINDOW_ID', 'Capture requires a macOS window number');
   signal.throwIfAborted();
+  // A bound recording persists the canonical path actually proven at runtime.
+  const recordedTarget: Target = bound ? { ...target, appPath: bound.bundlePath } : target;
   const executable = fileURLToPath(new URL('./cuekeeper-capture', import.meta.url));
   const args = [target.app, windowNumber, String(seconds)];
   if (!indicator) args.push('--no-indicator');
   if (sound) args.push('--sound');
   if (traceClicks) args.push('--trace-clicks');
+  if (bound) args.push('--pid', String(bound.pid), '--app-path', bound.bundlePath);
   const child = spawn(executable, args, { stdio: ['ignore', 'pipe', 'ignore'] });
   const completion = new Promise<number | null>(resolve => {
     child.once('error', () => { /* close also fires after a failed spawn. */ });
@@ -174,7 +201,7 @@ export async function record(
   }, 5000);
   let sessionTimeout: NodeJS.Timeout | undefined;
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
-  const recording = new Recording(target);
+  const recording = new Recording(recordedTarget, { requireElementLocator: Boolean(target.appPath) });
   const warnings = new Map<string, CaptureWarning>();
 
   let ready = false;
@@ -211,6 +238,16 @@ export async function record(
         if (data.hotkeysFiltered !== true) {
           throw new Fault('HOTKEY_FILTER_UNCONFIRMED',
             'Capture helper did not confirm hotkey filtering. Rebuild it with pnpm build:recorder', true);
+        }
+        if (bound) {
+          // The helper confirms the same PID and canonical path before the
+          // first event; otherwise the capture cannot be attributed.
+          const announced = data.identity === null || typeof data.identity !== 'object'
+            ? undefined : object(data.identity);
+          if (!announced || announced.pid !== bound.pid ||
+              announced.windowOwnerPid !== bound.pid || announced.bundlePath !== bound.bundlePath) {
+            throw new Fault('IDENTITY_MISMATCH', 'Capture helper did not confirm the selected copy');
+          }
         }
         announceIndicator(data.indicator, indicator);
         ready = true;
@@ -250,11 +287,19 @@ export async function record(
         if (Date.now() - event.seen > 2000) {
           throw new Fault('STALE_CAPTURE', 'The accessibility snapshot could not keep up with input');
         }
-        const captured = await desktop.snapshot(target, 1200, event.kind === 'click' ? initial.windowId : undefined);
+        const captured = bound
+          ? await identity.readWindow(desktop, target, { timeoutMs: 1200, preferredWindowId: initial.windowId })
+          : await desktop.snapshot(target, 1200, event.kind === 'click' ? initial.windowId : undefined);
         if (captured.windowId !== initial.windowId) {
           throw new Fault('WINDOW_CHANGED', 'Capture switched away from the initial window');
         }
-        recording.add({ event, snapshot: captured });
+        const skipped = recording.add({ event, snapshot: captured });
+        if (skipped) {
+          warn(skipped, pointerWarningMessages.get(skipped) ?? `Some input was skipped: ${skipped}`);
+          if (traceId) trace({ stage: 'flow', id: traceId, decision: 'filtered', reason: skipped });
+          burst = undefined;
+          continue;
+        }
         burst = event.kind === 'text' ? { at: event.t, snapshot: captured } : undefined;
         if (traceId) trace({ stage: 'flow', id: traceId, decision: 'collected', windowId: captured.windowId });
       } catch (error) {
@@ -262,7 +307,7 @@ export async function record(
           trace({ stage: 'flow', id: traceId, decision: 'filtered',
             reason: error instanceof Fault ? error.code : 'CAPTURE_FAILED' });
         }
-        if (!(error instanceof Fault) || error.dependency ||
+        if (!(error instanceof Fault) || error.dependency || error instanceof IdentityFault ||
             ['PERM_DENIED', 'APP_NOT_FOUND', 'WINDOW_NOT_FOUND', 'WINDOW_MISMATCH', 'WINDOW_CHANGED'].includes(error.code)) {
           throw error;
         }

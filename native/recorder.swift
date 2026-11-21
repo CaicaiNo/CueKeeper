@@ -9,6 +9,8 @@ import Foundation
 final class Capture {
     private let app: String
     private let window: Int
+    private let pid: Int32?
+    private let bundlePath: String?
     private let indicator: RecordingIndicator?
     private let sound: Bool
     private let traceClicks: Bool
@@ -33,12 +35,27 @@ final class Capture {
     private var stopped = false
     private(set) var failed = false
 
-    init(app: String, window: Int, showIndicator: Bool, sound: Bool, traceClicks: Bool) {
+    init(app: String, window: Int, pid: Int32?, bundlePath: String?, showIndicator: Bool, sound: Bool, traceClicks: Bool) {
         self.app = app
         self.window = window
+        self.pid = pid
+        self.bundlePath = bundlePath
         self.indicator = showIndicator ? RecordingIndicator() : nil
         self.sound = sound
         self.traceClicks = traceClicks
+    }
+
+    /** Owner PID of the selected native window, read without focusing it. */
+    private func windowOwnerPid() -> Int32? {
+        guard let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], CGWindowID(window)) as? [[String: Any]],
+              let owner = list.first?[kCGWindowOwnerPID as String] as? NSNumber else { return nil }
+        return owner.int32Value
+    }
+
+    /** The bound instance, or nil when no path identity was requested. */
+    private func boundApplication() -> NSRunningApplication? {
+        guard let pid else { return nil }
+        return NSRunningApplication(processIdentifier: pid)
     }
 
     func emit(_ object: [String: Any]) {
@@ -103,6 +120,26 @@ final class Capture {
             stop("TAP_UNAVAILABLE", detail: "The input event tap did not enable")
             return
         }
+        // A path-bound recording proves the selected window belongs to the
+        // instance named by the caller before any input is attributed to it.
+        var identity: [String: Any]?
+        if let pid {
+            guard let application = boundApplication(), !application.isTerminated,
+                  application.bundleIdentifier == app else {
+                stop("IDENTITY_MISMATCH", detail: "The bound process is no longer running")
+                return
+            }
+            let owner = windowOwnerPid()
+            guard owner == pid else {
+                stop("IDENTITY_MISMATCH", detail: "The selected window belongs to another process")
+                return
+            }
+            identity = [
+                "pid": Int(pid),
+                "bundlePath": bundlePath ?? application.bundleURL?.resolvingSymlinksInPath().path ?? "",
+                "windowOwnerPid": Int(owner ?? 0),
+            ]
+        }
         started = ProcessInfo.processInfo.systemUptime
         let deadline = Timer(timeInterval: seconds, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -115,7 +152,9 @@ final class Capture {
         updateIndicator()
         playCue()
         traceMouseLifecycle("ready")
-        emit(["kind": "ready", "indicator": indicatorEvidence, "hotkeysFiltered": true])
+        var ready: [String: Any] = ["kind": "ready", "indicator": indicatorEvidence, "hotkeysFiltered": true]
+        ready["identity"] = identity
+        emit(ready)
         refreshFocus()
     }
 
@@ -154,7 +193,8 @@ final class Capture {
     func refreshFocus() -> NSRunningApplication? {
         guard started != nil, !stopped, stopReleaseDeadline == nil else { return nil }
         let frontmost = NSWorkspace.shared.frontmostApplication
-        let target = frontmost?.bundleIdentifier == app ? frontmost : nil
+        let target = pid.map { frontmost?.processIdentifier == $0 ? frontmost : nil }
+            ?? (frontmost?.bundleIdentifier == app ? frontmost : nil)
         let active = target != nil
         guard active != targetIsFrontmost else { return target }
         targetIsFrontmost = active
@@ -187,6 +227,19 @@ final class Capture {
         if let deadline = stopReleaseDeadline, ProcessInfo.processInfo.systemUptime >= deadline {
             stop()
             return
+        }
+        // Once a recording is bound to one instance, losing that instance or
+        // its window ends the capture instead of re-attributing input.
+        if let pid {
+            guard let application = boundApplication(), !application.isTerminated,
+                  application.bundleIdentifier == app else {
+                stop("IDENTITY_CHANGED", detail: "The bound process stopped during recording")
+                return
+            }
+            guard windowOwnerPid() == pid else {
+                stop("IDENTITY_CHANGED", detail: "The selected window stopped belonging to the bound process")
+                return
+            }
         }
         guard CGPreflightListenEventAccess() else { stop("INPUT_MONITORING_LOST"); return }
         guard AXIsProcessTrusted() else { stop("ACCESSIBILITY_LOST"); return }
@@ -368,7 +421,14 @@ final class Capture {
         } : nil
         let hit = screenPoint.map { NSWindow.windowNumber(at: $0, belowWindowWithWindowNumber: 0) }
         let frontmost = traceClicks ? NSWorkspace.shared.frontmostApplication : nil
-        let targetAppFrontmost = frontmost.map { $0.bundleIdentifier == app }
+        var targetAppFrontmost: Bool?
+        if let frontmost {
+            if let pid {
+                targetAppFrontmost = frontmost.processIdentifier == pid
+            } else {
+                targetAppFrontmost = frontmost.bundleIdentifier == app
+            }
+        }
         // The top normal window is a diagnostic hint for activation within the same app.
         var frontWindow: Int?
         if hit == window, let frontmost, targetAppFrontmost == true,
@@ -454,13 +514,34 @@ struct RecorderCommand {
     @MainActor
     static func main() {
         let args = CommandLine.arguments
-        let switches = args.dropFirst(4)
         guard args.count >= 4, let window = Int(args[2]), window > 0,
-              let seconds = Double(args[3]), (1...90).contains(seconds),
-              switches.allSatisfy({ $0 == "--no-indicator" || $0 == "--sound" || $0 == "--trace-clicks" }) else {
+              let seconds = Double(args[3]), (1...90).contains(seconds) else {
             exit(2)
         }
-        let capture = Capture(app: args[1], window: window,
+        // Identity switches pair a PID and canonical path with the container's
+        // window number; any other token is rejected rather than ignored.
+        var switches: [String] = []
+        var pid: Int32?
+        var appPath: String?
+        var index = 4
+        while index < args.count {
+            switch args[index] {
+            case "--no-indicator", "--sound", "--trace-clicks":
+                switches.append(args[index])
+                index += 1
+            case "--pid":
+                guard index + 1 < args.count, let value = Int32(args[index + 1]), value > 0 else { exit(2) }
+                pid = value
+                index += 2
+            case "--app-path":
+                guard index + 1 < args.count, !args[index + 1].isEmpty else { exit(2) }
+                appPath = args[index + 1]
+                index += 2
+            default:
+                exit(2)
+            }
+        }
+        let capture = Capture(app: args[1], window: window, pid: pid, bundlePath: appPath,
                               showIndicator: !switches.contains("--no-indicator"),
                               sound: switches.contains("--sound"),
                               traceClicks: switches.contains("--trace-clicks"))

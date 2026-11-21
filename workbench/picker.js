@@ -66,7 +66,7 @@ export function createAppPicker({
       }, icon('check'), el('span', {}, '使用此副本'));
       body.replaceChildren(
         el('div', { className: 'path-step-head' }, back, el('strong', {}, app.name)),
-        muted(`「${app.name}」有 ${app.paths.length} 份副本。保存测试项时会写入这条路径；回放按路径锁定在下一步接入。`),
+        muted(`「${app.name}」有 ${app.paths.length} 份副本。保存测试项时会写入这条路径，实时回放只向该副本的窗口发送输入；路径不符或同标识多实例会以 APP_AMBIGUOUS 阻塞。`),
         staleAppPath(app, state.appPaths)
           ? el('p', { className: 'path-stale' }, `已选路径不在当前目录中：${current}`)
           : undefined,

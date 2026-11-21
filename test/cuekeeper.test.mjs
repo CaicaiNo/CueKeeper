@@ -6,6 +6,10 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+
+// Keep the native identity helper out of stubbed runs: a locally built helper
+// must not inspect or launch real applications during the test suite.
+process.env.CUEKEEPER_APP_IDENTITY = '/nonexistent/cuekeeper-identity';
 import { TypeCompiler } from '@sinclair/typebox/compiler';
 import { unzipSync, strFromU8 } from 'fflate';
 import { discoverAssets } from '../dist/assets.js';
@@ -114,7 +118,10 @@ process.exitCode = ${captureExit};
   const path = join(dir, 'recorded.flow.json');
   const result = spawnSync(process.execPath, [join(dist, 'cli.js'), 'record',
     '--app', fixture.target.app, '--window', fixture.target.window, '--out', path, '--seconds', String(seconds),
-    '--json', ...flags], { env: { ...process.env, CUEKEEPER_AGENT_DESKTOP: desktop }, encoding: 'utf8', timeout: 10000 });
+    '--json', ...flags], {
+    env: { ...process.env, CUEKEEPER_AGENT_DESKTOP: desktop, CUEKEEPER_APP_IDENTITY: join(dir, 'identity') },
+    encoding: 'utf8', timeout: 10000,
+  });
   return { code: result.status, response: JSON.parse(result.stdout), stderr: result.stderr,
     snapshotWindows: readFileSync(snapshotsLog, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line)),
     recorded: existsSync(path) ? parseFlow(JSON.parse(readFileSync(path, 'utf8'))) : undefined };
@@ -391,10 +398,15 @@ test('adapter scopes commands and sends unlogged text on stdin', { skip: process
   const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-adapter-test-'));
   const stub = join(dir, 'desktop');
   const previous = process.env.CUEKEEPER_AGENT_DESKTOP;
+  const previousIdentity = process.env.CUEKEEPER_APP_IDENTITY;
   process.env.CUEKEEPER_AGENT_DESKTOP = stub;
+  // No native identity probe: this test asserts the legacy app-scoped route.
+  process.env.CUEKEEPER_APP_IDENTITY = join(dir, 'identity');
   t.after(() => {
     if (previous === undefined) delete process.env.CUEKEEPER_AGENT_DESKTOP;
     else process.env.CUEKEEPER_AGENT_DESKTOP = previous;
+    if (previousIdentity === undefined) delete process.env.CUEKEEPER_APP_IDENTITY;
+    else process.env.CUEKEEPER_APP_IDENTITY = previousIdentity;
     rmSync(dir, { recursive: true, force: true });
   });
 

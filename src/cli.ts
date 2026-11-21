@@ -3,8 +3,10 @@ import { parseArgs } from 'node:util';
 import { dirname, resolve } from 'node:path';
 import { discoverAssets } from './assets.js';
 import { BatchError, batchExitCode, bindRows, readData, resolveBatchSecrets, runBatch } from './batch.js';
+import { AppIdentitySession, IdentityFault } from './app-identity.js';
 import { captureTargetCheck } from './contracts.js';
-import { offlineDesktop, withDesktop } from './desktop.js';
+import type { Target } from './contracts.js';
+import { fixtureAppPath, offlineDesktop, withDesktop } from './desktop.js';
 import { ensureNew, readJson, writeNew } from './files.js';
 import { parseFlow, plan } from './flow.js';
 import { Fault } from './locator.js';
@@ -22,8 +24,8 @@ const help = `Cuekeeper
   cuekeeper flow validate <flow.json|test.json> [--json]
   cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--report <report.json>] [--json]
   cuekeeper workbench [run-directory] [--port <port>] [--library <directory>] [--allow-live-replay]
-  cuekeeper pick --app <bundle-id> --window <title> [--select <ref>] [--snapshot <snapshot.json>] [--json]
-  cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--seconds 25] [--no-indicator] [--sound] [--trace-clicks] [--json]
+  cuekeeper pick --app <bundle-id> --window <title> [--app-path <path>] [--select <ref>] [--snapshot <snapshot.json>] [--json]
+  cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--app-path <path>] [--seconds 25] [--no-indicator] [--sound] [--trace-clicks] [--json]
   cuekeeper report pack <report.json> --flow <flow.json> --out <report.zip> [--assets <dir>] [--json]
 
 Exit codes
@@ -91,20 +93,45 @@ async function main() {
     const { values } = parseArgs({
       args: rest, options: {
         ...common, app: { type: 'string' }, window: { type: 'string' },
+        'app-path': { type: 'string' },
         select: { type: 'string' }, snapshot: { type: 'string' },
       },
     });
-    const target = { app: values.app, window: values.window };
+    const target = {
+      app: values.app, window: values.window,
+      ...(values['app-path'] ? { appPath: values['app-path'] } : {}),
+    } as Target;
     if (!captureTargetCheck.Check(target) || !/^[a-z\d][a-z\d.-]*\.[a-z\d][a-z\d-]*$/i.test(target.app)) {
       throw new Error('Specify --app with a bundle ID and --window with an exact window title');
     }
     let observed: Snapshot;
     if (values.snapshot) {
-      observed = await offlineDesktop(await readJson(values.snapshot), target).snapshot(target);
+      const fixture = await readJson(values.snapshot);
+      const saved = fixtureAppPath(fixture);
+      if (target.appPath && saved && target.appPath !== saved) {
+        throw new IdentityFault('APP_AMBIGUOUS', 'fixture_path_mismatch',
+          '快照来自另一个应用路径，请重新采集快照或恢复与快照匹配的目标。',
+          target.app, 'bundle_path');
+      }
+      if (!target.appPath && saved) target.appPath = saved;
+      observed = await offlineDesktop(fixture, target).snapshot(target);
     } else {
       macOnly();
-      observed = await withDesktop({ headed: false, signal },
-        desktop => desktop.snapshot(target, 5000, undefined, true));
+      if (target.appPath) {
+        const identity = new AppIdentitySession(target);
+        await identity.preflight();
+        observed = await withDesktop({ headed: false, signal }, async desktop => {
+          await identity.bindInstances(desktop);
+          const current = await identity.readWindow(desktop, target, { timeoutMs: 5000 });
+          // The picked target names the canonical copy that was proven.
+          if (identity.canonicalPath) target.appPath = identity.canonicalPath;
+          observed = current;
+          return current;
+        });
+      } else {
+        observed = await withDesktop({ headed: false, signal },
+          desktop => desktop.snapshot(target, 5000, undefined, true));
+      }
     }
     const candidates = pickCandidates(observed);
     if (values.select !== undefined) {
@@ -166,7 +193,10 @@ async function main() {
       };
       let summary;
       if (values.snapshot) {
-        summary = await runBatch(rows, offlineDesktop(await readJson(values.snapshot), flow.target), options);
+        const fixture = await readJson(values.snapshot);
+        summary = await runBatch(rows, offlineDesktop(fixture, flow.target), {
+          ...options, offline: true, ...(fixtureAppPath(fixture) ? { fixtureAppPath: fixtureAppPath(fixture)! } : {}),
+        });
       } else {
         macOnly();
         summary = await withDesktop({ headed: values.headed ?? false, signal },
@@ -199,7 +229,11 @@ async function main() {
     };
     let report;
     if (values.snapshot) {
-      report = await runFlow(flow, offlineDesktop(await readJson(values.snapshot), flow.target), options);
+      const fixture = await readJson(values.snapshot);
+      const path = fixtureAppPath(fixture);
+      report = await runFlow(flow, offlineDesktop(fixture, flow.target), {
+        ...options, offline: true, ...(path ? { fixtureAppPath: path } : {}),
+      });
     } else {
       macOnly();
       report = await withDesktop({ headed: values.headed ?? false, signal },
@@ -235,12 +269,16 @@ async function main() {
     const { values } = parseArgs({
       args: rest, options: {
         ...common, app: { type: 'string' }, window: { type: 'string' },
+        'app-path': { type: 'string' },
         out: { type: 'string' }, seconds: { type: 'string', default: '25' },
         'no-indicator': { type: 'boolean' }, sound: { type: 'boolean' },
         'trace-clicks': { type: 'boolean' },
       },
     });
-    const target = { app: values.app, window: values.window };
+    const target = {
+      app: values.app, window: values.window,
+      ...(values['app-path'] ? { appPath: values['app-path'] } : {}),
+    } as Target;
     if (!captureTargetCheck.Check(target) || !/^[a-z\d][a-z\d.-]*\.[a-z\d][a-z\d-]*$/i.test(target.app)) {
       throw new Error('Specify --app with a bundle ID and --window with an exact window title');
     }

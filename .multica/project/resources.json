@@ -1,0 +1,17 @@
+{
+  "project_id": "3178ec27-8aab-426e-aff5-e690947de1db",
+  "project_title": "CueKeeper",
+  "project_description": "ai 自动化测试方案，使用 [https://lite.ego.app/](https://lite.ego.app/) 类似开源的 浏览器框架 和 [https://github.com/vercel-labs/agent-desktop](https://github.com/vercel-labs/agent-desktop) 桌面软件，实现自动化测试方案录制 + 自动化测试\n\n1. 测试人员只需要录制一次自动化流程， 该项目就能根据流程自己进行测试\n2. 测试人员也可以编写流程，项目也能自己进行模拟测试\n\n\n## 当前方向（2026-11-21 更新）\n\n- 第一优先级：操作系统层面的操作录制与回放测试（桌面 App），macOS 先行。\n- 浏览器方案暂缓，不作为当前实现路线。\n- 技术底座候选：macOS Accessibility API（AXUIElement）+ CGEventTap / CGEventPost；流程用 JSON 描述，断言基于可访问性树而非像素比对。\n- 当前验证任务：HAOC-47（macOS 桌面操作录制/回放可行性 spike）。\n\n## 运行纪律（2026-11-21 用户明确要求，优先级最高）\n\n用户原话：「以后测试要我允许 我现在都操作不了了 一直弹框」。\n\n- **先获批，再开跑**：任何会抢占用户鼠标键盘、或会触发 macOS 系统授权弹框的运行（`aiosr replay`/`record`、`agent-desktop` 的 click / type / press / set-value、以及重新编译 AX 程序），必须先在本 issue 评论里取得用户明确同意（「可以跑」+ 时间窗），未获同意不得自行启动。\n- **先说清楚**：开跑前在评论里写明会弹哪些框、大概几次、占用多久；跑完立即停止，不留常驻进程、定时任务或 LaunchAgent。\n- **不许边改边跑**：adhoc 临时签名每重编译一次就换 cdhash，macOS 会把它当陌生程序重新弹授权。同一轮验证只编译一次，编译与运行分开，不要在用户使用电脑期间反复重编译 + 重跑。\n- **用户说停就停**：立刻 `pkill -f aiosr`，停掉所有自动化，再说明原因，不解释、不续跑。\n- 权限授权只能由用户手动点击，agent 不代点、不修改系统设置。「用户已授权」不等于「本轮已获批」。\n\n\n## 代码仓库\n\n- GitHub：https://github.com/CaicaiNo/CueKeeper\n- 本地：`/Users/sheng/Documents/git/cuekeeper`，`origin` 使用 SSH\n- 约定：直接提交并推送到 `origin/main`，不需要等人工确认；推送前必须通过 `pnpm build \u0026\u0026 pnpm test`",
+  "resources": [
+    {
+      "id": "f969efd3-73a7-4e11-a777-a02cdc18001d",
+      "resource_type": "local_directory",
+      "resource_ref": {
+        "daemon_id": "01a1ef1f-1d2e-79a4-8338-5454e429050a",
+        "local_path": "/Users/sheng/Documents/git/cuekeeper",
+        "execution_mode": "worktree"
+      },
+      "label": "cuekeeper"
+    }
+  ]
+}

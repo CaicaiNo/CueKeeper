@@ -22,6 +22,7 @@ pnpm test
 pnpm build:recorder
 mkdir -p out/demo
 node dist/cli.js record --app com.apple.TextEdit --window "无标题" --out out/demo/recorded.flow.json --seconds 30
+# 指定安装副本时加 --app-path "/Applications/TextEdit.app"
 ```
 
 回放与报告。下面的离线命令使用仓库自带样本，不需要桌面权限，可直接验证安装：
@@ -42,6 +43,8 @@ unzip -t out/demo/report.zip
 node dist/cli.js run out/demo/recorded.flow.json --dry-run --json
 node dist/cli.js run out/demo/recorded.flow.json --headed --report out/demo/recorded-report.json --json
 ```
+
+固定应用路径的流程还需要 `pnpm build:recorder` 生成的原生身份查询程序 `dist/cuekeeper-identity`。它只读取进程、进程启动标识和窗口归属，不安装事件监听，也不申请辅助功能或输入监控权限。
 
 工作台读取 `flow.json`、`recorded.flow.json`、`report.json` 等同目录文件（终端会打印本机地址，手动打开，`Ctrl+C` 关闭）：
 
@@ -109,6 +112,8 @@ node dist/cli.js run /path/to/test.flow.json --dry-run --snapshot /path/to/snaps
 
 不录制也能把动作绑定到目标控件。`pick` 只读取窗口快照，不点击、不抢焦点，也不改变前台窗口。
 
+同一应用装有多份副本时，`record` 与 `pick` 的 `--app-path` 指定其中一个。录制只在握手确认窗口 owner 的 PID、进程启动标识和规范 `bundleURL` 后写入该路径；回放按路径锁定实例，之后只用窗口 ID 发送输入，不再按 bundle ID 或全局前台猜测。路径失效返回 `APP_PATH_INVALID`，路径不符或同标识多实例返回 `APP_AMBIGUOUS`，固定路径流程中的裸坐标返回 `UNSAFE_POINT`。
+
 ```sh
 node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --json
 node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --select e1 --json
@@ -123,8 +128,8 @@ node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --selec
 | 命令 | 用途 |
 | --- | --- |
 | `flow validate <flow.json>` | 检查 v1 结构、ID、行为引用和参数绑定 |
-| `record --app <bundle-id> --window <精确标题> --out <flow.json>` | 录制目标窗口，显示计时 HUD，支持 `--no-indicator` 和 `--sound` |
-| `pick --app <bundle-id> --window <精确标题> [--select <ref>] [--snapshot <snapshot.json>]` | 只读快照，按可交互元素优先列出候选，或输出可写入 flow 的定位器 |
+| `record --app <bundle-id> --window <精确标题> --out <flow.json> [--app-path <路径>]` | 录制目标窗口，显示计时 HUD，支持 `--no-indicator` 和 `--sound` |
+| `pick --app <bundle-id> --window <精确标题> [--app-path <路径>] [--select <ref>] [--snapshot <snapshot.json>]` | 只读快照，按可交互元素优先列出候选，或输出可写入 flow 的定位器 |
 | `run <flow.json> --dry-run` | 用当前窗口解析定位器 |
 | `run <flow.json> --headed --report <report.json>` | 允许物理点击，回放并记录逐步结果 |
 | `run <test.json> --data <rows.json> [--report <batch.json>]` | 每行覆盖行为调用参数后串行执行；报告写汇总与逐行 v1 报告 |

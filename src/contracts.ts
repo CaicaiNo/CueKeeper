@@ -24,7 +24,18 @@ const element = object({
 });
 const locator = T.Union([element, object({ kind: T.Literal('point'), point })]);
 
-export const targetSchema = object({ app: label, window: label, appPath: T.Optional(T.String({ minLength: 1, maxLength: 4096 })) });
+// An app path names one installed copy. The shape check stays platform-neutral:
+// POSIX absolute, Windows drive absolute, or a standard UNC path. Relative
+// paths, `~`, file URLs, device namespaces and control characters are rejected.
+export const appPathPattern =
+  '^(?![\\s\\S]*[\\u0000-\\u001f\\u007f])(?:/(?!/)[\\s\\S]+|[A-Za-z]:[/\\\\][^/\\\\][\\s\\S]*' +
+  '|\\\\\\\\(?![?.]\\\\)[^/\\\\]+\\\\[^/\\\\]+\\\\[^/\\\\][\\s\\S]*)$';
+
+export const targetSchema = object({
+  app: label,
+  window: label,
+  appPath: T.Optional(T.String({ minLength: 1, maxLength: 4096, pattern: appPathPattern })),
+});
 
 const comparator = T.Union([T.Literal('equals'), T.Literal('contains'), T.Literal('matches')]);
 
@@ -202,10 +213,41 @@ const entry = T.Union([
     assertion: T.Optional(assertionResult),
   }),
 ]);
+const appIdentityCode = T.Union([
+  T.Literal('APP_PATH_INVALID'), T.Literal('APP_AMBIGUOUS'),
+  T.Literal('UNSUPPORTED_PLATFORM'), T.Literal('UNSAFE_POINT'),
+]);
+const appIdentityReason = T.Union([
+  T.Literal('invalid_bundle_path'), T.Literal('bundle_id_mismatch'),
+  T.Literal('unsupported_path_platform'), T.Literal('path_mismatch'),
+  T.Literal('multiple_instances'), T.Literal('multiple_installed_copies'),
+  T.Literal('identity_unproven'), T.Literal('instance_changed'),
+  T.Literal('driver_target_unconfirmed'), T.Literal('fixture_path_mismatch'),
+  T.Literal('untargeted_input'),
+]);
+const appIdentityMode = T.Union([T.Literal('bundle_path'), T.Literal('legacy_bundle_id')]);
+// Optional identity summary. A blocked identity carries the first terminating
+// reason; the entry it stopped on is named when one exists.
+const appIdentity = T.Union([
+  object({
+    app: label,
+    mode: appIdentityMode,
+    status: T.Union([T.Literal('verified'), T.Literal('offline_unverified')]),
+  }),
+  object({
+    app: label,
+    mode: appIdentityMode,
+    status: T.Literal('blocked'),
+    code: appIdentityCode,
+    reason: appIdentityReason,
+    entryId: T.Optional(T.String({ minLength: 1, maxLength: 196 })),
+  }),
+]);
 export const reportSchema = object({
   version: T.Literal(1), flowId: id, flowSha256: digest, startedAt: timestamp,
   mode: T.Union([T.Literal('replay'), T.Literal('dry-run')]),
   status: T.Union([T.Literal('passed'), T.Literal('failed'), T.Literal('blocked')]),
+  appIdentity: T.Optional(appIdentity),
   entries: T.Array(entry, { minItems: 1 }),
 });
 
@@ -270,6 +312,12 @@ export type ElementLocator = Static<typeof element>;
 export type Check = Static<typeof check>;
 export type Target = Static<typeof targetSchema>;
 export type Report = Static<typeof reportSchema>;
+export type AppIdentity = Static<typeof appIdentity>;
+export type AppIdentityReason =
+  | 'invalid_bundle_path' | 'bundle_id_mismatch' | 'unsupported_path_platform'
+  | 'path_mismatch' | 'multiple_instances' | 'multiple_installed_copies'
+  | 'identity_unproven' | 'instance_changed' | 'driver_target_unconfirmed'
+  | 'fixture_path_mismatch' | 'untargeted_input';
 export type BatchReport = Static<typeof batchReportSchema>;
 export type Entry = Static<typeof entry>;
 export type AssertCheck = Static<typeof assertCheck>;

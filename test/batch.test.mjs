@@ -7,6 +7,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+
+// Keep the native identity helper out of stubbed runs: a locally built helper
+// must not inspect or launch real applications during the test suite.
+process.env.CUEKEEPER_APP_IDENTITY = '/nonexistent/cuekeeper-identity';
 import {
   batchExitCode, bindRows, findDuplicateKey, parseData, readData, resolveBatchSecrets, runBatch,
 } from '../dist/batch.js';
@@ -399,7 +403,7 @@ fs.appendFileSync(${JSON.stringify(log)}, process.argv.slice(2).join(' ') + '\\n
 console.log(JSON.stringify({ version: '2.6', command: process.argv[2], ok: false, error: { code: 'UNEXPECTED' } }));
 `, { mode: 0o700 });
   const result = spawnSync(process.execPath, [cliPath, 'run', flowPath, '--data', dataPath, '--json'], {
-    encoding: 'utf8', env: { ...process.env, CUEKEEPER_AGENT_DESKTOP: stub },
+    encoding: 'utf8', env: { ...process.env, CUEKEEPER_AGENT_DESKTOP: stub, CUEKEEPER_APP_IDENTITY: join(directory, 'identity') },
   });
   assert.equal(result.status, 2, result.stdout + result.stderr);
   const response = JSON.parse(result.stdout);
@@ -441,7 +445,7 @@ else if (command === 'type') {
 console.log(JSON.stringify({ version: '2.6', command, ok: true, data }));
 `, { mode: 0o700 });
 
-  const env = { ...process.env, CUEKEEPER_AGENT_DESKTOP: stub };
+  const env = { ...process.env, CUEKEEPER_AGENT_DESKTOP: stub, CUEKEEPER_APP_IDENTITY: join(directory, 'identity') };
   delete env.CUEKEEPER_SECRET_TOKEN;
   const missing = spawnSync(process.execPath, [cliPath, 'run', flowPath, '--data', dataPath, '--json'],
     { encoding: 'utf8', env });

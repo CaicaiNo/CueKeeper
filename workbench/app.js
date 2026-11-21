@@ -323,9 +323,15 @@ function renderOverview() {
       el('span', { className: 'legend-count' }, String(count))))),
     infoList([
       ['目标', `${appLabel(state.session.target.app)} · ${state.session.target.window}`],
+      ['应用路径', state.session.target.appPath ?? '未指定（按唯一运行实例）'],
+      ...(state.session.pathConflict
+        ? [['快照路径', `${state.session.snapshotAppPath} · 与应用路径不一致`]]
+        : []),
       ['来源', short(state.session.directory.split('/').at(-1), 44)],
     ], 'meta-grid'),
-    muted('选择时间线中的动作查看定位器与整理操作。'));
+    state.session.pathConflict
+      ? muted('快照来自另一个应用路径，离线运行会以 APP_AMBIGUOUS / fixture_path_mismatch 阻塞。请重新采集快照或恢复与快照匹配的目标。')
+      : muted('选择时间线中的动作查看定位器与整理操作。'));
 }
 
 function renderInspector() {
@@ -628,6 +634,28 @@ async function saveTest() {
 }
 
 const resultStatus = { resolved: '已解析', passed: '通过', failed: '失败', blocked: '阻塞', skipped: '跳过' };
+const identityReasons = {
+  invalid_bundle_path: '选中的应用路径已失效，请重新选择副本并保存。',
+  bundle_id_mismatch: '应用路径的应用标识已变更，请重新选择副本并保存。',
+  unsupported_path_platform: '该应用路径属于另一平台，本机只能离线验证。',
+  path_mismatch: '无法唯一确认目标副本，请打开选中的副本后重新运行。',
+  multiple_instances: '同一应用有多个运行实例，请关闭冲突实例后重新运行。',
+  multiple_installed_copies: '本机有多份可启动的副本，请明确选择路径后保存。',
+  identity_unproven: '无法证明操作仍指向选中的副本，本轮已停止。',
+  instance_changed: '目标实例在运行中发生了变化，本轮已停止。',
+  driver_target_unconfirmed: '驱动无法证明窗口归属，本轮已停止。',
+  fixture_path_mismatch: '快照来自另一个应用路径，请重新采集快照。',
+  untargeted_input: '该坐标操作无法绑定到选中的副本，请改用元素定位器。',
+};
+
+function identityNotice(report) {
+  const identity = report.appIdentity;
+  if (!identity) return undefined;
+  if (identity.status === 'blocked') {
+    return muted(`应用身份阻塞 · ${identity.code ?? ''} · ${identityReasons[identity.reason] ?? identity.reason}`);
+  }
+  return muted(`应用身份 · ${identity.status === 'verified' ? '已核对运行实例' : '离线来源'} · ${identity.mode === 'bundle_path' ? '按副本路径' : '按应用标识'}`);
+}
 
 function runDialog() {
   const { session, allowLive } = state;
@@ -656,6 +684,7 @@ function runDialog() {
       report.status === 'passed' ? 'success' : 'error');
     setTimeout(() => openDialog('运行结果', [
       el('h3', {}, resultStatus[report.status]),
+      identityNotice(report),
       el('ol', { className: 'stack' }, ...report.entries.map(entry => el('li', {},
         `${entry.kind} · ${resultStatus[entry.status]} · ${entry.durationMs} ms`,
         entry.message ? muted(entry.message) : undefined))),

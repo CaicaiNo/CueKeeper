@@ -3,6 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { evaluateAssertion, resolveAssertion } from './assertion.js';
 import type { AssertionObservation } from './assertion.js';
+import { AppIdentitySession, IdentityFault, unsafePoint } from './app-identity.js';
 import { defaultEnsureTimeoutMs } from './contracts.js';
 import type { AssertCheck, Check, Ensure, Entry, Flow, Report, ScreenshotActual, Setup, Target } from './contracts.js';
 import { DesktopFault, isMissingWindow } from './desktop.js';
@@ -72,10 +73,17 @@ export async function runFlow(
     baselineDir?: string;
     /** Directory receiving assertion evidence, one subdirectory per step. */
     evidenceDir?: string;
+    /** True when the run resolves against a saved snapshot instead of the desktop. */
+    offline?: boolean;
+    /** The app path stored in the snapshot envelope, when one exists. */
+    fixtureAppPath?: string;
+    /** Injected identity probe/filesystem seam; production uses the native helper. */
+    identity?: AppIdentitySession;
   },
 ): Promise<Report> {
   const planned = plan(flow);
   const { dryRun, signal } = options;
+  const offline = options.offline === true;
   const report: Report = {
     version: 1,
     flowId: flow.id,
@@ -87,13 +95,67 @@ export async function runFlow(
   };
   const started = performance.now();
   const elapsed = () => Math.round(performance.now() - started);
+
+  const identity = options.identity ?? new AppIdentitySession(flow.target);
+  let identityBlock: { fault: IdentityFault; entryId?: string } | undefined;
+  /**
+   * A blocked start lists every planned action as blocked without inventing
+   * setup entries, and keeps the report timeline in flow order.
+   */
+  function blockBeforeStart(fault: IdentityFault) {
+    report.status = 'blocked';
+    report.appIdentity = fault.identity();
+    for (const { id, action } of planned) {
+      report.entries.push({
+        id, kind: action.kind, status: 'blocked', atMs: 0, durationMs: 0,
+        code: fault.code, message: fault.message,
+      });
+    }
+    return report;
+  }
+
+  try {
+    await identity.preflight({ offline });
+    if (offline && flow.target.appPath && options.fixtureAppPath &&
+        flow.target.appPath !== options.fixtureAppPath) {
+      throw new IdentityFault('APP_AMBIGUOUS', 'fixture_path_mismatch',
+        '快照来自另一个应用路径，请重新采集快照或恢复与快照匹配的目标。',
+        flow.target.app, identity.mode);
+    }
+    if (!offline) await identity.bindInstances(desktop);
+  } catch (error) {
+    if (error instanceof IdentityFault) return blockBeforeStart(error);
+    throw error;
+  }
+  if (offline) report.appIdentity = identity.offlineIdentity();
+
+  // Only a path-fixed target switches to window-only driver calls; a legacy
+  // flow keeps its existing app-scoped route.
+  const pathBound = !offline && identity.mode === 'bundle_path';
+
   function bindWindow(target: Target) {
     let windowId: string | undefined;
     let selectedWindowId: string | undefined;
+    const bound = pathBound && target.app === flow.target.app;
     return {
       get id() { return windowId; },
       async read(timeoutMs?: number, exactWindow = false, repairedWindowId?: string) {
         const selected = selectedWindowId ?? (exactWindow ? windowId ?? repairedWindowId : undefined);
+        if (bound) {
+          // After the first read the bound window ID is reused, so a later
+          // action never re-selects a window by title.
+          const preferred = selectedWindowId ?? windowId ?? (exactWindow ? repairedWindowId : undefined);
+          const current = await identity.readWindow(desktop, target, {
+            timeoutMs, ...(preferred === undefined ? {} : { preferredWindowId: preferred }),
+          });
+          const expectedId = windowId ?? selected;
+          if (expectedId !== undefined && current.windowId !== expectedId) {
+            throw new Fault('WINDOW_CHANGED', 'The original target window changed during the run');
+          }
+          windowId = current.windowId;
+          if (exactWindow) selectedWindowId = current.windowId;
+          return current;
+        }
         const current = await desktop.snapshot(target, timeoutMs, selected, exactWindow);
         const expectedId = windowId ?? selected;
         if (expectedId !== undefined && current.windowId !== expectedId) {
@@ -114,12 +176,19 @@ export async function runFlow(
   ) {
     signal.throwIfAborted();
     const atMs = elapsed();
+    const previousBlock = identityBlock;
     let outcome: SetupOutcome;
     try {
       outcome = await work();
     } catch (error) {
       if (signal.aborted || (error instanceof Fault && error.dependency)) throw error;
-      outcome = errorOutcome(error, failure);
+      if (error instanceof IdentityFault) identityBlock = { fault: error, entryId: id };
+      outcome = errorOutcome(error, error instanceof IdentityFault ? 'blocked' : failure);
+    }
+    // A repair can record the identity failure itself while keeping repair
+    // details; the entry that triggered it names the stop.
+    if (identityBlock && identityBlock !== previousBlock && identityBlock.entryId === undefined) {
+      identityBlock.entryId = id;
     }
     signal.throwIfAborted();
     const { repair, ...result } = outcome;
@@ -150,7 +219,7 @@ export async function runFlow(
     const deadline = performance.now() + timeoutMs;
     try {
       signal.throwIfAborted();
-      const repairedWindowId = await desktop.ensure(action, timeoutMs, window.id);
+      const repairedWindowId = await identity.ensure(desktop, action, timeoutMs, window.id);
       let current: Snapshot;
       for (;;) {
         signal.throwIfAborted();
@@ -175,6 +244,8 @@ export async function runFlow(
     } catch (error) {
       if (signal.aborted || (error instanceof Fault && error.dependency)) throw error;
       const outcome = errorOutcome(error, 'blocked');
+      // Keep the repair record while surfacing the identity stop at the top.
+      if (error instanceof IdentityFault) identityBlock = { fault: error };
       return { ...outcome, code: 'ENSURE_FAILED', repair: { ...repair, result: 'failed', code: outcome.code } };
     }
   }
@@ -208,20 +279,34 @@ export async function runFlow(
         return { status: 'passed' };
       }, 'blocked');
       if (state === 'blocked') return false;
+      if (identityBlock) return false;
     }
     return true;
   }
 
   const globalReady = await checkConditions(flow.setup, 'global');
   let halted = !globalReady;
+  let stopped = identityBlock ? 'identity' : undefined;
   if (halted) report.status = 'blocked';
   for (const { id, action } of planned) {
+    if (stopped === 'identity') {
+      await log(id, action.kind, async () =>
+        ({ status: 'skipped', message: 'Stopped by an earlier result' }));
+      continue;
+    }
     if (halted) {
       await log(id, action.kind, async () =>
         ({ status: globalReady ? 'skipped' : 'blocked', message: 'Stopped by an earlier result' }));
       continue;
     }
     if (!await checkConditions(action.setup, id)) {
+      if (identityBlock) {
+        await log(id, action.kind, async () =>
+          ({ status: 'skipped', message: 'Stopped by an earlier result' }));
+        report.status = 'blocked';
+        stopped = 'identity';
+        continue;
+      }
       await log(id, action.kind, async () =>
         ({ status: 'blocked', code: 'LOCAL_SETUP', message: 'Local precondition blocked this action' }));
       report.status = 'blocked';
@@ -235,6 +320,14 @@ export async function runFlow(
           snapshot: () => snapshot(),
           baselineDir: options.baselineDir,
           secretTexts: options.secretTexts,
+          windowsFor: (app: string) => app === flow.target.app
+            ? identity.windowsFor(desktop, flow.target)
+            : desktop.listWindows(app),
+          ...(pathBound ? {
+            screenshotWindow: (targetApp: string, windowId: string) => targetApp === flow.target.app
+              ? identity.screenshotWindow(desktop, windowId)
+              : desktop.screenshot(targetApp, windowId),
+          } : {}),
         };
         if (dryRun) {
           await resolveAssertion(action.check, context);
@@ -289,11 +382,15 @@ export async function runFlow(
       const current = await snapshot();
       if (action.kind === 'key') {
         if (dryRun) return { status: 'resolved', message: 'Window resolved for shortcut' };
+        if (pathBound) await identity.verifyWindowId(current.windowId, flow.target.window);
         return { status: 'passed', delivery: await desktop.press(
           [...(action.modifiers ?? []), action.key].join('+'), current,
         ) };
       }
       if (action.target.kind === 'point') {
+        // A path-fixed flow cannot prove which copy receives a global
+        // coordinate, so it stops instead of clicking the foreground window.
+        if (pathBound) throw unsafePoint(flow.target.app, identity.mode);
         if (!contains(current.tree.bounds, action.target.point)) {
           throw new Fault('UNSAFE_POINT', 'Coordinate is outside the selected window');
         }
@@ -304,13 +401,25 @@ export async function runFlow(
       const { node } = resolve(current, action.target);
       if (!node.ref || node.secure) throw new Fault('UNSAFE_TARGET', 'Control is secure or has no action reference');
       if (dryRun) return { status: 'resolved', message: `Resolved ${node.role}` };
+      if (pathBound) await identity.verifyWindowId(current.windowId, flow.target.window);
       const delivery = action.kind === 'click' ? await desktop.click(node.ref) : await desktop.type(node.ref, options.secretTexts?.get(id) ?? action.text);
       return { status: 'passed', delivery };
     });
+    if (identityBlock) {
+      report.status = 'blocked';
+      stopped = 'identity';
+      continue;
+    }
     if (status === 'failed') {
       report.status = 'failed';
       halted = true;
     }
+  }
+  if (identityBlock) {
+    report.status = 'blocked';
+    report.appIdentity = identityBlock.fault.identity(identityBlock.entryId);
+  } else if (!offline && identity.verified) {
+    report.appIdentity = identity.verifiedIdentity();
   }
   return report;
 }
