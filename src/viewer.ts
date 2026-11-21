@@ -326,6 +326,16 @@ export interface ViewerBundle {
   js: string;
 }
 
+const viewerIcons = {
+  fileDown: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M12 18v-6"/><path d="m9 15 3 3 3-3"/>',
+  fileCode: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="m10 13-2 2 2 2"/><path d="m14 13 2 2-2 2"/>',
+  filter: '<path d="M22 3H2l8 9.46V19l4 2v-8.54Z"/>',
+  activity: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+  x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+};
+const viewerIcon = (name: keyof typeof viewerIcons) =>
+  `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${viewerIcons[name]}</svg>`;
+
 export function renderViewer(report: Report, flow: Flow, steps: PlannedStep[], assets: PackAsset[]): ViewerBundle {
   const views = buildViews(report, flow, steps);
   const perEntry = new Map<string, PackAsset[]>();
@@ -399,10 +409,10 @@ export function renderViewer(report: Report, flow: Flow, steps: PlannedStep[], a
     <div class="elapsed">${formatDuration(totalDuration)}</div>
     <div class="env">${escapeHtml(flow.target.app)} · ${escapeHtml(flow.target.window)}</div>
     <div class="top-actions">
-      <a class="btn" href="report.json" download>报告 JSON</a>
-      <a class="btn" href="flow.json" download>流程 JSON</a>
-      <button class="btn" id="failedOnly" type="button" aria-pressed="false">只看失败</button>
-      <button class="btn" id="streamToggle" type="button" aria-pressed="${autoDisconnected ? 'true' : 'false'}">${autoDisconnected ? '退出断流预览' : '断流预览'}</button>
+      <a class="btn" href="report.json" download>${viewerIcon('fileDown')}报告 JSON</a>
+      <a class="btn" href="flow.json" download>${viewerIcon('fileCode')}流程 JSON</a>
+      <button class="btn" id="failedOnly" type="button" aria-pressed="false">${viewerIcon('filter')}只看失败</button>
+      <button class="btn" id="streamToggle" type="button" aria-pressed="${autoDisconnected ? 'true' : 'false'}">${viewerIcon(autoDisconnected ? 'x' : 'activity')}${autoDisconnected ? '退出断流预览' : '断流预览'}</button>
     </div>
   </header>
 
@@ -410,7 +420,7 @@ export function renderViewer(report: Report, flow: Flow, steps: PlannedStep[], a
     <span class="ic" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 2.5v7M8 12.4v.1" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="8" cy="8" r="6.2" stroke="currentColor" stroke-width="1.3"/></svg></span>
     <span><b>事件流已断开</b> <span class="mono">· 报告止于最后一次事件</span>　最后已知：第 ${last ? String(last.index + 1).padStart(2, '0') : '—'} 步 ${escapeHtml(last?.entry.id ?? '')}</span>
     <span class="sp"></span>
-    <button class="btn" id="bannerExit" type="button">退出断流预览</button>
+    <button class="btn" id="bannerExit" type="button">${viewerIcon('x')}退出断流预览</button>
   </div>
 
   <main class="layout">
@@ -502,6 +512,8 @@ a{color:var(--accent)}
   background:var(--surface);cursor:pointer;color:var(--ink-2);display:inline-flex;align-items:center;gap:6px;
   text-decoration:none;white-space:nowrap}
 .btn:hover{background:var(--surface-2);color:var(--ink)}
+.btn svg{flex:none;opacity:.85}
+.btn{display:inline-flex;align-items:center;gap:6px}
 .btn[aria-pressed="true"]{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
 .btn:focus-visible,.entry-row:focus-visible,.ghost:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
