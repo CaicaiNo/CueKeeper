@@ -229,20 +229,20 @@ function renderSetup() {
           confirmCondition(setup, condition.id);
           render();
           status(`已确认「${condition.name}」，保存时一并写入`, 'success');
-        }, { style: 'small', icon: 'check', iconOnly: true, title: '确认', disabled: deleted || condition.state === 'confirmed' }),
+        }, { style: 'small', icon: 'check', disabled: deleted || condition.state === 'confirmed' }),
         button('更换', () => conditionDialog(condition), {
-          style: 'small', icon: 'refresh', iconOnly: true, title: '更换', disabled: deleted,
+          style: 'small', icon: 'refresh', disabled: deleted,
         }),
         button('撤销', () => {
           undoCondition(setup, condition.id);
           render();
           status('已撤销前置条件的上一次修改');
-        }, { style: 'small', icon: 'undo', iconOnly: true, title: '撤销', disabled: !canUndo(setup, condition.id) }),
+        }, { style: 'small', icon: 'undo', disabled: !canUndo(setup, condition.id) }),
         button('删除', () => {
           deleteCondition(setup, condition.id);
           render();
           status(`已删除「${condition.name}」，可用撤销恢复`, 'success');
-        }, { style: 'small danger', icon: 'trash', iconOnly: true, title: '删除', disabled: deleted })));
+        }, { style: 'small danger', icon: 'trash', disabled: deleted })));
   }));
 }
 
@@ -258,9 +258,7 @@ function renderTimeline() {
       button('合并为行为', () => mergeDialog(selected), {
         style: 'small', icon: 'layers', disabled: selected.length < 2 || selected.some(row => !isCompatible(row)), key: 'merge-selected',
       }),
-      button('清除', () => { state.selected.clear(); render(); }, {
-        style: 'small', icon: 'x', iconOnly: true, title: '清除选择',
-      })),
+      button('清除', () => { state.selected.clear(); render(); }, { style: 'small', icon: 'x' })),
   ] : []));
   if (!rows.length) {
     $('timeline').replaceChildren(empty(state.session ? '当前筛选下没有动作。' : '导入运行目录后查看录制动作。'));

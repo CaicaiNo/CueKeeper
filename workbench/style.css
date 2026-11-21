@@ -293,7 +293,8 @@ dialog::backdrop { background: rgba(0, 0, 0, .62); }
 .state-chip.inferred { color: var(--accent); }
 .state-chip.deleted, .state-chip.invalid { color: var(--muted); }
 .condition .muted { margin-top: 3px; overflow-wrap: anywhere; }
-.condition .actions { margin-top: 9px; }
+.condition .actions { margin-top: 9px; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.condition .actions .button { width: 100%; }
 @media (max-width: 1200px) {
   .workspace { grid-template-columns: 224px minmax(0, 1fr) 320px; }
   .row-focus { grid-template-columns: 74px 44px minmax(0, 1fr) 56px; gap: 8px; }
