@@ -383,3 +383,9 @@ dialog::backdrop { background: rgba(17, 17, 16, .32); }
   .draft-header input.test-name { width: min(240px, 62vw); }
   .status { min-height: 32px; }
 }
+
+.draft-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.draft-copy .muted { margin: 0; font-size: 12px; }
+.plan { max-height: 320px; overflow: auto; padding: 8px; border-radius: 8px; background: var(--surface-2, #f4f5f7); }
+.plan-step { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border-radius: 6px; background: var(--surface, #fff); }
+.plan-step .muted { margin: 0; white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; }

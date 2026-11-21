@@ -5,6 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+
+// Keep the native identity helper out of stubbed runs: a locally built helper
+// must not inspect or launch real applications during the test suite.
+process.env.CUEKEEPER_APP_IDENTITY = '/nonexistent/cuekeeper-identity';
 import { contains, parseSnapshot, resolve } from '../dist/locator.js';
 import { pickCandidates, selectCandidate } from '../dist/pick.js';
 

@@ -33,6 +33,10 @@ export interface AssertionContext {
   baselineDir?: string;
   timeoutMs?: number;
   secretTexts?: ReadonlyMap<string, string>;
+  /** Identity-scoped inventory; a path-fixed target only exposes its bound instance. */
+  windowsFor?: (app: string) => Promise<WindowInfo[]>;
+  /** Window-only capture for a bound instance; receives the assertion's app. */
+  screenshotWindow?: (app: string, windowId: string) => Promise<Uint8Array>;
 }
 
 const regionPixelLimit = 16_777_216;
@@ -185,7 +189,9 @@ async function evaluateElement(
 
 async function windowInventory(check: WindowAssertCheck, context: AssertionContext) {
   try {
-    return await context.desktop.listWindows(check.target.app, context.timeoutMs);
+    return context.windowsFor
+      ? await context.windowsFor(check.target.app)
+      : await context.desktop.listWindows(check.target.app, context.timeoutMs);
   } catch (error) {
     // A confirmed app-not-running is an empty inventory; `exists: false` needs it.
     if (error instanceof Fault && ['APP_NOT_FOUND', 'WINDOW_NOT_FOUND'].includes(error.code)) return [];
@@ -242,7 +248,9 @@ async function evaluateScreenshot(
 
   let actualBytes: Uint8Array;
   try {
-    actualBytes = await context.desktop.screenshot(check.target.app, window.id, context.timeoutMs);
+    actualBytes = context.screenshotWindow
+      ? await context.screenshotWindow(check.target.app, window.id)
+      : await context.desktop.screenshot(check.target.app, window.id, context.timeoutMs);
   } catch (error) {
     const code = error instanceof Fault ? error.code : 'ASSERTION_CAPTURE_FAILED';
     if (code === 'WINDOW_NOT_FOUND' || code === 'APP_NOT_FOUND' || code === 'WINDOW_CHANGED') {

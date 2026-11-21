@@ -7,24 +7,23 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { listApps } from './app-catalog.js';
 import { appIconPng } from './apps.js';
 import { loadBaseline } from './assertion.js';
-import { offlineDesktop, withDesktop } from './desktop.js';
+import { fixtureAppPath, offlineDesktop, withDesktop } from './desktop.js';
 import { readJson, writeNew } from './files.js';
-import { plan } from './flow.js';
+import { hashFlow, plan } from './flow.js';
 import { object } from './locator.js';
 import { crop, decodePng, encodePng } from './png.js';
 import { runFlow } from './run.js';
+import type { ShellRunOptions } from './run.js';
+import { createRootPrivilegeRunner } from './shell-privilege.js';
+import {
+  describeShellStep, hasShellSecrets, reachableShells, shellGate, shellPrivilege,
+} from './shell.js';
 import { keepConfirmedSetup } from './setup.js';
 import { parseLibraryItem, parseTestItem, resolveSecrets } from './test-item.js';
+import { workbenchAssets } from './workbench-assets.js';
 import { loadSession, sameTarget } from './workbench-session.js';
 
-const staticFiles = new Map([
-  ['/', ['index.html', 'text/html']],
-  ['/style.css', ['style.css', 'text/css']],
-  ['/app.js', ['app.js', 'text/javascript']],
-  ['/dom.js', ['dom.js', 'text/javascript']],
-  ['/model.js', ['model.js', 'text/javascript']],
-  ['/picker.js', ['picker.js', 'text/javascript']],
-]);
+const staticFiles = new Map(workbenchAssets.map(asset => [asset.path, [asset.file, asset.type] as const]));
 
 async function readBody(request: IncomingMessage) {
   const chunks: Buffer[] = [];
@@ -85,14 +84,49 @@ async function saveBaseline(directory: string, source: string, region: ReturnTyp
   return { sha256, frameWidth: image.width, frameHeight: image.height };
 }
 
+interface ConfirmationToken {
+  sessionId: string;
+  flowSha256: string;
+  planHash: string;
+  expiresAt: number;
+}
+
+const confirmationTtlMs = 120_000;
+
+function stepsNeedLive(planned: ReturnType<typeof plan>) {
+  return planned.some(({ action }) => action.kind === 'click' && action.target.kind === 'point');
+}
+
+function planHash(sessionId: string, flowSha256: string, steps: unknown, captureOutput: boolean) {
+  return createHash('sha256')
+    .update(JSON.stringify({ sessionId, flowSha256, steps, captureOutput }))
+    .digest('hex');
+}
+
 export async function startWorkbench(options: {
-  directory?: string; port: number; library?: string; allowLive: boolean; signal: AbortSignal;
+  directory?: string; port: number; library?: string; allowLive: boolean;
+  allowShell?: boolean; allowSudo?: boolean; signal: AbortSignal;
 }) {
   let session = options.directory ? await loadSession(options.directory) : undefined;
   const library = resolve(options.library ?? join(homedir(), '.cuekeeper', 'behaviors'));
   const allowLive = options.allowLive && process.platform === 'darwin';
+  const allowShell = options.allowShell ?? false;
+  const allowSudo = options.allowSudo ?? false;
+  const tokens = new Map<string, ConfirmationToken>();
   let running = false;
+  let currentRun: AbortController | undefined;
   let origin: string;
+
+  function libraryEntry(item: Awaited<ReturnType<typeof parseLibraryItem>>) {
+    const shells = item.behavior.steps.filter(step => step.kind === 'shell');
+    return {
+      ...item,
+      shell: {
+        steps: shells.length,
+        privileged: shells.filter(step => step.kind === 'shell' && shellPrivilege(step) !== 'user').length,
+      },
+    };
+  }
 
   async function listLibrary() {
     let names;
@@ -103,7 +137,7 @@ export async function startWorkbench(options: {
       throw error;
     }
     return Promise.all(names.filter(entry => entry.isFile() && /^[a-z0-9_-]+\.behavior\.json$/i.test(entry.name))
-      .map(async entry => parseLibraryItem(await readJson(join(library, entry.name)))));
+      .map(async entry => libraryEntry(await parseLibraryItem(await readJson(join(library, entry.name))))));
   }
 
   async function requestHandler(request: IncomingMessage, response: ServerResponse) {
@@ -140,7 +174,11 @@ export async function startWorkbench(options: {
       return send(response, 403, { error: 'Use the local CueKeeper workbench' });
     }
     const data = await readBody(request);
-    if (path === '/api/state') return send(response, 200, { session: session?.view, allowLive, library: await listLibrary() });
+    if (path === '/api/state') {
+      return send(response, 200, {
+        session: session?.view, allowLive, allowShell, allowSudo, library: await listLibrary(),
+      });
+    }
     if (path === '/api/apps') return send(response, 200, { apps: await listApps() });
     if (path === '/api/import') {
       if (typeof data.directory !== 'string' || !data.directory.trim()) throw new Error('Enter a run directory');
@@ -151,6 +189,12 @@ export async function startWorkbench(options: {
       session = imported;
       return send(response, 200, session.view);
     }
+    if (path === '/api/stop') {
+      // Stop is bound to the server run, not to a session snapshot.
+      if (!currentRun) return send(response, 200, { stopped: false });
+      currentRun.abort(new Error('Stopped from the workbench'));
+      return send(response, 200, { stopped: true });
+    }
     const current = session;
     if (!current || data.session !== current.view.id) return send(response, 409, { error: 'Reload the current session' });
     if (path === '/api/library') {
@@ -158,7 +202,7 @@ export async function startWorkbench(options: {
       if (!sameTarget(item.target, current.flow.target)) throw new Error('Behavior target must match the session');
       await mkdir(library, { mode: 0o700, recursive: true });
       await writeNew(join(library, `${item.behavior.id}.behavior.json`), JSON.stringify(item, null, 2) + '\n');
-      return send(response, 201, item);
+      return send(response, 201, libraryEntry(item));
     }
     if (path === '/api/baseline') {
       const source = typeof data.source === 'string' ? data.source.trim() : '';
@@ -166,6 +210,34 @@ export async function startWorkbench(options: {
       const region = readRegion(data.region);
       const saved = await saveBaseline(current.directory, source, region);
       return send(response, 201, { ...saved, region });
+    }
+    if (path === '/api/plan') {
+      const { flow, secrets } = parseTestItem(data.test);
+      if (!sameTarget(flow.target, current.flow.target)) throw new Error('Test target must match the session');
+      const planned = plan(flow);
+      const shells = reachableShells(planned);
+      const captureOutput = data.captureOutput === true;
+      const captureAllowed = secrets.size === 0 &&
+        !shells.some(step => hasShellSecrets(step.action)) &&
+        !shells.some(step => shellPrivilege(step.action) !== 'user');
+      const steps = planned.map(({ id, action }) => action.kind === 'shell'
+        ? { kind: 'shell', ...describeShellStep(action, { baseDir: current.directory }) }
+        : { id, kind: action.kind });
+      const flowSha256 = hashFlow(flow);
+      const hash = planHash(current.view.id, flowSha256, steps, captureOutput);
+      const token = randomUUID();
+      const now = Date.now();
+      for (const [key, value] of tokens) if (value.expiresAt <= now) tokens.delete(key);
+      tokens.set(token, {
+        sessionId: current.view.id, flowSha256, planHash: hash, expiresAt: now + confirmationTtlMs,
+      });
+      return send(response, 200, {
+        steps, shell: { reachable: shells.length, privileged: shells.filter(step => shellPrivilege(step.action) !== 'user').length },
+        captureOutput, captureAllowed, allowShell, allowSudo,
+        needsDesktop: (flow.setup?.length ?? 0) > 0 ||
+          planned.some(step => step.action.kind !== 'shell' || (step.action.setup?.length ?? 0) > 0),
+        token,
+      });
     }
     if (path !== '/api/save' && path !== '/api/run') return send(response, 404, { error: 'Unknown workbench endpoint' });
     const baselines = join(current.directory, 'baselines');
@@ -191,22 +263,71 @@ export async function startWorkbench(options: {
     if (data.mode !== 'offline' && data.mode !== 'live') throw new Error('Choose a replay mode');
     if (running) throw new Error('A test is already running');
     const dryRun = data.mode === 'offline';
+    const planned = plan(flow);
+    const shells = reachableShells(planned);
+    const interactive = !dryRun && data.confirm === true;
+    const gate = dryRun ? undefined : shellGate(flow, planned, { allowShell, allowSudo, interactive });
+    if (gate) {
+      throw new Error(gate.message ?? (gate.code === 'SHELL_NOT_ALLOWED'
+        ? 'Shell steps require the workbench to start with --allow-shell'
+        : 'Privileged shell steps require --allow-sudo'));
+    }
+    if (!dryRun && (!allowLive || data.confirm !== true)) {
+      throw new Error('Live replay requires explicit opt-in and confirmation');
+    }
+    if (!dryRun && shells.length > 0) {
+      const captureOutput = data.captureOutput === true;
+      const tokenId = typeof data.token === 'string' ? data.token : undefined;
+      const token = tokenId ? tokens.get(tokenId) : undefined;
+      if (!tokenId || !token) throw new Error('Run preview expired. Review the plan again before starting');
+      const steps = planned.map(({ id, action }) => action.kind === 'shell'
+        ? { kind: 'shell', ...describeShellStep(action, { baseDir: current.directory }) }
+        : { id, kind: action.kind });
+      const expected = planHash(current.view.id, hashFlow(flow), steps, captureOutput);
+      if (token.sessionId !== current.view.id || token.flowSha256 !== hashFlow(flow) ||
+          token.planHash !== expected || token.expiresAt <= Date.now()) {
+        throw new Error('Run confirmation no longer matches this test or session');
+      }
+      if (captureOutput && (secrets.size || shells.some(step => hasShellSecrets(step.action)) ||
+          shells.some(step => shellPrivilege(step.action) !== 'user'))) {
+        throw new Error('Shell output stays metadata-only while secrets or privileged steps are present');
+      }
+      // Consume only a valid token, immediately before the plan starts.
+      tokens.delete(tokenId);
+    }
     running = true;
+    currentRun = new AbortController();
     try {
-      const { signal } = options;
-      if (!dryRun && (!allowLive || data.confirm !== true)) throw new Error('Live replay requires explicit opt-in and confirmation');
-      if (dryRun && current.snapshot === undefined) throw new Error('Offline replay requires snapshot.json in the run directory');
-      if (!dryRun && plan(flow).some(({ action }) => action.kind === 'click' && action.target.kind === 'point')) {
+      const signal = AbortSignal.any([options.signal, currentRun.signal]);
+      const needsDesktop = (flow.setup?.length ?? 0) > 0 ||
+        planned.some(step => step.action.kind !== 'shell' || (step.action.setup?.length ?? 0) > 0);
+      if (dryRun && needsDesktop && current.snapshot === undefined) {
+        throw new Error('Offline replay requires snapshot.json in the run directory');
+      }
+      if (!dryRun && stepsNeedLive(planned)) {
         throw new Error('Save and run coordinate clicks explicitly with the CLI --headed option');
       }
+      const shell: ShellRunOptions = {
+        allowShell, allowSudo, interactive, baseDir: current.directory,
+        captureOutput: data.captureOutput === true,
+        privilege: createRootPrivilegeRunner(),
+      };
       const secretTexts = dryRun ? undefined : resolveSecrets(secrets, process.env);
       const baselineDir = join(current.directory, 'baselines');
       const report = dryRun
-        ? await runFlow(flow, offlineDesktop(current.snapshot, flow.target), { dryRun, signal, baselineDir })
-        : await withDesktop({ headed: true, signal }, desktop => runFlow(flow, desktop, { dryRun, signal, secretTexts, baselineDir }));
-      return send(response, 200, report);
+        ? await runFlow(flow, needsDesktop ? offlineDesktop(current.snapshot, flow.target) : undefined, {
+          dryRun, signal, baselineDir, shell, offline: true,
+          ...(needsDesktop && current.snapshot !== undefined && fixtureAppPath(current.snapshot)
+            ? { fixtureAppPath: fixtureAppPath(current.snapshot)! } : {}),
+        })
+        : await (needsDesktop
+          ? withDesktop({ headed: true, signal },
+            desktop => runFlow(flow, desktop, { dryRun, signal, secretTexts, baselineDir, shell }))
+          : runFlow(flow, undefined, { dryRun, signal, secretTexts, baselineDir, shell }));
+      return send(response, 200, { ...report, stopped: currentRun.signal.aborted });
     } finally {
       running = false;
+      currentRun = undefined;
     }
   }
 

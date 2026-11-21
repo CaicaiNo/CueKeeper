@@ -1,10 +1,15 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { dirname, resolve } from 'node:path';
+import { realpath } from 'node:fs/promises';
 import { discoverAssets } from './assets.js';
+import { capturePreflight, diagnose, formatDoctor, preflightFault } from './doctor.js';
+import { buildInfo, versionLine } from './version.js';
 import { BatchError, batchExitCode, bindRows, readData, resolveBatchSecrets, runBatch } from './batch.js';
+import { AppIdentitySession, IdentityFault } from './app-identity.js';
 import { captureTargetCheck } from './contracts.js';
-import { offlineDesktop, withDesktop } from './desktop.js';
+import type { Target } from './contracts.js';
+import { fixtureAppPath, offlineDesktop, withDesktop } from './desktop.js';
 import { ensureNew, readJson, writeNew } from './files.js';
 import { parseFlow, plan } from './flow.js';
 import { Fault } from './locator.js';
@@ -13,18 +18,26 @@ import { pickCandidates, selectCandidate } from './pick.js';
 import type { PickCandidate } from './pick.js';
 import { record } from './record.js';
 import { packReport } from './report.js';
-import { runFlow } from './run.js';
+import { blockedShellReport, runFlow } from './run.js';
+import type { ShellRunOptions } from './run.js';
+import { createRootPrivilegeRunner } from './shell-privilege.js';
+import { flowHasShellDefinitions, reachableShells, shellGate } from './shell.js';
 import { parseTestItem, resolveSecrets } from './test-item.js';
+import { enqueueUpload, processUploadQueue } from './upload-queue.js';
+import { defaultQueueDir, resolveUploadConfig } from './upload.js';
 import { startWorkbench } from './workbench.js';
 
-const help = `Cuekeeper
+const help = `Cuekeeper ${buildInfo().version}
 
+  cuekeeper --version
+  cuekeeper doctor [--json]
   cuekeeper flow validate <flow.json|test.json> [--json]
-  cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--report <report.json>] [--json]
-  cuekeeper workbench [run-directory] [--port <port>] [--library <directory>] [--allow-live-replay]
-  cuekeeper pick --app <bundle-id> --window <title> [--select <ref>] [--snapshot <snapshot.json>] [--json]
-  cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--seconds 25] [--no-indicator] [--sound] [--trace-clicks] [--json]
-  cuekeeper report pack <report.json> --flow <flow.json> --out <report.zip> [--assets <dir>] [--json]
+  cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--interactive] [--report <report.json>] [--allow-shell] [--allow-sudo] [--capture-shell-output] [--json]
+  cuekeeper workbench [run-directory] [--port <port>] [--library <directory>] [--allow-live-replay] [--allow-shell] [--allow-sudo]
+  cuekeeper pick --app <bundle-id> --window <title> [--app-path <path>] [--select <ref>] [--snapshot <snapshot.json>] [--json]
+  cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--app-path <path>] [--seconds 25] [--no-indicator] [--sound] [--trace-clicks] [--json]
+  cuekeeper report pack <report.json> --flow <flow.json> --out <report.zip> [--assets <dir>] [--no-upload] [--queue <dir>] [--config <upload.json>] [--json]
+  cuekeeper report upload [--queue <dir>] [--retry-paused] [--json]
 
 Exit codes
   0  Completed
@@ -72,12 +85,31 @@ function describeCandidate(candidate: PickCandidate) {
     `${candidate.path.join(' › ')} · ${bounds}${candidate.point ? ` · point ${candidate.point.join(',')}` : ''}`;
 }
 
+/** Human-readable form of a root command; never written to reports or logs. */
+function formatCommand(program: string, args: string[]) {
+  return [program, ...args]
+    .map(part => (!part || /[\s"'\\$`;&|*?<>()]/.test(part) ? JSON.stringify(part) : part))
+    .join(' ');
+}
+
 async function main() {
   if (!argv.length || argv.includes('--help') || argv[0] === 'help') {
     success({ usage: help }, help);
     return;
   }
+  if (argv[0] === '--version' || argv[0] === '-v' || argv[0] === 'version') {
+    const info = buildInfo();
+    success({ ...info }, versionLine(info));
+    return;
+  }
   const [command, ...rest] = argv;
+  if (command === 'doctor') {
+    const { positionals } = parseArgs({ args: rest, options: common, allowPositionals: true });
+    checkPositionals(positionals, 0);
+    const report = await diagnose();
+    success(report, formatDoctor(report), report.ok ? 0 : 1);
+    return;
+  }
   if (command === 'flow' && rest[0] === 'validate') {
     const { positionals } = parseArgs({ args: rest.slice(1), options: common, allowPositionals: true });
     checkPositionals(positionals, 1);
@@ -91,20 +123,45 @@ async function main() {
     const { values } = parseArgs({
       args: rest, options: {
         ...common, app: { type: 'string' }, window: { type: 'string' },
+        'app-path': { type: 'string' },
         select: { type: 'string' }, snapshot: { type: 'string' },
       },
     });
-    const target = { app: values.app, window: values.window };
+    const target = {
+      app: values.app, window: values.window,
+      ...(values['app-path'] ? { appPath: values['app-path'] } : {}),
+    } as Target;
     if (!captureTargetCheck.Check(target) || !/^[a-z\d][a-z\d.-]*\.[a-z\d][a-z\d-]*$/i.test(target.app)) {
       throw new Error('Specify --app with a bundle ID and --window with an exact window title');
     }
     let observed: Snapshot;
     if (values.snapshot) {
-      observed = await offlineDesktop(await readJson(values.snapshot), target).snapshot(target);
+      const fixture = await readJson(values.snapshot);
+      const saved = fixtureAppPath(fixture);
+      if (target.appPath && saved && target.appPath !== saved) {
+        throw new IdentityFault('APP_AMBIGUOUS', 'fixture_path_mismatch',
+          '快照来自另一个应用路径，请重新采集快照或恢复与快照匹配的目标。',
+          target.app, 'bundle_path');
+      }
+      if (!target.appPath && saved) target.appPath = saved;
+      observed = await offlineDesktop(fixture, target).snapshot(target);
     } else {
       macOnly();
-      observed = await withDesktop({ headed: false, signal },
-        desktop => desktop.snapshot(target, 5000, undefined, true));
+      if (target.appPath) {
+        const identity = new AppIdentitySession(target);
+        await identity.preflight();
+        observed = await withDesktop({ headed: false, signal }, async desktop => {
+          await identity.bindInstances(desktop);
+          const current = await identity.readWindow(desktop, target, { timeoutMs: 5000 });
+          // The picked target names the canonical copy that was proven.
+          if (identity.canonicalPath) target.appPath = identity.canonicalPath;
+          observed = current;
+          return current;
+        });
+      } else {
+        observed = await withDesktop({ headed: false, signal },
+          desktop => desktop.snapshot(target, 5000, undefined, true));
+      }
     }
     const candidates = pickCandidates(observed);
     if (values.select !== undefined) {
@@ -141,17 +198,48 @@ async function main() {
       args: rest, allowPositionals: true, options: {
         ...common, 'dry-run': { type: 'boolean' }, headed: { type: 'boolean' },
         report: { type: 'string' }, snapshot: { type: 'string' }, data: { type: 'string' },
+        'allow-shell': { type: 'boolean' }, 'allow-sudo': { type: 'boolean' },
+        'capture-shell-output': { type: 'boolean' }, interactive: { type: 'boolean' },
       },
     });
     checkPositionals(positionals, 1);
     const dryRun = values['dry-run'] ?? false;
+    const interactive = values.interactive ?? false;
+    // Machine mode has no human to answer a password dialog; refuse instead of
+    // silently downgrading an interactive root step. A dry run never prompts,
+    // so it stays allowed under --json.
+    if (interactive && machine && !dryRun) {
+      throw new Error('--interactive cannot be combined with --json');
+    }
     if (values.snapshot && !dryRun) throw new Error('--snapshot requires --dry-run');
     if (values.headed && dryRun) throw new Error('--headed is only for replay');
     if (values.report) await ensureNew(values.report);
     const { flow, secrets } = parseTestItem(await readJson(positionals[0]));
-    const baselineDir = resolve(dirname(resolve(positionals[0])), 'baselines');
+    const planned = plan(flow);
+    const input = await realpath(resolve(positionals[0]));
+    const shell: ShellRunOptions = {
+      allowShell: values['allow-shell'] ?? false,
+      allowSudo: values['allow-sudo'] ?? false,
+      interactive,
+      baseDir: dirname(input),
+      captureOutput: values['capture-shell-output'] ?? false,
+      privilege: createRootPrivilegeRunner(),
+      ...(interactive ? {
+        announceRoot: (step: { id: string; program: string; args: string[]; cwd: string; mode: string }) => {
+          console.error(`root ${step.id} · ${step.mode} · cwd ${step.cwd}`);
+          console.error(`  ${formatCommand(step.program, step.args)}`);
+        },
+      } : {}),
+    };
+    const gate = dryRun ? undefined : shellGate(flow, planned, shell);
+    const baselineDir = resolve(dirname(input), 'baselines');
 
     if (values.data) {
+      // Batch rows replay one flow repeatedly. Shell steps need the single-flow
+      // confirmation path, so a table with shell definitions is refused here.
+      if (flowHasShellDefinitions(flow)) {
+        throw new Error('Batch runs do not accept flows with shell steps yet');
+      }
       // Preflight the whole table, then resolve secrets, before any desktop
       // driver call or report artifact is created.
       const table = await readData(values.data);
@@ -166,7 +254,10 @@ async function main() {
       };
       let summary;
       if (values.snapshot) {
-        summary = await runBatch(rows, offlineDesktop(await readJson(values.snapshot), flow.target), options);
+        const fixture = await readJson(values.snapshot);
+        summary = await runBatch(rows, offlineDesktop(fixture, flow.target), {
+          ...options, offline: true, ...(fixtureAppPath(fixture) ? { fixtureAppPath: fixtureAppPath(fixture)! } : {}),
+        });
       } else {
         macOnly();
         summary = await withDesktop({ headed: values.headed ?? false, signal },
@@ -195,21 +286,41 @@ async function main() {
       dryRun, signal,
       secretTexts: dryRun ? undefined : resolveSecrets(secrets, process.env),
       baselineDir,
+      shell,
       ...(values.report ? { evidenceDir: `${resolve(values.report)}.assets` } : {}),
     };
     let report;
-    if (values.snapshot) {
-      report = await runFlow(flow, offlineDesktop(await readJson(values.snapshot), flow.target), options);
+    if (gate) {
+      // No desktop adapter and no shell process is created for a blocked run.
+      report = blockedShellReport(flow, planned, gate);
     } else {
-      macOnly();
-      report = await withDesktop({ headed: values.headed ?? false, signal },
-        desktop => runFlow(flow, desktop, options));
+      const needsDesktop = (flow.setup?.length ?? 0) > 0 ||
+        planned.some(step => step.action.kind !== 'shell' || (step.action.setup?.length ?? 0) > 0);
+      if (!needsDesktop) {
+        report = await runFlow(flow, undefined, options);
+      } else if (values.snapshot) {
+        const fixture = await readJson(values.snapshot);
+        const path = fixtureAppPath(fixture);
+        report = await runFlow(flow, offlineDesktop(fixture, flow.target), {
+          ...options, offline: true, ...(path ? { fixtureAppPath: path } : {}),
+        });
+      } else {
+        macOnly();
+        report = await withDesktop({ headed: values.headed ?? false, signal },
+          desktop => runFlow(flow, desktop, options));
+      }
     }
     if (values.report) await writeNew(values.report, JSON.stringify(report, null, 2) + '\n');
     const details = report.entries
-      .map(entry => `${entry.id} ${entry.kind} ${entry.status}${entry.message ? ` — ${entry.message}` : ''}`)
+      .map(entry => {
+        const shellDetail = entry.kind === 'shell'
+          ? ` ${entry.shell.mode}/${entry.shell.privilege} ${entry.shell.execution}` : '';
+        return `${entry.id} ${entry.kind}${shellDetail} ${entry.status}` +
+          (entry.message ? ` — ${entry.message}` : '');
+      })
       .join('\n');
-    success(report, `${report.mode} ${report.status}\n${details}`, report.status === 'passed' ? 0 : 1);
+    success(report, `${report.mode} ${report.status}\n${details}`,
+      signal.aborted ? 130 : report.status === 'passed' ? 0 : 1);
     return;
   }
 
@@ -217,14 +328,19 @@ async function main() {
     const { positionals, values } = parseArgs({
       args: rest, allowPositionals: true, options: {
         ...common, port: { type: 'string', default: '0' }, library: { type: 'string' },
-        'allow-live-replay': { type: 'boolean' },
+        'allow-live-replay': { type: 'boolean' }, 'allow-shell': { type: 'boolean' },
+        'allow-sudo': { type: 'boolean' },
       },
     });
     if (positionals.length > 1) throw new Error('Specify at most one run directory');
     const port = Number(values.port);
     if (!/^\d+$/.test(values.port) || !Number.isInteger(port) || port > 65535) throw new Error('Invalid port');
     const workbench = await startWorkbench({
-      directory: positionals[0], port, library: values.library, allowLive: values['allow-live-replay'] ?? false, signal,
+      directory: positionals[0], port, library: values.library,
+      allowLive: values['allow-live-replay'] ?? false,
+      allowShell: values['allow-shell'] ?? false,
+      allowSudo: values['allow-sudo'] ?? false,
+      signal,
     });
     success({ url: workbench.url }, workbench.url);
     await workbench.closed;
@@ -235,12 +351,16 @@ async function main() {
     const { values } = parseArgs({
       args: rest, options: {
         ...common, app: { type: 'string' }, window: { type: 'string' },
+        'app-path': { type: 'string' },
         out: { type: 'string' }, seconds: { type: 'string', default: '25' },
         'no-indicator': { type: 'boolean' }, sound: { type: 'boolean' },
         'trace-clicks': { type: 'boolean' },
       },
     });
-    const target = { app: values.app, window: values.window };
+    const target = {
+      app: values.app, window: values.window,
+      ...(values['app-path'] ? { appPath: values['app-path'] } : {}),
+    } as Target;
     if (!captureTargetCheck.Check(target) || !/^[a-z\d][a-z\d.-]*\.[a-z\d][a-z\d-]*$/i.test(target.app)) {
       throw new Error('Specify --app with a bundle ID and --window with an exact window title');
     }
@@ -248,6 +368,8 @@ async function main() {
     const seconds = Number(values.seconds);
     if (!Number.isInteger(seconds) || seconds < 1 || seconds > 90) throw new Error('--seconds must be an integer from 1 to 90');
     macOnly();
+    const preflight = preflightFault(await capturePreflight());
+    if (preflight) throw preflight;
     await ensureNew(output);
     const options = { seconds, indicator: !values['no-indicator'], sound: values.sound ?? false,
       traceClicks: values['trace-clicks'] ?? false };
@@ -272,6 +394,7 @@ async function main() {
     const { values, positionals } = parseArgs({
       args: rest.slice(1), allowPositionals: true, options: {
         ...common, flow: { type: 'string' }, out: { type: 'string' }, assets: { type: 'string' },
+        'no-upload': { type: 'boolean' }, queue: { type: 'string' }, config: { type: 'string' },
       },
     });
     checkPositionals(positionals, 1);
@@ -282,7 +405,43 @@ async function main() {
     ]);
     const archive = packReport(input, parseFlow(rawFlow), { assets });
     await writeNew(output, archive);
-    success({ output, bytes: archive.length, assets: assets.length }, `Wrote ${output}`);
+    let upload: { queued: boolean; queue?: string; id?: string; duplicate?: boolean; error?: string } | undefined;
+    if (!values['no-upload']) {
+      const queue = values.queue ?? defaultQueueDir(process.env);
+      try {
+        const config = await resolveUploadConfig({ env: process.env, configPath: values.config });
+        if (config) {
+          const queued = await enqueueUpload({ queueDir: queue, config, bundlePath: output, bytes: archive });
+          upload = { queued: true, queue, id: queued.item.id, duplicate: queued.duplicate };
+        }
+      } catch (error) {
+        // The local ZIP is already published; report upload trouble separately.
+        upload = { queued: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+    const data = { output, bytes: archive.length, assets: assets.length, ...(upload ? { upload } : {}) };
+    const details = [`Wrote ${output}`];
+    if (upload?.queued) details.push(`Queued upload ${upload.id}${upload.duplicate ? ' (already queued)' : ''}`);
+    if (upload?.error) details.push(`Upload not queued: ${upload.error}`);
+    success(data, details.join('\n'));
+    return;
+  }
+
+  if (command === 'report' && rest[0] === 'upload') {
+    const { values } = parseArgs({
+      args: rest.slice(1), options: {
+        ...common, queue: { type: 'string' }, 'retry-paused': { type: 'boolean' },
+      },
+    });
+    const queue = values.queue ?? defaultQueueDir(process.env);
+    const summary = await processUploadQueue({
+      queueDir: queue, env: process.env, retryPaused: values['retry-paused'] ?? false, signal,
+    });
+    const data = { queue, ...summary };
+    const message = `Uploads: ${summary.done} done, ${summary.pending} pending, ` +
+      `${summary.paused} paused, ${summary.skipped} skipped`;
+    const code = summary.interrupted || signal.aborted ? 130 : summary.paused ? 1 : 0;
+    success(data, message, code);
     return;
   }
 

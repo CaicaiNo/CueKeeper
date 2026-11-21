@@ -1,7 +1,7 @@
 import { createDom } from './dom.js';
 import {
   canUndo, changeTarget, compileDraft, confirmCondition, confirmedSetup, deleteCondition, id, makeBehavior,
-  retargetCondition, sameTarget, setupDraft, undoCondition, visibleRows,
+  retargetCondition, sameTarget, setupDraft, shellDraft, shellSummary, undoCondition, visibleRows,
 } from './model.js';
 import { createAppPicker } from './picker.js';
 
@@ -9,14 +9,15 @@ const $ = name => document.getElementById(name);
 const dialog = $('dialog');
 const state = {
   session: null, library: [], allowLive: false, app: '', selected: new Set(), ignored: new Set(),
-  expanded: new Set(), showIgnored: false, focused: null, draft: [], tab: 'actions', saving: false, setup: null, appPaths: {}, catalog: null, catalogAt: 0, catalogError: null, appNames: {},
+  expanded: new Set(), showIgnored: false, focused: null, draft: [], tab: 'actions', saving: false,
+  running: false, setup: null, appPaths: {}, catalog: null, catalogAt: 0, catalogError: null, appNames: {},
 };
 
 const dom = createDom(document);
 const { el, icon, button, empty, muted, input, field, select } = dom;
 
-const KIND_ICONS = { click: 'pointer', type: 'text', key: 'keyboard', wait: 'clock', assert: 'checkCircle', behavior: 'layers' };
-const KIND_LABELS = { behavior: '行为' };
+const KIND_ICONS = { click: 'pointer', type: 'text', key: 'keyboard', wait: 'clock', assert: 'checkCircle', behavior: 'layers', shell: 'terminal' };
+const KIND_LABELS = { behavior: '行为', shell: 'Shell' };
 
 function kindChip(kind) {
   return el('span', { className: 'kind', title: kind },
@@ -89,6 +90,7 @@ function actionLabel(action) {
     case 'key': return [...(action.modifiers ?? []), action.key].join(' + ');
     case 'assert':
     case 'wait': return `${label} · ${action.check.expect.property} = ${short(String(action.check.expect.equals))}`;
+    case 'shell': return `Shell · ${short(shellSummary(action).command)}`;
     default: return action.kind;
   }
 }
@@ -323,9 +325,15 @@ function renderOverview() {
       el('span', { className: 'legend-count' }, String(count))))),
     infoList([
       ['目标', `${appLabel(state.session.target.app)} · ${state.session.target.window}`],
+      ['应用路径', state.session.target.appPath ?? '未指定（按唯一运行实例）'],
+      ...(state.session.pathConflict
+        ? [['快照路径', `${state.session.snapshotAppPath} · 与应用路径不一致`]]
+        : []),
       ['来源', short(state.session.directory.split('/').at(-1), 44)],
     ], 'meta-grid'),
-    muted('选择时间线中的动作查看定位器与整理操作。'));
+    state.session.pathConflict
+      ? muted('快照来自另一个应用路径，离线运行会以 APP_AMBIGUOUS / fixture_path_mismatch 阻塞。请重新采集快照或恢复与快照匹配的目标。')
+      : muted('选择时间线中的动作查看定位器与整理操作。'));
 }
 
 function renderInspector() {
@@ -336,9 +344,11 @@ function renderInspector() {
     panel.replaceChildren(items.length ? el('div', { className: 'stack' }, ...items.map(item => {
       const compatible = state.session && sameTarget(item.target, state.session.target);
       const { behavior, parameterTypes } = item;
+      const shell = item.shell ?? { steps: 0, privileged: 0 };
       return el('article', { className: 'library-item stack' },
         el('h3', {}, behavior.name),
         muted(`${behavior.steps.length} 步 · ${item.target.app} · ${item.target.window}`),
+        shell.steps ? muted(`含 ${shell.steps} 个 Shell 步骤${shell.privileged ? ` · ${shell.privileged} 个提权步骤` : ''}`) : undefined,
         behavior.parameters.length ? muted(behavior.parameters.map(param => `${param} · ${parameterTypes[param]}`).join(' / ')) : undefined,
         el('div', { className: 'actions' },
           button('引用', () => behaviorDialog(item, false), { style: 'small', icon: 'plus', disabled: !compatible }),
@@ -362,7 +372,9 @@ function renderInspector() {
     el('div', { className: 'actions' },
       button('加入测试项', () => addAction(row.action), { icon: 'listPlus', disabled: !editable }),
       button('添加断言', () => assertionDialog(row), { icon: 'checkCircle', disabled: !editable }),
-      button('重新拾取', () => locatorDialog(row), { icon: 'crosshair', disabled: !editable || row.action.kind === 'key' }),
+      button('重新拾取', () => locatorDialog(row), {
+        icon: 'crosshair', disabled: !editable || row.action.kind === 'key' || row.action.kind === 'shell',
+      }),
       button(ignored ? '恢复动作' : '忽略动作', () => {
         if (ignored) state.ignored.delete(row.id);
         else {
@@ -377,17 +389,25 @@ function renderInspector() {
 function renderDraft() {
   const { draft, session, saving } = state;
   $('draft-count').textContent = `${draft.length} 项`;
-  $('save-button').disabled = !draft.length || saving;
-  $('run-button').disabled = !draft.length || saving;
+  $('save-button').disabled = !draft.length || saving || state.running;
+  $('shell-button').disabled = saving || state.running;
+  $('run-button').disabled = (!draft.length && !state.running) || saving;
+  const runLabel = state.running ? '停止' : '运行测试项';
+  const runButton = $('run-button');
+  if (runButton.lastChild?.nodeType === 3) runButton.lastChild.textContent = runLabel;
+  else runButton.append(document.createTextNode(runLabel));
   const items = draft.map((entry, index) => {
     const move = offset => {
       [draft[index], draft[index + offset]] = [draft[index + offset], draft[index]];
       renderDraft();
       $(`draft-${entry.id}-${offset}`)?.focus();
     };
+    const shell = !entry.item && entry.action.kind === 'shell' ? shellSummary(entry.action) : undefined;
     return el('li', { className: 'draft-item' },
       kindChip(entry.item ? 'behavior' : entry.action.kind),
-      el('strong', {}, entry.item?.behavior.name ?? actionLabel(entry.action)),
+      el('div', { className: 'draft-copy' },
+        el('strong', {}, entry.item?.behavior.name ?? actionLabel(entry.action)),
+        shell ? muted(`${shell.command} · ${shell.cwd} · ${shell.privilege}`) : undefined),
       el('div', { className: 'button-group trailing' },
         entry.item ? button('参数', () => behaviorDialog(entry.item, false, entry), { style: 'small', icon: 'sliders' }) : undefined,
         button('上移', () => move(-1), { style: 'small', icon: 'up', iconOnly: true, title: '上移', disabled: index === 0, key: `draft-${entry.id}--1` }),
@@ -451,8 +471,20 @@ function importDialog() {
     muted('读取 flow.json 或 recorded.flow.json。report.json、actions.json 与 snapshot.json 存在时一并导入。'),
     state.draft.length ? muted('成功导入后将切换会话。请先保存要保留的草稿。') : undefined,
   ], '导入', async () => {
-    setSession(await api('import', { directory: directory.value.trim() }));
+    const imported = await api('import', { directory: directory.value.trim() });
+    setSession(imported);
     status('已导入本地会话', 'success');
+    const shell = imported.shell ?? { reachable: 0, definitions: 0, privileged: 0 };
+    if (shell.reachable || shell.definitions) {
+      setTimeout(() => openDialog('导入完成', [
+        el('h3', {}, `Shell 定义 ${shell.reachable + shell.definitions} 个`),
+        muted(`可执行 ${shell.reachable} 个 · 行为定义内 ${shell.definitions} 个（含尚未调用的行为）`),
+        shell.privileged
+          ? muted(`其中 ${shell.privileged} 个是提权步骤，实时运行还需 --allow-sudo；密码授权型 Root 步骤还会在运行确认后弹框。`)
+          : muted('全部是用户态步骤。'),
+        muted('保存、校验和离线预览都不会执行；实时运行需要启动参数 --allow-shell。'),
+      ]), 0);
+    }
   });
 }
 
@@ -484,7 +516,9 @@ function mergeDialog(rows) {
     state.selected.clear();
     state.tab = 'library';
     render();
-    status(`已保存行为「${saved.behavior.name}」${add.checked ? '并加入草稿' : ''}`, 'success');
+    const shell = saved.shell ?? { steps: 0, privileged: 0 };
+    status(`已保存行为「${saved.behavior.name}」${add.checked ? '并加入草稿' : ''}` +
+      (shell.steps ? ` · 含 ${shell.steps} 个 Shell 步骤${shell.privileged ? '（需管理员预配置）' : ''}` : ''), 'success');
   });
 }
 
@@ -500,8 +534,10 @@ function behaviorDialog(item, copy, entry) {
       }),
     };
   });
+  const shellSteps = behavior.steps.filter(step => step.kind === 'shell').length;
   openDialog(entry ? '编辑行为参数' : copy ? '复制行为' : '引用行为', [
     name ? field('副本名称', name) : muted(`${behavior.name} · ${behavior.steps.length} 步`),
+    shellSteps ? muted(`该行为含 ${shellSteps} 个 Shell 步骤，加入草稿后仍需 --allow-shell 才能实时运行。`) : undefined,
     ...fields.map(({ param, secret, node }) => field(secret ? `${param} · 环境变量名` : param, node)),
   ], entry ? '应用参数' : '加入草稿', () => {
     for (const { secret, node } of fields) {
@@ -606,6 +642,94 @@ function assertionDialog(row) {
   });
 }
 
+function addEnvRow(container) {
+  const key = input({ placeholder: 'FIXTURE_TOKEN', maxLength: 64 });
+  const value = input({ placeholder: '值或 CUEKEEPER_SECRET_ 变量名', maxLength: 4000 });
+  const secret = el('input', { type: 'checkbox' });
+  const row = el('div', { className: 'parameter-row' },
+    key, value, el('label', { className: 'checkbox' }, secret, '引用环境变量'),
+    button('删除', () => row.remove(), { style: 'small danger', icon: 'trash', iconOnly: true }));
+  container.append(row);
+}
+
+function shellDialog() {
+  const mode = select([['argv', '逐项参数'], ['script', 'Shell 脚本']]);
+  const argvRows = el('div', { className: 'stack' });
+  const addArg = (value = '') => {
+    const arg = input({ value, placeholder: '/usr/bin/tool 或参数', maxLength: 4096 });
+    const row = el('div', { className: 'parameter-row' }, arg,
+      button('删除', () => row.remove(), { style: 'small danger', icon: 'trash', iconOnly: true }));
+    argvRows.append(row);
+  };
+  addArg('');
+  const argvBox = el('div', { className: 'stack' }, argvRows,
+    button('添加参数', () => addArg(), { style: 'small', icon: 'plus' }));
+  const command = el('textarea', { rows: 4, maxLength: 16384, placeholder: 'echo hello | tr a-z A-Z' });
+  const commandBox = field('Shell 脚本', command);
+  commandBox.hidden = true;
+  const cwd = input({ placeholder: '默认输入文件目录', maxLength: 4096 });
+  const timeout = el('input', { type: 'number', min: '1', max: '120000', value: '30000' });
+  const expected = el('input', { type: 'number', min: '0', max: '255', value: '0' });
+  const privilege = select([['user', '用户态'], ['root', 'Root · 需管理员密码'], ['sudo', '需管理员预配置']]);
+  const rootMode = select([['prompt', '每次弹框输入管理员密码'], ['sudoers', 'sudoers 免密（无人值守）']]);
+  const task = input({ placeholder: '/Library/CueKeeper/privileged/<任务 ID>', maxLength: 4096 });
+  const envRows = el('div', { className: 'stack' });
+  const envBlock = el('div', { className: 'stack' },
+    el('h3', {}, '环境变量'), muted('保留键与 SUDO_ / DYLD_ / LD_ / CUEKEEPER_ 前缀不可覆盖。'),
+    envRows, button('添加环境变量', () => addEnvRow(envRows), { style: 'small', icon: 'plus' }));
+  const userBox = el('div', { className: 'stack' },
+    field('工作目录', cwd), field('超时（毫秒）', timeout), field('预期退出码', expected), envBlock);
+  const rootBox = el('div', { className: 'stack' },
+    field('授权方式', rootMode),
+    muted('Root 步骤只接受逐项参数，不接受 Shell 脚本或环境变量。运行前会展示完整命令与工作目录，密码只通过弹框交给 sudo。'));
+  const sudoBox = el('div', { className: 'stack' },
+    field('固定任务路径', task),
+    muted('固定任务由管理员预配置，不接受工作目录、环境变量、超时或脚本。'));
+  rootBox.hidden = true;
+  sudoBox.hidden = true;
+  mode.onchange = () => {
+    commandBox.hidden = mode.value !== 'script';
+    argvBox.hidden = mode.value === 'script';
+  };
+  privilege.onchange = () => {
+    const selected = privilege.value;
+    const sudo = selected === 'sudo';
+    const root = selected === 'root';
+    sudoBox.hidden = !sudo;
+    rootBox.hidden = !root;
+    userBox.hidden = sudo;
+    envBlock.hidden = root;
+    if (root && mode.value === 'script') mode.value = 'argv';
+    mode.disabled = sudo || root;
+    commandBox.hidden = sudo || root || mode.value !== 'script';
+    argvBox.hidden = sudo || mode.value === 'script';
+  };
+  openDialog('插入 Shell 步骤', [
+    field('形态', mode), argvBox, commandBox, field('权限', privilege), userBox, rootBox, sudoBox,
+    muted('保存与预览都不会执行。含 Shell 的测试项不能打包为离线报告。'),
+  ], '加入草稿', () => {
+    const selected = privilege.value;
+    const sudo = selected === 'sudo';
+    const root = selected === 'root';
+    const argv = sudo
+      ? [task.value.trim()]
+      : [...argvRows.querySelectorAll('input')].map(node => node.value);
+    const env = [...envRows.children].map(row => {
+      const [key, value, secret] = row.querySelectorAll('input');
+      return [key.value, value.value, secret.checked];
+    });
+    const action = shellDraft({
+      mode: sudo || root ? 'argv' : mode.value, argv, command: sudo || root ? '' : command.value,
+      cwd: sudo ? '' : cwd.value,
+      timeoutMs: timeout.value, expectedExitCode: expected.value,
+      privilege: selected, privilegeMode: rootMode.value, env: sudo || root ? [] : env,
+    });
+    state.draft.push({ id: id('action'), action });
+    renderDraft();
+    status('已加入 Shell 步骤', 'success');
+  });
+}
+
 function currentTest() {
   const name = $('test-name').value.trim();
   if (!name) throw new Error('填写测试项名称。');
@@ -628,6 +752,69 @@ async function saveTest() {
 }
 
 const resultStatus = { resolved: '已解析', passed: '通过', failed: '失败', blocked: '阻塞', skipped: '跳过' };
+const identityReasons = {
+  invalid_bundle_path: '选中的应用路径已失效，请重新选择副本并保存。',
+  bundle_id_mismatch: '应用路径的应用标识已变更，请重新选择副本并保存。',
+  unsupported_path_platform: '该应用路径属于另一平台，本机只能离线验证。',
+  path_mismatch: '无法唯一确认目标副本，请打开选中的副本后重新运行。',
+  multiple_instances: '同一应用有多个运行实例，请关闭冲突实例后重新运行。',
+  multiple_installed_copies: '本机有多份可启动的副本，请明确选择路径后保存。',
+  identity_unproven: '无法证明操作仍指向选中的副本，本轮已停止。',
+  instance_changed: '目标实例在运行中发生了变化，本轮已停止。',
+  driver_target_unconfirmed: '驱动无法证明窗口归属，本轮已停止。',
+  fixture_path_mismatch: '快照来自另一个应用路径，请重新采集快照。',
+  untargeted_input: '该坐标操作无法绑定到选中的副本，请改用元素定位器。',
+};
+
+function identityNotice(report) {
+  const identity = report.appIdentity;
+  if (!identity) return undefined;
+  if (identity.status === 'blocked') {
+    return muted(`应用身份阻塞 · ${identity.code ?? ''} · ${identityReasons[identity.reason] ?? identity.reason}`);
+  }
+  return muted(`应用身份 · ${identity.status === 'verified' ? '已核对运行实例' : '离线来源'} · ${identity.mode === 'bundle_path' ? '按副本路径' : '按应用标识'}`);
+}
+
+function planText(step) {
+  if (step.kind !== 'shell') return step.kind;
+  const command = [step.program, ...step.args]
+    .map(part => /\s/.test(part) ? JSON.stringify(part) : part).join(' ');
+  const privilege = step.privilege === 'sudo'
+    ? '需管理员预配置'
+    : step.privilege === 'root'
+      ? (step.privilegeMode === 'sudoers' ? 'Root · sudoers 免密' : 'Root · 密码授权')
+      : '用户态';
+  return `${privilege} · ${step.mode} · ${step.timeoutMs} ms · 目录 ${step.cwd}\n${command}`;
+}
+
+function showResult(mode, report) {
+  status(`${mode === 'offline' ? '离线运行' : '实时回放'}${resultStatus[report.status]} · ${report.entries.length} 条结果`,
+    report.status === 'passed' ? 'success' : 'error');
+  setTimeout(() => openDialog('运行结果', [
+    el('h3', {}, resultStatus[report.status]),
+    identityNotice(report),
+    report.stopped ? muted('本次运行已在停止请求后结束。') : undefined,
+    el('ol', { className: 'stack' }, ...report.entries.map(entry => {
+      const shell = entry.kind === 'shell'
+        ? ` · ${entry.shell.privilege}${entry.shell.privilegeMode ? `(${entry.shell.privilegeMode})` : ''}` +
+          `/${entry.shell.mode} · ${entry.shell.execution}` +
+          (entry.shell.exitCode === undefined ? '' : ` · 退出码 ${entry.shell.exitCode}`)
+        : '';
+      return el('li', {}, `${entry.id} · ${entry.kind}${shell} · ${resultStatus[entry.status]} · ${entry.durationMs} ms`,
+        entry.message ? muted(entry.message) : undefined);
+    })),
+  ]), 0);
+}
+
+async function stopRun() {
+  $('run-button').disabled = true;
+  try {
+    await api('stop', {});
+    status('正在停止当前运行…');
+  } catch (error) {
+    status(error.message, 'error');
+  }
+}
 
 function runDialog() {
   const { session, allowLive } = state;
@@ -644,27 +831,72 @@ function runDialog() {
   const confirmation = el('label', { className: 'checkbox', hidden: session.hasSnapshot },
     confirmed, `我确认向 ${session.target.window} 执行动作`);
   const mode = select(modes, () => { confirmation.hidden = mode.value !== 'live'; });
+  const capture = el('input', { type: 'checkbox' });
+  const planBox = el('div', { className: 'plan stack' }, muted('正在生成执行计划…'));
+  let plan;
+  let loading = false;
+  const refresh = async () => {
+    if (loading) return;
+    loading = true;
+    try {
+      plan = await api('plan', { ...currentTest(), captureOutput: capture.checked });
+      planBox.replaceChildren(
+        el('h3', {}, `展开后的执行计划 · ${plan.steps.length} 步`),
+        ...plan.steps.map(step => el('article', { className: 'plan-step' },
+          el('strong', {}, step.id), muted(planText(step)))),
+        plan.shell.reachable
+          ? muted(`Shell ${plan.shell.reachable} 步 · 提权 ${plan.shell.privileged} 步 · ` +
+            (plan.captureAllowed ? (plan.captureOutput ? '采集输出文本' : '不采集输出文本') : '输出仅保留元数据'))
+          : muted('没有 Shell 步骤。'),
+      );
+    } catch (error) {
+      plan = undefined;
+      planBox.replaceChildren(muted(error.message));
+    } finally {
+      loading = false;
+    }
+  };
+  capture.onchange = () => { void refresh(); };
   openDialog('运行测试项', [
     field('运行方式', mode), confirmation,
     muted('离线运行读取快照。实时回放向目标窗口写入并可能触发 macOS 权限提示。'),
-    muted('前置条件修复可能启动应用或将窗口切到前台。含坐标点击的测试项需要保存后使用 CLI 的 --headed 参数。'),
+    muted('前置条件修复可能启动应用或将窗口切到前台；命令引用的磁盘文件仍需你自己信任。'),
+    el('label', { className: 'checkbox' }, capture,
+      '采集 Shell 输出文本（存在秘密引用或提权步骤时只保留元数据）'),
+    planBox,
   ], '开始运行', async () => {
     const selected = mode.value;
     if (selected === 'live' && !confirmed.checked) throw new Error('确认目标窗口后开始回放。');
-    const report = await api('run', { ...currentTest(), mode: selected, confirm: confirmed.checked });
-    status(`${selected === 'offline' ? '离线运行' : '实时回放'}${resultStatus[report.status]} · ${report.entries.length} 条结果`,
-      report.status === 'passed' ? 'success' : 'error');
-    setTimeout(() => openDialog('运行结果', [
-      el('h3', {}, resultStatus[report.status]),
-      el('ol', { className: 'stack' }, ...report.entries.map(entry => el('li', {},
-        `${entry.kind} · ${resultStatus[entry.status]} · ${entry.durationMs} ms`,
-        entry.message ? muted(entry.message) : undefined))),
-    ]), 0);
+    if (!plan) throw new Error('执行计划尚未生成，请稍候再试。');
+    if (selected === 'live' && plan.shell.reachable && !plan.allowShell) {
+      throw new Error('实时运行 Shell 步骤需要启动参数 --allow-shell。');
+    }
+    if (selected === 'live' && plan.shell.privileged && !plan.allowSudo) {
+      throw new Error('含提权步骤，需要启动参数 --allow-sudo。');
+    }
+    const payload = {
+      ...currentTest(), mode: selected, confirm: confirmed.checked, captureOutput: capture.checked,
+      ...(selected === 'live' ? { token: plan.token } : {}),
+    };
+    state.running = true;
+    renderDraft();
+    status(`${selected === 'offline' ? '离线运行' : '实时回放'}中… 点击「停止」可取消剩余步骤`, '');
+    void (async () => {
+      try {
+        showResult(selected, await api('run', payload));
+      } catch (error) {
+        status(error.message, 'error');
+      } finally {
+        state.running = false;
+        renderDraft();
+      }
+    })();
   });
+  void refresh();
 }
 
 for (const [id, name] of [['import-button', 'folder'], ['save-button', 'save'], ['run-button', 'play'],
-  ['actions-tab', 'list'], ['library-tab', 'layers']]) {
+  ['shell-button', 'terminal'], ['actions-tab', 'list'], ['library-tab', 'layers']]) {
   const node = $(id);
   if (node && !node.querySelector('svg')) node.prepend(icon(name));
 }
@@ -673,7 +905,8 @@ $('app-picker').onclick = openAppPicker;
 $('import-button').onclick = importDialog;
 $('show-ignored').onchange = event => { state.showIgnored = event.target.checked; render(); };
 $('save-button').onclick = saveTest;
-$('run-button').onclick = runDialog;
+$('shell-button').onclick = shellDialog;
+$('run-button').onclick = () => state.running ? stopRun() : runDialog();
 for (const tab of ['actions', 'library']) $(`${tab}-tab`).onclick = () => { state.tab = tab; renderInspector(); };
 
 try {

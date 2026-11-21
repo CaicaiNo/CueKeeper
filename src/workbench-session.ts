@@ -10,6 +10,7 @@ import { pickCandidates } from './pick.js';
 import type { PickCandidate } from './pick.js';
 import { describeApps } from './apps.js';
 import { inferSetup } from './setup.js';
+import { summarizeShellUsage } from './shell.js';
 
 export const sameTarget = (a: { app: string; window: string }, b: { app: string; window: string }) =>
   a.app === b.app && a.window === b.window;
@@ -133,6 +134,7 @@ export async function loadSession(path: string) {
 
   let candidates: PickCandidate[] = [];
   let snapshotApp: string | undefined;
+  let snapshotAppPath: string | undefined;
   if (snapshot !== undefined) {
     const envelope = object(snapshot);
     const target = object(envelope.target);
@@ -140,6 +142,7 @@ export async function loadSession(path: string) {
         target.app !== flow.target.app || target.window !== flow.target.window) {
       throw new Error('snapshot.json does not match the selected flow target');
     }
+    if (typeof target.appPath === 'string' && target.appPath) snapshotAppPath = target.appPath;
     const data = object(envelope.data);
     if (typeof data.app === 'string' && data.app) snapshotApp = data.app;
     candidates = pickCandidates(parseSnapshot(data, flow.target));
@@ -164,6 +167,10 @@ export async function loadSession(path: string) {
       durationMs, timingSource: fromCapture ? 'capture' : report?.mode,
       startedAt: fromCapture ? undefined : report?.startedAt,
       hasSnapshot: snapshot !== undefined,
+      snapshotAppPath,
+      // The flow owns identity; a fixture from another path blocks offline runs.
+      pathConflict: Boolean(flow.target.appPath && snapshotAppPath && flow.target.appPath !== snapshotAppPath),
+      shell: summarizeShellUsage(flow, planned),
     },
   };
 }

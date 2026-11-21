@@ -48,6 +48,157 @@
         }
       ]
     },
+    "appIdentity": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "app": {
+              "minLength": 1,
+              "maxLength": 256,
+              "type": "string"
+            },
+            "mode": {
+              "anyOf": [
+                {
+                  "const": "bundle_path",
+                  "type": "string"
+                },
+                {
+                  "const": "legacy_bundle_id",
+                  "type": "string"
+                }
+              ]
+            },
+            "status": {
+              "anyOf": [
+                {
+                  "const": "verified",
+                  "type": "string"
+                },
+                {
+                  "const": "offline_unverified",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "required": [
+            "app",
+            "mode",
+            "status"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "app": {
+              "minLength": 1,
+              "maxLength": 256,
+              "type": "string"
+            },
+            "mode": {
+              "anyOf": [
+                {
+                  "const": "bundle_path",
+                  "type": "string"
+                },
+                {
+                  "const": "legacy_bundle_id",
+                  "type": "string"
+                }
+              ]
+            },
+            "status": {
+              "const": "blocked",
+              "type": "string"
+            },
+            "code": {
+              "anyOf": [
+                {
+                  "const": "APP_PATH_INVALID",
+                  "type": "string"
+                },
+                {
+                  "const": "APP_AMBIGUOUS",
+                  "type": "string"
+                },
+                {
+                  "const": "UNSUPPORTED_PLATFORM",
+                  "type": "string"
+                },
+                {
+                  "const": "UNSAFE_POINT",
+                  "type": "string"
+                }
+              ]
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "const": "invalid_bundle_path",
+                  "type": "string"
+                },
+                {
+                  "const": "bundle_id_mismatch",
+                  "type": "string"
+                },
+                {
+                  "const": "unsupported_path_platform",
+                  "type": "string"
+                },
+                {
+                  "const": "path_mismatch",
+                  "type": "string"
+                },
+                {
+                  "const": "multiple_instances",
+                  "type": "string"
+                },
+                {
+                  "const": "multiple_installed_copies",
+                  "type": "string"
+                },
+                {
+                  "const": "identity_unproven",
+                  "type": "string"
+                },
+                {
+                  "const": "instance_changed",
+                  "type": "string"
+                },
+                {
+                  "const": "driver_target_unconfirmed",
+                  "type": "string"
+                },
+                {
+                  "const": "fixture_path_mismatch",
+                  "type": "string"
+                },
+                {
+                  "const": "untargeted_input",
+                  "type": "string"
+                }
+              ]
+            },
+            "entryId": {
+              "minLength": 1,
+              "maxLength": 196,
+              "type": "string"
+            }
+          },
+          "required": [
+            "app",
+            "mode",
+            "status",
+            "code",
+            "reason"
+          ]
+        }
+      ]
+    },
     "entries": {
       "minItems": 1,
       "type": "array",
@@ -917,6 +1068,796 @@
               "atMs",
               "durationMs",
               "kind"
+            ]
+          },
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "id": {
+                "minLength": 1,
+                "maxLength": 196,
+                "type": "string"
+              },
+              "status": {
+                "anyOf": [
+                  {
+                    "const": "passed",
+                    "type": "string"
+                  },
+                  {
+                    "const": "failed",
+                    "type": "string"
+                  },
+                  {
+                    "const": "blocked",
+                    "type": "string"
+                  },
+                  {
+                    "const": "skipped",
+                    "type": "string"
+                  },
+                  {
+                    "const": "resolved",
+                    "type": "string"
+                  }
+                ]
+              },
+              "atMs": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "durationMs": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "message": {
+                "type": "string"
+              },
+              "code": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "shell",
+                "type": "string"
+              },
+              "shell": {
+                "anyOf": [
+                  {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "properties": {
+                      "mode": {
+                        "anyOf": [
+                          {
+                            "const": "argv",
+                            "type": "string"
+                          },
+                          {
+                            "const": "shell",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "privilege": {
+                        "anyOf": [
+                          {
+                            "const": "user",
+                            "type": "string"
+                          },
+                          {
+                            "const": "sudo",
+                            "type": "string"
+                          },
+                          {
+                            "const": "root",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "privilegeMode": {
+                        "anyOf": [
+                          {
+                            "const": "prompt",
+                            "type": "string"
+                          },
+                          {
+                            "const": "sudoers",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "execution": {
+                        "anyOf": [
+                          {
+                            "const": "preview",
+                            "type": "string"
+                          },
+                          {
+                            "const": "not-run",
+                            "type": "string"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "mode",
+                      "privilege",
+                      "execution"
+                    ]
+                  },
+                  {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "properties": {
+                      "mode": {
+                        "anyOf": [
+                          {
+                            "const": "argv",
+                            "type": "string"
+                          },
+                          {
+                            "const": "shell",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "privilege": {
+                        "anyOf": [
+                          {
+                            "const": "user",
+                            "type": "string"
+                          },
+                          {
+                            "const": "sudo",
+                            "type": "string"
+                          },
+                          {
+                            "const": "root",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "privilegeMode": {
+                        "anyOf": [
+                          {
+                            "const": "prompt",
+                            "type": "string"
+                          },
+                          {
+                            "const": "sudoers",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "cleanup": {
+                        "anyOf": [
+                          {
+                            "const": "complete",
+                            "type": "string"
+                          },
+                          {
+                            "const": "unknown",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "stdout": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "const": "text",
+                                "type": "string"
+                              },
+                              "bytes": {
+                                "minimum": 0,
+                                "maximum": 9007199254740991,
+                                "type": "integer"
+                              },
+                              "truncated": {
+                                "type": "boolean"
+                              },
+                              "text": {
+                                "minLength": 0,
+                                "maxLength": 16384,
+                                "pattern": "^[^\\u0000]*$",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "bytes",
+                              "truncated",
+                              "text"
+                            ]
+                          },
+                          {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "anyOf": [
+                                  {
+                                    "const": "binary",
+                                    "type": "string"
+                                  },
+                                  {
+                                    "const": "omitted",
+                                    "type": "string"
+                                  }
+                                ]
+                              },
+                              "bytes": {
+                                "minimum": 0,
+                                "maximum": 9007199254740991,
+                                "type": "integer"
+                              },
+                              "truncated": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "bytes",
+                              "truncated"
+                            ]
+                          }
+                        ]
+                      },
+                      "stderr": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "const": "text",
+                                "type": "string"
+                              },
+                              "bytes": {
+                                "minimum": 0,
+                                "maximum": 9007199254740991,
+                                "type": "integer"
+                              },
+                              "truncated": {
+                                "type": "boolean"
+                              },
+                              "text": {
+                                "minLength": 0,
+                                "maxLength": 16384,
+                                "pattern": "^[^\\u0000]*$",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "bytes",
+                              "truncated",
+                              "text"
+                            ]
+                          },
+                          {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "anyOf": [
+                                  {
+                                    "const": "binary",
+                                    "type": "string"
+                                  },
+                                  {
+                                    "const": "omitted",
+                                    "type": "string"
+                                  }
+                                ]
+                              },
+                              "bytes": {
+                                "minimum": 0,
+                                "maximum": 9007199254740991,
+                                "type": "integer"
+                              },
+                              "truncated": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "bytes",
+                              "truncated"
+                            ]
+                          }
+                        ]
+                      },
+                      "warnings": {
+                        "maxItems": 1,
+                        "type": "array",
+                        "items": {
+                          "const": "SHELL_OUTPUT_TRUNCATED",
+                          "type": "string"
+                        }
+                      },
+                      "execution": {
+                        "anyOf": [
+                          {
+                            "const": "finished",
+                            "type": "string"
+                          },
+                          {
+                            "const": "terminated",
+                            "type": "string"
+                          },
+                          {
+                            "const": "unknown",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "exitCode": {
+                        "minimum": 0,
+                        "maximum": 255,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "mode",
+                      "privilege",
+                      "execution",
+                      "exitCode"
+                    ]
+                  },
+                  {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "properties": {
+                      "mode": {
+                        "anyOf": [
+                          {
+                            "const": "argv",
+                            "type": "string"
+                          },
+                          {
+                            "const": "shell",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "privilege": {
+                        "anyOf": [
+                          {
+                            "const": "user",
+                            "type": "string"
+                          },
+                          {
+                            "const": "sudo",
+                            "type": "string"
+                          },
+                          {
+                            "const": "root",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "privilegeMode": {
+                        "anyOf": [
+                          {
+                            "const": "prompt",
+                            "type": "string"
+                          },
+                          {
+                            "const": "sudoers",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "cleanup": {
+                        "anyOf": [
+                          {
+                            "const": "complete",
+                            "type": "string"
+                          },
+                          {
+                            "const": "unknown",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "stdout": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "const": "text",
+                                "type": "string"
+                              },
+                              "bytes": {
+                                "minimum": 0,
+                                "maximum": 9007199254740991,
+                                "type": "integer"
+                              },
+                              "truncated": {
+                                "type": "boolean"
+                              },
+                              "text": {
+                                "minLength": 0,
+                                "maxLength": 16384,
+                                "pattern": "^[^\\u0000]*$",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "bytes",
+                              "truncated",
+                              "text"
+                            ]
+                          },
+                          {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "anyOf": [
+                                  {
+                                    "const": "binary",
+                                    "type": "string"
+                                  },
+                                  {
+                                    "const": "omitted",
+                                    "type": "string"
+                                  }
+                                ]
+                              },
+                              "bytes": {
+                                "minimum": 0,
+                                "maximum": 9007199254740991,
+                                "type": "integer"
+                              },
+                              "truncated": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "bytes",
+                              "truncated"
+                            ]
+                          }
+                        ]
+                      },
+                      "stderr": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "const": "text",
+                                "type": "string"
+                              },
+                              "bytes": {
+                                "minimum": 0,
+                                "maximum": 9007199254740991,
+                                "type": "integer"
+                              },
+                              "truncated": {
+                                "type": "boolean"
+                              },
+                              "text": {
+                                "minLength": 0,
+                                "maxLength": 16384,
+                                "pattern": "^[^\\u0000]*$",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "bytes",
+                              "truncated",
+                              "text"
+                            ]
+                          },
+                          {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "anyOf": [
+                                  {
+                                    "const": "binary",
+                                    "type": "string"
+                                  },
+                                  {
+                                    "const": "omitted",
+                                    "type": "string"
+                                  }
+                                ]
+                              },
+                              "bytes": {
+                                "minimum": 0,
+                                "maximum": 9007199254740991,
+                                "type": "integer"
+                              },
+                              "truncated": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "bytes",
+                              "truncated"
+                            ]
+                          }
+                        ]
+                      },
+                      "warnings": {
+                        "maxItems": 1,
+                        "type": "array",
+                        "items": {
+                          "const": "SHELL_OUTPUT_TRUNCATED",
+                          "type": "string"
+                        }
+                      },
+                      "execution": {
+                        "anyOf": [
+                          {
+                            "const": "finished",
+                            "type": "string"
+                          },
+                          {
+                            "const": "terminated",
+                            "type": "string"
+                          },
+                          {
+                            "const": "unknown",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "signal": {
+                        "pattern": "^SIG[A-Z0-9]+$",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "mode",
+                      "privilege",
+                      "execution",
+                      "signal"
+                    ]
+                  },
+                  {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "properties": {
+                      "mode": {
+                        "anyOf": [
+                          {
+                            "const": "argv",
+                            "type": "string"
+                          },
+                          {
+                            "const": "shell",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "privilege": {
+                        "anyOf": [
+                          {
+                            "const": "user",
+                            "type": "string"
+                          },
+                          {
+                            "const": "sudo",
+                            "type": "string"
+                          },
+                          {
+                            "const": "root",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "privilegeMode": {
+                        "anyOf": [
+                          {
+                            "const": "prompt",
+                            "type": "string"
+                          },
+                          {
+                            "const": "sudoers",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "cleanup": {
+                        "anyOf": [
+                          {
+                            "const": "complete",
+                            "type": "string"
+                          },
+                          {
+                            "const": "unknown",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "stdout": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "const": "text",
+                                "type": "string"
+                              },
+                              "bytes": {
+                                "minimum": 0,
+                                "maximum": 9007199254740991,
+                                "type": "integer"
+                              },
+                              "truncated": {
+                                "type": "boolean"
+                              },
+                              "text": {
+                                "minLength": 0,
+                                "maxLength": 16384,
+                                "pattern": "^[^\\u0000]*$",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "bytes",
+                              "truncated",
+                              "text"
+                            ]
+                          },
+                          {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "anyOf": [
+                                  {
+                                    "const": "binary",
+                                    "type": "string"
+                                  },
+                                  {
+                                    "const": "omitted",
+                                    "type": "string"
+                                  }
+                                ]
+                              },
+                              "bytes": {
+                                "minimum": 0,
+                                "maximum": 9007199254740991,
+                                "type": "integer"
+                              },
+                              "truncated": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "bytes",
+                              "truncated"
+                            ]
+                          }
+                        ]
+                      },
+                      "stderr": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "const": "text",
+                                "type": "string"
+                              },
+                              "bytes": {
+                                "minimum": 0,
+                                "maximum": 9007199254740991,
+                                "type": "integer"
+                              },
+                              "truncated": {
+                                "type": "boolean"
+                              },
+                              "text": {
+                                "minLength": 0,
+                                "maxLength": 16384,
+                                "pattern": "^[^\\u0000]*$",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "bytes",
+                              "truncated",
+                              "text"
+                            ]
+                          },
+                          {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "anyOf": [
+                                  {
+                                    "const": "binary",
+                                    "type": "string"
+                                  },
+                                  {
+                                    "const": "omitted",
+                                    "type": "string"
+                                  }
+                                ]
+                              },
+                              "bytes": {
+                                "minimum": 0,
+                                "maximum": 9007199254740991,
+                                "type": "integer"
+                              },
+                              "truncated": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "bytes",
+                              "truncated"
+                            ]
+                          }
+                        ]
+                      },
+                      "warnings": {
+                        "maxItems": 1,
+                        "type": "array",
+                        "items": {
+                          "const": "SHELL_OUTPUT_TRUNCATED",
+                          "type": "string"
+                        }
+                      },
+                      "execution": {
+                        "anyOf": [
+                          {
+                            "const": "finished",
+                            "type": "string"
+                          },
+                          {
+                            "const": "terminated",
+                            "type": "string"
+                          },
+                          {
+                            "const": "unknown",
+                            "type": "string"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "mode",
+                      "privilege",
+                      "execution"
+                    ]
+                  }
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "status",
+              "atMs",
+              "durationMs",
+              "kind",
+              "shell"
             ]
           }
         ]

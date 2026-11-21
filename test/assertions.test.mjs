@@ -4,6 +4,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+
+// Keep the native identity helper out of stubbed runs: a locally built helper
+// must not inspect or launch real applications during the test suite.
+process.env.CUEKEEPER_APP_IDENTITY = '/nonexistent/cuekeeper-identity';
 import { TypeCompiler } from '@sinclair/typebox/compiler';
 import { unzipSync, strFromU8 } from 'fflate';
 import { discoverAssets } from '../dist/assets.js';

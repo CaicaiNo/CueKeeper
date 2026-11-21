@@ -53,6 +53,30 @@ out/assets/logs/runner.log
 - 没有 `assets/` 时也能打包。缺少截图或日志时，详情里显示明确说明，不伪造内容。
 - 同一个目标路径出现两次会报错，符号链接不会被跟随。
 
+## Shell 步骤
+
+`kind: "shell"` 的条目带一个封闭的 `shell` 对象：
+
+| 字段 | 内容 |
+| --- | --- |
+| `mode` | `argv`（默认）或 `shell`（显式脚本） |
+| `privilege` | `user`、`sudo` 或 `root` |
+| `privilegeMode` | 仅 root 步骤：`prompt`（管理员密码框）或 `sudoers`（无人值守白名单） |
+| `execution` | `preview`、`not-run`、`finished`、`terminated` 或 `unknown` |
+| `exitCode` / `signal` | 二者互斥；只记录真实退出码或被终止的信号 |
+| `cleanup` | 终止后按进程组回收的结果：`complete` 或 `unknown` |
+| `stdout` / `stderr` | `{ kind, bytes, truncated, text? }`，每流最多 16 KiB |
+| `warnings` | 仅 `SHELL_OUTPUT_TRUNCATED`，不覆盖原退出或取消结果 |
+
+- 文本采集默认关闭。CLI 用 `--capture-shell-output` 单次开启，工作台在运行确认中单独勾选。
+- 存在 Shell 秘密引用、测试秘密绑定或任一提权步骤时，只保留输出元数据（`kind: "omitted"`），不写文本。
+- 报告和错误信息不记录原始 `argv`、脚本、环境变量值或工作目录。命令只在本机的源 flow 编辑与运行确认界面上显示。
+- 含 NUL 或无效 UTF-8 的流标记为 `binary`，只记录字节数与截断状态。
+- 缺少实时运行许可时，报告状态为 `blocked`，对应步骤带 `SHELL_NOT_ALLOWED` 或 `SHELL_PRIVILEGE_REQUIRED`，其余步骤为 `skipped`。管理员取消或密码框超时用 `SHELL_PRIVILEGE_CANCELLED`，无法弹出密码框用 `SHELL_PRIVILEGE_UNAVAILABLE`。
+- root 步骤只记录 `privilege`、`privilegeMode`、`execution` 与退出码；特权命令的 stdout/stderr 永不进入报告。说明见 [Root 步骤与管理员授权](shell-security.md)。
+
+含 Shell 定义的流程（包括尚未调用的行为）不能使用 `report pack`。打包会把原始 flow 写进 ZIP，而首版不允许发布命令与秘密引用；这类运行仍可用 `--report` 写 JSON，并在工作台查看。
+
 ## v1 报告的降级
 
 前置条件触发修复时，`kind: "setup"` 的条目记录可选的 `repair`，包含 `attempted`、`kind` 和 `result`。条目 ID 仍为 `<作用域>/setup/<条件 ID>`。执行或观测失败时，条目码为 `ENSURE_FAILED`，`repair.code` 保留具体原因，例如 `APP_NOT_FOUND`、`LAUNCH_TIMEOUT`、`WINDOW_NOT_FOUND` 或系统权限错误。复查仍不满足时，条目码为 `PRECONDITION_FALSE`。

@@ -3,6 +3,7 @@ import { zipSync, strToU8 } from 'fflate';
 import { reportCheck } from './contracts.js';
 import type { Flow, Report } from './contracts.js';
 import { hashFlow, plan } from './flow.js';
+import { flowHasShellDefinitions } from './shell.js';
 import { decorateAsset } from './assets.js';
 import type { PackAsset, RawAsset } from './assets.js';
 import { renderViewer } from './viewer.js';
@@ -63,6 +64,11 @@ function canonical(value: unknown): string {
 }
 
 export function packReport(input: unknown, flow: Flow, options: PackOptions = {}): Uint8Array {
+  // A packed report embeds the raw flow; shell steps may carry commands and
+  // environment references that must not be published.
+  if (flowHasShellDefinitions(flow)) {
+    throw new Error('Report packing is unavailable for flows with shell steps');
+  }
   if (!reportCheck.Check(input)) throw new Error('Invalid v1 report');
   if (input.flowId !== flow.id || input.flowSha256 !== hashFlow(flow)) {
     throw new Error('Report and flow do not match');

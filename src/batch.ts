@@ -338,6 +338,10 @@ export interface BatchRunOptions {
   secretTexts?: ReadonlyMap<string, string>;
   /** Batches with secret bindings keep assertion results but drop image evidence. */
   omitEvidence?: boolean;
+  /** Rows resolve against a saved snapshot rather than the live desktop. */
+  offline?: boolean;
+  /** App path stored in the snapshot envelope, for fixture consistency checks. */
+  fixtureAppPath?: string;
 }
 
 function rowDirectoryName(row: number) {
@@ -411,6 +415,8 @@ export async function runBatch(
         report = await runFlow(row.flow, desktop, {
           dryRun: options.dryRun,
           signal: options.signal,
+          ...(options.offline ? { offline: true } : {}),
+          ...(options.fixtureAppPath ? { fixtureAppPath: options.fixtureAppPath } : {}),
           ...(options.baselineDir ? { baselineDir: options.baselineDir } : {}),
           ...(options.secretTexts ? { secretTexts: options.secretTexts } : {}),
           ...(staging && !options.omitEvidence ? { evidenceDir: staging } : {}),

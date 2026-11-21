@@ -5,23 +5,31 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Fault, contains, object, parseSnapshot } from './locator.js';
 import type { Node, Point, Snapshot } from './locator.js';
-import type { Ensure, Entry, Target } from './contracts.js';
+import type { Delivery, Ensure, Target } from './contracts.js';
 
 export interface WindowInfo {
   id: string;
   title: string;
+  /** PID the driver reports for the window owner, when it exposes one. */
+  processInstance?: number;
 }
 
 export interface Desktop {
   snapshot(target: Target, timeoutMs?: number, windowId?: string, exactWindow?: boolean): Promise<Snapshot>;
   property(node: Node, property: 'text' | 'value' | 'visible', timeoutMs?: number): Promise<string | boolean | undefined>;
   ensure(action: Ensure, timeoutMs: number, windowId?: string): Promise<string | undefined>;
-  click(ref: string): Promise<Entry['delivery']>;
-  clickPoint(snapshot: Snapshot, target: Target, point: Point): Promise<Entry['delivery']>;
-  type(ref: string, text: string): Promise<Entry['delivery']>;
-  press(combo: string, snapshot: Snapshot): Promise<Entry['delivery']>;
+  click(ref: string): Promise<Delivery | undefined>;
+  clickPoint(snapshot: Snapshot, target: Target, point: Point): Promise<Delivery | undefined>;
+  type(ref: string, text: string): Promise<Delivery | undefined>;
+  press(combo: string, snapshot: Snapshot): Promise<Delivery | undefined>;
   /** Read-only application window inventory for window assertions. */
   listWindows(app: string, timeoutMs?: number): Promise<WindowInfo[]>;
+  /** Read-only inventory without an app filter, for identity cross-checks. */
+  listAllWindows(timeoutMs?: number): Promise<WindowInfo[]>;
+  /** Window-only calls; no bundle ID is resolved by the driver. */
+  snapshotWindow(windowId: string, title: string, timeoutMs?: number): Promise<Snapshot>;
+  focusWindow(windowId: string, timeoutMs?: number): Promise<void>;
+  screenshotWindow(windowId: string, timeoutMs?: number): Promise<Uint8Array>;
   /** Capture the whole window as PNG bytes without touching the window. */
   screenshot(app: string, windowId: string, timeoutMs?: number): Promise<Uint8Array>;
 }
@@ -30,7 +38,7 @@ export const agentDesktopVersion = '1.3.1';
 const deliveryStates = new Set(['delivered_verified', 'delivered_unverified', 'delivery_uncertain', 'not_delivered', 'unknown']);
 
 export class DesktopFault extends Fault {
-  constructor(code: string, command: string, public delivery: Entry['delivery']) {
+  constructor(code: string, command: string, public delivery: Delivery | undefined) {
     super(code, `agent-desktop ${command} returned ${code}`);
   }
 }
@@ -43,10 +51,27 @@ function isCommandTimeout(error: unknown) {
   return error instanceof Fault && (error.code === 'TIMEOUT' || error.code === 'COMMAND_TIMEOUT');
 }
 
-function delivery(result: Record<string, unknown>): Entry['delivery'] {
+function windowList(data: unknown): WindowInfo[] {
+  if (!Array.isArray(data)) throw new Fault('BAD_RESPONSE', 'Expected a window inventory');
+  return data.map(object).map(window => {
+    if (typeof window.id !== 'string' || !/^w-[a-zA-Z0-9_.:-]+$/.test(window.id)) {
+      throw new Fault('BAD_RESPONSE', 'Missing or invalid window ID');
+    }
+    const raw = window.process_instance ?? window.processInstance;
+    const processInstance = typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0 ? raw :
+      typeof raw === 'string' && /^\d+$/.test(raw) ? Number(raw) : undefined;
+    return {
+      id: window.id,
+      title: typeof window.title === 'string' ? window.title : '',
+      ...(processInstance === undefined ? {} : { processInstance }),
+    };
+  });
+}
+
+function delivery(result: Record<string, unknown>): Delivery | undefined {
   if (result.disposition === undefined) return undefined;
   const value = object(result.disposition).delivery;
-  return typeof value === 'string' && deliveryStates.has(value) ? value as Entry['delivery'] : undefined;
+  return typeof value === 'string' && deliveryStates.has(value) ? value as Delivery : undefined;
 }
 
 function commandRunner(env: NodeJS.ProcessEnv, signal: AbortSignal) {
@@ -212,13 +237,36 @@ export async function withDesktop<T>(
       async listWindows(app, timeoutMs = 3000) {
         const data = await call('list-windows', ['--app', app, '--timeout-ms', String(timeoutMs)],
           undefined, timeoutMs + 3000);
-        if (!Array.isArray(data)) throw new Fault('BAD_RESPONSE', 'Expected a window inventory');
-        return data.map(object).map(window => {
-          if (typeof window.id !== 'string' || !/^w-[a-zA-Z0-9_.:-]+$/.test(window.id)) {
-            throw new Fault('BAD_RESPONSE', 'Missing or invalid window ID');
-          }
-          return { id: window.id, title: typeof window.title === 'string' ? window.title : '' };
-        });
+        return windowList(data);
+      },
+      async listAllWindows(timeoutMs = 3000) {
+        const data = await call('list-windows', ['--timeout-ms', String(timeoutMs)],
+          undefined, timeoutMs + 3000);
+        return windowList(data);
+      },
+      async snapshotWindow(windowId, title, timeoutMs = 3000) {
+        const data = await call('snapshot', [
+          '--include-bounds', '--max-depth', '50', '--timeout-ms', String(timeoutMs), '--window-id', windowId,
+        ], undefined, timeoutMs + 3000);
+        return parseSnapshot(data, { app: '', window: title });
+      },
+      async focusWindow(windowId, timeoutMs = 5000) {
+        const result = object(await call('focus-window', ['--window-id', windowId], undefined, timeoutMs));
+        if (object(result.focused).id !== windowId) {
+          throw new Fault('WINDOW_CHANGED', 'The focused window did not match the bound window');
+        }
+      },
+      async screenshotWindow(windowId, timeoutMs = 10_000) {
+        const path = join(state, `assertion-${Date.now()}.png`);
+        try {
+          await call('screenshot', ['--window-id', windowId, path], undefined, timeoutMs);
+          return new Uint8Array(await readFile(path));
+        } catch (error) {
+          if (error instanceof Fault) throw error;
+          throw new Fault('ASSERTION_CAPTURE_FAILED', 'The window screenshot wrote no readable PNG');
+        } finally {
+          await rm(path, { force: true });
+        }
       },
       async screenshot(app, windowId, timeoutMs = 10_000) {
         const path = join(state, `assertion-${Date.now()}.png`);
@@ -264,6 +312,15 @@ function snapshotProperty(node: Node, property: 'text' | 'value' | 'visible') {
     node.value ?? node.name : node.name ?? node.value;
 }
 
+export function fixtureAppPath(data: unknown): string | undefined {
+  try {
+    const target = object(object(data).target);
+    return typeof target.appPath === 'string' && target.appPath ? target.appPath : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function offlineDesktop(data: unknown, expected: Target): Desktop {
   const fixture = object(data);
   const target = object(fixture.target);
@@ -291,6 +348,20 @@ export function offlineDesktop(data: unknown, expected: Target): Desktop {
       // against it and only that window is visible in the inventory.
       return [{ id: snap.windowId, title: expected.window }];
     },
+    async listAllWindows() {
+      return [{ id: snap.windowId, title: expected.window }];
+    },
+    async snapshotWindow(windowId, title) {
+      if (windowId !== snap.windowId) {
+        throw new Fault('WINDOW_CHANGED', 'Offline fixture does not cover the requested window');
+      }
+      if (title !== expected.window) {
+        throw new Fault('WINDOW_MISMATCH', 'Offline fixture does not cover the requested window');
+      }
+      return snap;
+    },
+    async focusWindow() { throw new Fault('WINDOW_MISMATCH', 'Offline fixtures cannot focus windows'); },
+    async screenshotWindow() { throw new Fault('WINDOW_MISMATCH', 'Offline fixtures do not include window screenshots'); },
     async screenshot() {
       throw new Fault('WINDOW_MISMATCH', 'Offline fixtures do not include window screenshots');
     },
