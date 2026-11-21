@@ -48,6 +48,157 @@
         }
       ]
     },
+    "appIdentity": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "app": {
+              "minLength": 1,
+              "maxLength": 256,
+              "type": "string"
+            },
+            "mode": {
+              "anyOf": [
+                {
+                  "const": "bundle_path",
+                  "type": "string"
+                },
+                {
+                  "const": "legacy_bundle_id",
+                  "type": "string"
+                }
+              ]
+            },
+            "status": {
+              "anyOf": [
+                {
+                  "const": "verified",
+                  "type": "string"
+                },
+                {
+                  "const": "offline_unverified",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "required": [
+            "app",
+            "mode",
+            "status"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "app": {
+              "minLength": 1,
+              "maxLength": 256,
+              "type": "string"
+            },
+            "mode": {
+              "anyOf": [
+                {
+                  "const": "bundle_path",
+                  "type": "string"
+                },
+                {
+                  "const": "legacy_bundle_id",
+                  "type": "string"
+                }
+              ]
+            },
+            "status": {
+              "const": "blocked",
+              "type": "string"
+            },
+            "code": {
+              "anyOf": [
+                {
+                  "const": "APP_PATH_INVALID",
+                  "type": "string"
+                },
+                {
+                  "const": "APP_AMBIGUOUS",
+                  "type": "string"
+                },
+                {
+                  "const": "UNSUPPORTED_PLATFORM",
+                  "type": "string"
+                },
+                {
+                  "const": "UNSAFE_POINT",
+                  "type": "string"
+                }
+              ]
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "const": "invalid_bundle_path",
+                  "type": "string"
+                },
+                {
+                  "const": "bundle_id_mismatch",
+                  "type": "string"
+                },
+                {
+                  "const": "unsupported_path_platform",
+                  "type": "string"
+                },
+                {
+                  "const": "path_mismatch",
+                  "type": "string"
+                },
+                {
+                  "const": "multiple_instances",
+                  "type": "string"
+                },
+                {
+                  "const": "multiple_installed_copies",
+                  "type": "string"
+                },
+                {
+                  "const": "identity_unproven",
+                  "type": "string"
+                },
+                {
+                  "const": "instance_changed",
+                  "type": "string"
+                },
+                {
+                  "const": "driver_target_unconfirmed",
+                  "type": "string"
+                },
+                {
+                  "const": "fixture_path_mismatch",
+                  "type": "string"
+                },
+                {
+                  "const": "untargeted_input",
+                  "type": "string"
+                }
+              ]
+            },
+            "entryId": {
+              "minLength": 1,
+              "maxLength": 196,
+              "type": "string"
+            }
+          },
+          "required": [
+            "app",
+            "mode",
+            "status",
+            "code",
+            "reason"
+          ]
+        }
+      ]
+    },
     "entries": {
       "minItems": 1,
       "type": "array",

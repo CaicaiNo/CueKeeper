@@ -4,6 +4,10 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+
+// Keep the native identity helper out of stubbed runs: a locally built helper
+// must not inspect or launch real applications during the test suite.
+process.env.CUEKEEPER_APP_IDENTITY = '/nonexistent/cuekeeper-identity';
 import { fileURLToPath } from 'node:url';
 import { TypeCompiler } from '@sinclair/typebox/compiler';
 import { strFromU8, unzipSync } from 'fflate';
@@ -99,7 +103,9 @@ console.log(JSON.stringify({ version: '2.6', ok: true, command, data: result }))
 `, { mode: 0o700 });
   const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
   const result = spawnSync(process.execPath, [cli, 'run', source, '--report', output, '--json', ...flags], {
-    env: { ...process.env, CUEKEEPER_AGENT_DESKTOP: stub },
+    // Keep live identity probing out of stubbed runs: a locally built helper
+    // must not inspect real apps during the test suite.
+    env: { ...process.env, CUEKEEPER_AGENT_DESKTOP: stub, CUEKEEPER_APP_IDENTITY: join(dir, 'identity') },
     encoding: 'utf8',
     timeout: 10_000,
   });

@@ -14,6 +14,46 @@ const escapeHtml = (value: string) => value.replace(/[&<>"']/g, character => ent
 const statusLabels: Record<string, string> = {
   passed: '通过', resolved: '已解析', failed: '失败', blocked: '阻塞', skipped: '跳过',
 };
+
+const identityModeLabels: Record<string, string> = {
+  bundle_path: '按副本路径', legacy_bundle_id: '按应用标识',
+};
+const identityStatusLabels: Record<string, string> = {
+  verified: '已核对运行实例', offline_unverified: '离线来源', blocked: '应用身份阻塞',
+};
+const identityReasonLabels: Record<string, string> = {
+  invalid_bundle_path: '选中的应用路径已失效，请重新选择副本并保存。',
+  bundle_id_mismatch: '应用路径的应用标识已变更，请重新选择副本并保存。',
+  unsupported_path_platform: '该应用路径属于另一平台，本机只能离线验证。',
+  path_mismatch: '无法唯一确认目标副本，请打开选中的副本后重新运行。',
+  multiple_instances: '同一应用有多个运行实例，请关闭冲突实例后重新运行。',
+  multiple_installed_copies: '本机有多份可启动的副本，请明确选择路径后保存。',
+  identity_unproven: '无法证明操作仍指向选中的副本，本轮已停止。',
+  instance_changed: '目标实例在运行中发生了变化，本轮已停止。',
+  driver_target_unconfirmed: '驱动无法证明窗口归属，本轮已停止。',
+  fixture_path_mismatch: '快照来自另一个应用路径，请重新采集快照。',
+  untargeted_input: '该坐标操作无法绑定到选中的副本，请改用元素定位器。',
+};
+
+function identityMarkup(report: Report) {
+  const identity = report.appIdentity;
+  if (!identity) return '';
+  return `<span class="tag identity status-${escapeHtml(identity.status)}">${escapeHtml(
+    identityStatusLabels[identity.status] ?? identity.status)} · ${escapeHtml(identityModeLabels[identity.mode] ?? identity.mode)}</span>`;
+}
+
+function identityBanner(report: Report) {
+  const identity = report.appIdentity;
+  if (!identity || identity.status !== 'blocked') return '<div class="banner" id="identityBanner" hidden></div>';
+  const reason = typeof identity.reason === 'string' ? identity.reason : '';
+  const hint = identityReasonLabels[reason] ?? '应用身份无法确认，本轮已停止。';
+  return `<div class="banner" id="identityBanner">
+    <span class="ic" aria-hidden="true">${viewerIcon('alert')}</span>
+    <span><b>${escapeHtml(identityStatusLabels.blocked)}</b> <span class="mono">${escapeHtml(identity.code ?? '')}</span>　${escapeHtml(hint)}</span>
+    <span class="sp"></span>
+    <span class="mono">${escapeHtml(reason)}${identity.entryId ? ` · ${escapeHtml(identity.entryId)}` : ''}</span>
+  </div>`;
+}
 const kindLabels: Record<string, string> = {
   setup: '前置条件', click: '点击', type: '输入', key: '快捷键', wait: '等待', assert: '断言',
 };
@@ -491,7 +531,7 @@ export function renderViewer(report: Report, flow: Flow, steps: PlannedStep[], a
       <span class="count">${completed} / ${views.length}</span>
     </div>
     <div class="elapsed">${formatDuration(totalDuration)}</div>
-    <div class="env">${escapeHtml(flow.target.app)} · ${escapeHtml(flow.target.window)}</div>
+    <div class="env">${escapeHtml(flow.target.app)} · ${escapeHtml(flow.target.window)}${identityMarkup(report)}</div>
     <div class="top-actions">
       <a class="btn" href="report.json" download>${viewerIcon('fileDown')}报告 JSON</a>
       <a class="btn" href="flow.json" download>${viewerIcon('fileCode')}流程 JSON</a>
@@ -507,6 +547,8 @@ export function renderViewer(report: Report, flow: Flow, steps: PlannedStep[], a
     <span class="sp"></span>
     <button class="btn" id="bannerExit" type="button">${viewerIcon('x')}退出断流预览</button>
   </div>
+
+  ${identityBanner(report)}
 
   <main class="layout">
     <section class="rail" aria-label="执行时间线">

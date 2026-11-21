@@ -51,6 +51,7 @@ pnpm test
 pnpm build:recorder
 mkdir -p out/demo
 node dist/cli.js record --app com.apple.TextEdit --window "无标题" --out out/demo/recorded.flow.json --seconds 30
+# 指定安装副本时加 --app-path "/Applications/TextEdit.app"
 ```
 
 回放与报告。下面的离线命令使用仓库自带样本，不需要桌面权限，可直接验证安装：
@@ -71,6 +72,8 @@ unzip -t out/demo/report.zip
 node dist/cli.js run out/demo/recorded.flow.json --dry-run --json
 node dist/cli.js run out/demo/recorded.flow.json --headed --report out/demo/recorded-report.json --json
 ```
+
+固定应用路径的流程还需要 `pnpm build:recorder` 生成的原生身份查询程序 `dist/cuekeeper-identity`。它只读取进程、进程启动标识和窗口归属，不安装事件监听，也不申请辅助功能或输入监控权限。
 
 工作台读取 `flow.json`、`recorded.flow.json`、`report.json` 等同目录文件（终端会打印本机地址，手动打开，`Ctrl+C` 关闭）：
 
@@ -156,6 +159,8 @@ node dist/cli.js run /path/to/root.flow.json --allow-shell --allow-sudo --intera
 
 不录制也能把动作绑定到目标控件。`pick` 只读取窗口快照，不点击、不抢焦点，也不改变前台窗口。
 
+同一应用装有多份副本时，`record` 与 `pick` 的 `--app-path` 指定其中一个。录制只在握手确认窗口 owner 的 PID、进程启动标识和规范 `bundleURL` 后写入该路径；回放按路径锁定实例，之后只用窗口 ID 发送输入，不再按 bundle ID 或全局前台猜测。路径失效返回 `APP_PATH_INVALID`，路径不符或同标识多实例返回 `APP_AMBIGUOUS`，固定路径流程中的裸坐标返回 `UNSAFE_POINT`。
+
 ```sh
 node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --json
 node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --select e1 --json
@@ -172,13 +177,14 @@ node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --selec
 | `doctor [--json]` | 只读自检：Node 运行时、文件完整性、agent-desktop 版本、录制器与辅助功能/输入监控权限；末行为下一步 |
 | `--version` | 打印版本，发布包还带构建提交 |
 | `flow validate <flow.json>` | 检查 v1 结构、ID、行为引用和参数绑定 |
-| `record --app <bundle-id> --window <精确标题> --out <flow.json>` | 录制目标窗口，显示计时 HUD，支持 `--no-indicator` 和 `--sound` |
-| `pick --app <bundle-id> --window <精确标题> [--select <ref>] [--snapshot <snapshot.json>]` | 只读快照，按可交互元素优先列出候选，或输出可写入 flow 的定位器 |
+| `record --app <bundle-id> --window <精确标题> --out <flow.json> [--app-path <路径>]` | 录制目标窗口，显示计时 HUD，支持 `--no-indicator` 和 `--sound` |
+| `pick --app <bundle-id> --window <精确标题> [--app-path <路径>] [--select <ref>] [--snapshot <snapshot.json>]` | 只读快照，按可交互元素优先列出候选，或输出可写入 flow 的定位器 |
 | `run <flow.json> --dry-run` | 用当前窗口解析定位器；纯 Shell 流程无需快照 |
 | `run <flow.json> --allow-shell [--allow-sudo] [--interactive] [--capture-shell-output]` | 执行 Shell 步骤；固定任务首版禁用，root 步骤走密码框或 sudoers |
 | `run <flow.json> --headed --report <report.json>` | 允许物理点击，回放并记录逐步结果 |
 | `run <test.json> --data <rows.json> [--report <batch.json>]` | 每行覆盖行为调用参数后串行执行；报告写汇总与逐行 v1 报告 |
-| `report pack <report.json> --flow <flow.json> --out <report.zip>` | 验证报告与流程配对，生成可离线打开的 ZIP；`--assets <dir>` 带入截图、日志和 AX 快照 |
+| `report pack <report.json> --flow <flow.json> --out <report.zip>` | 验证报告与流程配对，生成可离线打开的 ZIP；`--assets <dir>` 带入截图、日志和 AX 快照；配置上传后自动入队 |
+| `report upload [--queue <dir>] [--retry-paused]` | 处理本地上传队列；暂停项修复原因后用 `--retry-paused` 手动继续 |
 
 默认在主屏显示边框和 HUD。窗口服务器确认面板后，HUD 显示「录制就绪」，终端在标准错误输出 `INDICATOR_READY`。录制时可切到飞书等其他应用，返回目标窗口后继续，已捕获的动作会保留。`Ctrl+Option+P` 暂停或继续，`Ctrl+Option+X` 停止并保存。可用 `--no-indicator` 关闭边框和 HUD，热键仍可用。
 
@@ -193,4 +199,4 @@ node dist/cli.js report pack out/demo/batch.json.rows/row-000001/report.json \
 
 所有命令支持 `--json`，标准输出提供单个 JSON 对象。错误有 `error.code` 和 `error.message`。生成的运行报告放在 `data` 中，失败报告的 `ok` 为 `false`。录制状态提示写标准错误。正常结束且有有效动作时，CLI 返回 `ok: true`，跳过的事件记录在 `data.warnings`。录制失败或中断时，已有步骤保存至 `--out`，CLI 返回 `data.partial: true` 及原因。没有有效动作时返回错误。退出码为 `0` 完成、`1` 失败、阻塞或部分录制、`2` 输入文件或依赖错误、`130` 中断。`doctor` 用 `0` 表示全部检查通过、`1` 表示有检查失败；`record` 的启动自检使用 `2`，错误码为 `RECORDER_MISSING`、`RECORDER_UNUSABLE` 或 `PERMISSIONS_REQUIRED`。
 
-[架构与里程碑](docs/architecture.md)说明 schema、适配接口、录制限制与后续工作。
+[架构与里程碑](docs/architecture.md)说明 schema、适配接口、录制限制与后续工作。报告上传的配置、队列与 CLI 用法见[报告上传客户端](docs/upload-client.md)。

@@ -6,8 +6,10 @@ import { discoverAssets } from './assets.js';
 import { capturePreflight, diagnose, formatDoctor, preflightFault } from './doctor.js';
 import { buildInfo, versionLine } from './version.js';
 import { BatchError, batchExitCode, bindRows, readData, resolveBatchSecrets, runBatch } from './batch.js';
+import { AppIdentitySession, IdentityFault } from './app-identity.js';
 import { captureTargetCheck } from './contracts.js';
-import { offlineDesktop, withDesktop } from './desktop.js';
+import type { Target } from './contracts.js';
+import { fixtureAppPath, offlineDesktop, withDesktop } from './desktop.js';
 import { ensureNew, readJson, writeNew } from './files.js';
 import { parseFlow, plan } from './flow.js';
 import { Fault } from './locator.js';
@@ -21,6 +23,8 @@ import type { ShellRunOptions } from './run.js';
 import { createRootPrivilegeRunner } from './shell-privilege.js';
 import { flowHasShellDefinitions, reachableShells, shellGate } from './shell.js';
 import { parseTestItem, resolveSecrets } from './test-item.js';
+import { enqueueUpload, processUploadQueue } from './upload-queue.js';
+import { defaultQueueDir, resolveUploadConfig } from './upload.js';
 import { startWorkbench } from './workbench.js';
 
 const help = `Cuekeeper ${buildInfo().version}
@@ -30,9 +34,10 @@ const help = `Cuekeeper ${buildInfo().version}
   cuekeeper flow validate <flow.json|test.json> [--json]
   cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--interactive] [--report <report.json>] [--allow-shell] [--allow-sudo] [--capture-shell-output] [--json]
   cuekeeper workbench [run-directory] [--port <port>] [--library <directory>] [--allow-live-replay] [--allow-shell] [--allow-sudo]
-  cuekeeper pick --app <bundle-id> --window <title> [--select <ref>] [--snapshot <snapshot.json>] [--json]
-  cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--seconds 25] [--no-indicator] [--sound] [--trace-clicks] [--json]
-  cuekeeper report pack <report.json> --flow <flow.json> --out <report.zip> [--assets <dir>] [--json]
+  cuekeeper pick --app <bundle-id> --window <title> [--app-path <path>] [--select <ref>] [--snapshot <snapshot.json>] [--json]
+  cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--app-path <path>] [--seconds 25] [--no-indicator] [--sound] [--trace-clicks] [--json]
+  cuekeeper report pack <report.json> --flow <flow.json> --out <report.zip> [--assets <dir>] [--no-upload] [--queue <dir>] [--config <upload.json>] [--json]
+  cuekeeper report upload [--queue <dir>] [--retry-paused] [--json]
 
 Exit codes
   0  Completed
@@ -118,20 +123,45 @@ async function main() {
     const { values } = parseArgs({
       args: rest, options: {
         ...common, app: { type: 'string' }, window: { type: 'string' },
+        'app-path': { type: 'string' },
         select: { type: 'string' }, snapshot: { type: 'string' },
       },
     });
-    const target = { app: values.app, window: values.window };
+    const target = {
+      app: values.app, window: values.window,
+      ...(values['app-path'] ? { appPath: values['app-path'] } : {}),
+    } as Target;
     if (!captureTargetCheck.Check(target) || !/^[a-z\d][a-z\d.-]*\.[a-z\d][a-z\d-]*$/i.test(target.app)) {
       throw new Error('Specify --app with a bundle ID and --window with an exact window title');
     }
     let observed: Snapshot;
     if (values.snapshot) {
-      observed = await offlineDesktop(await readJson(values.snapshot), target).snapshot(target);
+      const fixture = await readJson(values.snapshot);
+      const saved = fixtureAppPath(fixture);
+      if (target.appPath && saved && target.appPath !== saved) {
+        throw new IdentityFault('APP_AMBIGUOUS', 'fixture_path_mismatch',
+          '快照来自另一个应用路径，请重新采集快照或恢复与快照匹配的目标。',
+          target.app, 'bundle_path');
+      }
+      if (!target.appPath && saved) target.appPath = saved;
+      observed = await offlineDesktop(fixture, target).snapshot(target);
     } else {
       macOnly();
-      observed = await withDesktop({ headed: false, signal },
-        desktop => desktop.snapshot(target, 5000, undefined, true));
+      if (target.appPath) {
+        const identity = new AppIdentitySession(target);
+        await identity.preflight();
+        observed = await withDesktop({ headed: false, signal }, async desktop => {
+          await identity.bindInstances(desktop);
+          const current = await identity.readWindow(desktop, target, { timeoutMs: 5000 });
+          // The picked target names the canonical copy that was proven.
+          if (identity.canonicalPath) target.appPath = identity.canonicalPath;
+          observed = current;
+          return current;
+        });
+      } else {
+        observed = await withDesktop({ headed: false, signal },
+          desktop => desktop.snapshot(target, 5000, undefined, true));
+      }
     }
     const candidates = pickCandidates(observed);
     if (values.select !== undefined) {
@@ -224,7 +254,10 @@ async function main() {
       };
       let summary;
       if (values.snapshot) {
-        summary = await runBatch(rows, offlineDesktop(await readJson(values.snapshot), flow.target), options);
+        const fixture = await readJson(values.snapshot);
+        summary = await runBatch(rows, offlineDesktop(fixture, flow.target), {
+          ...options, offline: true, ...(fixtureAppPath(fixture) ? { fixtureAppPath: fixtureAppPath(fixture)! } : {}),
+        });
       } else {
         macOnly();
         summary = await withDesktop({ headed: values.headed ?? false, signal },
@@ -266,7 +299,11 @@ async function main() {
       if (!needsDesktop) {
         report = await runFlow(flow, undefined, options);
       } else if (values.snapshot) {
-        report = await runFlow(flow, offlineDesktop(await readJson(values.snapshot), flow.target), options);
+        const fixture = await readJson(values.snapshot);
+        const path = fixtureAppPath(fixture);
+        report = await runFlow(flow, offlineDesktop(fixture, flow.target), {
+          ...options, offline: true, ...(path ? { fixtureAppPath: path } : {}),
+        });
       } else {
         macOnly();
         report = await withDesktop({ headed: values.headed ?? false, signal },
@@ -314,12 +351,16 @@ async function main() {
     const { values } = parseArgs({
       args: rest, options: {
         ...common, app: { type: 'string' }, window: { type: 'string' },
+        'app-path': { type: 'string' },
         out: { type: 'string' }, seconds: { type: 'string', default: '25' },
         'no-indicator': { type: 'boolean' }, sound: { type: 'boolean' },
         'trace-clicks': { type: 'boolean' },
       },
     });
-    const target = { app: values.app, window: values.window };
+    const target = {
+      app: values.app, window: values.window,
+      ...(values['app-path'] ? { appPath: values['app-path'] } : {}),
+    } as Target;
     if (!captureTargetCheck.Check(target) || !/^[a-z\d][a-z\d.-]*\.[a-z\d][a-z\d-]*$/i.test(target.app)) {
       throw new Error('Specify --app with a bundle ID and --window with an exact window title');
     }
@@ -353,6 +394,7 @@ async function main() {
     const { values, positionals } = parseArgs({
       args: rest.slice(1), allowPositionals: true, options: {
         ...common, flow: { type: 'string' }, out: { type: 'string' }, assets: { type: 'string' },
+        'no-upload': { type: 'boolean' }, queue: { type: 'string' }, config: { type: 'string' },
       },
     });
     checkPositionals(positionals, 1);
@@ -363,7 +405,43 @@ async function main() {
     ]);
     const archive = packReport(input, parseFlow(rawFlow), { assets });
     await writeNew(output, archive);
-    success({ output, bytes: archive.length, assets: assets.length }, `Wrote ${output}`);
+    let upload: { queued: boolean; queue?: string; id?: string; duplicate?: boolean; error?: string } | undefined;
+    if (!values['no-upload']) {
+      const queue = values.queue ?? defaultQueueDir(process.env);
+      try {
+        const config = await resolveUploadConfig({ env: process.env, configPath: values.config });
+        if (config) {
+          const queued = await enqueueUpload({ queueDir: queue, config, bundlePath: output, bytes: archive });
+          upload = { queued: true, queue, id: queued.item.id, duplicate: queued.duplicate };
+        }
+      } catch (error) {
+        // The local ZIP is already published; report upload trouble separately.
+        upload = { queued: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+    const data = { output, bytes: archive.length, assets: assets.length, ...(upload ? { upload } : {}) };
+    const details = [`Wrote ${output}`];
+    if (upload?.queued) details.push(`Queued upload ${upload.id}${upload.duplicate ? ' (already queued)' : ''}`);
+    if (upload?.error) details.push(`Upload not queued: ${upload.error}`);
+    success(data, details.join('\n'));
+    return;
+  }
+
+  if (command === 'report' && rest[0] === 'upload') {
+    const { values } = parseArgs({
+      args: rest.slice(1), options: {
+        ...common, queue: { type: 'string' }, 'retry-paused': { type: 'boolean' },
+      },
+    });
+    const queue = values.queue ?? defaultQueueDir(process.env);
+    const summary = await processUploadQueue({
+      queueDir: queue, env: process.env, retryPaused: values['retry-paused'] ?? false, signal,
+    });
+    const data = { queue, ...summary };
+    const message = `Uploads: ${summary.done} done, ${summary.pending} pending, ` +
+      `${summary.paused} paused, ${summary.skipped} skipped`;
+    const code = summary.interrupted || signal.aborted ? 130 : summary.paused ? 1 : 0;
+    success(data, message, code);
     return;
   }
 

@@ -7,7 +7,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { listApps } from './app-catalog.js';
 import { appIconPng } from './apps.js';
 import { loadBaseline } from './assertion.js';
-import { offlineDesktop, withDesktop } from './desktop.js';
+import { fixtureAppPath, offlineDesktop, withDesktop } from './desktop.js';
 import { readJson, writeNew } from './files.js';
 import { hashFlow, plan } from './flow.js';
 import { object } from './locator.js';
@@ -315,8 +315,11 @@ export async function startWorkbench(options: {
       const secretTexts = dryRun ? undefined : resolveSecrets(secrets, process.env);
       const baselineDir = join(current.directory, 'baselines');
       const report = dryRun
-        ? await runFlow(flow, needsDesktop ? offlineDesktop(current.snapshot, flow.target) : undefined,
-          { dryRun, signal, baselineDir, shell })
+        ? await runFlow(flow, needsDesktop ? offlineDesktop(current.snapshot, flow.target) : undefined, {
+          dryRun, signal, baselineDir, shell, offline: true,
+          ...(needsDesktop && current.snapshot !== undefined && fixtureAppPath(current.snapshot)
+            ? { fixtureAppPath: fixtureAppPath(current.snapshot)! } : {}),
+        })
         : await (needsDesktop
           ? withDesktop({ headed: true, signal },
             desktop => runFlow(flow, desktop, { dryRun, signal, secretTexts, baselineDir, shell }))

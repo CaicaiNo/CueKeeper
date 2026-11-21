@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import test from 'node:test';
+
+// Keep the native identity helper out of stubbed runs: a locally built helper
+// must not inspect or launch real applications during the test suite.
+process.env.CUEKEEPER_APP_IDENTITY = '/nonexistent/cuekeeper-identity';
 import { unzipSync, strFromU8 } from 'fflate';
 import { offlineDesktop } from '../dist/desktop.js';
 import { parseFlow } from '../dist/flow.js';
