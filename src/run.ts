@@ -1,12 +1,13 @@
 import { setTimeout as sleep } from 'node:timers/promises';
-import type { Check, Entry, Flow, Report, Setup } from './contracts.js';
-import { DesktopFault } from './desktop.js';
+import { defaultEnsureTimeoutMs } from './contracts.js';
+import type { Check, Ensure, Entry, Flow, Report, Setup } from './contracts.js';
+import { DesktopFault, isMissingWindow } from './desktop.js';
 import type { Desktop } from './desktop.js';
 import { hashFlow, plan } from './flow.js';
 import { Fault, contains, resolve } from './locator.js';
 import type { Located, Snapshot } from './locator.js';
 
-type Outcome = Pick<Entry, 'status' | 'message' | 'code' | 'delivery'>;
+type Outcome = Pick<Entry, 'status' | 'message' | 'code' | 'delivery' | 'repair'>;
 
 function locateCheck(snapshot: Snapshot, check: Check): Located | undefined {
   try {
@@ -19,11 +20,11 @@ function locateCheck(snapshot: Snapshot, check: Check): Located | undefined {
   }
 }
 
-async function evaluate(desktop: Desktop, current: Snapshot, check: Check) {
+async function evaluate(desktop: Desktop, current: Snapshot, check: Check, timeoutMs?: number) {
   const found = locateCheck(current, check);
   if (check.expect.property === 'exists') return Boolean(found) === check.expect.equals;
   if (!found || found.node.secure) throw new Fault('PROPERTY_UNAVAILABLE', 'Property unavailable for this control');
-  const actual = await desktop.property(found.node, check.expect.property);
+  const actual = await desktop.property(found.node, check.expect.property, timeoutMs);
   if (actual === undefined) throw new Fault('PROPERTY_UNAVAILABLE', 'Property could not be read');
   return actual === check.expect.equals;
 }
@@ -54,13 +55,17 @@ export async function runFlow(
   const started = performance.now();
   const elapsed = () => Math.round(performance.now() - started);
   let windowId: string | undefined;
+  let selectedWindowId: string | undefined;
   let drySnapshot: Promise<Snapshot> | undefined;
-  async function readSnapshot(timeoutMs?: number) {
-    const current = await desktop.snapshot(flow.target, timeoutMs);
-    if (windowId !== undefined && current.windowId !== windowId) {
+  async function readSnapshot(timeoutMs?: number, exactWindow = false, repairedWindowId?: string) {
+    const selected = selectedWindowId ?? (exactWindow ? windowId ?? repairedWindowId : undefined);
+    const current = await desktop.snapshot(flow.target, timeoutMs, selected, exactWindow);
+    const expectedId = windowId ?? selected;
+    if (expectedId !== undefined && current.windowId !== expectedId) {
       throw new Fault('WINDOW_CHANGED', 'The original target window changed during the run');
     }
     windowId = current.windowId;
+    if (exactWindow) selectedWindowId = current.windowId;
     return current;
   }
   const snapshot = (timeoutMs?: number) => dryRun ? (drySnapshot ??= readSnapshot()) : readSnapshot(timeoutMs);
@@ -82,18 +87,69 @@ export async function runFlow(
     return outcome.status;
   }
 
+  async function evaluateSetup(current: Snapshot, check: Check, deadline?: number) {
+    try {
+      const budget = deadline === undefined ? undefined : Math.ceil(deadline - performance.now());
+      if (budget !== undefined && budget <= 0) throw new Fault('COMMAND_TIMEOUT', 'The setup repair deadline expired');
+      return await evaluate(desktop, current, check, budget);
+    } catch (error) {
+      if (error instanceof Fault && error.code === 'NOT_FOUND') return false;
+      throw error;
+    }
+  }
+
+  async function ensureThenCheck(check: Check, action: Ensure): Promise<Outcome> {
+    try {
+      if (await evaluateSetup(await readSnapshot(undefined, true), check)) return { status: 'passed' };
+    } catch (error) {
+      if (signal.aborted || !isMissingWindow(error)) throw error;
+    }
+    const repair = { attempted: true, kind: action.kind };
+    const timeoutMs = action.timeout_ms ?? defaultEnsureTimeoutMs;
+    const deadline = performance.now() + timeoutMs;
+    try {
+      signal.throwIfAborted();
+      const repairedWindowId = await desktop.ensure(action, flow.target, timeoutMs, windowId);
+      let current: Snapshot;
+      for (;;) {
+        signal.throwIfAborted();
+        const remaining = Math.ceil(deadline - performance.now());
+        if (remaining <= 0) throw new Fault('WINDOW_NOT_FOUND', 'The target window was not ready before the repair deadline');
+        try {
+          current = await readSnapshot(remaining, true, repairedWindowId);
+          break;
+        } catch (error) {
+          if (signal.aborted || !isMissingWindow(error) || action.kind === 'window_ready' ||
+              deadline - performance.now() <= 100) throw error;
+        }
+        await sleep(100, undefined, { signal });
+      }
+      if (await evaluateSetup(current, check, deadline)) {
+        return { status: 'passed', repair: { ...repair, result: 'passed' }, message: 'Confirmed precondition matched after repair' };
+      }
+      return {
+        status: 'blocked', code: 'PRECONDITION_FALSE', message: 'Confirmed precondition still did not match after repair',
+        repair: { ...repair, result: 'failed' },
+      };
+    } catch (error) {
+      if (signal.aborted || (error instanceof Fault && error.dependency)) throw error;
+      const outcome = errorOutcome(error, 'blocked');
+      return { ...outcome, code: 'ENSURE_FAILED', repair: { ...repair, result: 'failed', code: outcome.code } };
+    }
+  }
+
   async function checkConditions(conditions: Setup[] = [], scope: string) {
     for (const condition of conditions) {
       const state = await log(`${scope}/setup/${condition.id}`, 'setup', async () => {
         if (condition.state !== 'confirmed') {
           return { status: 'skipped', message: `Setup state is ${condition.state}` };
         }
-        const current = await snapshot();
         if (dryRun) {
-          locateCheck(current, condition.check);
+          locateCheck(await snapshot(), condition.check);
           return { status: 'resolved' };
         }
-        if (!await evaluate(desktop, current, condition.check)) {
+        if (condition.ensure) return ensureThenCheck(condition.check, condition.ensure);
+        if (!await evaluate(desktop, await snapshot(), condition.check)) {
           throw new Fault('PRECONDITION_FALSE', 'Confirmed precondition did not match');
         }
         return { status: 'passed' };

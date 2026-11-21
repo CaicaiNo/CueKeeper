@@ -174,6 +174,39 @@
               "target",
               "expect"
             ]
+          },
+          "ensure": {
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "kind": {
+                "anyOf": [
+                  {
+                    "const": "app_running",
+                    "type": "string"
+                  },
+                  {
+                    "const": "window_ready",
+                    "type": "string"
+                  }
+                ]
+              },
+              "app": {
+                "minLength": 1,
+                "maxLength": 256,
+                "type": "string"
+              },
+              "timeout_ms": {
+                "minimum": 1000,
+                "maximum": 120000,
+                "default": 15000,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "app"
+            ]
           }
         },
         "required": [
@@ -359,6 +392,39 @@
                             "required": [
                               "target",
                               "expect"
+                            ]
+                          },
+                          "ensure": {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "anyOf": [
+                                  {
+                                    "const": "app_running",
+                                    "type": "string"
+                                  },
+                                  {
+                                    "const": "window_ready",
+                                    "type": "string"
+                                  }
+                                ]
+                              },
+                              "app": {
+                                "minLength": 1,
+                                "maxLength": 256,
+                                "type": "string"
+                              },
+                              "timeout_ms": {
+                                "minimum": 1000,
+                                "maximum": 120000,
+                                "default": 15000,
+                                "type": "integer"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "app"
                             ]
                           }
                         },
@@ -595,6 +661,39 @@
                               "target",
                               "expect"
                             ]
+                          },
+                          "ensure": {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "anyOf": [
+                                  {
+                                    "const": "app_running",
+                                    "type": "string"
+                                  },
+                                  {
+                                    "const": "window_ready",
+                                    "type": "string"
+                                  }
+                                ]
+                              },
+                              "app": {
+                                "minLength": 1,
+                                "maxLength": 256,
+                                "type": "string"
+                              },
+                              "timeout_ms": {
+                                "minimum": 1000,
+                                "maximum": 120000,
+                                "default": 15000,
+                                "type": "integer"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "app"
+                            ]
                           }
                         },
                         "required": [
@@ -821,6 +920,39 @@
                               "target",
                               "expect"
                             ]
+                          },
+                          "ensure": {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "anyOf": [
+                                  {
+                                    "const": "app_running",
+                                    "type": "string"
+                                  },
+                                  {
+                                    "const": "window_ready",
+                                    "type": "string"
+                                  }
+                                ]
+                              },
+                              "app": {
+                                "minLength": 1,
+                                "maxLength": 256,
+                                "type": "string"
+                              },
+                              "timeout_ms": {
+                                "minimum": 1000,
+                                "maximum": 120000,
+                                "default": 15000,
+                                "type": "integer"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "app"
+                            ]
                           }
                         },
                         "required": [
@@ -1015,6 +1147,39 @@
                             "required": [
                               "target",
                               "expect"
+                            ]
+                          },
+                          "ensure": {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "anyOf": [
+                                  {
+                                    "const": "app_running",
+                                    "type": "string"
+                                  },
+                                  {
+                                    "const": "window_ready",
+                                    "type": "string"
+                                  }
+                                ]
+                              },
+                              "app": {
+                                "minLength": 1,
+                                "maxLength": 256,
+                                "type": "string"
+                              },
+                              "timeout_ms": {
+                                "minimum": 1000,
+                                "maximum": 120000,
+                                "default": 15000,
+                                "type": "integer"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "app"
                             ]
                           }
                         },
@@ -1289,6 +1454,39 @@
                             "required": [
                               "target",
                               "expect"
+                            ]
+                          },
+                          "ensure": {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "anyOf": [
+                                  {
+                                    "const": "app_running",
+                                    "type": "string"
+                                  },
+                                  {
+                                    "const": "window_ready",
+                                    "type": "string"
+                                  }
+                                ]
+                              },
+                              "app": {
+                                "minLength": 1,
+                                "maxLength": 256,
+                                "type": "string"
+                              },
+                              "timeout_ms": {
+                                "minimum": 1000,
+                                "maximum": 120000,
+                                "default": 15000,
+                                "type": "integer"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "app"
                             ]
                           }
                         },
@@ -1577,6 +1775,39 @@
                             "target",
                             "expect"
                           ]
+                        },
+                        "ensure": {
+                          "additionalProperties": false,
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "anyOf": [
+                                {
+                                  "const": "app_running",
+                                  "type": "string"
+                                },
+                                {
+                                  "const": "window_ready",
+                                  "type": "string"
+                                }
+                              ]
+                            },
+                            "app": {
+                              "minLength": 1,
+                              "maxLength": 256,
+                              "type": "string"
+                            },
+                            "timeout_ms": {
+                              "minimum": 1000,
+                              "maximum": 120000,
+                              "default": 15000,
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "app"
+                          ]
                         }
                       },
                       "required": [
@@ -1812,6 +2043,39 @@
                             "target",
                             "expect"
                           ]
+                        },
+                        "ensure": {
+                          "additionalProperties": false,
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "anyOf": [
+                                {
+                                  "const": "app_running",
+                                  "type": "string"
+                                },
+                                {
+                                  "const": "window_ready",
+                                  "type": "string"
+                                }
+                              ]
+                            },
+                            "app": {
+                              "minLength": 1,
+                              "maxLength": 256,
+                              "type": "string"
+                            },
+                            "timeout_ms": {
+                              "minimum": 1000,
+                              "maximum": 120000,
+                              "default": 15000,
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "app"
+                          ]
                         }
                       },
                       "required": [
@@ -2038,6 +2302,39 @@
                             "target",
                             "expect"
                           ]
+                        },
+                        "ensure": {
+                          "additionalProperties": false,
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "anyOf": [
+                                {
+                                  "const": "app_running",
+                                  "type": "string"
+                                },
+                                {
+                                  "const": "window_ready",
+                                  "type": "string"
+                                }
+                              ]
+                            },
+                            "app": {
+                              "minLength": 1,
+                              "maxLength": 256,
+                              "type": "string"
+                            },
+                            "timeout_ms": {
+                              "minimum": 1000,
+                              "maximum": 120000,
+                              "default": 15000,
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "app"
+                          ]
                         }
                       },
                       "required": [
@@ -2232,6 +2529,39 @@
                           "required": [
                             "target",
                             "expect"
+                          ]
+                        },
+                        "ensure": {
+                          "additionalProperties": false,
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "anyOf": [
+                                {
+                                  "const": "app_running",
+                                  "type": "string"
+                                },
+                                {
+                                  "const": "window_ready",
+                                  "type": "string"
+                                }
+                              ]
+                            },
+                            "app": {
+                              "minLength": 1,
+                              "maxLength": 256,
+                              "type": "string"
+                            },
+                            "timeout_ms": {
+                              "minimum": 1000,
+                              "maximum": 120000,
+                              "default": 15000,
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "app"
                           ]
                         }
                       },
@@ -2506,6 +2836,39 @@
                           "required": [
                             "target",
                             "expect"
+                          ]
+                        },
+                        "ensure": {
+                          "additionalProperties": false,
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "anyOf": [
+                                {
+                                  "const": "app_running",
+                                  "type": "string"
+                                },
+                                {
+                                  "const": "window_ready",
+                                  "type": "string"
+                                }
+                              ]
+                            },
+                            "app": {
+                              "minLength": 1,
+                              "maxLength": 256,
+                              "type": "string"
+                            },
+                            "timeout_ms": {
+                              "minimum": 1000,
+                              "maximum": 120000,
+                              "default": 15000,
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "app"
                           ]
                         }
                       },

@@ -89,22 +89,13 @@ function expectationText(expect: Check['expect']) {
 
 function planIndex(flow: Flow, steps: PlannedStep[]) {
   const actions = new Map<string, ExecutableAction>();
-  for (const step of steps) actions.set(step.id, step.action);
   const setups = new Map<string, Setup>();
-  const add = (setup: Setup) => { setups.set(setup.id, setup); };
-  for (const setup of flow.setup ?? []) add(setup);
-  for (const behavior of flow.behaviors ?? []) {
-    for (const action of behavior.steps) for (const setup of action.setup ?? []) add(setup);
-  }
-  for (const step of flow.steps) {
-    if (step.kind !== 'behavior') for (const setup of step.setup ?? []) add(setup);
+  for (const setup of flow.setup ?? []) setups.set(`global/setup/${setup.id}`, setup);
+  for (const { id, action } of steps) {
+    actions.set(id, action);
+    for (const setup of action.setup ?? []) setups.set(`${id}/setup/${setup.id}`, setup);
   }
   return { actions, setups };
-}
-
-function setupFor(entry: Entry, setups: Map<string, Setup>) {
-  const match = /(?:^|\/)setup\/([^/]+)$/.exec(entry.id);
-  return match ? setups.get(match[1]) : undefined;
 }
 
 function summaryFor(entry: Entry, action: ExecutableAction | undefined, setup: Setup | undefined) {
@@ -143,7 +134,7 @@ function buildViews(report: Report, flow: Flow, steps: PlannedStep[]): StepView[
   const { actions, setups } = planIndex(flow, steps);
   return report.entries.map(entry => {
     const action = entry.kind === 'setup' ? undefined : actions.get(entry.id);
-    const setup = entry.kind === 'setup' ? setupFor(entry, setups) : undefined;
+    const setup = entry.kind === 'setup' ? setups.get(entry.id) : undefined;
     const check = action && (action.kind === 'wait' || action.kind === 'assert') ? action.check :
       setup ? setup.check : undefined;
     return {
@@ -198,6 +189,12 @@ function errorSection(view: StepView) {
 function assertionSection(view: StepView) {
   if (!view.check) return '';
   const wait = view.action?.kind === 'wait' ? view.action.timeoutMs : undefined;
+  const repair = view.entry.repair;
+  const repairLabel = repair && [
+    repair.kind === 'app_running' ? '确保应用运行' : '打开或聚焦窗口',
+    statusLabels[repair.result],
+    repair.code,
+  ].filter(Boolean).join(' · ');
   return `<section class="sect">
   <div class="sect-head"><h3>断言</h3><span class="rule"></span></div>
   <div class="assertbox">
@@ -205,6 +202,7 @@ function assertionSection(view: StepView) {
     <div class="row"><span class="k">结果</span>${chip(view.entry.status)}</div>
     <div class="row"><span class="k">定位器</span><code>${escapeHtml(locatorText(view.check.target))}</code></div>
     ${wait !== undefined ? `<div class="row"><span class="k">超时上限</span><code>${wait} ms</code></div>` : ''}
+    ${repairLabel ? `<div class="row"><span class="k">修复</span><code>${escapeHtml(repairLabel)}</code></div>` : ''}
   </div>
 </section>`;
 }
