@@ -125,6 +125,19 @@ function captureCode(code: unknown) {
   return typeof code === 'string' && /^[A-Z_]{1,48}$/.test(code) ? code : 'CAPTURE_FAILED';
 }
 
+function announceIndicator(confirmation: unknown, enabled: boolean) {
+  if (!enabled && confirmation === false) return;
+  if (enabled && confirmation !== null && typeof confirmation === 'object' && !Array.isArray(confirmation)) {
+    const { window, display, level, bounds } = object(confirmation);
+    if ([window, display, level].every(value => typeof value === 'number' && Number.isSafeInteger(value) && value > 0) &&
+        Array.isArray(bounds) && bounds.length === 4 && bounds.every(Number.isFinite) && bounds[2] > 0 && bounds[3] > 0) {
+      process.stderr.write(`INDICATOR_READY window=${window} display=${display} level=${level} bounds=${bounds.join(',')}\n`);
+      return;
+    }
+  }
+  throw new Fault('INDICATOR_UNCONFIRMED', 'Capture helper did not confirm the requested indicator state. Rebuild it with pnpm build:recorder', true);
+}
+
 export async function record(
   desktop: Desktop, target: Target, options: CaptureOptions, signal: AbortSignal,
 ): Promise<CaptureResult> {
@@ -144,7 +157,12 @@ export async function record(
   });
   const abort = () => child.kill();
   signal.addEventListener('abort', abort, { once: true });
-  const timeout = setTimeout(() => child.kill('SIGKILL'), (seconds + 5) * 1000);
+  let startupTimedOut = false;
+  const startupTimeout = setTimeout(() => {
+    startupTimedOut = true;
+    child.kill('SIGKILL');
+  }, 5000);
+  let sessionTimeout: NodeJS.Timeout | undefined;
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
   const recording = new Recording(target);
   const warnings = new Map<string, CaptureWarning>();
@@ -168,10 +186,14 @@ export async function record(
       if (data.kind === 'error') {
         const code = captureCode(data.code);
         const dependency = code === 'INPUT_MONITORING_REQUIRED' || (!ready && code === 'TAP_UNAVAILABLE');
-        throw new Fault(code, `Capture helper stopped: ${code}`, dependency);
+        const detail = typeof data.detail === 'string' && /^[ -~]{1,240}$/.test(data.detail) ? ` (${data.detail})` : '';
+        throw new Fault(code, `Capture helper stopped: ${code}${detail}`, dependency);
       }
       if (data.kind === 'ready' && !ready) {
+        announceIndicator(data.indicator, indicator);
         ready = true;
+        clearTimeout(startupTimeout);
+        sessionTimeout = setTimeout(() => child.kill('SIGKILL'), (seconds + 5) * 1000);
         process.stderr.write(`Recording for up to ${seconds} seconds. Ctrl+Option+P pauses or resumes. Ctrl+Option+X stops and saves.\n`);
         continue;
       }
@@ -217,6 +239,7 @@ export async function record(
 
     const code = await completion;
     signal.throwIfAborted();
+    if (startupTimedOut) throw new Fault('CAPTURE_START_TIMEOUT', 'Capture helper did not become ready within five seconds');
     if (!ready) throw new Fault('CAPTURE_DEPENDENCY', 'Capture helper unavailable. Build it with pnpm build:recorder', true);
     if (code !== 0) throw new Fault('CAPTURE_FAILED', 'Capture helper exited before recording finished');
   } catch (error) {
@@ -226,7 +249,8 @@ export async function record(
     lines.close();
     child.kill();
     await completion;
-    clearTimeout(timeout);
+    clearTimeout(startupTimeout);
+    clearTimeout(sessionTimeout);
     signal.removeEventListener('abort', abort);
   }
 

@@ -12,6 +12,9 @@ final class Capture {
     private let sound: Bool
     private let ownPID = Int64(ProcessInfo.processInfo.processIdentifier)
     private var tap: CFMachPort?
+    private var seconds: TimeInterval = 0
+    private var indicatorDeadline: TimeInterval = 0
+    private var recordingDeadline: Timer?
     private var started: TimeInterval?
     private var pausedAt: TimeInterval?
     private var totalPaused: TimeInterval = 0
@@ -40,12 +43,15 @@ final class Capture {
         }
     }
 
-    func stop(_ code: String? = nil) {
+    func stop(_ code: String? = nil, detail: String? = nil) {
         guard !stopped else { return }
         stopped = true
+        recordingDeadline?.invalidate()
         if let code {
             failed = true
-            emit(["kind": "error", "code": code])
+            var error = ["kind": "error", "code": code]
+            error["detail"] = detail
+            emit(error)
         }
         guard let application = NSApp else { return }
         application.stop(nil)
@@ -57,18 +63,42 @@ final class Capture {
         }
     }
 
-    func start(tap: CFMachPort) {
+    func prepare(tap: CFMachPort, seconds: TimeInterval) {
         self.tap = tap
+        self.seconds = seconds
+        if let indicator {
+            if let detail = indicator.show() {
+                stop("INDICATOR_NOT_VISIBLE", detail: detail)
+                return
+            }
+            indicatorDeadline = ProcessInfo.processInfo.systemUptime + 2
+        } else {
+            begin(indicatorEvidence: false)
+        }
+    }
+
+    private func begin(indicatorEvidence: Any) {
+        guard !stopped, let tap else { return }
+        CGEvent.tapEnable(tap: tap, enable: true)
+        guard CGEvent.tapIsEnabled(tap: tap) else {
+            stop("TAP_UNAVAILABLE", detail: "The input event tap did not enable")
+            return
+        }
         started = ProcessInfo.processInfo.systemUptime
-        rebuildIndicator()
+        let deadline = Timer(timeInterval: seconds, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.stop() }
+        }
+        recordingDeadline = deadline
+        RunLoop.main.add(deadline, forMode: .common)
+        updateIndicator()
         playCue()
-        emit(["kind": "ready"])
+        emit(["kind": "ready", "indicator": indicatorEvidence])
         refreshFocus()
     }
 
     func closeIndicator() {
         indicator?.hide()
-        if let cue = playCue() {
+        if started != nil, let cue = playCue() {
             RunLoop.current.run(until: Date().addingTimeInterval(min(cue.duration, 0.5)))
         }
     }
@@ -81,15 +111,20 @@ final class Capture {
     }
 
     func rebuildIndicator() {
-        guard started != nil, !stopped else { return }
-        indicator?.rebuild()
+        guard tap != nil, !stopped else { return }
+        if let detail = indicator?.show() {
+            stop("INDICATOR_NOT_VISIBLE", detail: detail)
+            return
+        }
         updateIndicator()
     }
 
     private func updateIndicator() {
         guard let started else { return }
-        let activeTime = (pausedAt ?? ProcessInfo.processInfo.systemUptime) - started - totalPaused
-        indicator?.update(elapsed: Int(max(0, activeTime)), paused: pausedAt != nil)
+        let now = ProcessInfo.processInfo.systemUptime
+        let activeTime = (pausedAt ?? now) - started - totalPaused
+        indicator?.update(elapsed: Int(max(0, activeTime)), paused: pausedAt != nil,
+                          starting: pausedAt == nil && now - started < 3)
     }
 
     @discardableResult
@@ -110,6 +145,16 @@ final class Capture {
 
     func checkSession() {
         guard !stopped, let tap else { return }
+        if started == nil, let indicator {
+            switch indicator.visibility() {
+            case .confirmed(let evidence): begin(indicatorEvidence: evidence)
+            case .waiting(let detail):
+                if ProcessInfo.processInfo.systemUptime >= indicatorDeadline {
+                    stop("INDICATOR_NOT_VISIBLE", detail: detail)
+                }
+            }
+            return
+        }
         guard CGPreflightListenEventAccess() else { stop("INPUT_MONITORING_LOST"); return }
         guard CFMachPortIsValid(tap) else { stop("TAP_UNAVAILABLE"); return }
         if !CGEvent.tapIsEnabled(tap: tap) {
@@ -277,7 +322,12 @@ struct RecorderCommand {
         }
         CGEvent.tapEnable(tap: tap, enable: false)
         let application = NSApplication.shared
-        application.setActivationPolicy(.accessory)
+        guard application.setActivationPolicy(.accessory) else {
+            capture.emit(["kind": "error", "code": "CAPTURE_APPKIT_SETUP", "detail": "Could not set accessory activation policy"])
+            CFMachPortInvalidate(tap)
+            exit(2)
+        }
+        NSWindow.allowsAutomaticWindowTabbing = false
         let loop = CFRunLoopGetMain()
         let workspace = NSWorkspace.shared.notificationCenter
         let screens = NotificationCenter.default
@@ -292,20 +342,13 @@ struct RecorderCommand {
         let tick = Timer(timeInterval: 0.25, repeats: true) { _ in
             MainActor.assumeIsolated { capture.checkSession() }
         }
-        let deadline = Timer(timeInterval: seconds, repeats: false) { _ in
-            MainActor.assumeIsolated { capture.stop() }
-        }
         DispatchQueue.main.async {
-            capture.start(tap: tap)
             CFRunLoopAddSource(loop, source, .commonModes)
-            CGEvent.tapEnable(tap: tap, enable: true)
+            capture.prepare(tap: tap, seconds: seconds)
             RunLoop.main.add(tick, forMode: .common)
-            deadline.fireDate = Date().addingTimeInterval(seconds)
-            RunLoop.main.add(deadline, forMode: .common)
         }
         application.run()
         tick.invalidate()
-        deadline.invalidate()
         workspace.removeObserver(focusObserver)
         screens.removeObserver(screenObserver)
         CGEvent.tapEnable(tap: tap, enable: false)
