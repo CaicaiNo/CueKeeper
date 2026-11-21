@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "flowId": "textedit-save",
+  "flowSha256": "e283c7bcbff38770232a414069365a22423ebecab6b7d6328ab30b75c99288e8",
+  "startedAt": "2026-11-21T03:18:00.057Z",
+  "mode": "dry-run",
+  "status": "passed",
+  "entries": [
+    {
+      "id": "click-body",
+      "kind": "click",
+      "atMs": 0,
+      "durationMs": 0,
+      "status": "resolved",
+      "message": "Resolved textfield"
+    },
+    {
+      "id": "type-text",
+      "kind": "type",
+      "atMs": 0,
+      "durationMs": 0,
+      "status": "resolved",
+      "message": "Resolved textfield"
+    },
+    {
+      "id": "save",
+      "kind": "key",
+      "atMs": 0,
+      "durationMs": 0,
+      "status": "resolved",
+      "message": "Window resolved for shortcut"
+    }
+  ]
+}

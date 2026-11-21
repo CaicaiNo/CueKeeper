@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "textedit-save",
+  "name": "Save a TextEdit document",
+  "target": { "app": "com.apple.TextEdit", "window": "Cuekeeper-M1.txt" },
+  "steps": [
+    { "id": "click-body", "kind": "click", "target": { "kind": "element", "role": "textfield", "name": "" } },
+    { "id": "type-text", "kind": "type", "target": { "kind": "element", "role": "textfield", "name": "" }, "text": "Cuekeeper M1" },
+    { "id": "save", "kind": "key", "key": "s", "modifiers": ["meta"] }
+  ]
+}

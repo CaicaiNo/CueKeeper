@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aTrust 安装流程 #128 · 流程执行台</title>
+<style>
+  :root{
+    --bg:#F5F3EF;
+    --surface:#FFFFFF;
+    --surface-2:#FAF9F6;
+    --ink:#1B1A17;
+    --ink-2:#55514A;
+    --muted:#8B857B;
+    --line:#E4E0D8;
+    --line-strong:#D6D1C7;
+    --accent:#A65A12;
+    --accent-soft:#F4E9DC;
+    --failed:#A3281F;
+    --failed-soft:#F7E7E4;
+    --ok:#2F6B4F;
+    --radius-s:8px;
+    --radius-m:10px;
+    --radius-l:14px;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,"JetBrains Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;height:100vh;overflow:hidden;background:var(--bg);color:var(--ink);
+    font:400 13px/1.5 ui-sans-serif,-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  button{font:inherit;color:inherit}
+  .app{display:flex;flex-direction:column;height:100vh;min-height:0}
+
+  /* ---------- top bar ---------- */
+  .topbar{
+    display:flex;align-items:center;gap:20px;
+    height:56px;padding:0 24px;
+    background:var(--surface);border-bottom:1px solid var(--line);
+    position:sticky;top:0;z-index:20;
+  }
+  .brand{display:flex;align-items:center;gap:8px;font-weight:500;letter-spacing:-0.01em}
+  .brand .mark{width:18px;height:18px;border:1.5px solid var(--ink);border-radius:5px;position:relative}
+  .brand .mark::after{content:"";position:absolute;left:5px;top:5px;width:6px;height:6px;border-radius:2px;background:var(--accent)}
+  .divider{width:1px;height:20px;background:var(--line-strong)}
+  .run-name{display:flex;align-items:baseline;gap:8px;font-weight:500}
+  .run-id{color:var(--muted);font-family:var(--mono);font-size:12px}
+  .run-state{display:flex;align-items:center;gap:6px;color:var(--ink-2)}
+  .dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+  .dot.live{background:var(--accent)}
+  .progress{display:flex;align-items:center;gap:8px;margin-left:4px}
+  .progress .track{width:88px;height:3px;border-radius:2px;background:var(--line);overflow:hidden}
+  .progress .fill{display:block;height:100%;width:29%;background:var(--ink)}
+  .progress .count{font-family:var(--mono);font-size:12px;color:var(--ink-2)}
+  .elapsed{font-family:var(--mono);font-size:12px;color:var(--ink-2)}
+  .env{font-size:12px;color:var(--muted);white-space:nowrap}
+  .top-actions{margin-left:auto;display:flex;align-items:center;gap:8px}
+  .follow{display:flex;align-items:center;gap:6px;height:32px;padding:0 10px;border:1px solid var(--line);
+    border-radius:var(--radius-s);color:var(--ink-2);cursor:pointer;background:var(--surface)}
+  .follow input{accent-color:var(--accent);margin:0}
+  .btn{height:32px;padding:0 12px;border:1px solid var(--line-strong);border-radius:var(--radius-s);
+    background:var(--surface);cursor:pointer;color:var(--ink-2)}
+  .btn:hover{background:var(--surface-2);color:var(--ink)}
+  .btn.danger{color:var(--failed);border-color:#E0C9C5}
+  .btn.primary{background:var(--ink);color:#fff;border-color:var(--ink)}
+  .btn.primary:hover{background:#000;color:#fff}
+  .btn:focus-visible,.follow:focus-visible,.step:focus-visible,.group-toggle:focus-visible,
+  .shot-btn:focus-visible,.icon-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+  /* ---------- layout ---------- */
+  .layout{
+    display:grid;grid-template-columns:400px minmax(0,1fr);
+    flex:1;min-height:0;
+  }
+  .rail{
+    background:var(--surface-2);border-right:1px solid var(--line);
+    overflow-y:auto;padding:20px 16px 32px 20px;
+  }
+  .rail-head{display:flex;align-items:center;justify-content:space-between;margin:0 0 12px 40px}
+  .rail-head h1{font-size:12px;font-weight:500;color:var(--muted);margin:0;letter-spacing:0.01em}
+  .filter{background:none;border:0;color:var(--muted);font-size:12px;cursor:pointer;padding:2px 4px;border-radius:4px}
+  .filter:hover{color:var(--ink)}
+
+  .timeline{list-style:none;margin:0;padding:0;position:relative}
+  .timeline::before{
+    content:"";position:absolute;left:15px;top:10px;bottom:14px;width:1.5px;background:var(--line);
+  }
+  .group{margin-bottom:4px}
+  .group-toggle{
+    display:flex;align-items:center;gap:8px;width:100%;
+    background:none;border:0;padding:8px 8px 8px 34px;margin:0;
+    cursor:pointer;text-align:left;border-radius:6px;position:relative;z-index:1;
+  }
+  .group-toggle:hover{background:#F1EEE8}
+  .group-toggle .chev{color:var(--muted);transition:transform .15s ease}
+  .group.closed .chev{transform:rotate(-90deg)}
+  .group-title{font-weight:500;font-size:12.5px}
+  .group-meta{margin-left:auto;color:var(--muted);font-size:11.5px;font-family:var(--mono);letter-spacing:0}
+  .group-status{width:6px;height:6px;border-radius:50%;background:var(--line-strong);flex:none}
+  .group-status.done{background:var(--ink)}
+  .group-status.run{background:var(--accent)}
+  .group.closed .steps{display:none}
+
+  .steps{list-style:none;margin:0;padding:0}
+  .step{
+    display:grid;grid-template-columns:30px 1fr auto;align-items:center;gap:10px;
+    min-height:36px;padding:4px 8px 4px 8px;border-radius:6px;cursor:pointer;
+    position:relative;background:transparent;
+  }
+  .step:hover{background:#F1EEE8}
+  .step.selected{background:var(--surface);box-shadow:0 0 0 1px var(--line) inset}
+  .step.selected:hover{background:var(--surface)}
+  .marker{position:relative;display:grid;place-items:center;height:100%;z-index:1}
+  .marker .line{position:absolute;left:50%;top:-14px;bottom:-14px;width:1.5px;transform:translateX(-50%);background:transparent}
+  .step.done .marker .line{background:var(--ink)}
+  .marker .node{width:18px;height:18px;border-radius:50%;background:var(--surface-2);display:grid;place-items:center;position:relative}
+  .step.done .node{background:var(--ink);color:#fff}
+  .step.run .node{background:var(--accent);color:#fff;box-shadow:0 0 0 3px var(--accent-soft)}
+  .step.run.selected .node{box-shadow:0 0 0 3px var(--accent-soft)}
+  .step.todo .node{border:1.5px solid var(--line-strong);background:var(--surface-2)}
+  .step.skip .node{border:1.5px dashed var(--line-strong);background:var(--surface-2)}
+  .step.fail .node{background:var(--failed);color:#fff}
+  .idx{font-family:var(--mono);font-size:11.5px;color:var(--muted);line-height:1}
+  .step-title{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .step.run .step-title{color:var(--accent);font-weight:500}
+  .step.todo .step-title{color:var(--ink-2)}
+  .step-meta{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:11px;font-family:var(--mono)}
+  .tag{font-family:var(--mono);font-size:10.5px;color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:0 4px;line-height:15px}
+  .tag.retry{color:var(--accent);border-color:#E4D2BE;background:var(--accent-soft)}
+  .cam{color:var(--muted);display:inline-grid;place-items:center}
+  .slow{width:4px;height:4px;border-radius:50%;background:var(--line-strong);display:inline-block}
+
+  /* ---------- detail ---------- */
+  .detail{overflow-y:auto;padding:28px 32px 40px;min-width:0}
+  .detail-inner{max-width:860px}
+  .step-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .step-head .no{font-family:var(--mono);font-size:13px;color:var(--muted)}
+  .step-head h2{font-size:21px;line-height:1.3;font-weight:500;margin:0;letter-spacing:-0.01em}
+  .chip{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 8px;border-radius:5px;
+    font-size:11.5px;border:1px solid var(--line);color:var(--ink-2);background:var(--surface)}
+  .chip.run{color:var(--accent);border-color:#E4D2BE;background:var(--accent-soft)}
+  .chip.ok{color:var(--ok);border-color:#CFDCD4;background:#F2F7F4}
+  .chip.fail{color:var(--failed);border-color:#E3CCC8;background:var(--failed-soft)}
+  .head-meta{color:var(--muted);font-size:12px;font-family:var(--mono);margin-left:auto}
+
+  .shots{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:24px 0 0}
+  .shot{margin:0;border:1px solid var(--line);border-radius:var(--radius-m);background:var(--surface);overflow:hidden}
+  .shot-frame{position:relative;aspect-ratio:16/10;background:#EDEAE4;padding:18px 18px 0}
+  .shot-cap{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-top:1px solid var(--line);font-size:11.5px;color:var(--muted)}
+  .shot-cap .t{font-family:var(--mono)}
+  .shot-btn{background:none;border:0;color:var(--ink-2);font-size:11.5px;cursor:pointer;padding:2px 4px;border-radius:4px}
+  .shot-btn:hover{color:var(--ink);background:var(--surface-2)}
+
+  /* mock window inside shot */
+  .win{position:absolute;inset:18px 18px 0;background:#fff;border:1px solid #DCD7CD;border-radius:8px 8px 0 0;
+    box-shadow:0 1px 2px rgba(27,26,23,.06);display:flex;flex-direction:column;overflow:hidden}
+  .win-bar{display:flex;align-items:center;gap:5px;height:26px;padding:0 10px;border-bottom:1px solid #EEEBE4;background:#FBFAF7}
+  .win-bar i{width:7px;height:7px;border-radius:50%;background:#DCD7CD;display:block}
+  .win-title{margin-left:8px;font-size:11px;color:#8B857B}
+  .win-body{flex:1;display:grid;grid-template-columns:86px 1fr;min-height:0}
+  .win-side{border-right:1px solid #F0EDE7;padding:9px 8px;display:flex;flex-direction:column;gap:2px;background:#FCFBF8}
+  .nav{font-size:11px;color:#8B857B;padding:5px 8px;border-radius:5px;line-height:1.2;white-space:nowrap}
+  .nav.on{background:#F1EEE8;color:#1B1A17}
+  .win-main{padding:14px 14px 12px;display:flex;flex-direction:column;gap:10px;min-height:0}
+  .win-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .win-h{font-size:12px;font-weight:500;color:#1B1A17;line-height:1.2;margin:0}
+  .pill{font-size:10px;color:#8B857B;border:1px solid #E4E0D8;border-radius:99px;padding:1px 7px;white-space:nowrap}
+  .w-line{height:6px;width:72%;background:#F0EDE7;border-radius:3px}
+  .w-line.short{width:48%}
+  .w-rule{height:1px;background:#F0EDE7;margin-top:2px}
+  .win-btnrow{margin-top:auto;display:flex;justify-content:flex-end;gap:8px;padding-top:10px}
+  .win-btn{height:24px;min-width:56px;border:1px solid #D9D3C7;border-radius:5px;background:#FCFBF8;
+    font-size:11px;color:#55514A;display:inline-grid;place-items:center;padding:0 10px;line-height:1}
+  .win-btn.primary{background:#1B1A17;border-color:#1B1A17;color:#fff}
+  .win-btn.hit{position:relative;border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
+  .crosshair{position:absolute;left:50%;top:50%;width:30px;height:30px;transform:translate(-50%,-50%);pointer-events:none}
+  .crosshair::before,.crosshair::after{content:"";position:absolute;background:rgba(166,90,18,.55)}
+  .crosshair::before{left:50%;top:0;bottom:0;width:1px}
+  .crosshair::after{top:50%;left:0;right:0;height:1px}
+  .crosshair span{position:absolute;inset:0;border:1.5px solid var(--accent);border-radius:50%}
+  .sheet{position:absolute;inset:26px 0 0 86px;background:#fff;border-left:1px solid #DCD7CD;padding:14px 16px;
+    display:flex;flex-direction:column;gap:2px}
+  .sheet-title{font-size:13px;font-weight:500;color:#1B1A17;margin:0 0 6px}
+  .sheet-row{display:flex;align-items:center;justify-content:space-between;gap:10px;
+    font-size:11px;color:#55514A;padding:8px 0;border-bottom:1px solid #F0EDE7}
+  .sheet-row .mono{font-family:var(--mono);font-size:10.5px;color:#8B857B}
+  .sheet-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:auto;padding-bottom:12px}
+  .dim{opacity:.32}
+  .toggle{width:24px;height:13px;border-radius:7px;background:#D9D3C7;position:relative;flex:none}
+  .toggle::after{content:"";position:absolute;top:2px;left:2px;width:9px;height:9px;border-radius:50%;background:#fff}
+  .toggle.on{background:var(--accent)}
+  .toggle.on::after{left:13px}
+  .live-badge{position:absolute;right:10px;top:10px;display:inline-flex;align-items:center;gap:5px;
+    background:rgba(255,255,255,.92);border:1px solid var(--line);border-radius:4px;padding:2px 6px;font-size:10px;color:var(--ink-2)}
+  .live-badge .dot{width:5px;height:5px;background:var(--accent)}
+
+  /* assertion + facts */
+  .assert{display:flex;align-items:flex-start;gap:10px;margin-top:20px;padding:12px 14px;border:1px solid var(--line);
+    border-radius:var(--radius-m);background:var(--surface)}
+  .assert .ico{flex:none;margin-top:1px}
+  .assert .txt{font-size:12.5px;color:var(--ink-2)}
+  .assert .txt b{font-weight:500;color:var(--ink)}
+  .assert.run{border-color:#E4D2BE;background:#FDF8F1}
+  .assert .state{font-family:var(--mono);font-size:11.5px;margin-left:8px}
+
+  .facts{margin:20px 0 0;border:1px solid var(--line);border-radius:var(--radius-m);background:var(--surface);overflow:hidden}
+  .fact{display:grid;grid-template-columns:120px minmax(0,1fr) 32px;align-items:center;gap:12px;padding:10px 14px;border-top:1px solid var(--line)}
+  .fact:first-child{border-top:0}
+  .fact dt{color:var(--muted);font-size:12px;margin:0}
+  .fact dd{margin:0;font-family:var(--mono);font-size:12px;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .fact dd .k{color:var(--muted)}
+  .icon-btn{width:26px;height:26px;display:grid;place-items:center;border:1px solid transparent;border-radius:5px;background:none;cursor:pointer;color:var(--muted)}
+  .icon-btn:hover{background:var(--surface-2);border-color:var(--line);color:var(--ink)}
+
+  details.panel{margin-top:12px;border:1px solid var(--line);border-radius:var(--radius-m);background:var(--surface)}
+  details.panel summary{cursor:pointer;list-style:none;padding:10px 14px;font-size:12px;color:var(--ink-2);display:flex;align-items:center;gap:8px}
+  details.panel summary::-webkit-details-marker{display:none}
+  details.panel summary .chev{color:var(--muted);transition:transform .15s ease}
+  details.panel[open] summary .chev{transform:rotate(90deg)}
+  details.panel .body{border-top:1px solid var(--line);padding:12px 14px;font-family:var(--mono);font-size:11.5px;
+    color:var(--ink-2);white-space:pre-wrap;line-height:1.7;background:var(--surface-2);border-radius:0 0 var(--radius-m) var(--radius-m)}
+
+  .detail-actions{display:flex;align-items:center;gap:8px;margin-top:24px}
+  .detail-actions .spacer{flex:1}
+  .hint{font-size:11.5px;color:var(--muted)}
+
+  /* ---------- status bar ---------- */
+  .statusbar{display:flex;align-items:center;gap:20px;height:44px;padding:0 24px;
+    border-top:1px solid var(--line);background:var(--surface);font-size:11.5px;color:var(--muted)}
+  .statusbar .mono{font-family:var(--mono)}
+  .statusbar .sep{width:1px;height:14px;background:var(--line)}
+  .statusbar .right{margin-left:auto;display:flex;align-items:center;gap:8px}
+  .conn{display:inline-flex;align-items:center;gap:6px}
+  .conn .dot{width:5px;height:5px;background:var(--ok)}
+
+  /* ---------- lightbox ---------- */
+  .lightbox{position:fixed;inset:0;background:rgba(27,26,23,.55);display:none;align-items:center;justify-content:center;padding:40px;z-index:50}
+  .lightbox.open{display:flex}
+  .lightbox .box{background:var(--surface);border-radius:var(--radius-l);max-width:1000px;width:100%;overflow:hidden;
+    box-shadow:0 20px 60px rgba(0,0,0,.25)}
+  .lightbox .box-head{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--line)}
+  .lightbox .box-head .t{font-size:12px;color:var(--ink-2)}
+  .lightbox .box-body{padding:24px;background:#EFECE6}
+  .lightbox .stage{position:relative;aspect-ratio:16/10;background:#EDEAE4;border:1px solid var(--line);border-radius:8px;
+    padding:28px 28px 0;margin:0 auto;max-width:760px}
+  .lightbox .stage .win{inset:28px 28px 0}
+
+  @media (max-width:1080px){
+    .layout{grid-template-columns:340px minmax(0,1fr)}
+    .env,.progress .track{display:none}
+  }
+  @media (max-width:860px){
+    .layout{display:block}
+    .rail{border-right:0;border-bottom:1px solid var(--line);max-height:46vh}
+    .shots{grid-template-columns:1fr}
+    .topbar{flex-wrap:wrap;height:auto;padding:10px 16px;gap:12px}
+    .detail{padding:20px 16px 32px}
+  }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand"><span class="mark"></span>ai-autoloop</div>
+    <span class="divider"></span>
+    <div class="run-name">aTrust 安装流程 <span class="run-id">#128</span></div>
+    <div class="run-state"><span class="dot live"></span>执行中</div>
+    <div class="progress" aria-label="进度 4 / 14">
+      <span class="track"><span class="fill" id="progressFill"></span></span>
+      <span class="count" id="progressCount">4 / 14</span>
+    </div>
+    <div class="elapsed" id="elapsed">01:24</div>
+    <div class="env">macOS 26 · aTrust 4.2.1</div>
+    <div class="top-actions">
+      <label class="follow"><input type="checkbox" id="follow" checked>跟随执行</label>
+      <button class="btn" type="button">暂停</button>
+      <button class="btn danger" type="button">停止</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="rail" aria-label="执行时间线">
+      <div class="rail-head">
+        <h1>执行时间线</h1>
+        <button class="filter" type="button" title="只看失败">只看失败</button>
+      </div>
+      <ol class="timeline" id="timeline"></ol>
+    </section>
+
+    <section class="detail" aria-label="步骤详情">
+      <div class="detail-inner">
+        <div class="step-head">
+          <span class="no" id="dNo">03</span>
+          <h2 id="dTitle">点击 [设置] 按钮</h2>
+          <span class="chip run" id="dChip"><span class="dot live" style="background:currentColor"></span><span id="dChipText">执行中</span></span>
+          <span class="head-meta" id="dMeta">320ms · 第 1 次尝试</span>
+        </div>
+
+        <div class="shots">
+          <figure class="shot">
+            <div class="shot-frame" id="shotBefore"></div>
+            <figcaption class="shot-cap"><span>操作前</span><span class="t">12:04:31.220</span><button class="shot-btn" type="button" data-shot="before">查看大图</button></figcaption>
+          </figure>
+          <figure class="shot">
+            <div class="shot-frame" id="shotAfter"></div>
+            <figcaption class="shot-cap"><span>操作后</span><span class="t" id="afterTime">12:04:31.540</span><button class="shot-btn" type="button" data-shot="after">查看大图</button></figcaption>
+          </figure>
+        </div>
+
+        <div class="assert run" id="assertBox">
+          <span class="ico" id="assertIco"></span>
+          <span class="txt"><b id="assertTitle">等待「设置」窗口出现</b><span class="state" id="assertState">超时 5s · 已等待 320ms</span></span>
+        </div>
+
+        <dl class="facts">
+          <div class="fact"><dt>动作</dt><dd>click <span class="k">·</span> 单击</dd><button class="icon-btn" title="复制">⧉</button></div>
+          <div class="fact"><dt>定位器</dt><dd id="dLocator">role=button name=设置 path=window[设置]&gt;group&gt;button</dd><button class="icon-btn" title="复制">⧉</button></div>
+          <div class="fact"><dt>应用</dt><dd>aTrust <span class="k">·</span> com.sangfor.atrust</dd><button class="icon-btn" title="复制">⧉</button></div>
+          <div class="fact"><dt>执行方式</dt><dd>AXPress <span class="k">·</span> headless <span class="k">·</span> 未移动指针</dd><button class="icon-btn" title="复制">⧉</button></div>
+        </dl>
+
+        <details class="panel">
+          <summary><span class="chev">▸</span>可访问性片段 <span class="hint" style="margin-left:auto">12 个节点</span></summary>
+          <div class="body">window "设置"
+  └ group
+    ├ statictext "常规"
+    ├ statictext "网络"
+    ├ button "启用代理"  enabled
+    └ button "取消"      enabled</div>
+        </details>
+
+        <details class="panel">
+          <summary><span class="chev">▸</span>该步日志 <span class="hint" style="margin-left:auto">2026-11-21 12:04:31</span></summary>
+          <div class="body">12:04:31.220  snapshot  w-16780  refs=8
+12:04:31.228  resolve   role=button name=设置  → @s3j93x85c4t4oq:e5
+12:04:31.240  action    AXPress  delivered
+12:04:31.540  artifact  after.png 2940×1912
+12:04:31.542  assert    window "设置"  waiting…</div>
+        </details>
+
+        <div class="detail-actions">
+          <button class="btn primary" type="button" id="ackBtn">
+            <span style="display:inline-flex;align-items:center;gap:6px">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 8.5 6.2 11.6 13 4.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              标记完成
+            </span>
+          </button>
+          <button class="btn" type="button">重试此步</button>
+          <span class="spacer"></span>
+          <span class="hint" id="followHint">跟随中 · 步骤结束后自动前进</span>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="statusbar">
+    <span>已完成 <span class="mono" id="sDone">3</span></span>
+    <span class="sep"></span>
+    <span>失败 <span class="mono">0</span></span>
+    <span class="sep"></span>
+    <span>重试 <span class="mono">1</span></span>
+    <span class="sep"></span>
+    <span>跳过 <span class="mono">0</span></span>
+    <span class="sep"></span>
+    <span>最慢 <span class="mono">02 激活主窗口 · 1.8s</span></span>
+    <span class="right conn"><span class="dot"></span>事件流已连接 · 延迟 42ms</span>
+  </footer>
+</div>
+
+<div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="截图预览">
+  <div class="box">
+    <div class="box-head"><span class="t" id="lbTitle">操作前</span><button class="btn" type="button" id="lbClose">关闭</button></div>
+    <div class="box-body"><div class="stage" id="lbStage"></div></div>
+  </div>
+</div>
+
+<script>
+  const steps = [
+    {id:'01',g:0,title:'启动 aTrust',act:'launch',st:'done',ms:'1.2s',retry:0,cam:false},
+    {id:'02',g:0,title:'激活主窗口',act:'focus',st:'done',ms:'1.8s',retry:1,cam:true},
+    {id:'03',g:0,title:'点击 [设置] 按钮',act:'click',st:'run',ms:'320ms',retry:0,cam:true},
+    {id:'04',g:1,title:'等待设置窗口出现',act:'wait',st:'todo',ms:'—',retry:0,cam:false},
+    {id:'05',g:1,title:'点击 [网络] 标签',act:'click',st:'todo',ms:'—',retry:0,cam:false},
+    {id:'06',g:1,title:'勾选 [启用代理]',act:'click',st:'todo',ms:'—',retry:0,cam:false},
+    {id:'07',g:1,title:'断言代理已开启',act:'assert',st:'todo',ms:'—',retry:0,cam:false},
+    {id:'08',g:2,title:'输入账号',act:'type',st:'todo',ms:'—',retry:0,cam:false},
+    {id:'09',g:2,title:'输入密码',act:'type',st:'todo',ms:'—',retry:0,cam:false},
+    {id:'10',g:2,title:'点击 [登录]',act:'click',st:'todo',ms:'—',retry:0,cam:false},
+    {id:'11',g:2,title:'等待主界面',act:'wait',st:'todo',ms:'—',retry:0,cam:false},
+    {id:'12',g:2,title:'断言已登录',act:'assert',st:'todo',ms:'—',retry:0,cam:false},
+    {id:'13',g:3,title:'关闭设置窗口',act:'click',st:'todo',ms:'—',retry:0,cam:false},
+    {id:'14',g:3,title:'留存结果截图',act:'shot',st:'todo',ms:'—',retry:0,cam:false}
+  ];
+  const groups = [
+    {title:'前置准备',range:[0,2],st:'run'},
+    {title:'打开设置',range:[3,6],st:''},
+    {title:'登录验证',range:[7,11],st:''},
+    {title:'收尾',range:[12,13],st:''}
+  ];
+
+  const icon = {
+    check:'<svg width="10" height="10" viewBox="0 0 16 16" fill="none"><path d="M3 8.5 6.2 11.6 13 4.6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    run:'<svg width="8" height="8" viewBox="0 0 8 8" fill="currentColor"><circle cx="4" cy="4" r="2.4"/></svg>',
+    fail:'<svg width="9" height="9" viewBox="0 0 16 16" fill="none"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+    cam:'<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><rect x="2.2" y="4.6" width="11.6" height="8" rx="1.6" stroke="currentColor" stroke-width="1.4"/><path d="M6 4.6l.9-1.4h2.2l.9 1.4" stroke="currentColor" stroke-width="1.4"/><circle cx="8" cy="8.6" r="2" stroke="currentColor" stroke-width="1.4"/></svg>',
+    chev:'<svg width="10" height="10" viewBox="0 0 16 16" fill="none"><path d="M4.5 6.5 8 10l3.5-3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+  };
+
+  const timeline = document.getElementById('timeline');
+  let selected = 2;
+
+  function renderTimeline(){
+    timeline.innerHTML = groups.map((g,gi)=>{
+      const items = steps.slice(g.range[0],g.range[1]+1);
+      const done = items.filter(s=>s.st==='done').length;
+      const meta = gi===0 ? `${done}/${items.length} 步`
+                 : `${items.length} 步`;
+      return `<li class="group" data-group="${gi}">
+        <button class="group-toggle" type="button" aria-expanded="true">
+          <span class="chev">${icon.chev}</span>
+          <span class="group-title">${g.title}</span>
+          <span class="group-status ${g.st}"></span>
+          <span class="group-meta">${meta}</span>
+        </button>
+        <ul class="steps">${items.map(s=>`
+          <li class="step ${s.st} ${+s.id-1===selected?'selected':''}" data-id="${s.id}" tabindex="0">
+            <span class="marker"><span class="line"></span><span class="node">${
+              s.st==='done'?icon.check:s.st==='run'?icon.run:s.st==='fail'?icon.fail:''
+            }</span></span>
+            <span class="step-title"><span class="idx">${s.id}</span>&nbsp;&nbsp;${s.title}</span>
+            <span class="step-meta">${s.retry?`<span class="tag retry">↻ ${s.retry}</span>`:''}${s.ms!=='—'?`<span>${s.ms}</span>`:''}${s.cam?`<span class="cam" title="有截图">${icon.cam}</span>`:''}${s.id==='02'?'<span class="slow" title="慢步骤"></span>':''}</span>
+          </li>`).join('')}</ul>
+      </li>`;
+    }).join('');
+
+    timeline.querySelectorAll('.group-toggle').forEach(btn=>{
+      btn.addEventListener('click',()=>{
+        const li = btn.closest('.group');
+        li.classList.toggle('closed');
+        btn.setAttribute('aria-expanded', String(!li.classList.contains('closed')));
+      });
+    });
+    timeline.querySelectorAll('.step').forEach(el=>{
+      el.addEventListener('click',()=>selectStep(+el.dataset.id-1));
+      el.addEventListener('keydown',e=>{
+        if(e.key==='Enter'||e.key===' '){e.preventDefault();selectStep(+el.dataset.id-1);}
+      });
+    });
+  }
+
+  const detail = {
+    '01':{title:'启动 aTrust',chip:'ok',chipText:'已通过',meta:'1.2s · 第 1 次尝试',locator:'app=aTrust bundle=com.sangfor.atrust',assert:'应用进程已启动 · pid 61444'},
+    '02':{title:'激活主窗口',chip:'ok',chipText:'已通过',meta:'1.8s · 第 2 次尝试',locator:'window=aTrust role=window',assert:'窗口获得焦点 · 1 次重试后通过'},
+    '03':{title:'点击 [设置] 按钮',chip:'run',chipText:'执行中',meta:'320ms · 第 1 次尝试',locator:'role=button name=设置 path=window[设置]>group>button',assert:'等待「设置」窗口出现'},
+    '04':{title:'等待设置窗口出现',chip:'',chipText:'等待中',meta:'—',locator:'window=设置 role=window',assert:'尚未开始'}
+  };
+
+  function selectStep(i){
+    selected = i;
+    document.querySelectorAll('.step').forEach(el=>el.classList.toggle('selected', +el.dataset.id-1===i));
+    const s = steps[i], d = detail[s.id] || {title:s.title,chip:'',chipText:'等待中',meta:s.ms,locator:'—',assert:'尚未开始'};
+    dNo.textContent = s.id;
+    dTitle.textContent = d.title;
+    dChip.className = 'chip ' + d.chip;
+    dChip.innerHTML = (d.chip==='run'?'<span class="dot live" style="background:currentColor"></span>':'') + `<span id="dChipText">${d.chipText}</span>`;
+    dMeta.textContent = d.meta;
+    dLocator.textContent = d.locator;
+    assertTitle.textContent = d.assert;
+    assertState.textContent = s.st==='run' ? '超时 5s · 已等待 320ms' : '';
+    assertBox.className = 'assert ' + (s.st==='run'?'run':'');
+  }
+
+  // mock screenshot builders
+  function winMarkup(mode){
+    const hit = mode==='before'
+      ? `<span class="win-btn hit">设置<span class="crosshair"><span></span></span></span>`
+      : `<span class="win-btn">设置</span>`;
+    return `<div class="win">
+      <div class="win-bar"><i></i><i></i><i></i><span class="win-title">aTrust · 工作台</span></div>
+      <div class="win-body">
+        <div class="win-side"><span class="nav on">概览</span><span class="nav">网络</span><span class="nav">账号</span><span class="nav">设置</span></div>
+        <div class="win-main">
+          <div class="win-head"><h4 class="win-h">连接状态</h4><span class="pill">未连接</span></div>
+          <div class="w-line"></div><div class="w-line short"></div>
+          <div class="w-rule"></div>
+          <div class="win-btnrow"><span class="win-btn">退出</span>${hit}</div>
+        </div>
+      </div>
+    </div>`;
+  }
+  function afterMarkup(){
+    return `<div class="win">
+      <div class="win-bar"><i></i><i></i><i></i><span class="win-title">aTrust · 设置</span></div>
+      <div class="win-body">
+        <div class="win-side"><span class="nav">概览</span><span class="nav">网络</span><span class="nav">账号</span><span class="nav on">设置</span></div>
+        <div class="win-main dim">
+          <div class="win-head"><h4 class="win-h">连接状态</h4><span class="pill">未连接</span></div>
+          <div class="w-line"></div><div class="w-line short"></div>
+          <div class="w-rule"></div>
+          <div class="win-btnrow"><span class="win-btn">退出</span><span class="win-btn">设置</span></div>
+        </div>
+      </div>
+      <div class="sheet">
+        <p class="sheet-title">设置</p>
+        <div class="sheet-row"><span>启用代理</span><span class="toggle on"></span></div>
+        <div class="sheet-row"><span>代理地址</span><span class="mono">127.0.0.1:8080</span></div>
+        <div class="sheet-row"><span>开机自动连接</span><span class="toggle"></span></div>
+        <div class="sheet-actions"><span class="win-btn">取消</span><span class="win-btn primary">保存</span></div>
+      </div>
+      <span class="live-badge"><span class="dot"></span>实时</span>
+    </div>`;
+  }
+  shotBefore.innerHTML = winMarkup('before');
+  shotAfter.innerHTML = afterMarkup();
+
+  // lightbox
+  const lb = document.getElementById('lightbox'), lbStage = document.getElementById('lbStage');
+  document.querySelectorAll('.shot-btn').forEach(b=>{
+    b.addEventListener('click',()=>{
+      lbStage.innerHTML = b.dataset.shot==='before'?winMarkup('before'):afterMarkup();
+      document.getElementById('lbTitle').textContent = b.dataset.shot==='before'?'操作前 · 12:04:31.220':'操作后 · 12:04:31.540';
+      lb.classList.add('open');
+    });
+  });
+  document.getElementById('lbClose').addEventListener('click',()=>lb.classList.remove('open'));
+  lb.addEventListener('click',e=>{if(e.target===lb)lb.classList.remove('open');});
+  document.addEventListener('keydown',e=>{if(e.key==='Escape')lb.classList.remove('open');});
+
+  // follow toggle
+  const follow = document.getElementById('follow');
+  follow.addEventListener('change',()=>{
+    document.getElementById('followHint').textContent = follow.checked?'跟随中 · 步骤结束后自动前进':'已暂停跟随 · 点「回到当前」可恢复';
+  });
+
+  // manual ack
+  document.getElementById('ackBtn').addEventListener('click',e=>{
+    const btn=e.currentTarget;
+    btn.innerHTML='已标记完成';
+    btn.disabled=true;
+    btn.style.opacity=.65;
+  });
+
+  // keyboard j/k
+  document.addEventListener('keydown',e=>{
+    if(e.target.matches('input,button,summary')) return;
+    if(e.key==='j'||e.key==='ArrowDown'){e.preventDefault();selectStep(Math.min(steps.length-1,selected+1));}
+    if(e.key==='k'||e.key==='ArrowUp'){e.preventDefault();selectStep(Math.max(0,selected-1));}
+  });
+
+  renderTimeline();
+  selectStep(2);
+</script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "ready",
+  "name": "The editor is blank",
+  "state": "confirmed",
+  "check": { "target": { "kind": "element", "role": "textfield" }, "expect": { "property": "value", "equals": "" } }
+}

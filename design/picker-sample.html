@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cuekeeper Studio · 元素拾取</title>
+<style>
+  :root{
+    --bg:#F5F3EF;--surface:#FFFFFF;--surface-2:#FAF9F6;
+    --ink:#1B1A17;--ink-2:#55514A;--muted:#8B857B;
+    --line:#E4E0D8;--line-strong:#D6D1C7;
+    --accent:#A65A12;--accent-soft:#F4E9DC;
+    --failed:#A3281F;--failed-soft:#FBF3F1;--failed-line:#E5CEC9;
+    --ok:#2F6B4F;--ok-soft:#F2F7F4;--ok-line:#CFDCD4;
+    --radius-s:8px;--radius-m:10px;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,"JetBrains Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;height:100vh;overflow:hidden;background:var(--bg);color:var(--ink);
+    font:400 13px/1.5 ui-sans-serif,-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",Arial,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  button{font:inherit;color:inherit}
+  .app{display:flex;flex-direction:column;height:100vh}
+
+  /* top */
+  .topbar{display:flex;align-items:center;gap:16px;height:56px;padding:0 20px;background:var(--surface);
+    border-bottom:1px solid var(--line);z-index:5}
+  .brand{display:flex;align-items:center;gap:8px;font-weight:500;letter-spacing:-.01em;white-space:nowrap}
+  .brand .mark{width:18px;height:18px;border:1.5px solid var(--ink);border-radius:5px;position:relative}
+  .brand .mark::after{content:"";position:absolute;left:5px;top:5px;width:6px;height:6px;border-radius:2px;background:var(--accent)}
+  .brand .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:2px}
+  .divider{width:1px;height:20px;background:var(--line-strong)}
+  .modes{display:inline-flex;border:1px solid var(--line-strong);border-radius:7px;overflow:hidden;background:var(--surface-2)}
+  .mode{height:28px;padding:0 11px;border:0;background:none;font-size:12px;color:var(--ink-2);cursor:pointer;display:inline-flex;align-items:center;gap:6px}
+  .mode+.mode{border-left:1px solid var(--line)}
+  .mode.on{background:var(--ink);color:#fff}
+  .mode .dot{width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.7}
+  .top-actions{margin-left:auto;display:flex;align-items:center;gap:10px}
+  .esc{font-size:11.5px;color:var(--muted);display:flex;align-items:center;gap:6px}
+  .kbd{font-family:var(--mono);font-size:10px;border:1px solid var(--line-strong);border-bottom-width:2px;
+    border-radius:4px;padding:0 4px;color:var(--ink-2);background:var(--surface)}
+  .btn{height:30px;padding:0 11px;border:1px solid var(--line-strong);border-radius:7px;background:var(--surface);
+    cursor:pointer;color:var(--ink-2);display:inline-flex;align-items:center;gap:6px;font-size:12px}
+  .btn:hover{background:var(--surface-2);color:var(--ink)}
+  .btn.primary{background:var(--ink);color:#fff;border-color:var(--ink)}
+  .btn.primary:hover{background:#000}
+  .btn.small{height:26px;padding:0 9px;font-size:11.5px}
+  .btn.ghost{background:none;border-color:transparent;color:var(--muted)}
+  .btn.ghost:hover{background:var(--surface-2);color:var(--ink)}
+  .btn[disabled]{opacity:.5;cursor:default}
+  .btn:focus-visible,.cand:focus-within,.mode:focus-visible,.row:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+  /* layout */
+  .picker{display:grid;grid-template-columns:minmax(0,1fr) 404px;flex:1;min-height:0}
+  .stage{position:relative;min-width:0;overflow:hidden;display:flex;align-items:center;justify-content:center;
+    padding:28px 36px 56px;background:#E9E5DE}
+  .stage::before{content:"";position:absolute;inset:0;background:
+    radial-gradient(1200px 600px at 30% 20%, rgba(255,255,255,.5), transparent 70%)}
+  .hintbar{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);display:flex;align-items:center;gap:14px;
+    background:rgba(27,26,23,.86);color:#fff;font-size:11.5px;padding:7px 12px;border-radius:7px;white-space:nowrap;z-index:9}
+  .hintbar .kbd{background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.25);color:#fff}
+
+  /* desktop mock */
+  .deskwin{width:min(820px,92%);background:#fff;border:1px solid #D6D1C7;border-radius:10px;overflow:hidden;
+    box-shadow:0 14px 40px rgba(27,26,23,.16);position:relative}
+  .titlebar{display:flex;align-items:center;gap:6px;height:34px;padding:0 12px;background:#FBFAF7;border-bottom:1px solid #EDEAE4}
+  .titlebar i{width:8px;height:8px;border-radius:50%;background:#DCD7CD;display:block}
+  .titlebar .t{margin-left:10px;font-size:11.5px;color:#8B857B}
+  .winbody{display:grid;grid-template-columns:150px minmax(0,1fr);min-height:330px}
+  .winbody .side{border-right:1px solid #F0EDE7;background:#FCFBF8;padding:12px 9px;display:flex;flex-direction:column;gap:2px}
+  .winbody .side .n{font-size:12px;color:#8B857B;padding:7px 9px;border-radius:5px;white-space:nowrap}
+  .winbody .side .n.on{background:#F1EEE8;color:#1B1A17;font-weight:500}
+  .winbody .main{padding:22px 24px;display:flex;flex-direction:column;gap:0}
+  .winbody h3{margin:0 0 14px;font-size:15px;font-weight:500}
+  .setrow{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 12px;border-bottom:1px solid #F0EDE7;
+    font-size:12.5px;color:#55514A;border-radius:6px;position:relative}
+  .setrow:last-child{border-bottom:0}
+  .setrow .l{display:flex;flex-direction:column;gap:2px}
+  .setrow .sub{font-size:11px;color:#8B857B}
+  .toggle{width:30px;height:16px;border-radius:9px;background:#D9D3C7;position:relative;flex:none}
+  .toggle::after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:#fff}
+  .toggle.on{background:var(--accent)}.toggle.on::after{left:16px}
+  .toggle.neutral{background:#8B857B}
+  .inputmock{height:26px;min-width:150px;border:1px solid #E4E0D8;border-radius:5px;background:#FCFBF8;
+    font-family:var(--mono);font-size:11px;color:#8B857B;display:flex;align-items:center;padding:0 8px}
+  .target{outline:2px solid var(--accent);outline-offset:2px;background:rgba(166,90,18,.07);
+    box-shadow:0 0 0 9999px rgba(27,26,23,.10);z-index:4}
+  .target.flash{outline-color:var(--ok);background:rgba(47,107,79,.08)}
+  .elbadge{position:absolute;right:4px;top:-26px;background:var(--ink);color:#fff;font-size:10.5px;padding:2px 7px;
+    border-radius:4px;white-space:nowrap;font-family:var(--mono);z-index:5}
+  .elbadge .r{color:#D9B98A}
+  .elbadge::after{content:"";position:absolute;left:12px;bottom:-4px;width:7px;height:7px;background:var(--ink);transform:rotate(45deg)}
+
+  /* web mock */
+  .browser{width:min(860px,94%);background:#fff;border:1px solid #D6D1C7;border-radius:10px;overflow:hidden;
+    box-shadow:0 14px 40px rgba(27,26,23,.16);position:relative}
+  .bchrome{display:flex;align-items:center;gap:8px;height:38px;padding:0 12px;background:#FBFAF7;border-bottom:1px solid #EDEAE4}
+  .bchrome i{width:8px;height:8px;border-radius:50%;background:#DCD7CD;display:block}
+  .url{flex:1;height:24px;border:1px solid #E4E0D8;border-radius:5px;background:#fff;display:flex;align-items:center;
+    gap:6px;padding:0 8px;font-family:var(--mono);font-size:10.5px;color:#8B857B;margin-left:8px}
+  .page{padding:0 0 24px}
+  .pnav{display:flex;align-items:center;gap:20px;padding:14px 26px;border-bottom:1px solid #F0EDE7;font-size:12px;color:#55514A}
+  .pnav .logo{font-weight:500;color:#1B1A17;margin-right:8px}
+  .pnav .links{display:flex;gap:16px;color:#8B857B}
+  .pnav .cart{margin-left:auto;font-family:var(--mono);font-size:11px;color:#8B857B}
+  .hero{display:grid;grid-template-columns:1.1fr .9fr;gap:24px;padding:26px}
+  .hero h1{margin:0 0 10px;font-size:26px;line-height:1.25;font-weight:500;letter-spacing:-.01em}
+  .hero p{margin:0 0 16px;color:#6F6A62;font-size:12.5px;max-width:38ch}
+  .price{font-family:var(--mono);font-size:20px;color:#1B1A17;margin:0 0 16px}
+  .buy{height:34px;padding:0 16px;border-radius:7px;background:#1B1A17;color:#fff;border:0;font-size:12.5px;
+    display:inline-flex;align-items:center;position:relative;outline-offset:3px}
+  .buy.target{box-shadow:0 0 0 9999px rgba(27,26,23,.10);outline:2px solid var(--accent);background:#1B1A17}
+  .buy .elbadge{top:50%;left:calc(100% + 12px);right:auto;transform:translateY(-50%)}
+  .buy .elbadge::after{left:-4px;top:50%;bottom:auto;transform:translateY(-50%) rotate(45deg)}
+  .heroimg{background:#F1EEE8;border:1px solid #E4E0D8;border-radius:8px;aspect-ratio:4/3;position:relative;overflow:hidden}
+  .heroimg::before{content:"";position:absolute;inset:18% 22%;border:1px solid #DCD7CD;border-radius:8px;background:#FCFBF8}
+  .heroimg::after{content:"";position:absolute;left:30%;right:30%;top:42%;height:2px;background:#DCD7CD;box-shadow:0 14px 0 #DCD7CD,0 28px 0 #DCD7CD}
+
+  /* panel */
+  .panel{background:var(--surface);border-left:1px solid var(--line);overflow-y:auto;padding:20px 22px 28px;min-height:0}
+  .p-head{display:flex;align-items:center;gap:8px;margin:0 0 10px}
+  .p-head h2{font-size:11.5px;font-weight:500;color:var(--muted);margin:0}
+  .chip{display:inline-flex;align-items:center;height:20px;padding:0 7px;border-radius:4px;font-size:10.5px;
+    border:1px solid var(--line);background:var(--surface-2);color:var(--ink-2)}
+  .chip.web{color:var(--accent);border-color:#E4D2BE;background:var(--accent-soft)}
+  .elcard{border:1px solid var(--line);border-radius:9px;background:var(--surface-2);padding:12px 14px}
+  .elcard .role{font-family:var(--mono);font-size:10.5px;color:var(--accent);letter-spacing:.01em}
+  .elcard .nm{font-size:15px;font-weight:500;margin:2px 0 8px}
+  .elcard dl{display:grid;grid-template-columns:64px 1fr;gap:4px 10px;margin:0;font-size:11.5px}
+  .elcard dt{color:var(--muted)}
+  .elcard dd{margin:0;font-family:var(--mono);font-size:11px;color:var(--ink-2)}
+
+  .sect{margin-top:20px}
+  .sect-head{display:flex;align-items:center;gap:8px;margin:0 0 8px}
+  .sect-head h3{font-size:11.5px;font-weight:500;color:var(--muted);margin:0}
+  .sect-head .rule{flex:1;height:1px;background:var(--line)}
+  .sect-head .n{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  .sect-head .n b{color:var(--ok);font-weight:400}
+
+  .cands{display:flex;flex-direction:column;gap:6px}
+  .cand{display:grid;grid-template-columns:16px minmax(0,1fr) auto;gap:9px;align-items:center;
+    border:1px solid var(--line);border-radius:8px;padding:8px 10px;cursor:pointer;background:var(--surface)}
+  .cand:hover{border-color:var(--line-strong)}
+  .cand.on{border-color:var(--ink);box-shadow:0 0 0 1px var(--ink) inset}
+  .cand input{margin:0;accent-color:var(--ink)}
+  .cand .cn{font-size:11.5px;color:var(--ink-2)}
+  .cand code{display:block;font-family:var(--mono);font-size:10.5px;color:var(--muted);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+  .stab{font-size:10px;padding:1px 5px;border-radius:3px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+  .stab.high{color:var(--ok);border-color:var(--ok-line);background:var(--ok-soft)}
+  .stab.mid{color:#7A5A25;border-color:#EADCC2;background:#FCF6E9}
+  .stab.low{color:var(--failed);border-color:var(--failed-line);background:var(--failed-soft)}
+
+  .preview{margin-top:8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);overflow:hidden}
+  .preview .code{display:flex;align-items:center;gap:8px;padding:9px 11px;font-family:var(--mono);font-size:11px;color:var(--ink-2)}
+  .preview .code span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .preview .bar{display:flex;align-items:center;gap:8px;padding:7px 10px;border-top:1px solid var(--line);background:var(--surface)}
+  .preview .bar .hint{font-size:10.5px;color:var(--muted);margin-left:auto}
+  .iconbtn{width:24px;height:24px;display:grid;place-items:center;border:1px solid transparent;border-radius:5px;
+    background:none;cursor:pointer;color:var(--muted)}
+  .iconbtn:hover{background:var(--surface-2);border-color:var(--line);color:var(--ink)}
+
+  .bindbox{border:1px solid var(--line);border-radius:9px;background:var(--surface);overflow:hidden}
+  .brow{display:grid;grid-template-columns:78px 1fr;gap:10px;align-items:center;padding:9px 11px;border-top:1px solid var(--line);font-size:11.5px}
+  .brow:first-child{border-top:0}
+  .brow .k{color:var(--muted)}
+  .brow .v{color:var(--ink-2)}
+  .brow .v .mono{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  .seg{display:inline-flex;border:1px solid var(--line-strong);border-radius:6px;overflow:hidden;background:var(--surface-2)}
+  .seg button{height:26px;padding:0 10px;border:0;background:none;font-size:11.5px;color:var(--ink-2);cursor:pointer}
+  .seg button+button{border-left:1px solid var(--line)}
+  .seg button.on{background:var(--ink);color:#fff}
+  .selrow{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--ink-2)}
+  .selrow select{height:26px;border:1px solid var(--line);border-radius:5px;background:var(--surface);font-size:11.5px;padding:0 6px;color:var(--ink-2);flex:1}
+  .actions{display:flex;align-items:center;gap:8px;margin-top:20px;padding-top:14px;border-top:1px solid var(--line)}
+  .actions .sp{flex:1}
+  .actions .hint{font-size:10.5px;color:var(--muted)}
+
+  .toast{position:fixed;left:50%;bottom:64px;transform:translateX(-50%);background:var(--ink);color:#fff;
+    font-size:12px;padding:7px 12px;border-radius:7px;opacity:0;pointer-events:none;transition:opacity .18s ease;z-index:30}
+  .toast.show{opacity:1}
+
+  .statusbar{display:flex;align-items:center;gap:16px;height:38px;padding:0 20px;border-top:1px solid var(--line);
+    background:var(--surface);font-size:11px;color:var(--muted)}
+  .statusbar .mono{font-family:var(--mono)}
+  .statusbar .sep{width:1px;height:13px;background:var(--line)}
+  .statusbar .right{margin-left:auto;display:flex;gap:14px;align-items:center}
+  .conn{display:inline-flex;align-items:center;gap:6px}
+  .conn .dot{width:5px;height:5px;border-radius:50%;background:var(--ok)}
+
+  @media (max-width:1040px){.picker{grid-template-columns:minmax(0,1fr) 360px}.winbody{grid-template-columns:120px 1fr}}
+  @media (max-width:860px){.picker{display:block;overflow:auto}.stage{min-height:52vh}.panel{border-left:0;border-top:1px solid var(--line)}}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand"><span class="mark"></span>Cuekeeper <span class="sub">Studio</span></div>
+    <span class="divider"></span>
+    <div class="modes" role="tablist" aria-label="拾取目标类型">
+      <button class="mode on" type="button" data-mode="desktop" role="tab" aria-selected="true"><span class="dot"></span>桌面应用</button>
+      <button class="mode" type="button" data-mode="web" role="tab" aria-selected="false"><span class="dot"></span>网页</button>
+    </div>
+    <div class="top-actions">
+      <span class="esc"><span class="kbd">Esc</span> 退出拾取</span>
+      <button class="btn" type="button">重新拾取</button>
+    </div>
+  </header>
+
+  <main class="picker">
+    <section class="stage" id="stage">
+      <!-- desktop -->
+      <div class="deskwin" id="sceneDesktop">
+        <div class="titlebar"><i></i><i></i><i></i><span class="t">aTrust · 设置</span></div>
+        <div class="winbody">
+          <div class="side"><span class="n">概览</span><span class="n on">网络</span><span class="n">账号</span><span class="n">设置</span></div>
+          <div class="main">
+            <h3>网络设置</h3>
+            <div class="setrow target" id="pickDesktop">
+              <span class="l"><span>启用代理</span><span class="sub">通过本地代理转发流量</span></span>
+              <span class="toggle"></span>
+              <span class="elbadge"><span class="r">checkbox</span> · 启用代理</span>
+            </div>
+            <div class="setrow">
+              <span class="l"><span>代理地址</span><span class="sub">HTTP / SOCKS5</span></span>
+              <span class="inputmock">127.0.0.1:8080</span>
+            </div>
+            <div class="setrow">
+              <span class="l"><span>开机自动连接</span><span class="sub">登录后自动启用</span></span>
+              <span class="toggle on neutral"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- web -->
+      <div class="browser" id="sceneWeb" hidden>
+        <div class="bchrome"><i></i><i></i><i></i><span class="url">https://shop.example.com/item/42</span></div>
+        <div class="page">
+          <div class="pnav"><span class="logo">Northwind</span><span class="links"><span>产品</span><span>定价</span><span>文档</span></span><span class="cart">购物车 · 2</span></div>
+          <div class="hero">
+            <div>
+              <h1>Field Notes 笔记本<br>三本装</h1>
+              <p>100gsm 无酸纸，A5 尺寸，适合日常记录与野外笔记。</p>
+              <p class="price">¥ 128.00</p>
+              <button class="buy target" id="pickWeb" type="button">立即购买<span class="elbadge"><span class="r">button</span> · 立即购买</span></button>
+            </div>
+            <div class="heroimg"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="hintbar">
+        <span>移动鼠标选择元素</span><span>·</span><span>单击确认</span><span>·</span>
+        <span><span class="kbd">⌥</span> 点击选择父级</span><span>·</span><span><span class="kbd">Esc</span> 取消</span>
+      </div>
+    </section>
+
+    <aside class="panel">
+      <div class="p-head"><h2>已捕获元素</h2><span class="chip" id="modeChip">桌面应用</span></div>
+
+      <div class="elcard">
+        <div class="role" id="elRole">checkbox</div>
+        <div class="nm" id="elName">启用代理</div>
+        <dl>
+          <dt>值</dt><dd id="elValue">0 · 未选中</dd>
+          <dt>位置</dt><dd id="elFrame">812, 344 · 30 × 16</dd>
+          <dt>应用</dt><dd id="elApp">aTrust · com.sangfor.atrust</dd>
+        </dl>
+      </div>
+
+      <div class="sect">
+        <div class="sect-head"><h3>定位器候选</h3><span class="rule"></span><span class="n" id="matchCount">匹配 <b>1</b> 个</span></div>
+        <div class="cands" id="cands"></div>
+        <div class="preview">
+          <div class="code"><span id="locatorCode">role=checkbox name=启用代理</span>
+            <button class="iconbtn" type="button" title="复制定位器">⧉</button></div>
+          <div class="bar">
+            <button class="btn small" type="button" id="testLocator">测试定位器</button>
+            <span class="hint" id="stabHint">稳定 · 同名元素 0 个 · 层级 3</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="sect">
+        <div class="sect-head"><h3>绑定动作</h3><span class="rule"></span><span class="n">手动创建 · 未录制</span></div>
+        <div class="bindbox">
+          <div class="brow"><span class="k">动作</span>
+            <span class="seg" id="actionSeg">
+              <button class="on" type="button" data-act="click">点击</button>
+              <button type="button" data-act="type">输入</button>
+              <button type="button" data-act="assert">断言</button>
+            </span>
+          </div>
+          <div class="brow"><span class="k">参数</span><span class="v" id="actionParam">单击 · 左键 · 不移动指针</span></div>
+          <div class="brow"><span class="k">目标行为</span>
+            <span class="selrow"><select aria-label="目标行为"><option>测试行为 1</option><option>打开设置</option><option>新建行为</option></select></span>
+          </div>
+          <div class="brow"><span class="k">插入位置</span><span class="v">第 6 步 · 点击 [登录] 之后</span></div>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button class="btn primary" type="button" id="bindBtn">确认绑定</button>
+        <button class="btn" type="button" id="repick">重新拾取</button>
+        <span class="sp"></span>
+        <span class="hint">绑定后可继续拾取下一个</span>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="statusbar">
+    <span>拾取模式 <span class="mono" id="modeLabel">桌面</span></span>
+    <span class="sep"></span>
+    <span>目标窗口 <span class="mono" id="winLabel">w-16780</span></span>
+    <span class="sep"></span>
+    <span>候选 <span class="mono" id="candLabel">4</span></span>
+    <span class="right"><span class="conn"><span class="dot"></span>agent-desktop 已连接</span><span>辅助功能 已授权</span></span>
+  </footer>
+</div>
+
+<div class="toast" id="toast">已绑定到「测试行为 1」第 6 步</div>
+
+<script>
+  const data = {
+    desktop: {
+      chip:'桌面应用', modeLabel:'桌面', win:'w-16780',
+      role:'checkbox', name:'启用代理', value:'0 · 未选中',
+      frame:'812, 344 · 30 × 16', app:'aTrust · com.sangfor.atrust',
+      cands:[
+        {k:'role + name', code:'role=checkbox name=启用代理', stab:'high', st:'高', matches:1, note:'稳定 · 同名元素 0 个 · 层级 3'},
+        {k:'层级路径', code:'window[设置] > group > row[启用代理] > checkbox', stab:'mid', st:'中', matches:1, note:'稳定 · 依赖层级，窗口结构变化需重拾'},
+        {k:'原生 id', code:'native_id=proxy_toggle', stab:'high', st:'高', matches:1, note:'稳定 · 应用更新可能改动 id'},
+        {k:'坐标兜底', code:'point=812,344', stab:'low', st:'低', matches:0, note:'不稳定 · 分辨率或缩放变化后失效'}
+      ]
+    },
+    web: {
+      chip:'网页', modeLabel:'网页', win:'tab · 42',
+      role:'button', name:'立即购买', value:'—',
+      frame:'684, 512 · 96 × 34', app:'Chrome · shop.example.com',
+      cands:[
+        {k:'role + name', code:'role=button name=立即购买', stab:'high', st:'高', matches:1, note:'稳定 · 同名元素 0 个 · 可访问性完整'},
+        {k:'CSS 选择器', code:'#buy-now', stab:'high', st:'高', matches:1, note:'稳定 · id 唯一，适合网页'},
+        {k:'XPath', code:'//button[contains(., "立即购买")]', stab:'mid', st:'中', matches:1, note:'可用 · 文案变化后会失效'},
+        {k:'坐标兜底', code:'point=684,512', stab:'low', st:'低', matches:0, note:'不稳定 · 响应式布局变化后失效'}
+      ]
+    }
+  };
+
+  let mode = 'desktop';
+  let candIndex = 0;
+
+  const $ = id=>document.getElementById(id);
+
+  function renderCands(){
+    const d = data[mode];
+    $('cands').innerHTML = d.cands.map((c,i)=>`
+      <label class="cand ${i===candIndex?'on':''}">
+        <input type="radio" name="cand" ${i===candIndex?'checked':''} data-i="${i}">
+        <span><span class="cn">${c.k}</span><code>${c.code}</code></span>
+        <span class="stab ${c.stab}">${c.st}</span>
+      </label>`).join('');
+
+    const c = d.cands[candIndex];
+    $('locatorCode').textContent = c.code;
+    $('stabHint').textContent = c.note;
+    $('matchCount').innerHTML = c.matches ? `匹配 <b>${c.matches}</b> 个` : `匹配 <b>0</b> 个 · 仅兜底`;
+    document.querySelectorAll('.cand input').forEach(r=>r.addEventListener('change',()=>{
+      candIndex = +r.dataset.i; renderCands();
+    }));
+  }
+
+  function renderMode(){
+    const d = data[mode];
+    $('modeChip').textContent = d.chip;
+    $('modeChip').className = 'chip ' + (mode==='web'?'web':'');
+    $('elRole').textContent = d.role;
+    $('elName').textContent = d.name;
+    $('elValue').textContent = d.value;
+    $('elFrame').textContent = d.frame;
+    $('elApp').textContent = d.app;
+    $('modeLabel').textContent = d.modeLabel;
+    $('winLabel').textContent = d.win;
+    $('candLabel').textContent = d.cands.length;
+    $('sceneDesktop').hidden = mode !== 'desktop';
+    $('sceneWeb').hidden = mode !== 'web';
+    document.querySelectorAll('.mode').forEach(b=>{
+      const on = b.dataset.mode===mode;
+      b.classList.toggle('on',on); b.setAttribute('aria-selected',String(on));
+    });
+    candIndex = 0;
+    renderCands();
+  }
+
+  document.querySelectorAll('.mode').forEach(b=>b.addEventListener('click',()=>{
+    mode = b.dataset.mode; renderMode();
+  }));
+
+  $('testLocator').addEventListener('click',()=>{
+    const el = mode==='desktop' ? $('pickDesktop') : $('pickWeb');
+    el.classList.add('flash');
+    setTimeout(()=>el.classList.remove('flash'), 1200);
+    toast(mode==='desktop' ? '定位器命中 1 个元素' : '定位器命中 1 个元素（#buy-now）');
+  });
+
+  $('actionSeg').addEventListener('click',e=>{
+    const b = e.target.closest('button'); if(!b) return;
+    document.querySelectorAll('#actionSeg button').forEach(x=>x.classList.toggle('on',x===b));
+    const act = b.dataset.act;
+    $('actionParam').textContent = act==='click' ? '单击 · 左键 · 不移动指针'
+      : act==='type' ? '输入 {{text}} · 先聚焦再写入'
+      : '断言 checked = true · 轮询 2000ms';
+  });
+
+  $('bindBtn').addEventListener('click',()=>{
+    toast('已绑定到「测试行为 1」第 6 步');
+    $('bindBtn').textContent='已绑定';
+    $('bindBtn').disabled=true;
+  });
+
+  $('repick').addEventListener('click',()=>{
+    $('bindBtn').textContent='确认绑定';
+    $('bindBtn').disabled=false;
+    toast('移动鼠标重新选择元素');
+  });
+
+  let t;
+  function toast(msg){
+    const el=$('toast'); el.textContent=msg; el.classList.add('show');
+    clearTimeout(t); t=setTimeout(()=>el.classList.remove('show'),2000);
+  }
+
+  if(location.hash==='#web') mode='web';
+  renderMode();
+</script>
+</body>
+</html>

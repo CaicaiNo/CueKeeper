@@ -1,0 +1,607 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aTrust 安装流程 #128 · 三级时间线</title>
+<style>
+  :root{
+    --bg:#F5F3EF;--surface:#FFFFFF;--surface-2:#FAF9F6;
+    --ink:#1B1A17;--ink-2:#55514A;--muted:#8B857B;
+    --line:#E4E0D8;--line-strong:#D6D1C7;
+    --accent:#A65A12;--accent-soft:#F4E9DC;
+    --failed:#A3281F;--failed-soft:#FBF3F1;--failed-line:#E5CEC9;
+    --warn:#8A5A12;--warn-soft:#FCF6E9;--warn-line:#EADCC2;
+    --ok:#2F6B4F;
+    --radius-s:8px;--radius-m:10px;--radius-l:14px;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,"JetBrains Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;height:100vh;overflow:hidden;background:var(--bg);color:var(--ink);
+    font:400 13px/1.5 ui-sans-serif,-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",Arial,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  button{font:inherit;color:inherit}
+  .app{display:flex;flex-direction:column;height:100vh;min-height:0}
+
+  .topbar{display:flex;align-items:center;gap:20px;height:56px;padding:0 24px;background:var(--surface);
+    border-bottom:1px solid var(--line);z-index:6}
+  .brand{display:flex;align-items:center;gap:8px;font-weight:500;letter-spacing:-.01em}
+  .brand .mark{width:18px;height:18px;border:1.5px solid var(--ink);border-radius:5px;position:relative}
+  .brand .mark::after{content:"";position:absolute;left:5px;top:5px;width:6px;height:6px;border-radius:2px;background:var(--accent)}
+  .divider{width:1px;height:20px;background:var(--line-strong)}
+  .run-name{display:flex;align-items:baseline;gap:8px;font-weight:500}
+  .run-id{color:var(--muted);font-family:var(--mono);font-size:12px}
+  .run-state{display:flex;align-items:center;gap:6px;color:var(--ink-2)}
+  .dot{width:7px;height:7px;border-radius:50%;display:inline-block;background:var(--muted)}
+  .dot.fail{background:var(--failed)}
+  .progress{display:flex;align-items:center;gap:8px}
+  .progress .track{width:88px;height:3px;border-radius:2px;background:var(--line);overflow:hidden}
+  .progress .fill{display:block;height:100%;width:43%;background:var(--ink)}
+  .progress .count,.elapsed{font-family:var(--mono);font-size:12px;color:var(--ink-2)}
+  .env{font-size:12px;color:var(--muted);white-space:nowrap}
+  .top-actions{margin-left:auto;display:flex;align-items:center;gap:8px}
+  .btn{height:32px;padding:0 12px;border:1px solid var(--line-strong);border-radius:var(--radius-s);
+    background:var(--surface);cursor:pointer;color:var(--ink-2);display:inline-flex;align-items:center;gap:6px}
+  .btn:hover{background:var(--surface-2);color:var(--ink)}
+  .btn.primary{background:var(--ink);color:#fff;border-color:var(--ink)}
+  .btn.primary:hover{background:#000;color:#fff}
+  .btn.danger{color:var(--failed);border-color:var(--failed-line)}
+  .btn:focus-visible,.step:focus-visible,.action-row:focus-visible,.phase-toggle:focus-visible,
+  .shot-btn:focus-visible,.icon-btn:focus-visible,.link{outline:2px solid var(--accent);outline-offset:2px}
+
+  .layout{display:grid;grid-template-columns:400px minmax(0,1fr);flex:1;min-height:0}
+  .rail{background:var(--surface-2);border-right:1px solid var(--line);overflow-y:auto;padding:16px 14px 32px 18px}
+  .rail-head{display:flex;align-items:center;justify-content:space-between;margin:4px 0 10px 30px}
+  .rail-head h1{font-size:12px;font-weight:500;color:var(--muted);margin:0}
+  .rail-tools{display:flex;align-items:center;gap:6px}
+  .filter,.ghost{background:none;border:0;color:var(--muted);font-size:11.5px;cursor:pointer;padding:2px 4px;border-radius:4px}
+  .filter:hover,.ghost:hover{color:var(--ink);background:#F1EEE8}
+  .restore{display:none;align-items:center;gap:6px;margin:0 0 10px 30px;padding:6px 8px;border:1px solid var(--line);
+    border-radius:6px;background:var(--surface);font-size:11px;color:var(--ink-2)}
+  .restore.show{display:flex}
+  .restore .mono{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  .restore .sp{flex:1}
+
+  .timeline{list-style:none;margin:0;padding:0;position:relative}
+  .timeline::before{content:"";position:absolute;left:14px;top:8px;bottom:12px;width:1.5px;background:var(--line)}
+  .phase{margin-bottom:2px}
+  .phase-toggle{display:flex;align-items:center;gap:8px;width:100%;background:none;border:0;
+    padding:8px 6px 8px 26px;cursor:pointer;text-align:left;border-radius:6px;position:relative;z-index:1}
+  .phase-toggle:hover{background:#F1EEE8}
+  .phase-toggle .chev{color:var(--muted);width:10px;display:inline-grid;place-items:center;transition:transform .12s ease;transform:rotate(90deg)}
+  .phase.closed .phase-toggle .chev{transform:rotate(0)}
+  .phase-title{font-weight:500;font-size:12.5px}
+  .phase-meta{margin-left:auto;color:var(--muted);font-size:11px;font-family:var(--mono)}
+  .phase-dot{width:6px;height:6px;border-radius:50%;background:var(--line-strong);flex:none}
+  .phase-dot.done{background:var(--ink)}.phase-dot.fail{background:var(--failed)}
+  .phase.closed .phase-body{display:none}
+
+  .action{position:relative}
+  .action-row{display:grid;grid-template-columns:22px 1fr auto;gap:8px;align-items:center;width:100%;
+    background:none;border:0;padding:5px 6px 5px 24px;border-radius:6px;cursor:pointer;text-align:left;position:relative;z-index:1}
+  .action-row:hover{background:#F1EEE8}
+  .action.fail .action-row{padding-top:6px}
+  .action:not(.open) .action-row.selected{background:var(--surface);box-shadow:0 0 0 1px var(--line) inset}
+  .a-node{width:15px;height:15px;border-radius:50%;border:1.5px solid var(--line-strong);background:var(--surface-2);
+    display:grid;place-items:center;justify-self:center;position:relative;z-index:1}
+  .action.done .a-node{background:var(--ink);border-color:var(--ink);color:#fff}
+  .action.fail .a-node{background:var(--failed);border-color:var(--failed);color:#fff}
+  .action.run .a-node{background:var(--accent);border-color:var(--accent);color:#fff}
+  .a-title{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ink-2)}
+  .action.fail .a-title{color:var(--failed);font-weight:500}
+  .action.run .a-title{color:var(--accent);font-weight:500}
+  .a-meta{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  .a-chev{color:var(--muted);display:inline-grid;place-items:center;transition:transform .12s ease}
+  .action.open .a-chev{transform:rotate(90deg)}
+  .a-body{display:none;margin:0;padding:0;list-style:none}
+  .action.open .a-body{display:block}
+  .leaf{display:grid;grid-template-columns:16px 1fr auto;gap:8px;align-items:center;padding:3px 6px 3px 46px;
+    border-radius:6px;cursor:pointer;position:relative}
+  .leaf:hover{background:#F1EEE8}
+  .leaf.selected{background:var(--surface);box-shadow:0 0 0 1px var(--line) inset}
+  .leaf .d{width:6px;height:6px;border-radius:50%;background:var(--line-strong);justify-self:center}
+  .leaf.done .d{background:var(--ink)}
+  .leaf.fail .d{background:var(--failed)}
+  .leaf.todo .d{background:transparent;border:1.5px solid var(--line-strong);width:7px;height:7px}
+  .leaf .t{font-size:12px;color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .leaf.fail .t{color:var(--failed)}
+  .leaf.selected .t{color:var(--ink)}
+  .leaf .m{font-family:var(--mono);font-size:10.5px;color:var(--muted);display:flex;gap:6px;align-items:center}
+  .idx{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-right:4px}
+
+  .detail{overflow-y:auto;padding:0 32px 40px;min-width:0;scroll-behavior:smooth}
+  .detail-inner{max-width:860px}
+  .detail-head{position:sticky;top:0;z-index:4;background:var(--bg);padding:22px 0 12px;border-bottom:1px solid transparent}
+  .detail-head.scrolled{border-bottom-color:var(--line)}
+  .crumb{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--muted);margin:0 0 6px}
+  .crumb .sep{color:var(--line-strong)}
+  .step-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .step-head .no{font-family:var(--mono);font-size:13px;color:var(--muted)}
+  .step-head h2{font-size:21px;line-height:1.3;font-weight:500;margin:0;letter-spacing:-.01em}
+  .chip{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 8px;border-radius:5px;font-size:11.5px;
+    border:1px solid var(--line);color:var(--ink-2);background:var(--surface)}
+  .chip.fail{color:var(--failed);border-color:var(--failed-line);background:var(--failed-soft)}
+  .head-meta{color:var(--muted);font-size:12px;font-family:var(--mono);margin-left:auto}
+  .summary{margin:10px 0 0;color:var(--ink-2);font-size:12.5px;max-width:70ch}
+
+  .sect{margin-top:22px}
+  .sect-head{display:flex;align-items:center;gap:8px;margin:0 0 8px}
+  .sect-head h3{font-size:11.5px;font-weight:500;color:var(--muted);margin:0;letter-spacing:.01em}
+  .sect-head .rule{flex:1;height:1px;background:var(--line)}
+  .sect-head .extra{font-size:11px;color:var(--muted);font-family:var(--mono)}
+
+  .error{border:1px solid var(--failed-line);border-radius:var(--radius-m);background:var(--surface);overflow:hidden}
+  .error-head{display:flex;align-items:center;gap:10px;padding:11px 14px;background:var(--failed-soft);border-bottom:1px solid var(--failed-line)}
+  .error-head .ic{color:var(--failed);display:grid;place-items:center}
+  .error-head .code{font-family:var(--mono);font-size:11px;color:var(--failed)}
+  .error-head .t{font-size:12.5px;font-weight:500}
+  .error-body{padding:12px 14px}
+  .error-body p{margin:0;color:var(--ink-2);font-size:12px}
+  .diff{display:grid;grid-template-columns:64px 1fr;gap:6px 12px;margin:10px 0 0}
+  .diff dt{color:var(--muted);font-size:11.5px;margin:0}
+  .diff dd{margin:0;font-family:var(--mono);font-size:11.5px;color:var(--ink-2)}
+  .diff dd.bad{color:var(--failed)}.diff dd.good{color:var(--ok)}
+  .sugg{margin:12px 0 0;padding:10px 12px;background:var(--surface-2);border:1px solid var(--line);border-radius:8px}
+  .sugg h4{margin:0 0 4px;font-size:11px;font-weight:500;color:var(--muted)}
+  .sugg ol{margin:0;padding-left:16px;color:var(--ink-2);font-size:11.5px;line-height:1.8}
+  .sugg code{font-family:var(--mono);font-size:10.5px;background:#F1EEE8;padding:1px 4px;border-radius:3px}
+
+  .shots{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .shot{margin:0;border:1px solid var(--line);border-radius:var(--radius-m);background:var(--surface);overflow:hidden}
+  .shot-frame{position:relative;aspect-ratio:16/10;background:#EDEAE4;padding:16px 16px 0}
+  .shot-cap{display:flex;align-items:center;justify-content:space-between;padding:7px 11px;border-top:1px solid var(--line);font-size:11px;color:var(--muted)}
+  .shot-cap .t{font-family:var(--mono);font-size:10.5px}
+  .shot-btn{background:none;border:0;color:var(--ink-2);font-size:11px;cursor:pointer;padding:2px 4px;border-radius:4px}
+  .shot-btn:hover{color:var(--ink);background:var(--surface-2)}
+
+  .win{position:absolute;inset:16px 16px 0;background:#fff;border:1px solid #DCD7CD;border-radius:8px 8px 0 0;
+    box-shadow:0 1px 2px rgba(27,26,23,.06);display:flex;flex-direction:column;overflow:hidden}
+  .win-bar{display:flex;align-items:center;gap:5px;height:24px;padding:0 9px;border-bottom:1px solid #EEEBE4;background:#FBFAF7}
+  .win-bar i{width:6px;height:6px;border-radius:50%;background:#DCD7CD;display:block}
+  .win-title{margin-left:8px;font-size:10.5px;color:#8B857B}
+  .win-body{flex:1;display:grid;grid-template-columns:80px 1fr;min-height:0}
+  .win-side{border-right:1px solid #F0EDE7;padding:8px 7px;display:flex;flex-direction:column;gap:2px;background:#FCFBF8}
+  .nav{font-size:10.5px;color:#8B857B;padding:4px 7px;border-radius:5px;line-height:1.2;white-space:nowrap}
+  .nav.on{background:#F1EEE8;color:#1B1A17}
+  .win-main{padding:12px;display:flex;flex-direction:column;gap:8px;min-height:0}
+  .row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid #F0EDE7;font-size:10.5px;color:#55514A}
+  .row:last-child{border-bottom:0}
+  .row .r{display:flex;align-items:center;gap:8px;position:relative}
+  .toggle{width:24px;height:13px;border-radius:7px;background:#D9D3C7;position:relative;flex:none}
+  .toggle::after{content:"";position:absolute;top:2px;left:2px;width:9px;height:9px;border-radius:50%;background:#fff}
+  .toggle.on{background:var(--accent)}.toggle.on::after{left:13px}
+  .crosshair{position:absolute;left:50%;top:50%;width:28px;height:28px;transform:translate(-50%,-50%);pointer-events:none;z-index:3}
+  .crosshair::before,.crosshair::after{content:"";position:absolute;background:rgba(166,90,18,.55)}
+  .crosshair::before{left:50%;top:0;bottom:0;width:1px}
+  .crosshair::after{top:50%;left:0;right:0;height:1px}
+  .crosshair span{position:absolute;inset:0;border:1.5px solid var(--accent);border-radius:50%}
+  .miss{position:absolute;inset:-4px -5px;border:1.5px dashed var(--failed);border-radius:5px;pointer-events:none;z-index:2}
+  .miss span{position:absolute;right:-1px;top:-8px;font-size:9.5px;color:var(--failed);background:#fff;padding:0 4px;
+    border:1px solid var(--failed-line);border-radius:3px;line-height:14px}
+
+  .targets{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line);border:1px solid var(--line);
+    border-radius:var(--radius-m);overflow:hidden}
+  .target{background:var(--surface);padding:10px 12px;min-width:0}
+  .target .k{font-size:11px;color:var(--muted);margin:0 0 2px}
+  .target .v{font-family:var(--mono);font-size:11.5px;color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .target.wide{grid-column:1 / -1}
+
+  .ctx{display:flex;flex-direction:column;gap:0;border:1px solid var(--line);border-radius:var(--radius-m);background:var(--surface);overflow:hidden}
+  .ctx-row{display:grid;grid-template-columns:92px 1fr auto;gap:10px;align-items:center;padding:9px 12px;border-top:1px solid var(--line);font-size:12px}
+  .ctx-row:first-child{border-top:0}
+  .ctx-row .k{color:var(--muted);font-size:11.5px}
+  .ctx-row .t{color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ctx-row .t b{font-weight:400;font-family:var(--mono);font-size:11px;color:var(--muted);margin-right:6px}
+  .link{background:none;border:0;color:var(--accent);font-size:11.5px;cursor:pointer;padding:2px 4px;border-radius:4px}
+  .link:hover{background:var(--accent-soft)}
+
+  .artifacts{border:1px solid var(--line);border-radius:var(--radius-m);background:var(--surface);overflow:hidden}
+  .artifact{display:grid;grid-template-columns:18px 1fr auto auto;gap:10px;align-items:center;padding:8px 12px;
+    border-top:1px solid var(--line);font-size:12px;color:var(--ink-2)}
+  .artifact:first-child{border-top:0}
+  .artifact .ic{color:var(--muted);display:grid;place-items:center}
+  .artifact .sz{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  .artifact .dl{background:none;border:0;color:var(--muted);cursor:pointer;font-size:11px;padding:2px 4px;border-radius:4px}
+  .artifact .dl:hover{color:var(--ink);background:var(--surface-2)}
+
+  .attempts{border:1px solid var(--line);border-radius:var(--radius-m);background:var(--surface);overflow:hidden}
+  .attempt{display:grid;grid-template-columns:58px 1fr auto;gap:10px;align-items:center;padding:8px 12px;border-top:1px solid var(--line);font-size:11.5px}
+  .attempt:first-child{border-top:0}
+  .attempt .n{font-family:var(--mono);color:var(--muted);font-size:10.5px}
+  .attempt .why{color:var(--ink-2)}
+  .attempt .r{font-family:var(--mono);font-size:10.5px;color:var(--failed)}
+
+  details.panel{margin-top:10px;border:1px solid var(--line);border-radius:var(--radius-m);background:var(--surface)}
+  details.panel summary{cursor:pointer;list-style:none;padding:9px 12px;font-size:11.5px;color:var(--ink-2);display:flex;align-items:center;gap:8px}
+  details.panel summary::-webkit-details-marker{display:none}
+  details.panel summary .chev{color:var(--muted)}
+  details.panel .body{border-top:1px solid var(--line);padding:10px 12px;font-family:var(--mono);font-size:11px;
+    color:var(--ink-2);white-space:pre-wrap;line-height:1.7;background:var(--surface-2);border-radius:0 0 var(--radius-m) var(--radius-m)}
+  details.panel .hint{margin-left:auto;font-size:10.5px;color:var(--muted)}
+
+  .actions{display:flex;align-items:center;gap:8px;margin-top:22px;padding-top:16px;border-top:1px solid var(--line)}
+  .actions .spacer{flex:1}
+  .hint{font-size:11px;color:var(--muted)}
+
+  .statusbar{display:flex;align-items:center;gap:18px;height:44px;padding:0 24px;border-top:1px solid var(--line);
+    background:var(--surface);font-size:11px;color:var(--muted)}
+  .statusbar .mono{font-family:var(--mono)}
+  .statusbar .sep{width:1px;height:14px;background:var(--line)}
+  .statusbar .right{margin-left:auto;display:flex;align-items:center;gap:8px}
+  .conn{display:inline-flex;align-items:center;gap:6px}
+  .conn .dot{width:5px;height:5px;background:var(--ok)}
+
+  .toast{position:fixed;left:50%;bottom:64px;transform:translateX(-50%);background:var(--ink);color:#fff;
+    font-size:12px;padding:7px 12px;border-radius:7px;opacity:0;pointer-events:none;transition:opacity .2s ease;z-index:30}
+  .toast.show{opacity:1}
+
+  @media (max-width:1080px){.layout{grid-template-columns:340px minmax(0,1fr)}.env,.progress .track{display:none}}
+  @media (max-width:860px){.layout{display:block}.rail{border-right:0;border-bottom:1px solid var(--line);max-height:44vh}
+    .shots,.targets{grid-template-columns:1fr}.topbar{flex-wrap:wrap;height:auto;padding:10px 16px;gap:12px}
+    .detail{padding:0 16px 32px}}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand"><span class="mark"></span>ai-autoloop</div>
+    <span class="divider"></span>
+    <div class="run-name">aTrust 安装流程 <span class="run-id">#128</span></div>
+    <div class="run-state"><span class="dot fail"></span>已中止</div>
+    <div class="progress" aria-label="进度 6 / 14">
+      <span class="track"><span class="fill"></span></span>
+      <span class="count">6 / 14</span>
+    </div>
+    <div class="elapsed">02:10</div>
+    <div class="env">macOS 26 · aTrust 4.2.1</div>
+    <div class="top-actions">
+      <button class="btn primary" type="button" id="retryTop">重试此步</button>
+      <button class="btn" type="button">导出报告</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="rail" aria-label="执行时间线">
+      <div class="rail-head">
+        <h1>执行时间线</h1>
+        <div class="rail-tools">
+          <button class="filter" type="button">只看失败</button>
+        </div>
+      </div>
+      <div class="restore" id="restore">
+        <span class="dot" style="width:5px;height:5px;background:var(--accent)"></span>
+        <span>已恢复上次视图</span>
+        <span class="mono" id="restoreAt"></span>
+        <span class="sp"></span>
+        <button class="ghost" type="button" id="clearRestore">清除</button>
+      </div>
+      <ol class="timeline" id="timeline"></ol>
+    </section>
+
+    <section class="detail" id="detail">
+      <div class="detail-inner">
+        <div class="detail-head" id="detailHead">
+          <div class="crumb"><span>配置代理</span><span class="sep">/</span><span>启用代理</span><span class="sep">/</span><span>第 6 步</span></div>
+          <div class="step-head">
+            <span class="no">06</span>
+            <h2>勾选 [启用代理]</h2>
+            <span class="chip fail">失败</span>
+            <span class="head-meta">2.4s · 第 2 次尝试</span>
+          </div>
+          <p class="summary">在「设置」窗口中勾选「启用代理」，随后断言开关进入选中状态。点击已送达，但 2 秒内状态没有变化。</p>
+        </div>
+
+        <div class="sect">
+          <div class="sect-head"><h3>截图</h3><span class="extra">窗口 aTrust · 2940 × 1912</span><span class="rule"></span></div>
+          <div class="shots">
+            <figure class="shot">
+              <div class="shot-frame" id="shotBefore"></div>
+              <figcaption class="shot-cap"><span>操作前</span><span class="t">12:06:08.120</span><button class="shot-btn" data-shot="before" type="button">查看大图</button></figcaption>
+            </figure>
+            <figure class="shot">
+              <div class="shot-frame" id="shotAfter"></div>
+              <figcaption class="shot-cap"><span>操作后 · 未变化</span><span class="t">12:06:10.560</span><button class="shot-btn" data-shot="after" type="button">查看大图</button></figcaption>
+            </figure>
+          </div>
+        </div>
+
+        <div class="sect">
+          <div class="sect-head"><h3>断言</h3><span class="extra">轮询 2000ms</span><span class="rule"></span></div>
+          <div class="error">
+            <div class="error-head">
+              <span class="ic"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 2.6v6.8M8 12.5v.1" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="8" cy="8" r="6.2" stroke="currentColor" stroke-width="1.3"/></svg></span>
+              <span class="code">ASSERTION_FAILED</span>
+              <span class="t">开关未进入选中状态</span>
+            </div>
+            <div class="error-body">
+              <p>元素可交互且已获得焦点，点击也返回成功；应用没有把新状态写回可访问性树。</p>
+              <dl class="diff">
+                <dt>期望</dt><dd class="good">checked = true</dd>
+                <dt>实际</dt><dd class="bad">checked = false</dd>
+                <dt>元素</dt><dd>checkbox “启用代理” · enabled · visible</dd>
+              </dl>
+              <div class="sugg">
+                <h4>建议</h4>
+                <ol>
+                  <li>确认开关是否被策略锁定（灰色或禁用态）。</li>
+                  <li>把断言等待上限从 <code>2000ms</code> 调到 <code>4000ms</code> 后重试。</li>
+                  <li>若应用不写回 AX 状态，改用坐标点击并校验邻近文本。</li>
+                </ol>
+              </div>
+            </div>
+          </div>
+          <div class="attempts" style="margin-top:10px">
+            <div class="attempt"><span class="n">第 1 次</span><span class="why">点击成功，2s 后开关仍为 off</span><span class="r">FAILED · 1.9s</span></div>
+            <div class="attempt"><span class="n">第 2 次</span><span class="why">重试前重新快照，元素未变化</span><span class="r">FAILED · 2.4s</span></div>
+          </div>
+        </div>
+
+        <div class="sect">
+          <div class="sect-head"><h3>目标</h3><span class="rule"></span></div>
+          <div class="targets">
+            <div class="target wide"><p class="k">定位器</p><div class="v">role=checkbox name=启用代理 path=window[设置]&gt;group&gt;checkbox</div></div>
+            <div class="target"><p class="k">应用</p><div class="v">aTrust · com.sangfor.atrust</div></div>
+            <div class="target"><p class="k">执行方式</p><div class="v">AXPress · headless</div></div>
+            <div class="target"><p class="k">窗口</p><div class="v">设置 · w-16780</div></div>
+            <div class="target"><p class="k">坐标</p><div class="v">812, 344 · 逻辑点</div></div>
+          </div>
+        </div>
+
+        <div class="sect">
+          <div class="sect-head"><h3>上下文与依赖</h3><span class="rule"></span></div>
+          <div class="ctx">
+            <div class="ctx-row"><span class="k">上一步</span><span class="t"><b>05</b>点击 [网络] 标签 · 0.3s</span><button class="link" type="button" data-goto="05">查看</button></div>
+            <div class="ctx-row"><span class="k">下一步</span><span class="t"><b>07</b>断言代理已开启 · 未执行</span><button class="link" type="button" data-goto="07">查看</button></div>
+            <div class="ctx-row"><span class="k">依赖</span><span class="t">需要设置窗口已打开（04）且网络页已激活（05）</span><span></span></div>
+          </div>
+        </div>
+
+        <div class="sect">
+          <div class="sect-head"><h3>产物</h3><span class="extra">4 个文件 · 3.4 MB</span><span class="rule"></span></div>
+          <div class="artifacts">
+            <div class="artifact"><span class="ic"><svg width="13" height="13" viewBox="0 0 16 16" fill="none"><rect x="2.2" y="4.2" width="11.6" height="8.4" rx="1.6" stroke="currentColor" stroke-width="1.3"/><circle cx="8" cy="8.4" r="1.8" stroke="currentColor" stroke-width="1.3"/><path d="M5.6 4.2l.8-1.2h3.2l.8 1.2" stroke="currentColor" stroke-width="1.3"/></svg></span><span>before.png</span><span class="sz">1.7 MB</span><button class="dl" type="button">下载</button></div>
+            <div class="artifact"><span class="ic"><svg width="13" height="13" viewBox="0 0 16 16" fill="none"><rect x="2.2" y="4.2" width="11.6" height="8.4" rx="1.6" stroke="currentColor" stroke-width="1.3"/><circle cx="8" cy="8.4" r="1.8" stroke="currentColor" stroke-width="1.3"/><path d="M5.6 4.2l.8-1.2h3.2l.8 1.2" stroke="currentColor" stroke-width="1.3"/></svg></span><span>after.png</span><span class="sz">1.7 MB</span><button class="dl" type="button">下载</button></div>
+            <div class="artifact"><span class="ic"><svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M4 2.5h5l3 3v8H4z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M9 2.5v3h3" stroke="currentColor" stroke-width="1.3"/></svg></span><span>ax-snapshot.json</span><span class="sz">12 KB</span><button class="dl" type="button">下载</button></div>
+            <div class="artifact"><span class="ic"><svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M4 2.5h5l3 3v8H4z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M9 2.5v3h3" stroke="currentColor" stroke-width="1.3"/></svg></span><span>step.log</span><span class="sz">3 KB</span><button class="dl" type="button">下载</button></div>
+          </div>
+        </div>
+
+        <div class="sect">
+          <div class="sect-head"><h3>日志</h3><span class="extra">2026-11-21 12:06:10</span><span class="rule"></span></div>
+          <details class="panel" open>
+            <summary><span class="chev">▾</span>该步执行日志<span class="hint">失败后自动展开</span></summary>
+            <div class="body">12:06:08.120  snapshot  w-16780  refs=14
+12:06:08.132  resolve   role=checkbox name=启用代理 → @s9k2:m:e7
+12:06:08.140  action    AXPress  delivered
+12:06:10.140  assert    checked == true  → false  (timeout 2000ms)
+12:06:10.144  retry     attempt 2  scheduled
+12:06:10.560  result    ASSERTION_FAILED</div>
+          </details>
+        </div>
+
+        <div class="actions">
+          <button class="btn primary" type="button">重试此步</button>
+          <button class="btn" type="button">标记为已知问题</button>
+          <button class="btn" type="button">跳过并继续</button>
+          <span class="spacer"></span>
+          <button class="btn" type="button">复制报告</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="statusbar">
+    <span>已完成 <span class="mono">5</span></span>
+    <span class="sep"></span>
+    <span style="color:var(--failed)">失败 <span class="mono">1</span></span>
+    <span class="sep"></span>
+    <span>重试 <span class="mono">2</span></span>
+    <span class="sep"></span>
+    <span>最慢 <span class="mono">06 勾选代理 · 2.4s</span></span>
+    <span class="right conn"><span class="dot"></span>事件流已连接 · 延迟 12ms</span>
+  </footer>
+</div>
+
+<div class="toast" id="toast">已恢复上次查看位置</div>
+
+<script>
+  const KEY = 'autoloop.sample.v3';
+
+  const steps = {
+    '01':{p:'p1',a:'a1',t:'启动 aTrust',st:'done',ms:'1.2s'},
+    '02':{p:'p1',a:'a1',t:'激活主窗口',st:'done',ms:'1.8s',retry:1},
+    '03':{p:'p1',a:'a2',t:'点击 [设置] 按钮',st:'done',ms:'0.4s'},
+    '04':{p:'p1',a:'a2',t:'等待设置窗口出现',st:'done',ms:'0.9s'},
+    '05':{p:'p2',a:'a3',t:'点击 [网络] 标签',st:'done',ms:'0.3s'},
+    '06':{p:'p2',a:'a4',t:'勾选 [启用代理]',st:'fail',ms:'2.4s',retry:2},
+    '07':{p:'p2',a:'a4',t:'断言代理已开启',st:'todo',ms:''},
+    '08':{p:'p3',a:'a5',t:'输入账号',st:'todo',ms:''},
+    '09':{p:'p3',a:'a6',t:'输入密码',st:'todo',ms:''},
+    '10':{p:'p3',a:'a7',t:'点击 [登录]',st:'todo',ms:''},
+    '11':{p:'p3',a:'a7',t:'等待主界面',st:'todo',ms:''},
+    '12':{p:'p4',a:'a8',t:'关闭设置窗口',st:'todo',ms:''},
+    '13':{p:'p4',a:'a8',t:'退出 aTrust',st:'todo',ms:''},
+    '14':{p:'p4',a:'a8',t:'留存结果截图',st:'todo',ms:''}
+  };
+  const phases = [
+    {id:'p1',title:'前置准备',actions:[
+      {id:'a1',title:'启动并激活',steps:['01','02']},
+      {id:'a2',title:'打开设置',steps:['03','04']}
+    ]},
+    {id:'p2',title:'配置代理',actions:[
+      {id:'a3',title:'定位网络设置',steps:['05']},
+      {id:'a4',title:'启用代理',steps:['06','07']}
+    ]},
+    {id:'p3',title:'登录验证',actions:[
+      {id:'a5',title:'输入账号',steps:['08']},
+      {id:'a6',title:'输入密码',steps:['09']},
+      {id:'a7',title:'登录并确认',steps:['10','11']}
+    ]},
+    {id:'p4',title:'收尾',actions:[
+      {id:'a8',title:'关闭并留存',steps:['12','13','14']}
+    ]}
+  ];
+
+  const def = {selected:'06',openPhases:['p1','p2','p3','p4'],openActions:['a4'],at:null};
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch(e){}
+  const state = {
+    selected: saved?.selected || def.selected,
+    openPhases: new Set(saved?.openPhases || def.openPhases),
+    openActions: new Set(saved?.openActions || def.openActions),
+    at: saved?.at || null
+  };
+  const hashStep = new URLSearchParams(location.hash.replace('#','')).get('step');
+  if (hashStep && steps[hashStep]) state.selected = hashStep;
+
+  function save(){
+    state.at = new Date().toLocaleTimeString('zh-CN',{hour12:false});
+    localStorage.setItem(KEY, JSON.stringify({
+      selected: state.selected,
+      openPhases: [...state.openPhases],
+      openActions: [...state.openActions],
+      at: state.at
+    }));
+  }
+
+  const icon = {
+    check:'<svg width="9" height="9" viewBox="0 0 16 16" fill="none"><path d="M3 8.5 6.2 11.6 13 4.6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    fail:'<svg width="8" height="8" viewBox="0 0 16 16" fill="none"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>',
+    chev:'<svg width="9" height="9" viewBox="0 0 16 16" fill="none"><path d="M6.5 4.5 10 8l-3.5 3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+  };
+
+  const timeline = document.getElementById('timeline');
+
+  function actionState(action){
+    const ss = action.steps.map(id=>steps[id]);
+    if(ss.some(s=>s.st==='fail')) return 'fail';
+    if(ss.some(s=>s.st==='run')) return 'run';
+    if(ss.every(s=>s.st==='done')) return 'done';
+    return '';
+  }
+  function phaseState(phase){
+    const ids = phase.actions.flatMap(a=>a.steps);
+    const ss = ids.map(id=>steps[id]);
+    if(ss.some(s=>s.st==='fail')) return 'fail';
+    if(ss.every(s=>s.st==='done')) return 'done';
+    return '';
+  }
+
+  function render(){
+    timeline.innerHTML = phases.map(ph=>{
+      const ids = ph.actions.flatMap(a=>a.steps);
+      const done = ids.filter(id=>steps[id].st==='done').length;
+      const pst = phaseState(ph);
+      return `<li class="phase ${state.openPhases.has(ph.id)?'':'closed'}">
+        <button class="phase-toggle" type="button" data-phase="${ph.id}" aria-expanded="${state.openPhases.has(ph.id)}">
+          <span class="chev">${icon.chev}</span>
+          <span class="phase-title">${ph.title}</span>
+          <span class="phase-dot ${pst}"></span>
+          <span class="phase-meta">${done}/${ids.length} 步</span>
+        </button>
+        <div class="phase-body">
+          ${ph.actions.map(a=>{
+            const ast = actionState(a);
+            const open = state.openActions.has(a.id);
+            const ms = a.steps.map(id=>steps[id].ms).filter(Boolean);
+            return `<div class="action ${ast} ${open?'open':''}" data-action="${a.id}">
+              <button class="action-row ${a.steps.includes(state.selected)?'selected':''}" type="button" data-action-row="${a.id}">
+                <span class="a-node">${ast==='done'?icon.check:ast==='fail'?icon.fail:''}</span>
+                <span class="a-title">${a.title}</span>
+                <span class="a-meta">${a.steps.length>1?`<span>${a.steps.length} 步</span>`:''}${ms.length?`<span>${ms[ms.length-1]}</span>`:''}<span class="a-chev">${icon.chev}</span></span>
+              </button>
+              <ul class="a-body">
+                ${a.steps.map(id=>{const s=steps[id];return `<li class="leaf ${s.st} ${id===state.selected?'selected':''}" data-step="${id}" tabindex="0">
+                  <span class="d"></span>
+                  <span class="t"><span class="idx">${id}</span>${s.t}</span>
+                  <span class="m">${s.retry?`↻ ${s.retry}`:''}${s.ms?`<span>${s.ms}</span>`:''}</span>
+                </li>`}).join('')}
+              </ul>
+            </div>`;
+          }).join('')}
+        </div>
+      </li>`;
+    }).join('');
+
+    timeline.querySelectorAll('.phase-toggle').forEach(btn=>btn.addEventListener('click',()=>{
+      const id = btn.dataset.phase;
+      if(state.openPhases.has(id)) state.openPhases.delete(id); else state.openPhases.add(id);
+      save(); render();
+    }));
+    timeline.querySelectorAll('[data-action-row]').forEach(btn=>btn.addEventListener('click',()=>{
+      const id = btn.dataset.actionRow;
+      if(state.openActions.has(id)) state.openActions.delete(id); else state.openActions.add(id);
+      save(); render();
+    }));
+    timeline.querySelectorAll('[data-step]').forEach(el=>{
+      el.addEventListener('click',e=>{
+        e.stopPropagation();
+        selectStep(el.dataset.step);
+      });
+      el.addEventListener('keydown',e=>{
+        if(e.key==='Enter'||e.key===' '){e.preventDefault();selectStep(el.dataset.step);}
+      });
+    });
+  }
+
+  function selectStep(id){
+    if(!steps[id]) return;
+    state.selected = id;
+    history.replaceState(null,'',`#step=${id}`);
+    save(); render();
+    const s = steps[id];
+    // expand the containing action so the step stays visible
+    if(!state.openActions.has(s.a)){state.openActions.add(s.a);save();render();}
+    document.querySelector(`[data-step="${id}"]`)?.scrollIntoView({block:'nearest'});
+  }
+
+  // restore indicator
+  if(saved){
+    document.getElementById('restore').classList.add('show');
+    document.getElementById('restoreAt').textContent = saved.at || '';
+  }
+  document.getElementById('clearRestore').addEventListener('click',()=>{
+    localStorage.removeItem(KEY);
+    history.replaceState(null,'',location.pathname);
+    location.reload();
+  });
+
+  // screenshots
+  function winMarkup(state){
+    const before = state==='before';
+    return `<div class="win">
+      <div class="win-bar"><i></i><i></i><i></i><span class="win-title">aTrust · 设置</span></div>
+      <div class="win-body">
+        <div class="win-side"><span class="nav">概览</span><span class="nav on">网络</span><span class="nav">账号</span><span class="nav">设置</span></div>
+        <div class="win-main">
+          <div class="row" style="position:relative">
+            <span>启用代理</span>
+            <span class="r"><span class="toggle"></span>${before?'<span class="crosshair"><span></span></span>':''}</span>
+            ${before?'':'<span class="miss"><span>未变化</span></span>'}
+          </div>
+          <div class="row"><span>代理地址</span><span style="font-family:var(--mono);font-size:10px;color:#8B857B">127.0.0.1:8080</span></div>
+          <div class="row"><span>开机自动连接</span><span class="toggle"></span></div>
+        </div>
+      </div>
+    </div>`;
+  }
+  document.getElementById('shotBefore').innerHTML = winMarkup('before');
+  document.getElementById('shotAfter').innerHTML = winMarkup('after');
+
+  // sticky header shadow
+  const detail = document.getElementById('detail');
+  const head = document.getElementById('detailHead');
+  detail.addEventListener('scroll',()=>head.classList.toggle('scrolled', detail.scrollTop>8));
+
+  // context links
+  document.querySelectorAll('[data-goto]').forEach(b=>b.addEventListener('click',()=>{
+    selectStep(b.dataset.goto);
+    detail.scrollTo({top:0,behavior:'smooth'});
+  }));
+
+  render();
+  if(!saved) save();
+</script>
+</body>
+</html>

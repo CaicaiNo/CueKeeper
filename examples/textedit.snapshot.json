@@ -1,0 +1,28 @@
+{
+  "version": "2.6",
+  "ok": true,
+  "command": "snapshot",
+  "target": { "app": "com.apple.TextEdit", "window": "Cuekeeper-M1.txt" },
+  "data": {
+    "app": "TextEdit",
+    "window": { "id": "w-1234", "title": "Cuekeeper-M1.txt" },
+    "snapshot_id": "scuekeeper",
+    "ref_count": 1,
+    "complete": true,
+    "tree": {
+      "role": "window",
+      "name": "Cuekeeper-M1.txt",
+      "bounds": { "x": 100, "y": 100, "width": 640, "height": 420 },
+      "children": [{
+        "role": "scrollarea",
+        "children": [{
+          "role": "textfield",
+          "ref_id": "@scuekeeper:e1",
+          "value": "",
+          "states": ["focused"],
+          "bounds": { "x": 112, "y": 130, "width": 615, "height": 378 }
+        }]
+      }]
+    }
+  }
+}

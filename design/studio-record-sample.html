@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cuekeeper Studio · 录制</title>
+<style>
+  :root{
+    --bg:#F5F3EF;--surface:#FFFFFF;--surface-2:#FAF9F6;
+    --ink:#1B1A17;--ink-2:#55514A;--muted:#8B857B;
+    --line:#E4E0D8;--line-strong:#D6D1C7;
+    --accent:#A65A12;--accent-soft:#F4E9DC;
+    --failed:#A3281F;--failed-soft:#FBF3F1;--failed-line:#E5CEC9;
+    --ok:#2F6B4F;--ok-soft:#F2F7F4;--ok-line:#CFDCD4;
+    --radius-s:8px;--radius-m:10px;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,"JetBrains Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;height:100vh;overflow:hidden;background:var(--bg);color:var(--ink);
+    font:400 13px/1.5 ui-sans-serif,-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",Arial,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  button{font:inherit;color:inherit}
+  button,input,textarea{font-family:inherit}
+  .app{display:flex;flex-direction:column;height:100vh}
+
+  /* top */
+  .topbar{display:flex;align-items:center;gap:16px;height:56px;padding:0 20px;background:var(--surface);
+    border-bottom:1px solid var(--line);z-index:5}
+  .brand{display:flex;align-items:center;gap:8px;font-weight:500;letter-spacing:-.01em;white-space:nowrap}
+  .brand .mark{width:18px;height:18px;border:1.5px solid var(--ink);border-radius:5px;position:relative}
+  .brand .mark::after{content:"";position:absolute;left:5px;top:5px;width:6px;height:6px;border-radius:2px;background:var(--accent)}
+  .brand .sub{color:var(--muted);font-weight:400;font-size:12px;margin-left:2px}
+  .divider{width:1px;height:20px;background:var(--line-strong)}
+  .rec{display:inline-flex;align-items:center;gap:7px;height:26px;padding:0 9px;border:1px solid #E4D2BE;
+    background:var(--accent-soft);border-radius:5px;color:var(--accent);font-size:11.5px;font-weight:500}
+  .rec .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px rgba(166,90,18,.16)}
+  .rec .t{font-family:var(--mono);font-weight:400;font-size:11px}
+  .appchip{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--ink-2);white-space:nowrap}
+  .appchip .tile{width:16px;height:16px;border-radius:4px;background:#EDE9E2;border:1px solid var(--line-strong)}
+  .appchip .id{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  .top-actions{margin-left:auto;display:flex;align-items:center;gap:8px}
+  .btn{height:30px;padding:0 11px;border:1px solid var(--line-strong);border-radius:7px;background:var(--surface);
+    cursor:pointer;color:var(--ink-2);display:inline-flex;align-items:center;gap:6px;font-size:12px}
+  .btn:hover{background:var(--surface-2);color:var(--ink)}
+  .btn.primary{background:var(--ink);color:#fff;border-color:var(--ink)}
+  .btn.primary:hover{background:#000}
+  .btn.danger{color:var(--failed);border-color:var(--failed-line)}
+  .btn.small{height:26px;padding:0 9px;font-size:11.5px}
+  .btn.ghost{background:none;border-color:transparent;color:var(--muted)}
+  .btn.ghost:hover{background:var(--surface-2);color:var(--ink)}
+  .btn:focus-visible,.row:focus-visible,.card:focus-visible,.pick:focus-visible,.link:focus-visible{
+    outline:2px solid var(--accent);outline-offset:2px}
+
+  /* layout */
+  .studio{display:grid;grid-template-columns:340px 292px minmax(0,1fr);flex:1;min-height:0}
+  .panel{min-height:0;display:flex;flex-direction:column;border-right:1px solid var(--line)}
+  .panel:last-child{border-right:0}
+  .stream{background:var(--surface-2)}
+  .library{background:var(--surface)}
+  .inspector{background:var(--bg)}
+  .panel-head{display:flex;align-items:center;gap:8px;padding:14px 16px 10px;flex:none}
+  .panel-head h2{font-size:11.5px;font-weight:500;color:var(--muted);margin:0;letter-spacing:.01em}
+  .panel-head .count{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  .panel-head .sp{flex:1}
+
+  /* stream */
+  .stream-body{flex:1;overflow-y:auto;padding:2px 10px 96px}
+  .sgroup{margin:0 0 4px}
+  .sgroup-head{display:flex;align-items:center;gap:8px;padding:7px 8px;border:1px solid var(--line);
+    background:var(--surface);border-radius:7px;cursor:pointer;width:100%;text-align:left}
+  .sgroup-head:hover{border-color:var(--line-strong)}
+  .sgroup-head .chev{color:var(--muted);display:grid;place-items:center;transition:transform .12s ease}
+  .sgroup.open .sgroup-head .chev{transform:rotate(90deg)}
+  .sgroup-head .name{font-size:12.5px;font-weight:500}
+  .sgroup-head .meta{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  .sgroup-head .p{font-family:var(--mono);font-size:10px;color:var(--accent);background:var(--accent-soft);
+    border:1px solid #E4D2BE;border-radius:3px;padding:0 4px;line-height:15px}
+  .sgroup .inner{display:none;padding:4px 0 0 14px}
+  .sgroup.open .inner{display:block}
+
+  .row{display:grid;grid-template-columns:18px 22px 16px minmax(0,1fr) auto;gap:7px;align-items:center;
+    padding:6px 8px;border-radius:6px;cursor:pointer;position:relative}
+  .row:hover{background:#F1EEE8}
+  .row.sel{background:var(--surface);box-shadow:0 0 0 1px var(--line) inset,inset 2px 0 0 var(--accent)}
+  .row.sel:hover{background:var(--surface)}
+  .pick{appearance:none;-webkit-appearance:none;width:14px;height:14px;border:1.5px solid var(--line-strong);
+    border-radius:4px;background:var(--surface);cursor:pointer;margin:0;display:grid;place-items:center}
+  .pick:checked{background:var(--ink);border-color:var(--ink)}
+  .pick:checked::after{content:"";width:6px;height:3px;border-left:1.5px solid #fff;border-bottom:1.5px solid #fff;
+    transform:rotate(-45deg) translateY(-1px)}
+  .idx{font-family:var(--mono);font-size:10.5px;color:var(--muted);text-align:right}
+  .ico{color:var(--muted);display:grid;place-items:center}
+  .row .t{font-size:12px;color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .t b{font-weight:500;color:var(--ink)}
+  .row .m{font-family:var(--mono);font-size:10.5px;color:var(--muted);display:flex;align-items:center;gap:5px}
+  .row.secret .val{color:var(--muted)}
+  .mut{color:var(--muted)}
+  .selbar{position:absolute;left:10px;right:10px;bottom:10px;display:none;align-items:center;gap:8px;
+    padding:8px 10px;background:var(--ink);color:#fff;border-radius:8px;box-shadow:0 6px 18px rgba(27,26,23,.16)}
+  .selbar.show{display:flex}
+  .selbar .n{font-size:12px;white-space:nowrap}
+  .selbar .n b{font-family:var(--mono);font-weight:400}
+  .selbar .sp{flex:1}
+  .selbar .btn{height:28px;background:rgba(255,255,255,.14);border-color:transparent;color:#fff;font-size:11.5px}
+  .selbar .btn:hover{background:rgba(255,255,255,.22);color:#fff}
+  .stream-wrap{position:relative;flex:1;min-height:0;display:flex;flex-direction:column}
+
+  /* library */
+  .search{margin:0 14px 10px;height:30px;border:1px solid var(--line);border-radius:7px;background:var(--surface-2);
+    display:flex;align-items:center;gap:7px;padding:0 9px;color:var(--muted)}
+  .search input{border:0;background:none;outline:none;font-size:12px;width:100%;color:var(--ink)}
+  .search input::placeholder{color:var(--muted)}
+  .cards{flex:1;overflow-y:auto;padding:0 12px 20px;display:flex;flex-direction:column;gap:6px}
+  .card{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:10px 11px;cursor:pointer;text-align:left}
+  .card:hover{border-color:var(--line-strong);background:#FDFCFA}
+  .card.active{border-color:var(--ink);box-shadow:0 0 0 1px var(--ink) inset}
+  .card .top{display:flex;align-items:center;gap:7px}
+  .card .nm{font-size:12.5px;font-weight:500}
+  .card .ver{font-family:var(--mono);font-size:10px;color:var(--muted);border:1px solid var(--line);border-radius:3px;padding:0 4px;line-height:15px}
+  .card .ins{margin-left:auto;opacity:0;background:none;border:0;color:var(--accent);font-size:11px;cursor:pointer;padding:2px 4px;border-radius:4px}
+  .card:hover .ins{opacity:1}
+  .card .ins:hover{background:var(--accent-soft)}
+  .card .meta{display:flex;align-items:center;gap:8px;margin-top:5px;font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  .card .meta .p{color:var(--accent)}
+  .empty{padding:28px 12px;text-align:center;color:var(--muted);font-size:11.5px}
+
+  /* inspector */
+  .insp{flex:1;overflow-y:auto;padding:0 24px 28px}
+  .insp-head{position:sticky;top:0;background:var(--bg);padding:16px 0 10px;z-index:3;border-bottom:1px solid transparent}
+  .insp-head.stuck{border-bottom-color:var(--line)}
+  .kicker{font-size:11px;color:var(--muted);margin:0 0 4px}
+  .title-row{display:flex;align-items:center;gap:9px}
+  .title-row input{font-size:18px;font-weight:500;letter-spacing:-.01em;border:1px solid transparent;background:transparent;
+    border-radius:6px;padding:2px 6px;margin-left:-6px;min-width:0;flex:0 1 auto;width:260px;color:var(--ink)}
+  .title-row input:hover{border-color:var(--line)}
+  .title-row input:focus{outline:none;border-color:var(--line-strong);background:var(--surface)}
+  .chip{display:inline-flex;align-items:center;height:21px;padding:0 7px;border-radius:4px;font-size:11px;
+    border:1px solid var(--line);background:var(--surface);color:var(--ink-2)}
+  .chip.draft{color:var(--accent);border-color:#E4D2BE;background:var(--accent-soft)}
+  .insp-meta{margin:6px 0 0;color:var(--muted);font-size:11.5px;font-family:var(--mono)}
+
+  .sect{margin-top:20px}
+  .sect-head{display:flex;align-items:center;gap:8px;margin:0 0 8px}
+  .sect-head h3{font-size:11.5px;font-weight:500;color:var(--muted);margin:0}
+  .sect-head .rule{flex:1;height:1px;background:var(--line)}
+  .sect-head .extra{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+
+  .field{display:grid;grid-template-columns:92px 1fr;gap:10px;align-items:center;margin-bottom:8px}
+  .field label{font-size:11.5px;color:var(--muted)}
+  .input,textarea.input{width:100%;border:1px solid var(--line);border-radius:6px;background:var(--surface);
+    padding:6px 9px;font-size:12px;color:var(--ink)}
+  .input:focus,textarea.input:focus{outline:none;border-color:var(--line-strong);box-shadow:0 0 0 2px rgba(166,90,18,.12)}
+  textarea.input{resize:vertical;min-height:50px}
+
+  .ptable{border:1px solid var(--line);border-radius:9px;background:var(--surface);overflow:hidden}
+  .phead,.prow{display:grid;grid-template-columns:minmax(0,1.1fr) 86px 58px minmax(0,1fr) 46px;gap:8px;align-items:center;
+    padding:7px 10px}
+  .phead{font-size:10.5px;color:var(--muted);background:var(--surface-2);border-bottom:1px solid var(--line);
+    font-family:var(--mono)}
+  .prow{border-top:1px solid var(--line);font-size:11.5px}
+  .prow:first-of-type{border-top:0}
+  .prow .n{font-family:var(--mono);color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .prow .ty{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  .prow .rq{font-size:10.5px;color:var(--ink-2)}
+  .prow .dv{font-family:var(--mono);font-size:10.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .prow .sc{font-size:10px;color:var(--accent);border:1px solid #E4D2BE;background:var(--accent-soft);
+    border-radius:3px;padding:0 4px;line-height:15px;justify-self:start}
+  .prow .sc.no{visibility:hidden}
+  .pfoot{display:flex;align-items:center;gap:8px;padding:6px 10px;border-top:1px solid var(--line);background:var(--surface-2)}
+  .pfoot .hint{font-size:10.5px;color:var(--muted);margin-left:auto;font-family:var(--mono)}
+
+  .steps{border:1px solid var(--line);border-radius:9px;background:var(--surface);overflow:hidden}
+  .srow{display:grid;grid-template-columns:20px 18px minmax(0,1fr) auto;gap:8px;align-items:center;padding:7px 10px;
+    border-top:1px solid var(--line);font-size:11.5px}
+  .srow:first-child{border-top:0}
+  .srow .no{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  .srow .t{color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .srow .t b{font-weight:500;color:var(--ink)}
+  .srow .v{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  .srow .v .ref{color:var(--accent);background:var(--accent-soft);border:1px solid #E4D2BE;border-radius:3px;padding:0 4px}
+
+  .insp-actions{display:flex;align-items:center;gap:8px;margin-top:20px;padding-top:14px;border-top:1px solid var(--line)}
+  .insp-actions .sp{flex:1}
+  .insp-actions .hint{font-size:10.5px;color:var(--muted)}
+
+  .statusbar{display:flex;align-items:center;gap:16px;height:40px;padding:0 20px;border-top:1px solid var(--line);
+    background:var(--surface);font-size:11px;color:var(--muted)}
+  .statusbar .mono{font-family:var(--mono)}
+  .statusbar .sep{width:1px;height:13px;background:var(--line)}
+  .statusbar .right{margin-left:auto;display:flex;align-items:center;gap:14px}
+  .conn{display:inline-flex;align-items:center;gap:6px}
+  .conn .dot{width:5px;height:5px;background:var(--ok);border-radius:50%}
+  .kbd{font-family:var(--mono);font-size:10px;border:1px solid var(--line-strong);border-bottom-width:2px;
+    border-radius:4px;padding:0 4px;color:var(--ink-2);background:var(--surface)}
+
+  .toast{position:fixed;left:50%;bottom:58px;transform:translateX(-50%);background:var(--ink);color:#fff;
+    font-size:12px;padding:7px 12px;border-radius:7px;opacity:0;pointer-events:none;transition:opacity .18s ease;z-index:30}
+  .toast.show{opacity:1}
+
+  @media (max-width:1200px){.studio{grid-template-columns:310px 260px minmax(0,1fr)}}
+  @media (max-width:960px){.studio{display:block;overflow:auto}.panel{border-right:0;border-bottom:1px solid var(--line)}
+    .stream-body{max-height:46vh}.cards{max-height:40vh}.appchip,.rec .t{display:none}}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand"><span class="mark"></span>Cuekeeper <span class="sub">Studio</span></div>
+    <span class="divider"></span>
+    <span class="rec"><span class="dot"></span>录制中 <span class="t">00:42</span></span>
+    <div class="appchip"><span class="tile"></span>aTrust <span class="id">com.sangfor.atrust</span></div>
+    <div class="top-actions">
+      <button class="btn" type="button" id="pause">暂停</button>
+      <button class="btn" type="button">撤销</button>
+      <button class="btn danger" type="button">结束录制</button>
+    </div>
+  </header>
+
+  <main class="studio">
+    <!-- live stream -->
+    <section class="panel stream">
+      <div class="panel-head">
+        <h2>实时步骤</h2>
+        <span class="count" id="stepCount">7 步</span>
+        <span class="sp"></span>
+        <button class="btn ghost small" type="button">清空</button>
+      </div>
+      <div class="stream-wrap">
+        <div class="stream-body" id="stream"></div>
+        <div class="selbar" id="selbar">
+          <span class="n">已选 <b id="selCount">5</b> 步</span>
+          <span class="sp"></span>
+          <button class="btn" type="button" id="clearSel">清除</button>
+          <button class="btn" type="button" id="mergeBtn">合并为测试行为</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- behavior library -->
+    <section class="panel library">
+      <div class="panel-head">
+        <h2>行为库</h2>
+        <span class="count" id="libCount">3 个</span>
+        <span class="sp"></span>
+        <button class="btn ghost small" type="button">+ 新建</button>
+      </div>
+      <div class="search">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="4.4" stroke="currentColor" stroke-width="1.4"/><path d="m10.4 10.4 3 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        <input type="text" placeholder="搜索行为、参数" aria-label="搜索行为">
+      </div>
+      <div class="cards" id="cards"></div>
+    </section>
+
+    <!-- inspector -->
+    <section class="panel inspector">
+      <div class="insp" id="insp"></div>
+    </section>
+  </main>
+
+  <footer class="statusbar">
+    <span>已录制 <span class="mono" id="footSteps">7</span> 步</span>
+    <span class="sep"></span>
+    <span>行为 <span class="mono" id="footBehaviors">2</span></span>
+    <span class="sep"></span>
+    <span>事件流 <span class="mono">18ms</span></span>
+    <span class="right">
+      <span class="conn"><span class="dot"></span>Studio 已连接</span>
+      <span><span class="kbd">⌘G</span> 合并</span>
+      <span><span class="kbd">⌘Z</span> 撤销</span>
+    </span>
+  </footer>
+</div>
+
+<div class="toast" id="toast">已保存</div>
+
+<script>
+  const icon = {
+    launch:'<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M5 3.5 12 8l-7 4.5z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>',
+    click:'<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M3.5 2.5l7 4.2-3.1.9-1 3.1z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>',
+    type:'<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><rect x="2" y="4.5" width="12" height="7" rx="1.4" stroke="currentColor" stroke-width="1.3"/><path d="M4.5 7h1M7 7h1M9.5 7h1M4.5 9.4h5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>',
+    assert:'<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.6" stroke="currentColor" stroke-width="1.3"/><path d="M5.6 8.2 7.2 9.8l3.2-3.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    chev:'<svg width="9" height="9" viewBox="0 0 16 16" fill="none"><path d="M6.5 4.5 10 8l-3.5 3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+  };
+
+  const steps = [
+    {id:'01', type:'launch', title:'启动 <b>aTrust</b>', ms:'1.2s', val:'com.sangfor.atrust'},
+    {id:'02', type:'click',  title:'点击 <b>[账号]</b> 输入框', ms:'0.3s', val:'textfield “账号”', sel:true},
+    {id:'03', type:'type',   title:'输入 <b>“qa01”</b>', ms:'0.2s', val:'qa01', sel:true, param:'account'},
+    {id:'04', type:'click',  title:'点击 <b>[密码]</b> 输入框', ms:'0.2s', val:'securetextfield “密码”', sel:true},
+    {id:'05', type:'type',   title:'输入 <b>“••••••”</b>', ms:'0.2s', val:'••••••', sel:true, param:'password', secret:true},
+    {id:'06', type:'click',  title:'点击 <b>[登录]</b>', ms:'0.4s', val:'button “登录”', sel:true},
+    {id:'07', type:'assert', title:'断言 出现 <b>「主界面」</b>', ms:'0.6s', val:'window “主界面”'}
+  ];
+
+  const library = [
+    {id:'open-settings', name:'打开设置', version:2, n:3, params:0, uses:7,
+     steps:[{type:'click',t:'点击 [菜单]'},{type:'click',t:'点击 [设置]'},{type:'assert',t:'出现「设置」窗口'}]},
+    {id:'proxy', name:'配置代理', version:1, n:4, params:1, uses:3,
+     steps:[{type:'click',t:'点击 [网络]'},{type:'click',t:'勾选 [启用代理]'},{type:'type',t:'输入代理地址'},{type:'assert',t:'断言开关已开启'}],
+     paramList:[{name:'proxy', type:'string', req:true, def:'127.0.0.1:8080', secret:false}]},
+    {id:'close-app', name:'关闭应用', version:1, n:2, params:0, uses:9,
+     steps:[{type:'click',t:'点击 [关闭]'},{type:'assert',t:'断言进程已退出'}]}
+  ];
+
+  let merged = false;
+  let activeId = null;
+
+  const streamEl = document.getElementById('stream');
+  const selbar = document.getElementById('selbar');
+
+  function renderStream(){
+    const rowHtml = s=>`
+      <div class="row ${s.sel?'sel':''} ${s.secret?'secret':''}" data-id="${s.id}">
+        <input class="pick" type="checkbox" ${s.sel?'checked':''} aria-label="选择第 ${s.id} 步">
+        <span class="idx">${s.id}</span>
+        <span class="ico">${icon[s.type]}</span>
+        <span class="t">${s.title}</span>
+        <span class="m">${s.ms}</span>
+      </div>`;
+
+    if(!merged){ streamEl.innerHTML = steps.map(rowHtml).join(''); }
+    else {
+      const inner = steps.slice(1,6).map(rowHtml).join('');
+      streamEl.innerHTML =
+        rowHtml(steps[0]) +
+        `<div class="sgroup open" data-group="login">
+          <button class="sgroup-head" type="button">
+            <span class="chev">${icon.chev}</span>
+            <span class="name">测试行为 1</span>
+            <span class="p">2 参数</span>
+            <span class="meta">5 步 · 0.9s</span>
+          </button>
+          <div class="inner">${inner}</div>
+        </div>` +
+        rowHtml(steps[6]);
+    }
+    bindRows();
+  }
+
+  function bindRows(){
+    streamEl.querySelectorAll('.row').forEach(row=>{
+      const cb = row.querySelector('.pick');
+      cb.addEventListener('change',()=>{
+        const s = steps.find(x=>x.id===row.dataset.id);
+        s.sel = cb.checked;
+        row.classList.toggle('sel', cb.checked);
+        updateSel();
+        if(cb.checked) renderInspector(draft(), true); else if(!selectedCount()) renderInspector(library.find(b=>b.id==='proxy'));
+      });
+      row.addEventListener('click',e=>{
+        if(e.target.tagName==='INPUT') return;
+        cb.checked = !cb.checked;
+        cb.dispatchEvent(new Event('change'));
+      });
+    });
+    streamEl.querySelectorAll('.sgroup-head').forEach(h=>h.addEventListener('click',()=>{
+      h.parentElement.classList.toggle('open');
+    }));
+  }
+
+  function selectedCount(){ return steps.filter(s=>s.sel).length; }
+
+  function updateSel(){
+    const n = selectedCount();
+    document.getElementById('selCount').textContent = n;
+    selbar.classList.toggle('show', n>0 && !merged);
+    document.getElementById('stepCount').textContent = `${steps.length} 步`;
+  }
+
+  function draft(){
+    return {
+      id:'draft', name:'测试行为 1', version:0, draft:true, n:5,
+      steps:[
+        {type:'click', t:'点击 [账号]', v:'textfield “账号”'},
+        {type:'type', t:'输入账号', v:'<span class="ref">{{account}}</span>'},
+        {type:'click', t:'点击 [密码]', v:'securetextfield “密码”'},
+        {type:'type', t:'输入密码', v:'<span class="ref">{{password}}</span>'},
+        {type:'click', t:'点击 [登录]', v:'button “登录”'}
+      ],
+      paramList:[
+        {name:'account', type:'string', req:true, def:'qa01', secret:false},
+        {name:'password', type:'secret', req:true, def:'••••••', secret:true}
+      ]
+    };
+  }
+
+  function renderInspector(b, isDraft=false){
+    if(!b){ document.getElementById('insp').innerHTML = `<div class="empty">选择一个行为查看参数</div>`; return; }
+    const params = b.paramList || [];
+    const rows = params.length ? params.map(p=>`
+      <div class="prow">
+        <span class="n">${p.name}</span>
+        <span class="ty">${p.type}</span>
+        <span class="rq">${p.req?'必填':'可选'}</span>
+        <span class="dv">${p.def}</span>
+        <span class="sc ${p.secret?'':'no'}">敏感</span>
+      </div>`).join('') : `<div class="prow" style="grid-template-columns:1fr"><span class="mut">无参数，可直接复用</span></div>`;
+
+    document.getElementById('insp').innerHTML = `
+      <div class="insp-head">
+        <p class="kicker">${b.draft?'即将创建':'行为'} · ${b.steps.length} 步</p>
+        <div class="title-row">
+          <input id="bname" value="${b.name}" aria-label="行为名称">
+          ${b.draft?'<span class="chip draft">草稿</span>':`<span class="chip">v${b.version}</span>`}
+        </div>
+        <p class="insp-meta">${b.draft?'由 5 个步骤合并 · 2 个参数已自动识别':`被 ${b.uses} 个流程引用`}</p>
+      </div>
+
+      <div class="sect">
+        <div class="sect-head"><h3>描述</h3><span class="rule"></span></div>
+        <div class="field"><label>用途</label><input class="input" value="${b.draft?'登录 aTrust 账号':''}" placeholder="一句话说明这个行为做什么"></div>
+      </div>
+
+      <div class="sect">
+        <div class="sect-head"><h3>参数</h3><span class="extra">${params.length} 个</span><span class="rule"></span></div>
+        <div class="ptable">
+          <div class="phead"><span>名称</span><span>类型</span><span>必填</span><span>默认值</span><span></span></div>
+          ${rows}
+          <div class="pfoot"><button class="btn small" type="button">+ 添加参数</button><span class="hint">字面量可提取为参数</span></div>
+        </div>
+      </div>
+
+      <div class="sect">
+        <div class="sect-head"><h3>步骤</h3><span class="extra">${b.steps.length} 步</span><span class="rule"></span></div>
+        <div class="steps">
+          ${b.steps.map((s,i)=>`
+            <div class="srow">
+              <span class="no">${String(i+1).padStart(2,'0')}</span>
+              <span class="ico">${icon[s.type]||icon.click}</span>
+              <span class="t">${s.t||''}</span>
+              <span class="v">${s.v||''}</span>
+            </div>`).join('')}
+        </div>
+      </div>
+
+      <div class="insp-actions">
+        ${b.draft
+          ? `<button class="btn primary" type="button" id="saveBehavior">保存为行为</button>
+             <button class="btn" type="button" id="cancelDraft">取消</button>
+             <span class="sp"></span><span class="hint">保存后可拖入任意流程</span>`
+          : `<button class="btn primary" type="button" data-test>测试此行为</button>
+             <button class="btn" type="button">插入到流程</button>
+             <span class="sp"></span><button class="btn" type="button" data-dup>另存为副本</button>`}
+      </div>`;
+
+    const nameInput = document.getElementById('bname');
+    nameInput?.addEventListener('input',()=>{ b.name = nameInput.value; });
+
+    document.getElementById('saveBehavior')?.addEventListener('click',()=>saveDraft());
+    document.getElementById('cancelDraft')?.addEventListener('click',()=>{
+      steps.forEach(s=>{ if(s.sel) s.sel=false; });
+      renderStream(); updateSel(); renderInspector(library.find(x=>x.id==='proxy')); setActive('proxy');
+    });
+    document.querySelector('[data-test]')?.addEventListener('click',()=>toast('测试已开始，结果会出现在运行记录里'));
+    document.querySelector('[data-dup]')?.addEventListener('click',()=>toast('已创建副本'));
+  }
+
+  function saveDraft(silent=false){
+    merged = true;
+    steps.filter(s=>s.sel).forEach(s=>{ s.sel=false; });
+    renderStream(); updateSel();
+    library.push({id:'login', name:'测试行为 1', version:1, n:5, params:2, uses:0,
+      steps:draft().steps, paramList:draft().paramList});
+    renderLibrary(); setActive('login');
+    renderInspector(library.find(x=>x.id==='login'));
+    document.getElementById('footBehaviors').textContent = library.length;
+    if(!silent) toast('已保存为「测试行为 1」，可从行为库插入任意位置');
+  }
+
+  function renderLibrary(){
+    const cards = library.map(b=>`
+      <div class="card ${activeId===b.id?'active':''}" data-id="${b.id}" tabindex="0" role="button">
+        <div class="top">
+          <span class="nm">${b.name}</span>
+          <span class="ver">v${b.version}</span>
+          <button class="ins" type="button" data-insert="${b.id}">插入</button>
+        </div>
+        <div class="meta">
+          <span>${b.n} 步</span>
+          ${b.params?`<span class="p">${b.params} 参数</span>`:''}
+          <span>引用 ${b.uses}</span>
+        </div>
+      </div>`).join('');
+    document.getElementById('cards').innerHTML = cards;
+    document.getElementById('libCount').textContent = `${library.length} 个`;
+
+    document.querySelectorAll('.card').forEach(c=>{
+      c.addEventListener('click',e=>{
+        if(e.target.dataset.insert) return;
+        const b = library.find(x=>x.id===c.dataset.id);
+        setActive(b.id); renderInspector(b);
+      });
+      c.addEventListener('keydown',e=>{
+        if(e.key==='Enter'||e.key===' '){e.preventDefault();c.click();}
+      });
+    });
+    document.querySelectorAll('[data-insert]').forEach(btn=>btn.addEventListener('click',e=>{
+      e.stopPropagation();
+      const b = library.find(x=>x.id===btn.dataset.insert);
+      toast(`已把「${b.name}」插入到流程末尾`);
+    }));
+  }
+
+  function setActive(id){
+    activeId = id;
+    document.querySelectorAll('.card').forEach(c=>c.classList.toggle('active',c.dataset.id===id));
+  }
+
+  let toastTimer;
+  function toast(msg){
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(()=>t.classList.remove('show'), 2200);
+  }
+
+  // init: preselect the five steps that form the login behavior
+  renderStream(); updateSel();
+  renderLibrary();
+  renderInspector(draft(), true);
+  document.getElementById('footBehaviors').textContent = library.length;
+  if(location.hash === '#merged') saveDraft(true);
+
+  // merge button just focuses the draft (already shown)
+  document.getElementById('mergeBtn').addEventListener('click',()=>{
+    renderInspector(draft(), true);
+    document.getElementById('insp').scrollTo({top:0,behavior:'smooth'});
+  });
+  document.getElementById('clearSel').addEventListener('click',()=>{
+    steps.forEach(s=>s.sel=false);
+    renderStream(); updateSel(); renderInspector(library.find(x=>x.id==='proxy')); setActive('proxy');
+  });
+  document.getElementById('pause').addEventListener('click',()=>toast('录制已暂停，热键仍可用'));
+
+  const inspEl = document.getElementById('insp');
+  inspEl.addEventListener('scroll',()=>{
+    inspEl.querySelector('.insp-head')?.classList.toggle('stuck', inspEl.scrollTop>6);
+  });
+</script>
+</body>
+</html>

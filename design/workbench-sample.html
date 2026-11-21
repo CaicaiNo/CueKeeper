@@ -1,0 +1,599 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cuekeeper · 工作台复盘</title>
+<style>
+  :root{
+    --bg:#F5F3EF;--surface:#FFFFFF;--surface-2:#FAF9F6;
+    --ink:#1B1A17;--ink-2:#55514A;--muted:#8B857B;
+    --line:#E4E0D8;--line-strong:#D6D1C7;
+    --accent:#A65A12;--accent-soft:#F4E9DC;
+    --failed:#A3281F;--failed-soft:#FBF3F1;--failed-line:#E5CEC9;
+    --ok:#2F6B4F;--ok-soft:#F2F7F4;--ok-line:#CFDCD4;
+    --radius-s:8px;--radius-m:10px;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,"JetBrains Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;height:100vh;overflow:hidden;background:var(--bg);color:var(--ink);
+    font:400 13px/1.5 ui-sans-serif,-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",Arial,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  button{font:inherit;color:inherit}
+  .app{display:flex;flex-direction:column;height:100vh}
+
+  .topbar{display:flex;align-items:center;gap:14px;height:56px;padding:0 20px;background:var(--surface);
+    border-bottom:1px solid var(--line);z-index:6}
+  .brand{display:flex;align-items:center;gap:8px;font-weight:500;white-space:nowrap}
+  .brand .mark{width:18px;height:18px;border:1.5px solid var(--ink);border-radius:5px;position:relative}
+  .brand .mark::after{content:"";position:absolute;left:5px;top:5px;width:6px;height:6px;border-radius:2px;background:var(--accent)}
+  .divider{width:1px;height:20px;background:var(--line-strong)}
+  .session{display:flex;align-items:baseline;gap:8px;font-weight:500;white-space:nowrap}
+  .session .id{font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+  .meta{font-size:11.5px;color:var(--muted);white-space:nowrap}
+  .meta .mono{font-family:var(--mono)}
+  .top-actions{margin-left:auto;display:flex;gap:8px}
+  .btn{height:30px;padding:0 11px;border:1px solid var(--line-strong);border-radius:7px;background:var(--surface);
+    cursor:pointer;color:var(--ink-2);display:inline-flex;align-items:center;gap:6px;font-size:12px}
+  .btn:hover{background:var(--surface-2);color:var(--ink)}
+  .btn.primary{background:var(--ink);color:#fff;border-color:var(--ink)}
+  .btn.primary:hover{background:#000}
+  .btn.small{height:26px;padding:0 9px;font-size:11.5px}
+  .btn.ghost{background:none;border-color:transparent;color:var(--muted)}
+  .btn.ghost:hover{background:var(--surface-2);color:var(--ink)}
+  .btn[disabled]{opacity:.45;cursor:default}
+  .btn:focus-visible,.act:focus-visible,.appitem:focus-visible,.chip:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+  .main{flex:1;display:grid;grid-template-columns:236px minmax(0,1fr) 356px;min-height:0;overflow:hidden}
+
+  /* left */
+  .left{border-right:1px solid var(--line);background:var(--surface-2);overflow-y:auto;padding:16px 14px 20px}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:9px;padding:12px 13px}
+  .card h3{margin:0 0 2px;font-size:14px;font-weight:500}
+  .card .sub{font-size:11px;color:var(--muted)}
+  .stats{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line);border:1px solid var(--line);
+    border-radius:9px;overflow:hidden;margin-top:10px}
+  .stat{background:var(--surface);padding:9px 11px}
+  .stat .k{font-size:10.5px;color:var(--muted)}
+  .stat .v{font-family:var(--mono);font-size:15px;margin-top:1px}
+  .stat .v small{font-size:10.5px;color:var(--muted);font-family:inherit}
+  .sect{margin-top:20px}
+  .sect-head{display:flex;align-items:center;gap:8px;margin:0 0 8px}
+  .sect-head h3{font-size:11.5px;font-weight:500;color:var(--muted);margin:0}
+  .sect-head .rule{flex:1;height:1px;background:var(--line)}
+  .sect-head .n{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  .sect h4{font-size:11px;font-weight:500;color:var(--muted);margin:0 0 7px;display:flex;align-items:center;gap:6px}
+  .sect h4 .sp{flex:1}
+  .sect h4 .n{font-family:var(--mono);font-size:10px;color:var(--muted)}
+  .appitem{display:flex;align-items:center;gap:8px;width:100%;padding:7px 8px;border:0;background:none;
+    border-radius:6px;cursor:pointer;text-align:left;font-size:12px;color:var(--ink-2)}
+  .appitem:hover{background:#F1EEE8}
+  .appitem.on{background:var(--surface);box-shadow:0 0 0 1px var(--line) inset;color:var(--ink);font-weight:500}
+  .appitem .dot{width:6px;height:6px;border-radius:50%;background:var(--line-strong);flex:none}
+  .appitem.on .dot{background:var(--accent)}
+  .appitem .c{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  .hintbox{margin-top:14px;padding:10px 11px;border:1px dashed var(--line-strong);border-radius:8px;
+    font-size:11px;color:var(--muted);line-height:1.65}
+  .hintbox b{font-weight:500;color:var(--ink-2)}
+
+  /* timeline */
+  .center{min-width:0;min-height:0;overflow:hidden;display:flex;flex-direction:column;background:var(--bg)}
+  .center-head{display:flex;align-items:center;gap:10px;padding:13px 18px 10px}
+  .center-head h2{font-size:11.5px;font-weight:500;color:var(--muted);margin:0}
+  .center-head .c{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  .mergebar{display:none;align-items:center;gap:8px;margin:0 18px 8px;padding:6px 10px;background:var(--ink);
+    color:#fff;border-radius:7px;font-size:11.5px}
+  .mergebar.show{display:flex}
+  .mergebar .sp{flex:1}
+  .mergebar .btn{height:26px;background:rgba(255,255,255,.14);border-color:transparent;color:#fff;font-size:11px}
+  .mergebar .btn:hover{background:rgba(255,255,255,.24);color:#fff}
+
+  .timeline{flex:1;overflow-y:auto;padding:0 18px 18px;min-height:0}
+  .setupblock{border:1.5px dashed #D9B98A;background:#FDF8F1;border-radius:9px;padding:8px 10px;margin:2px 0 8px;position:relative}
+  .setupblock.confirmed{border-style:solid;border-color:var(--line-strong);background:var(--surface)}
+  .setup-head{display:flex;align-items:center;gap:8px;margin-bottom:2px}
+  .setup-head .t{font-size:11px;font-weight:500;color:var(--accent)}
+  .setupblock.confirmed .setup-head .t{color:var(--ink-2)}
+  .setup-head .hint{font-size:10px;color:var(--muted)}
+  .setup-head .sp{flex:1}
+  .prow{display:flex;align-items:center;gap:8px;padding:4px 0;font-size:11.5px;color:var(--ink-2);min-height:26px}
+  .prow .pico{color:var(--muted);display:grid;place-items:center;flex:none}
+  .prow .pname{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .prow .pstate{flex:none;font-size:9.5px;border:1px solid #E4D2BE;background:var(--accent-soft);color:var(--accent);
+    border-radius:3px;padding:0 4px;line-height:14px}
+  .prow .pstate.ok{color:var(--ok);border-color:var(--ok-line);background:var(--ok-soft)}
+  .prow .sp{flex:1;min-width:6px}
+  .prow .btn{height:22px;padding:0 7px;font-size:10.5px;flex:none}
+  .pchange{height:24px;border:1px solid var(--line-strong);border-radius:5px;background:var(--surface);font-size:11px;
+    color:var(--ink-2);padding:0 6px;flex:none;max-width:170px}
+  .scope{border-left:1.5px dashed #E3CDAE;margin-left:5px;padding-left:12px}
+  .scope-label{font-size:9.5px;color:var(--muted);font-family:var(--mono);margin:0 0 5px 2px}
+  .preblock{border:1.5px dashed #D9B98A;background:#FDF8F1;border-radius:9px;padding:6px 9px;margin:4px 0 7px;position:relative}
+  .preblock::after{content:"";position:absolute;left:14px;bottom:-8px;height:8px;border-left:1.5px dashed #D9B98A}
+  .preblock .setup-head{margin-bottom:0}
+  .tgroup{font-size:10.5px;color:var(--muted);font-family:var(--mono);margin:10px 2px 6px;display:flex;align-items:center;gap:8px}
+  .tgroup .rule{flex:1;height:1px;background:var(--line)}
+  .act{display:grid;grid-template-columns:16px 58px 18px minmax(0,1fr) 44px 96px;gap:9px;align-items:center;
+    background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:4px 9px;margin-bottom:3px;
+    cursor:pointer;position:relative}
+  .act:hover{border-color:var(--line-strong)}
+  .act.on{border-color:var(--ink);box-shadow:0 0 0 1px var(--ink) inset}
+  .act .pick{width:14px;height:14px;accent-color:var(--ink);margin:0}
+  .act .t{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  .act .ico{color:var(--muted);display:grid;place-items:center}
+  .act .title{font-size:12px;color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .act .title b{font-weight:500;color:var(--ink)}
+  .act .sub{display:flex;align-items:center;gap:7px;margin-top:2px;font-size:10.5px;color:var(--muted)}
+  .act .sub .appname{color:var(--ink-2)}
+  .act .sub .tag{font-family:var(--mono);font-size:9.5px;border:1px solid var(--line);border-radius:3px;padding:0 4px;line-height:14px}
+  .act .sub .tag.sens{color:var(--accent);border-color:#E4D2BE;background:var(--accent-soft)}
+  .act .dur{font-family:var(--mono);font-size:10.5px;color:var(--muted);text-align:right}
+  .thumb{height:36px;border:1px solid var(--line);border-radius:6px;background:#EFECE6;position:relative;overflow:hidden}
+  .thumb .w{position:absolute;inset:5px 5px 0;background:#fff;border:1px solid #DCD7CD;border-radius:3px 3px 0 0}
+  .thumb .w::before{content:"";position:absolute;left:0;top:0;bottom:0;width:16px;background:#FCFBF8;border-right:1px solid #F0EDE7}
+  .thumb .bar{position:absolute;left:22px;right:6px;height:3px;background:#EDEAE4;border-radius:2px}
+  .thumb .hit{position:absolute;border:1px solid var(--accent);background:rgba(166,90,18,.18);border-radius:2px}
+  .thumb .cur{position:absolute;width:1px;height:6px;background:var(--accent)}
+  .thumb .sw{position:absolute;width:34px;height:24px;border:1px solid #DCD7CD;background:#fff;border-radius:3px}
+  .thumb .sw.b{background:#F1EEE8}
+
+  /* right */
+  .right{border-left:1px solid var(--line);background:var(--surface);overflow-y:auto;padding:16px 18px 24px}
+  .r-head{display:flex;align-items:center;gap:9px}
+  .r-head .no{font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+  .r-head h3{font-size:16px;font-weight:500;margin:0;letter-spacing:-.01em;line-height:1.35}
+  .chip{display:inline-flex;align-items:center;height:20px;padding:0 7px;border-radius:4px;font-size:10.5px;
+    border:1px solid var(--line);background:var(--surface-2);color:var(--ink-2)}
+  .chip.high{color:var(--ok);border-color:var(--ok-line);background:var(--ok-soft)}
+  .r-meta{margin:6px 0 0;font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  .facts{margin-top:14px;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .fact{display:grid;grid-template-columns:66px 1fr;gap:8px;padding:7px 10px;border-top:1px solid var(--line);font-size:11.5px}
+  .fact:first-child{border-top:0}
+  .fact .k{color:var(--muted)}
+  .fact .v{color:var(--ink-2);font-family:var(--mono);font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .locator{margin-top:8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);padding:8px 10px;
+    font-family:var(--mono);font-size:10.5px;color:var(--ink-2);word-break:break-all}
+  .locator .lbl{display:block;font-family:inherit;font-size:9.5px;color:var(--muted);margin-bottom:3px}
+  .reqbox{margin-top:2px;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .req{display:grid;grid-template-columns:52px 1fr auto;gap:8px;align-items:center;padding:7px 10px;border-top:1px solid var(--line);font-size:11.5px}
+  .req:first-child{border-top:0}
+  .req .k{color:var(--muted)}
+  .req .v{font-family:var(--mono);font-size:10.5px;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .req .reqtag{font-size:9.5px;color:var(--muted);border:1px solid var(--line);border-radius:3px;padding:0 4px;line-height:14px}
+  .preinsert{position:relative;margin-top:6px}
+  .op.wide{width:100%;grid-column:1/-1}
+  .premenu{position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:8;background:var(--surface);border:1px solid var(--line-strong);
+    border-radius:8px;box-shadow:0 8px 24px rgba(27,26,23,.12);padding:4px;display:flex;flex-direction:column}
+  .premenu[hidden]{display:none}
+  .premenu button{border:0;background:none;text-align:left;padding:7px 9px;border-radius:6px;font-size:11.5px;color:var(--ink-2);cursor:pointer}
+  .premenu button:hover{background:var(--surface-2);color:var(--ink)}
+  .ops{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:10px}
+  .op{height:30px;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);font-size:11.5px;
+    color:var(--ink-2);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:5px}
+  .op:hover{background:var(--surface-2);color:var(--ink)}
+  .op.danger{color:var(--failed);border-color:var(--failed-line)}
+  .suggest{margin-top:12px;padding:10px 11px;border:1px solid #E4D2BE;background:#FCF7F0;border-radius:8px}
+  .suggest .t{font-size:11.5px;color:#6E4A12}
+  .suggest .t b{font-weight:500}
+  .suggest .row{display:flex;align-items:center;gap:6px;margin-top:8px}
+  .suggest .row .sp{flex:1}
+  .note{margin-top:12px;font-size:10.5px;color:var(--muted);line-height:1.6}
+
+  /* draft */
+  .draft{flex:none;height:158px;border-top:1px solid var(--line);background:var(--surface);display:flex;flex-direction:column;
+    position:relative;z-index:6}
+  .draft-head{display:flex;align-items:center;gap:10px;padding:10px 20px 6px}
+  .draft-head h3{font-size:12px;font-weight:500;margin:0}
+  .draft-head .meta{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  .draft-head .sp{flex:1}
+  .draft-body{flex:1;display:flex;align-items:center;gap:8px;padding:4px 20px 12px;overflow-x:auto}
+  .dchip{flex:none;display:flex;align-items:center;gap:8px;height:52px;padding:0 10px;border:1px solid var(--line);
+    border-radius:8px;background:var(--surface-2);min-width:132px;position:relative}
+  .dchip:hover{border-color:var(--line-strong)}
+  .dchip .grip{color:var(--muted);cursor:grab;font-size:12px;letter-spacing:-2px}
+  .dchip .n{font-family:var(--mono);font-size:9.5px;color:var(--muted)}
+  .dchip .nm{font-size:11.5px;font-weight:500;color:var(--ink-2);white-space:nowrap}
+  .dchip .x{position:absolute;right:3px;top:3px;border:0;background:none;color:var(--muted);cursor:pointer;
+    font-size:11px;line-height:1;padding:2px;border-radius:3px;opacity:0}
+  .dchip:hover .x{opacity:1}
+  .dchip .x:hover{background:var(--failed-soft);color:var(--failed)}
+  .dadd{flex:none;height:52px;min-width:110px;border:1px dashed var(--line-strong);border-radius:8px;background:none;
+    color:var(--muted);font-size:11.5px;cursor:pointer}
+  .dadd:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+  .arrow{color:var(--line-strong);flex:none}
+
+  .statusbar{height:36px;flex:none;display:flex;align-items:center;gap:14px;padding:0 20px;
+    border-top:1px solid var(--line);background:var(--surface-2);font-size:10.5px;color:var(--muted)}
+  .statusbar .mono{font-family:var(--mono)}
+  .statusbar .sep{width:1px;height:12px;background:var(--line)}
+  .statusbar .right{margin-left:auto;display:flex;gap:12px;align-items:center}
+  .conn{display:inline-flex;align-items:center;gap:5px}
+  .conn .dot{width:5px;height:5px;border-radius:50%;background:var(--ok)}
+
+  .toast{position:fixed;left:50%;bottom:178px;transform:translateX(-50%);background:var(--ink);color:#fff;
+    font-size:12px;padding:7px 12px;border-radius:7px;opacity:0;pointer-events:none;transition:opacity .18s ease;z-index:30}
+  .toast.show{opacity:1}
+
+  @media (max-width:1180px){.main{grid-template-columns:210px minmax(0,1fr) 320px}}
+  @media (max-width:980px){.main{grid-template-columns:1fr}.left,.right{display:none}}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand"><span class="mark"></span>Cuekeeper</div>
+    <span class="divider"></span>
+    <div class="session">aTrust 安装流程 <span class="id">会话 #12</span></div>
+    <span class="meta">已分析 <span class="mono">12</span> 个动作 · <span class="mono">01:42</span></span>
+    <div class="top-actions">
+      <button class="btn" type="button" id="reanalyze">重新分析</button>
+      <button class="btn primary" type="button" id="runDraft">运行测试项</button>
+    </div>
+  </header>
+
+  <main class="main">
+    <!-- left: summary + app filter -->
+    <aside class="left">
+      <div class="card">
+        <h3>录制会话</h3>
+        <div class="sub">11 月 21 日 12:04 · 本机录制</div>
+      </div>
+      <div class="stats">
+        <div class="stat"><div class="k">时长</div><div class="v">01:42</div></div>
+        <div class="stat"><div class="k">动作</div><div class="v">12</div></div>
+        <div class="stat"><div class="k">应用</div><div class="v">3</div></div>
+        <div class="stat"><div class="k">窗口</div><div class="v">5</div></div>
+      </div>
+
+      <div class="sect">
+        <h4>应用筛选 <span class="sp"></span><span class="n">动作数</span></h4>
+        <button class="appitem on" type="button" data-app="all"><span class="dot"></span>全部应用<span class="c">12</span></button>
+        <button class="appitem" type="button" data-app="aTrust"><span class="dot"></span>aTrust<span class="c">5</span></button>
+        <button class="appitem" type="button" data-app="系统设置"><span class="dot"></span>系统设置<span class="c">4</span></button>
+        <button class="appitem" type="button" data-app="Chrome"><span class="dot"></span>Chrome<span class="c">3</span></button>
+      </div>
+
+      <div class="hintbox">
+        <b>分析已完成</b><br>
+        原始事件 1,284 条，合并为 12 个动作。键入已合并，鼠标移动与悬停已忽略，密码输入已打码。
+      </div>
+    </aside>
+
+    <!-- center: action timeline -->
+    <section class="center">
+      <div class="center-head">
+        <h2>动作时间线</h2>
+        <span class="c" id="countLabel">12 个动作</span>
+      </div>
+      <div class="mergebar" id="mergebar">
+        <span>已选 <b id="mergeN">0</b> 个动作</span>
+        <span class="sp"></span>
+        <button class="btn" type="button" id="mergeBtn">合并为行为</button>
+        <button class="btn" type="button" id="clearSel">清除</button>
+      </div>
+      <div class="timeline" id="timeline"></div>
+    </section>
+
+    <!-- right: organize -->
+    <aside class="right" id="right"></aside>
+  </main>
+
+  <section class="draft">
+    <div class="draft-head">
+      <h3>测试项草稿</h3>
+      <span class="meta" id="draftMeta">5 个行为 · 估算 38s</span>
+      <span class="sp"></span>
+      <button class="btn small" type="button" id="saveDraft">保存草稿</button>
+    </div>
+    <div class="draft-body" id="draftBody"></div>
+  </section>
+
+  <footer class="statusbar">
+    <span>原始事件 <span class="mono">1,284</span> → 动作 <span class="mono">12</span></span>
+    <span class="sep"></span>
+    <span>分析耗时 <span class="mono">3.2s</span></span>
+    <span class="sep"></span>
+    <span>会话数据仅存本机</span>
+    <span class="right"><span class="conn"><span class="dot"></span>已保存</span><span>11:42</span></span>
+  </footer>
+</div>
+
+<div class="toast" id="toast">已加入测试项</div>
+
+<script>
+  const icon = {
+    launch:'<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M5 3.5 12 8l-7 4.5z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>',
+    click:'<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M3.5 2.5l7 4.2-3.1.9-1 3.1z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>',
+    type:'<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><rect x="2" y="4.5" width="12" height="7" rx="1.4" stroke="currentColor" stroke-width="1.3"/><path d="M4.5 7h1M7 7h1M9.5 7h1M4.5 9.4h5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>',
+    win:'<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><rect x="2.5" y="3.5" width="8" height="6.5" rx="1" stroke="currentColor" stroke-width="1.2"/><rect x="5.5" y="6" width="8" height="6.5" rx="1" stroke="currentColor" stroke-width="1.2"/></svg>'
+  };
+
+  const actions = [
+    {id:1,t:'12:04:31',ic:'launch',title:'启动 <b>aTrust</b>',app:'aTrust',win:'主窗口',ms:'1.2s'},
+    {id:2,t:'12:04:32',ic:'click',title:'点击 <b>[账号]</b> 输入框',app:'aTrust',win:'登录',ms:'0.3s'},
+    {id:3,t:'12:04:33',ic:'type',title:'输入账号',app:'aTrust',win:'登录',ms:'0.2s',tag:'合并 7 次按键'},
+    {id:4,t:'12:04:34',ic:'click',title:'点击 <b>[密码]</b> 输入框',app:'aTrust',win:'登录',ms:'0.2s'},
+    {id:5,t:'12:04:35',ic:'type',title:'输入密码',app:'aTrust',win:'登录',ms:'0.2s',tag:'敏感 · 已打码',sens:true},
+    {id:6,t:'12:04:37',ic:'click',title:'点击 <b>[登录]</b>',app:'aTrust',win:'登录',ms:'0.4s'},
+    {id:7,t:'12:04:39',ic:'win',title:'切换到 <b>「系统设置」</b>',app:'系统设置',win:'网络',ms:'—'},
+    {id:8,t:'12:04:41',ic:'click',title:'点击 <b>[网络]</b>',app:'系统设置',win:'网络',ms:'0.3s'},
+    {id:9,t:'12:04:43',ic:'click',title:'点击 <b>[启用代理]</b>',app:'系统设置',win:'网络',ms:'0.3s'},
+    {id:10,t:'12:04:45',ic:'type',title:'输入代理地址',app:'系统设置',win:'网络',ms:'0.4s',tag:'合并 14 次按键'},
+    {id:11,t:'12:04:47',ic:'win',title:'切换到 <b>Chrome</b>',app:'Chrome',win:'文档',ms:'—'},
+    {id:12,t:'12:04:50',ic:'click',title:'点击 <b>[复制]</b>',app:'Chrome',win:'文档',ms:'0.2s'}
+  ];
+
+  const details = {
+    1:{role:'window',name:'aTrust 主窗口',loc:'app=aTrust bundle=com.sangfor.atrust',conf:'高',sug:'启动应用通常作为流程的第一步'},
+    2:{role:'textfield',name:'账号',loc:'role=textfield name=账号 path=window[登录] > group > textfield',conf:'高',sug:'与 03 合并为「输入账号」'},
+    3:{role:'textfield',name:'账号',loc:'role=textfield name=账号 path=window[登录] > group > textfield',conf:'高',sug:'与 02 合并为「输入账号」'},
+    4:{role:'securetextfield',name:'密码',loc:'role=securetextfield name=密码 path=window[登录] > group > securetextfield',conf:'高',sug:'与 05 合并为「输入密码」'},
+    5:{role:'securetextfield',name:'密码',loc:'role=securetextfield name=密码',conf:'高',sug:'敏感输入，报告中不会保存明文'},
+    6:{role:'button',name:'登录',loc:'role=button name=登录 path=window[登录] > group > button',conf:'高',sug:'与 02–05 合并为「登录」行为'},
+    7:{role:'window',name:'网络',loc:'app=系统设置 window=网络',conf:'高',sug:'窗口切换，建议作为行为边界'},
+    8:{role:'button',name:'网络',loc:'role=button name=网络 path=window[设置] > tabgroup > tab',conf:'高',sug:'与 09、10 同属「配置代理」'},
+    9:{role:'checkbox',name:'启用代理',loc:'role=checkbox name=启用代理 path=window[网络] > group > row > checkbox',conf:'高',sug:'与 08、10 同属「配置代理」，建议合并'},
+    10:{role:'textfield',name:'代理地址',loc:'role=textfield name=代理地址 path=window[网络] > group > row > textfield',conf:'高',sug:'与 08、09 同属「配置代理」，建议合并'},
+    11:{role:'window',name:'文档',loc:'app=Chrome window=文档',conf:'高',sug:'窗口切换，建议作为行为边界'},
+    12:{role:'button',name:'复制',loc:'role=button name=复制 path=window[文档] > toolbar > button',conf:'中',sug:'与 11 同属 Chrome 操作'}
+  };
+
+  let activeApp='all';
+  let selectedId=9;
+  const checked=new Set();
+  let draft=[
+    {n:'启动应用',k:'launch'},{n:'登录',k:'act'},{n:'打开设置',k:'act'},
+    {n:'配置代理',k:'act'},{n:'关闭应用',k:'act'}
+  ];
+
+  let setup=[
+    {id:'s1',kind:'app',app:'aTrust',confirmed:false},
+    {id:'s2',kind:'window',title:'登录',confirmed:false}
+  ];
+  const preBlocks={};
+
+  const pin={
+    app:'<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><rect x="2.5" y="3" width="11" height="10" rx="1.6" stroke="currentColor" stroke-width="1.3"/><path d="M2.5 6h11" stroke="currentColor" stroke-width="1.3"/></svg>',
+    win:'<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><rect x="2.5" y="3.5" width="11" height="9" rx="1.4" stroke="currentColor" stroke-width="1.3"/><path d="M2.5 6h11" stroke="currentColor" stroke-width="1.3"/></svg>'
+  };
+
+  const timelineEl=document.getElementById('timeline');
+  const rightEl=document.getElementById('right');
+
+  function thumb(a){
+    if(a.ic==='win') return `<div class="thumb"><span class="sw" style="left:8px;top:8px"></span><span class="sw b" style="left:22px;top:16px"></span></div>`;
+    if(a.ic==='type') return `<div class="thumb"><div class="w"></div><span class="bar" style="top:18px;width:34px"></span><span class="cur" style="left:58px;top:17px"></span></div>`;
+    return `<div class="thumb"><div class="w"></div><span class="bar" style="top:12px;width:46px"></span><span class="bar" style="top:20px;width:30px"></span><span class="hit" style="left:52px;top:26px;width:26px;height:9px"></span></div>`;
+  }
+
+  function rowHtml(scope,row){
+    const isApp=row.kind==='app';
+    const name=isApp?`打开 ${row.app}`:`等待窗口「${row.title}」`;
+    const options=isApp?['aTrust','系统设置','Chrome']:['登录','网络','文档'];
+    return `<div class="prow" data-scope="${scope}" data-id="${row.id}">
+      <span class="pico">${isApp?pin.app:pin.win}</span>
+      <span class="pname">${name}</span>
+      <span class="pstate ${row.confirmed?'ok':''}">${row.confirmed?'已确认':'推断'}</span>
+      <select class="pchange" hidden>${options.map(o=>`<option ${o===(isApp?row.app:row.title)?'selected':''}>${o}</option>`).join('')}</select>
+      <span class="sp"></span>
+      ${row.confirmed?'':`<button class="btn small ghost" type="button" data-act="confirm">确认</button>`}
+      <button class="btn small ghost" type="button" data-act="change">更换</button>
+      <button class="btn small ghost" type="button" data-act="del">删除</button>
+    </div>`;
+  }
+
+  function renderTimeline(){
+    const list=actions.filter(a=>activeApp==='all'||a.app===activeApp);
+    const allConfirmed=setup.length>0&&setup.every(r=>r.confirmed);
+    const setupHtml=setup.length?`<div class="setupblock ${allConfirmed?'confirmed':''}">
+      <div class="setup-head">
+        <span class="t">前置</span>
+        <span class="hint">${allConfirmed?'已确认 · 回放前依次执行':'推断 · 确认后才生效'}</span>
+        <span class="sp"></span>
+        ${allConfirmed?'':`<button class="btn small ghost" type="button" data-confirm-all>全部确认</button>`}
+      </div>
+      ${setup.map(r=>rowHtml('setup',r)).join('')}
+    </div>`:'';
+
+    const listHtml=list.map(a=>{
+      const pre=preBlocks[a.id]?`<div class="preblock" data-for="${a.id}">
+        <div class="setup-head"><span class="t">插入的前置</span><span class="hint">仅作用于这一步</span></div>
+        ${preBlocks[a.id].map(r=>rowHtml('pre',r)).join('')}
+      </div>`:'';
+      return pre+`<div class="act ${a.id===selectedId?'on':''}" data-id="${a.id}" tabindex="0">
+        <input class="pick" type="checkbox" ${checked.has(a.id)?'checked':''} aria-label="选择动作 ${a.id}">
+        <span class="t">${a.t}</span>
+        <span class="ico">${icon[a.ic]}</span>
+        <span>
+          <div class="title">${a.title}</div>
+          <div class="sub"><span class="appname">${a.app}</span><span>·</span><span>${a.win}</span>${a.tag?`<span class="tag ${a.sens?'sens':''}">${a.tag}</span>`:''}</div>
+        </span>
+        <span class="dur">${a.ms}</span>
+        ${thumb(a)}
+      </div>`;
+    }).join('');
+
+    timelineEl.innerHTML=setupHtml+(setup.length?`<div class="scope"><div class="scope-label">作用于后续 ${list.length} 个动作</div>${listHtml}</div>`:listHtml);
+
+    document.getElementById('countLabel').textContent=`${list.length} 个动作`;
+    timelineEl.querySelectorAll('.act').forEach(el=>{
+      el.addEventListener('click',e=>{
+        if(e.target.classList.contains('pick')) return;
+        selectedId=+el.dataset.id; renderTimeline(); renderRight();
+      });
+      el.addEventListener('keydown',e=>{
+        if(e.key==='Enter'||e.key===' '){e.preventDefault();el.click();}
+      });
+      el.querySelector('.pick').addEventListener('change',e=>{
+        const id=+el.dataset.id;
+        if(e.target.checked) checked.add(id); else checked.delete(id);
+        updateMerge();
+      });
+    });
+
+    timelineEl.querySelectorAll('[data-act]').forEach(btn=>btn.addEventListener('click',e=>{
+      e.stopPropagation();
+      const rowEl=btn.closest('.prow');
+      const scope=rowEl.dataset.scope;
+      const forId=rowEl.closest('.preblock')?.dataset.for;
+      const arr=scope==='setup'?setup:preBlocks[forId];
+      const row=arr.find(r=>r.id===rowEl.dataset.id);
+      if(!row) return;
+      const act=btn.dataset.act;
+      if(act==='confirm'){row.confirmed=true;renderTimeline();renderRight();}
+      if(act==='del'){
+        arr.splice(arr.indexOf(row),1);
+        if(scope==='pre'&&!arr.length) delete preBlocks[forId];
+        renderTimeline();renderRight();
+      }
+      if(act==='change'){
+        rowEl.querySelector('.pname').style.display='none';
+        rowEl.querySelector('.pstate').style.display='none';
+        const sel=rowEl.querySelector('.pchange'); sel.hidden=false; sel.focus();
+      }
+    }));
+
+    timelineEl.querySelectorAll('.pchange').forEach(sel=>sel.addEventListener('change',()=>{
+      const rowEl=sel.closest('.prow');
+      const scope=rowEl.dataset.scope;
+      const forId=rowEl.closest('.preblock')?.dataset.for;
+      const arr=scope==='setup'?setup:preBlocks[forId];
+      const row=arr.find(r=>r.id===rowEl.dataset.id);
+      if(row.kind==='app') row.app=sel.value; else row.title=sel.value;
+      row.confirmed=false;
+      renderTimeline();renderRight();
+    }));
+
+    timelineEl.querySelector('[data-confirm-all]')?.addEventListener('click',()=>{
+      setup.forEach(r=>r.confirmed=true); renderTimeline(); renderRight(); toast('前置已确认，回放前会依次执行');
+    });
+  }
+
+  function updateMerge(){
+    document.getElementById('mergeN').textContent=checked.size;
+    document.getElementById('mergebar').classList.toggle('show',checked.size>0);
+  }
+
+  function renderRight(){
+    const a=actions.find(x=>x.id===selectedId)||actions[0];
+    const d=details[a.id]||{role:'—',name:'—',loc:'—',conf:'中',sug:'暂无合并建议'};
+    rightEl.innerHTML=`
+      <div class="r-head"><span class="no">${String(a.id).padStart(2,'0')}</span><h3>${a.title.replace(/<[^>]+>/g,'')}</h3>
+        <span class="chip ${d.conf==='高'?'high':''}">置信度 ${d.conf}</span></div>
+      <p class="r-meta">${a.t} · ${a.ms} · ${a.app} / ${a.win}</p>
+
+      <div class="facts">
+        <div class="fact"><span class="k">元素</span><span class="v">${d.role} “${d.name}”</span></div>
+        <div class="fact"><span class="k">应用</span><span class="v">${a.app}</span></div>
+        <div class="fact"><span class="k">窗口</span><span class="v">${a.win}</span></div>
+        <div class="fact"><span class="k">来源</span><span class="v">全局录制 · 自动分析</span></div>
+      </div>
+
+      <div class="locator"><span class="lbl">定位器</span>${d.loc}</div>
+
+      <div class="sect">
+        <div class="sect-head"><h3>前置条件</h3><span class="rule"></span><span class="n">回放前检查</span></div>
+        <div class="reqbox">
+          <div class="req"><span class="k">应用</span><span class="v">${a.app}</span><span class="reqtag">需已启动</span></div>
+          <div class="req"><span class="k">窗口</span><span class="v">${a.win}</span><span class="reqtag">需存在</span></div>
+        </div>
+        <div class="preinsert">
+          <button class="op wide" type="button" id="insertPre">+ 在此动作前插入前置</button>
+          <div class="premenu" id="premenu" hidden>
+            <button type="button" data-pre="app">打开 ${a.app}</button>
+            <button type="button" data-pre="window">等待窗口「${a.win}」</button>
+            <button type="button" data-pre="record">从录制中选取…</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ops">
+        <button class="op" type="button" data-add>加入测试项</button>
+        <button class="op" type="button" data-assert>添加断言</button>
+        <button class="op" type="button" data-pick>重新拾取</button>
+        <button class="op danger" type="button" data-ignore>忽略此动作</button>
+      </div>
+
+      ${d.sug?`<div class="suggest">
+        <div class="t"><b>合并建议</b> · ${d.sug}</div>
+        <div class="row"><span class="t" style="font-size:10.5px;color:#7A5A25">合并后可在测试项中复用</span><span class="sp"></span>
+          <button class="btn small" type="button" id="sugMerge">合并为行为</button></div>
+      </div>`:''}
+
+      ${a.ic==='click'?'<p class="note">这一步只记录了点击，没有校验结果。添加断言后，回放时才会检查元素状态。</p>':''}`;
+
+    rightEl.querySelector('[data-add]').addEventListener('click',()=>{ addChip(a.title.replace(/<[^>]+>/g,'')); toast('已加入测试项草稿'); });
+    rightEl.querySelector('[data-ignore]').addEventListener('click',()=>toast('已忽略，这一步不会进入测试项'));
+    rightEl.querySelector('[data-assert]').addEventListener('click',()=>toast('已添加断言：checked = true'));
+    rightEl.querySelector('[data-pick]').addEventListener('click',()=>toast('进入拾取模式，重新绑定目标'));
+
+    const ip=document.getElementById('insertPre'), menu=document.getElementById('premenu');
+    ip?.addEventListener('click',e=>{e.stopPropagation();menu.hidden=!menu.hidden;});
+    menu?.querySelectorAll('[data-pre]').forEach(b=>b.addEventListener('click',()=>{
+      const kind=b.dataset.pre;
+      if(kind==='record'){menu.hidden=true;toast('打开录制片段选择器');return;}
+      const arr=preBlocks[a.id]||(preBlocks[a.id]=[]);
+      arr.push({id:'p'+Date.now()+Math.random().toString(36).slice(2,5),kind,
+        app:a.app,title:a.win,confirmed:false});
+      menu.hidden=true; renderTimeline(); renderRight();
+      document.querySelector(`.preblock[data-for="${a.id}"]`)?.scrollIntoView({block:'nearest'});
+      toast('已插入前置动作，确认后生效');
+    }));
+
+    document.getElementById('sugMerge')?.addEventListener('click',()=>{
+      addChip('配置代理'); toast('已合并为行为「配置代理」');
+    });
+  }
+
+  function addChip(name){
+    draft.push({n:name,k:'act'});
+    renderDraft();
+  }
+
+  function renderDraft(){
+    document.getElementById('draftBody').innerHTML = draft.map((c,i)=>`
+      <div class="dchip">
+        <span class="grip">⠿</span>
+        <span><span class="n">${i+1}</span><div class="nm">${c.n}</div></span>
+        <button class="x" type="button" data-i="${i}" aria-label="移除">×</button>
+      </div>${i<draft.length-1?'<span class="arrow">→</span>':''}`).join('') +
+      `<button class="dadd" type="button" id="addBehavior">+ 添加行为</button>`;
+    document.getElementById('draftMeta').textContent=`${draft.length} 个行为 · 估算 38s`;
+    document.querySelectorAll('.dchip .x').forEach(b=>b.addEventListener('click',()=>{
+      draft.splice(+b.dataset.i,1); renderDraft();
+    }));
+    document.getElementById('addBehavior').addEventListener('click',()=>toast('从行为库或时间线选择要插入的行为'));
+  }
+
+  document.querySelectorAll('.appitem').forEach(b=>b.addEventListener('click',()=>{
+    activeApp=b.dataset.app;
+    document.querySelectorAll('.appitem').forEach(x=>x.classList.toggle('on',x===b));
+    renderTimeline();
+  }));
+
+  document.getElementById('mergeBtn').addEventListener('click',()=>{
+    addChip('测试行为 1');
+    checked.clear(); updateMerge(); renderTimeline();
+    toast('已合并为一个测试行为');
+  });
+  document.getElementById('clearSel').addEventListener('click',()=>{
+    checked.clear(); updateMerge(); renderTimeline();
+  });
+  document.getElementById('runDraft').addEventListener('click',()=>toast('测试项已提交运行'));
+  document.getElementById('saveDraft').addEventListener('click',()=>toast('草稿已保存'));
+  document.getElementById('reanalyze').addEventListener('click',()=>toast('正在重新分析原始事件'));
+
+  let tt;
+  function toast(msg){
+    const el=document.getElementById('toast'); el.textContent=msg; el.classList.add('show');
+    clearTimeout(tt); tt=setTimeout(()=>el.classList.remove('show'),2000);
+  }
+
+  renderTimeline(); renderRight(); renderDraft(); updateMerge();
+  if(location.hash==='#pre'){ preBlocks[9]=[{id:'p1',kind:'app',app:'系统设置',confirmed:false}]; renderTimeline();
+    document.querySelector('.preblock')?.scrollIntoView({block:'center'}); }
+  if(location.hash==='#confirmed'){ setup.forEach(r=>r.confirmed=true); renderTimeline(); }
+</script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "type-note",
+  "name": "Enter the note",
+  "parameters": ["note"],
+  "steps": [
+    { "id": "write", "kind": "type", "target": { "kind": "element", "role": "textfield" }, "text": { "param": "note" } }
+  ]
+}

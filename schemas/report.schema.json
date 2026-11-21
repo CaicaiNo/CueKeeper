@@ -1,0 +1,173 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Cuekeeper report v1",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1,
+      "type": "number"
+    },
+    "flowId": {
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
+      "type": "string"
+    },
+    "flowSha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "startedAt": {
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+      "type": "string"
+    },
+    "mode": {
+      "anyOf": [
+        {
+          "const": "replay",
+          "type": "string"
+        },
+        {
+          "const": "dry-run",
+          "type": "string"
+        }
+      ]
+    },
+    "status": {
+      "anyOf": [
+        {
+          "const": "passed",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "type": "string"
+        },
+        {
+          "const": "blocked",
+          "type": "string"
+        }
+      ]
+    },
+    "entries": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "id": {
+            "minLength": 1,
+            "maxLength": 196,
+            "type": "string"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "const": "setup",
+                "type": "string"
+              },
+              {
+                "const": "click",
+                "type": "string"
+              },
+              {
+                "const": "type",
+                "type": "string"
+              },
+              {
+                "const": "key",
+                "type": "string"
+              },
+              {
+                "const": "wait",
+                "type": "string"
+              },
+              {
+                "const": "assert",
+                "type": "string"
+              }
+            ]
+          },
+          "status": {
+            "anyOf": [
+              {
+                "const": "passed",
+                "type": "string"
+              },
+              {
+                "const": "failed",
+                "type": "string"
+              },
+              {
+                "const": "blocked",
+                "type": "string"
+              },
+              {
+                "const": "skipped",
+                "type": "string"
+              },
+              {
+                "const": "resolved",
+                "type": "string"
+              }
+            ]
+          },
+          "atMs": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "durationMs": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "delivery": {
+            "anyOf": [
+              {
+                "const": "delivered_verified",
+                "type": "string"
+              },
+              {
+                "const": "delivered_unverified",
+                "type": "string"
+              },
+              {
+                "const": "delivery_uncertain",
+                "type": "string"
+              },
+              {
+                "const": "not_delivered",
+                "type": "string"
+              },
+              {
+                "const": "unknown",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "status",
+          "atMs",
+          "durationMs"
+        ]
+      }
+    }
+  },
+  "required": [
+    "version",
+    "flowId",
+    "flowSha256",
+    "startedAt",
+    "mode",
+    "status",
+    "entries"
+  ]
+}
