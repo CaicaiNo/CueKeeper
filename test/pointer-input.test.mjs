@@ -169,6 +169,17 @@ test('a missing scroll target fails instead of scrolling another control', async
   assert.deepEqual(desktop.calls, []);
 });
 
+test('a coordinate scroll outside the window fails before any wheel command', async () => {
+  const desktop = fakeDesktop();
+  const flow = flowFor([{
+    id: 'wheel', kind: 'scroll', target: { kind: 'point', point: [900, 900] }, deltaX: 0, deltaY: -3,
+  }]);
+  const report = await runFlow(flow, desktop, { dryRun: false, signal });
+  assert.equal(report.status, 'failed');
+  assert.equal(report.entries[0].code, 'UNSAFE_POINT');
+  assert.deepEqual(desktop.calls, []);
+});
+
 test('the adapter maps gestures to driver commands and refuses unheaded physical input', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-pointer-adapter-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -222,4 +233,49 @@ console.log(JSON.stringify({ version: '2.6', command, ok: true, data }));
   assert.equal(headless.entries[0].code, 'HEADED_REQUIRED');
   const refused = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
   assert.deepEqual(refused.map(call => call.command), ['version', 'snapshot']);
+});
+
+test('the adapter sends counted and right clicks at a coordinate through mouse-click', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-pointer-point-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const previous = process.env.CUEKEEPER_AGENT_DESKTOP;
+  const previousIdentity = process.env.CUEKEEPER_APP_IDENTITY;
+  process.env.CUEKEEPER_AGENT_DESKTOP = join(dir, 'desktop');
+  process.env.CUEKEEPER_APP_IDENTITY = join(dir, 'identity');
+  t.after(() => {
+    if (previous === undefined) delete process.env.CUEKEEPER_AGENT_DESKTOP;
+    else process.env.CUEKEEPER_AGENT_DESKTOP = previous;
+    if (previousIdentity === undefined) delete process.env.CUEKEEPER_APP_IDENTITY;
+    else process.env.CUEKEEPER_APP_IDENTITY = previousIdentity;
+  });
+  const log = join(dir, 'calls');
+  writeFileSync(join(dir, 'desktop'), `#!/usr/bin/env node
+const fs = require('node:fs');
+const [command, ...args] = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ command, args }) + String.fromCharCode(10));
+const data = command === 'version' ? { version: '1.3.1' } :
+  command === 'snapshot' ? ${JSON.stringify(fixture.data)} :
+  command === 'focus-window' ? { focused: { id: 'w-1234' } } :
+  { disposition: { delivery: 'delivered_unverified' } };
+console.log(JSON.stringify({ version: '2.6', command, ok: true, data }));
+`, { mode: 0o700 });
+  const point = { kind: 'point', point: [200, 200] };
+  const flow = flowFor([
+    { id: 'double', kind: 'click', target: point, count: 2 },
+    { id: 'triple', kind: 'click', target: point, count: 3 },
+    { id: 'right', kind: 'click', target: point, button: 'right' },
+  ]);
+  const report = await withDesktop({ headed: true, signal },
+    desktop => runFlow(flow, desktop, { dryRun: false, signal }));
+  assert.equal(report.status, 'passed');
+  const calls = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(calls.map(call => call.command), [
+    'version',
+    'snapshot', 'focus-window', 'snapshot', 'mouse-click',
+    'snapshot', 'focus-window', 'snapshot', 'mouse-click',
+    'snapshot', 'focus-window', 'snapshot', 'mouse-click',
+  ]);
+  assert.deepEqual(calls[4].args, ['--headed', '--xy', '200,200', '--count', '2']);
+  assert.deepEqual(calls[8].args, ['--headed', '--xy', '200,200', '--count', '3']);
+  assert.deepEqual(calls[12].args, ['--headed', '--xy', '200,200', '--button', 'right']);
 });

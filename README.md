@@ -200,4 +200,4 @@ node dist/cli.js report pack out/demo/batch.json.rows/row-000001/report.json \
 
 所有命令支持 `--json`，标准输出提供单个 JSON 对象。错误有 `error.code` 和 `error.message`。生成的运行报告放在 `data` 中，失败报告的 `ok` 为 `false`。录制状态提示写标准错误。正常结束且有有效动作时，CLI 返回 `ok: true`，跳过的事件记录在 `data.warnings`。录制失败或中断时，已有步骤保存至 `--out`，CLI 返回 `data.partial: true` 及原因。没有有效动作时返回错误。退出码为 `0` 完成、`1` 失败、阻塞或部分录制、`2` 输入文件或依赖错误、`130` 中断。`doctor` 用 `0` 表示全部检查通过、`1` 表示有检查失败；`record` 的启动自检使用 `2`，错误码为 `RECORDER_MISSING`、`RECORDER_UNUSABLE` 或 `PERMISSIONS_REQUIRED`。
 
-[架构与里程碑](docs/architecture.md)说明 schema、适配接口、录制限制与后续工作。报告上传的配置、队列与 CLI 用法见[报告上传客户端](docs/upload-client.md)。
+[架构与里程碑](docs/architecture.md)说明 schema、适配接口、录制限制与后续工作。每个输入操作的录制、回放、离线测试、真机状态与错误码见[输入操作支持矩阵](docs/support-matrix.md)。报告上传的配置、队列与 CLI 用法见[报告上传客户端](docs/upload-client.md)。
