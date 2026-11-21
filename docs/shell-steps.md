@@ -52,6 +52,32 @@ CueKeeper 整体使用 root 会让导入的命令、测试工作台和桌面适�
 - 固定任务通过其 stdout 返回有界的开始和完成结构记录，下游程序与日志无法写入该通道。完成记录携带真实任务退出码、超时或取消结果。未收到开始记录时，sudo 拒绝或未能授权按 `SHELL_PRIVILEGE_REQUIRED` 处理，不根据 stderr 文案或 sudo 的退出码猜测业务结果。sudo 本身启动失败或收到开始后缺失有效完成记录按 `SHELL_START_FAILED` 处理，除非已确定取消或超时。
 - 操作者必须信任用户态命令及其脚本依赖。执行门拦截 CueKeeper 从导入内容发起的执行和提权请求。获准的用户态代码具备该账号已有的系统权限，包括直接请求系统提权的能力。夜间运行使用无通用 sudo 权限的专用账号。
 
+## 固定任务登记与协议（首版）
+
+- 登记表固定在 `/Library/CueKeeper/privileged/registry.json`，由 root 维护：
+
+  ```json
+  {
+    "version": 1,
+    "tasks": {
+      "reset-fixture": { "path": "/Library/CueKeeper/privileged/reset-fixture" }
+    }
+  }
+  ```
+
+- 预检逐项校验：任务 ID 与路径一致、登记项存在且路径完全相同、从特权根目录起没有符号链接组件、登记表与任务是属主为 root 的普通文件、组和其他用户不可写、任务对属主可执行。登记表本身不证明 sudoers 已授权。
+- 执行只发起一次 `sudo -n -k -u root -- <登记路径>`，固定 `cwd: /`、固定 `PATH` 与 `LANG=C`、关闭 stdin。不传参数、不探测、不使用 `sudo -v`。
+- 固定任务在 stdout 上写两行 NDJSON：
+
+  ```json
+  {"record":"start","task":"reset-fixture"}
+  {"record":"finish","task":"reset-fixture","state":"finished","exitCode":0}
+  ```
+
+  只接受一条开始记录和一条完成记录；任务 ID 不符、缺少退出码、额外记录或非 JSON 行都按协议失败处理。stderr 与原始输出不进入报告。
+- 未收到开始记录（sudo 拒绝或未授权）→ `SHELL_PRIVILEGE_REQUIRED`；sudo 本身无法启动，或已收到开始但缺少有效完成记录 → `SHELL_START_FAILED`。不根据 stderr 文案或 sudo 退出码猜业务结果。
+- 首版默认关闭真实提权：CLI 与工作台注入禁用适配器，只把提权步骤挡在预检。协议解析、授权分支和失败分支由 mock 适配器在离线用例中覆盖；真实 sudo、PAM 与特权进程回收留给 HAOC-76。
+
 ## 运行门与工作台
 
 1. **引入或编辑。** 工作台在导入 flow、test 或 behavior 时，展示 shell 的数量和提权标记，包括尚未调用的定义。保存、校验、导入以及查看报告均无副作用。在步骤列表的插入位置选择「Shell」，用逐项参数编辑器录入程序和参数。显式切到「Shell 脚本」后才显示脚本编辑器。步骤卡展示命令摘要、工作目录、用户态或「需管理员预配置」标记。编辑和确认界面可查看完整命令、解析后路径及环境键，秘密引用只显示变量名。录制产物仍从现有捕获动作生成。

@@ -313,7 +313,7 @@ export class AppIdentitySession {
    * flow accepts exactly one instance whose canonical bundle path matches; a
    * legacy flow accepts one provable same-ID instance.
    */
-  async bindInstances(desktop: Desktop): Promise<void> {
+  async bindInstances(desktop: Desktop | undefined): Promise<void> {
     if (this.offline) return;
     if (this.mode === 'bundle_path') return this.bindPath();
     return this.bindLegacy(desktop);
@@ -354,7 +354,7 @@ export class AppIdentitySession {
     this.checked = true;
   }
 
-  private async bindLegacy(_desktop: Desktop) {
+  private async bindLegacy(_desktop: Desktop | undefined) {
     // Without a native probe the legacy route keeps the driver's existing
     // app-scoped rules; a path-fixed flow can never take this route.
     if (!await this.probe.available()) return;

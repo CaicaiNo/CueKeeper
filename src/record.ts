@@ -181,7 +181,8 @@ export async function record(
   signal.throwIfAborted();
   // A bound recording persists the canonical path actually proven at runtime.
   const recordedTarget: Target = bound ? { ...target, appPath: bound.bundlePath } : target;
-  const executable = fileURLToPath(new URL('./cuekeeper-capture', import.meta.url));
+  const executable = process.env.CUEKEEPER_RECORDER?.trim() ||
+    fileURLToPath(new URL('./cuekeeper-capture', import.meta.url));
   const args = [target.app, windowNumber, String(seconds)];
   if (!indicator) args.push('--no-indicator');
   if (sound) args.push('--sound');
