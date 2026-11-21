@@ -15,7 +15,7 @@ export type AppIdentity = {
 };
 
 const cache = new Map<string, Omit<AppIdentity, 'label'>>();
-const iconCache = new Map<string, string | undefined>();
+const iconCache = new Map<string, Buffer | undefined>();
 
 async function installedPaths(bundleId: string) {
   try {
@@ -44,9 +44,9 @@ async function displayName(path: string) {
   return basename(path).replace(/\.app$/i, '');
 }
 
-async function appIcon(path: string) {
+async function iconPng(path: string) {
   if (iconCache.has(path)) return iconCache.get(path);
-  let icon: string | undefined;
+  let icon: Buffer | undefined;
   try {
     const { stdout } = await run('plutil', ['-convert', 'json', '-o', '-', join(path, 'Contents', 'Info.plist')], {
       timeout: 3000, maxBuffer: 256 * 1024,
@@ -59,7 +59,7 @@ async function appIcon(path: string) {
       const output = join(directory, 'icon.png');
       try {
         await run('sips', ['-s', 'format', 'png', file, '--out', output, '-Z', '64'], { timeout: 4000 });
-        icon = `data:image/png;base64,${(await readFile(output)).toString('base64')}`;
+        icon = await readFile(output);
       } finally {
         await rm(directory, { recursive: true, force: true });
       }
@@ -69,6 +69,15 @@ async function appIcon(path: string) {
   }
   iconCache.set(path, icon);
   return icon;
+}
+
+export async function appIconPng(path: string) {
+  return iconPng(path);
+}
+
+async function appIcon(path: string) {
+  const png = await iconPng(path);
+  return png ? `data:image/png;base64,${png.toString('base64')}` : undefined;
 }
 
 export async function describeApps(bundleIds: string[], hints: Record<string, string> = {}) {

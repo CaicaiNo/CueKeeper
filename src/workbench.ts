@@ -4,6 +4,8 @@ import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
+import { listApps } from './app-catalog.js';
+import { appIconPng } from './apps.js';
 import { loadBaseline } from './assertion.js';
 import { offlineDesktop, withDesktop } from './desktop.js';
 import { readJson, writeNew } from './files.js';
@@ -116,6 +118,14 @@ export async function startWorkbench(options: {
       response.writeHead(200, { 'Content-Type': asset[1] + '; charset=utf-8' }).end(data);
       return;
     }
+    if (request.method === 'GET' && path.startsWith('/app-icon/')) {
+      const bundleId = decodeURIComponent(path.slice('/app-icon/'.length).split('?')[0]);
+      const app = (await listApps()).find(item => item.bundleId === bundleId);
+      const png = app ? await appIconPng(app.paths[0]) : undefined;
+      if (!png) return send(response, 404, { error: 'Icon unavailable' });
+      response.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'private, max-age=3600' }).end(png);
+      return;
+    }
     if (request.method === 'GET' && session && path.startsWith(`/thumbnail/${session.view.id}/`)) {
       const image = session.images.get(path.split('/').at(-1)!);
       if (!image || path.split('/').length !== 4) return send(response, 404, { error: 'Thumbnail unavailable' });
@@ -129,6 +139,7 @@ export async function startWorkbench(options: {
     }
     const data = await readBody(request);
     if (path === '/api/state') return send(response, 200, { session: session?.view, allowLive, library: await listLibrary() });
+    if (path === '/api/apps') return send(response, 200, { apps: await listApps() });
     if (path === '/api/import') {
       if (typeof data.directory !== 'string' || !data.directory.trim()) throw new Error('Enter a run directory');
       if (running) throw new Error('A test is running');

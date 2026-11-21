@@ -20,9 +20,14 @@
     <aside class="summary pane" aria-labelledby="session-title">
       <h2 id="session-title" class="section-title"><span class="sec">01</span>录制会话</h2>
       <div id="summary"></div>
-      <h3><span class="sec">02</span>应用筛选</h3>
-      <div id="apps" class="app-list"></div>
-      <h3><span class="sec">03</span>前置条件</h3>
+      <button id="app-picker" class="app-picker" type="button" aria-haspopup="dialog" title="选择应用">
+        <span id="app-picker-icon" class="app-picker-icon" aria-hidden="true"></span>
+        <span id="app-picker-label" class="app-picker-label">全部应用</span>
+        <span class="app-picker-chevron" aria-hidden="true">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        </span>
+      </button>
+      <h3><span class="sec">02</span>前置条件</h3>
       <div id="setup" class="setup-list"></div>
     </aside>
 

@@ -7,7 +7,7 @@ const $ = name => document.getElementById(name);
 const dialog = $('dialog');
 const state = {
   session: null, library: [], allowLive: false, app: '', selected: new Set(), ignored: new Set(),
-  expanded: new Set(), showIgnored: false, focused: null, draft: [], tab: 'actions', saving: false, setup: null, appPaths: {},
+  expanded: new Set(), showIgnored: false, focused: null, draft: [], tab: 'actions', saving: false, setup: null, appPaths: {}, catalog: null,
 };
 
 function el(tag, attributes = {}, ...children) {
@@ -87,7 +87,12 @@ const isCompatible = row => sameTarget(row, state.session.target);
 const getRows = () => state.session?.timeline ?? [];
 const selectedRows = () => visibleRows(getRows(), state.app, state.ignored, false).filter(row => state.selected.has(row.id));
 const short = (text, length = 82) => text.length > length ? text.slice(0, length) + '…' : text;
-const appInfo = id => state.session?.apps?.[id];
+const appInfo = id => state.session?.apps?.[id] ?? state.catalog?.find(app => app.bundleId === id);
+const appIconSrc = id => {
+  const info = appInfo(id);
+  if (!info) return undefined;
+  return info.icon ?? `/app-icon/${encodeURIComponent(id)}`;
+};
 const appLabel = id => appInfo(id)?.label ?? id;
 const appTitle = id => {
   const info = appInfo(id);
@@ -96,38 +101,116 @@ const appTitle = id => {
   return [info.bundleId, ...(chosen ? [`已选：${chosen}`] : []), ...info.paths].join('\n');
 };
 
-function appGlyph(app) {
+function appGlyph(app, onDuplicate) {
   const info = appInfo(app);
+  const src = appIconSrc(app);
   const badge = info && info.paths.length > 1 ? el('button', {
     type: 'button', className: `dup-badge${state.appPaths[app] ? ' resolved' : ''}`,
     title: `${info.paths.length} 份副本，点击选择路径`,
-    onclick: event => { event.stopPropagation(); appPathDialog(app); },
+    onclick: event => { event.stopPropagation(); onDuplicate?.(); },
   }, String(info.paths.length)) : undefined;
   return el('span', { className: 'app-glyph' },
-    info?.icon ? el('img', { src: info.icon, alt: '', width: 18, height: 18 })
+    src ? el('img', { src, alt: '', width: 18, height: 18 })
       : el('span', { className: 'app-glyph-fallback' }, icon('appWindow', 12)),
     badge);
 }
 
-function appPathDialog(bundleId) {
-  const info = appInfo(bundleId);
-  if (!info) return;
-  const current = state.appPaths[bundleId];
-  const options = info.paths.map((path, index) => el('label', { className: 'path-option' },
-    el('input', { type: 'radio', name: 'app-path', value: path, checked: current ? current === path : index === 0 }),
-    el('span', {}, path)));
-  openDialog('选择应用副本', [
-    muted(`「${info.name}」有 ${info.paths.length} 份副本。保存测试项时会写入这条路径；回放按路径锁定在下一步接入。`),
-    el('div', { className: 'path-list' }, ...options),
-  ], '使用此副本', () => {
-    const checked = dialog.querySelector('input[name="app-path"]:checked');
-    if (!checked) throw new Error('请选择一个副本');
-    state.appPaths[bundleId] = checked.value;
-    status(`已指定「${info.name}」：${checked.value}`);
-    render();
-  });
-}
+async function openAppPicker() {
+  if (!state.session) return;
+  const search = input({ placeholder: '搜索应用', 'aria-label': '搜索应用' });
+  const list = el('div', { className: 'app-list', role: 'listbox', 'aria-label': '本机应用' });
+  const searchWrap = el('div', { className: 'app-search' }, icon('search', 14), search);
+  const body = el('div', { className: 'stack' }, searchWrap, list);
+  list.replaceChildren(muted('正在读取本机应用…'));
+  openDialog('选择应用', [body], undefined);
+  requestAnimationFrame(() => search.focus());
 
+  if (!state.catalog) {
+    status('正在读取本机应用…');
+    try {
+      state.catalog = (await api('apps')).apps;
+      status('已读取本机应用');
+    } catch (error) {
+      state.catalog = Object.values(state.session.apps ?? {});
+      status(`应用目录读取失败，只显示本次会话的应用：${error.message}`, 'error');
+    }
+  }
+  if (!dialog.open) return;
+  const catalog = [...state.catalog];
+  for (const app of Object.values(state.session.apps ?? {})) {
+    if (!catalog.some(item => item.bundleId === app.bundleId)) catalog.push({ ...app, paths: app.paths ?? [] });
+  }
+
+  const choose = (bundleId, path, app) => {
+    if (bundleId && app?.paths?.length > 1 && !path) {
+      showPaths(app);
+      return;
+    }
+    state.app = bundleId;
+    if (bundleId && path) state.appPaths[bundleId] = path;
+    dialog.close();
+    render();
+    status(bundleId ? `已筛选「${app?.name ?? appLabel(bundleId)}」` : '已显示全部应用');
+  };
+
+  const showPaths = app => {
+    const current = state.appPaths[app.bundleId];
+    const options = app.paths.map((path, index) => el('label', { className: 'path-option' },
+      el('input', { type: 'radio', name: 'app-path', value: path, checked: current ? current === path : index === 0 }),
+      el('span', {}, path)));
+    const back = button('返回', () => {
+      body.replaceChildren(searchWrap, list);
+      draw(search.value);
+      search.focus();
+    }, { style: 'small', icon: 'undo' });
+    const apply = el('button', {
+      type: 'button', className: 'button primary',
+      onclick: () => {
+        const checked = body.querySelector('input[name="app-path"]:checked');
+        if (checked) choose(app.bundleId, checked.value, app);
+      },
+    }, icon('check'), el('span', {}, '使用此副本'));
+    body.replaceChildren(
+      el('div', { className: 'path-step-head' }, back, el('strong', {}, app.name)),
+      muted(`「${app.name}」有 ${app.paths.length} 份副本。保存测试项时会写入这条路径；回放按路径锁定在下一步接入。`),
+      el('div', { className: 'path-list' }, ...options),
+      el('div', { className: 'actions' }, apply));
+  };
+
+  const draw = query => {
+    const value = query.trim().toLowerCase();
+    const all = [{ bundleId: '', name: '全部应用', paths: [], label: '全部应用' }, ...catalog];
+    const matches = all.filter(app => !value ||
+      app.name.toLowerCase().includes(value) || app.bundleId.toLowerCase().includes(value)).slice(0, 80);
+    list.replaceChildren(...matches.map(app => app.bundleId === ''
+      ? el('div', {
+        className: 'app-row', role: 'option', tabindex: '0', 'aria-selected': String(!state.app),
+        onclick: () => choose('', undefined, undefined),
+        onkeydown: event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); choose('', undefined, undefined); } },
+      },
+      el('span', { className: 'app-glyph app-glyph-all' }, icon('appWindow', 14)),
+      el('span', {}, el('span', { className: 'app-row-name' }, '全部应用'), el('span', { className: 'app-row-id' }, '不过滤应用')),
+      !state.app ? el('span', { className: 'app-row-check' }, icon('check', 14)) : undefined)
+      : el('div', {
+        className: 'app-row', role: 'option', tabindex: '0', 'aria-selected': String(state.app === app.bundleId),
+        title: appTitle(app.bundleId),
+        onclick: () => choose(app.bundleId, undefined, app),
+        onkeydown: event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); choose(app.bundleId, undefined, app); } },
+      },
+      appGlyph(app.bundleId, () => showPaths(app)),
+      el('span', {}, el('span', { className: 'app-row-name' }, app.name), el('span', { className: 'app-row-id' }, app.bundleId)),
+      state.app === app.bundleId ? el('span', { className: 'app-row-check' }, icon('check', 14)) : undefined)));
+  };
+
+  search.addEventListener('input', () => draw(search.value));
+  search.addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      list.querySelector('.app-row')?.click();
+    }
+  });
+  draw('');
+}
 function locatorLabel(target) {
   if (!target) return '目标窗口';
   if (target.kind === 'point') return `坐标 (${target.point.join(', ')})`;
@@ -186,7 +269,9 @@ function renderSummary() {
   $('session-name').textContent = session?.name ?? '';
   if (!session) {
     $('summary').replaceChildren(muted('尚未导入运行目录'));
-    $('apps').replaceChildren();
+    $('app-picker').disabled = true;
+    $('app-picker-label').textContent = '全部应用';
+    $('app-picker-icon').replaceChildren(icon('appWindow', 15));
     return;
   }
   const apps = new Map();
@@ -204,17 +289,12 @@ function renderSummary() {
     session.startedAt ? el('time', { className: 'muted', dateTime: session.startedAt },
       session.startedAt.slice(0, 19).replace('T', ' ') + ' UTC') : undefined,
   );
-  $('apps').replaceChildren(...[['', session.timeline.length], ...apps].map(([app, count], index) => el('button', {
-    type: 'button', className: 'app-filter', id: `app-${index}`, title: app ? appTitle(app) : undefined,
-    'aria-pressed': String(state.app === app),
-    onclick: () => {
-      state.app = app;
-      state.selected.clear();
-      state.focused = null;
-      render();
-    },
-  }, app ? appGlyph(app) : el('span', { className: 'app-glyph app-glyph-all' }, icon('appWindow', 12)),
-  el('span', { className: 'app-name' }, app ? appLabel(app) : '全部应用'), el('span', { className: 'time trailing' }, count))));
+  const picker = $('app-picker');
+  picker.disabled = false;
+  const current = state.app ? appInfo(state.app) : undefined;
+  $('app-picker-label').textContent = current?.label ?? '全部应用';
+  const src = current ? appIconSrc(state.app) : undefined;
+  $('app-picker-icon').replaceChildren(src ? el('img', { src, alt: '', width: 18, height: 18 }) : icon('appWindow', 15));
 }
 
 const setupStates = {
@@ -727,6 +807,7 @@ for (const [id, name] of [['import-button', 'folder'], ['save-button', 'save'], 
   if (node && !node.querySelector('svg')) node.prepend(icon(name));
 }
 
+$('app-picker').onclick = openAppPicker;
 $('import-button').onclick = importDialog;
 $('show-ignored').onchange = event => { state.showIgnored = event.target.checked; render(); };
 $('save-button').onclick = saveTest;
