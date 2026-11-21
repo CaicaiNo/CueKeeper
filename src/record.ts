@@ -253,7 +253,10 @@ export async function record(
           trace({ stage: 'flow', id: traceId, decision: 'filtered',
             reason: error instanceof Fault ? error.code : 'CAPTURE_FAILED' });
         }
-        if (!(error instanceof Fault) || error.dependency || error.code === 'PERM_DENIED') throw error;
+        if (!(error instanceof Fault) || error.dependency ||
+            ['PERM_DENIED', 'APP_NOT_FOUND', 'WINDOW_NOT_FOUND', 'WINDOW_MISMATCH', 'WINDOW_CHANGED'].includes(error.code)) {
+          throw error;
+        }
         endTextBurst();
         warn(error.code, error.message);
       }
@@ -287,6 +290,5 @@ export async function record(
     throw error;
   }
   if (recording.exceededStepLimit) warn('STEP_LIMIT', `The flow retains the first ${stepLimit} actions`);
-  const partial = !!failure || [...warnings.keys()].some(code => code !== 'FOCUS_CHANGED');
-  return { flow, warnings: [...warnings.values()], partial, failure };
+  return { flow, warnings: [...warnings.values()], partial: !!failure, failure };
 }

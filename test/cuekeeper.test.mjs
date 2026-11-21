@@ -65,7 +65,8 @@ test('secure input cannot be added to a flow', () => {
 });
 
 // Exercise the real CLI and output writer without invoking either live macOS executable.
-function recordFixture(t, events, { captureExit = 0, flags = [], seconds = 1, ready = true } = {}) {
+function recordFixture(t, events, { captureExit = 0, flags = [], seconds = 1, ready = true,
+  missingWindowAtSnapshot } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-record-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const dist = join(dir, 'dist');
@@ -77,11 +78,16 @@ function recordFixture(t, events, { captureExit = 0, flags = [], seconds = 1, re
   const desktop = join(dir, 'desktop');
   const snapshotsLog = join(dir, 'snapshots.log');
   writeFileSync(desktop, `#!/usr/bin/env node
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 const [command, ...args] = process.argv.slice(2);
 if (command === 'snapshot') {
   const windowArg = args.indexOf('--window-id');
   appendFileSync(${JSON.stringify(snapshotsLog)}, JSON.stringify(windowArg < 0 ? null : args[windowArg + 1]) + '\\n');
+  const snapshotNumber = readFileSync(${JSON.stringify(snapshotsLog)}, 'utf8').trimEnd().split('\\n').length;
+  if (snapshotNumber === ${JSON.stringify(missingWindowAtSnapshot)}) {
+    console.log(JSON.stringify({ version: '2.6', command, ok: false, error: { code: 'WINDOW_NOT_FOUND' } }));
+    process.exit(1);
+  }
 }
 const snapshots = ${JSON.stringify(fixture.data)};
 const data = command === 'version' ? { version: '1.3.1' } : snapshots;
@@ -111,6 +117,45 @@ process.exitCode = ${captureExit};
 
 const captureClick = { kind: 'click', point: [135, 165] };
 const captureSave = { kind: 'key', key: 's', modifiers: ['meta'] };
+
+test('record CLI saves three clicks and exits zero with an unsupported input warning',
+  { skip: process.platform !== 'darwin' }, t => {
+    for (const warning of ['UNSUPPORTED_EVENT', 'UNSUPPORTED_CLICK']) {
+      const { code, response, recorded } = recordFixture(t, [
+        captureClick, { kind: 'warning', code: warning }, captureClick, captureClick,
+      ]);
+      const result = { exitCode: code, ok: response.ok, actions: response.data.actions,
+        flow: recorded.steps.map(step => step.kind), warnings: response.data.warnings.map(entry => entry.code) };
+      t.diagnostic(JSON.stringify(result));
+      assert.deepEqual(result, {
+        exitCode: 0, ok: true, actions: 3, flow: ['click', 'click', 'click'], warnings: [warning],
+      });
+      assert.equal(response.data.partial, undefined);
+    }
+  });
+
+test('record CLI returns EMPTY_RECORDING when only unsupported input arrives',
+  { skip: process.platform !== 'darwin' }, t => {
+    const { code, response, recorded } = recordFixture(t, [{ kind: 'warning', code: 'UNSUPPORTED_EVENT' }]);
+    assert.equal(code, 1);
+    assert.equal(response.ok, false);
+    assert.equal(response.error.code, 'EMPTY_RECORDING');
+    assert.match(response.error.message, /UNSUPPORTED_EVENT/);
+    assert.equal(recorded, undefined);
+  });
+
+test('record CLI preserves the captured prefix when the target window is lost',
+  { skip: process.platform !== 'darwin' }, t => {
+    const { code, response, recorded, snapshotWindows } = recordFixture(t, [
+      captureClick, captureClick, captureClick,
+    ], { missingWindowAtSnapshot: 3 });
+    assert.equal(code, 1);
+    assert.equal(response.ok, false);
+    assert.equal(response.error.code, 'WINDOW_NOT_FOUND');
+    assert.equal(response.data.partial, true);
+    assert.deepEqual(recorded.steps.map(step => step.kind), ['click']);
+    assert.deepEqual(snapshotWindows, [null, fixture.data.window.id, fixture.data.window.id]);
+  });
 
 test('record CLI keeps a single click that activates the target and saves across app switches',
   { skip: process.platform !== 'darwin' }, t => {
@@ -168,7 +213,9 @@ test('record CLI traces mouse events before readiness and maps accepted clicks t
       { stage: 'flow', id: '200:2', decision: 'collected', windowId: fixture.data.window.id },
       { stage: 'flow', id: '400:4', decision: 'filtered', reason: 'OUTSIDE_WINDOW' },
     ]);
-    assert.equal(code, 1);
+    assert.equal(code, 0);
+    assert.equal(response.ok, true);
+    assert.equal(response.data.partial, undefined);
     assert.deepEqual(response.data.warnings.map(warning => warning.code), ['OUTSIDE_WINDOW']);
     assert.deepEqual(recorded.steps.map(step => step.kind), ['click', 'type', 'key']);
   });
@@ -220,9 +267,9 @@ test('record CLI flags skipped input and still writes actions received afterward
       { kind: 'key', key: 'unknown', modifiers: [] },
       { kind: 'text', chars: 'After warning' }, captureSave,
     ]);
-    assert.equal(code, 1);
-    assert.equal(response.error.code, 'PARTIAL_RECORDING');
-    assert.equal(response.data.partial, true);
+    assert.equal(code, 0);
+    assert.equal(response.ok, true);
+    assert.equal(response.data.partial, undefined);
     assert.deepEqual(response.data.warnings.map(warning => warning.code),
       ['UNSUPPORTED_EVENT', 'UNREPRESENTABLE_ACTION']);
     assert.deepEqual(recorded.steps.map(step => step.kind), ['click', 'type', 'key']);
