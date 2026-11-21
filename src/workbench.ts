@@ -124,7 +124,7 @@ export async function startWorkbench(options: {
       const secretTexts = dryRun ? undefined : resolveSecrets(secrets, process.env);
       const report = dryRun
         ? await runFlow(flow, offlineDesktop(current.snapshot, flow.target), { dryRun, signal })
-        : await withDesktop({ headed: false, signal }, desktop => runFlow(flow, desktop, { dryRun, signal, secretTexts }));
+        : await withDesktop({ headed: true, signal }, desktop => runFlow(flow, desktop, { dryRun, signal, secretTexts }));
       return send(response, 200, report);
     } finally {
       running = false;
