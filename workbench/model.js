@@ -1,6 +1,46 @@
 export const id = prefix => `${prefix}-${crypto.randomUUID()}`;
 export const sameTarget = (a, b) => a.app === b.app && a.window === b.window;
 
+export const KIND_LABELS = {
+  click: '点击', doubleClick: '双击', tripleClick: '三击', rightClick: '右键', scroll: '滚轮',
+  drag: '拖拽', type: '输入', key: '快捷键', wait: '等待', assert: '断言', behavior: '行为', shell: 'Shell',
+};
+
+/** The timeline shows pointer variants as their own kind without changing the flow. */
+export function actionKind(action) {
+  if (action.kind !== 'click') return action.kind;
+  if (action.button === 'right') return 'rightClick';
+  if (action.count === 2) return 'doubleClick';
+  if (action.count === 3) return 'tripleClick';
+  return 'click';
+}
+
+const scrollArrows = { up: '↑', down: '↓', left: '←', right: '→' };
+
+export function scrollDetail(action) {
+  if (action.direction !== undefined) return { direction: action.direction, amount: action.amount };
+  const dx = action.deltaX ?? 0;
+  const dy = action.deltaY ?? 0;
+  const vertical = Math.abs(dy) >= Math.abs(dx) && dy !== 0;
+  return {
+    direction: vertical ? (dy > 0 ? 'up' : 'down') : (dx > 0 ? 'right' : 'left'),
+    amount: Math.max(1, Math.round(Math.abs(vertical ? dy : dx))),
+  };
+}
+
+export function scrollLabel(action) {
+  const { direction, amount } = scrollDetail(action);
+  return `滚轮 ${scrollArrows[direction] ?? ''} ${amount} 行`;
+}
+
+/** The timeline names both drag endpoints; a re-picked endpoint stays visible. */
+export function dragSummary(action) {
+  const endpoint = target => target.kind === 'point'
+    ? `坐标 (${target.point[0]}, ${target.point[1]})`
+    : `${target.role}${target.name ? ` “${target.name}”` : ''}`;
+  return `拖拽 ${endpoint(action.from)} → ${endpoint(action.to)}`;
+}
+
 export function makeBehavior(rows, name, bindings, target) {
   if (rows.some(row => !sameTarget(row, target))) throw new Error('只能合并属于当前目标窗口的动作。');
   const parameterTypes = Object.create(null);
@@ -150,7 +190,7 @@ export function visibleRows(rows, app, ignored, showIgnored) {
 }
 
 export function changeTarget(action, target) {
-  if (action.kind === 'click' || action.kind === 'type') return { ...action, target };
+  if (action.kind === 'click' || action.kind === 'type' || action.kind === 'scroll') return { ...action, target };
   if (action.kind === 'assert' || action.kind === 'wait') return { ...action, check: { ...action.check, target } };
   throw new Error('快捷键使用目标窗口。');
 }

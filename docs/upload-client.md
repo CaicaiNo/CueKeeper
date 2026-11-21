@@ -1,6 +1,6 @@
 # 报告上传客户端
 
-本文件说明 `report pack` 之后的可选上传路径。线协议、字段与错误码以[报告上传协议](upload-protocol.md)和 [`upload.schema.json`](../schemas/upload.schema.json) 为准；本文件只描述客户端如何配置、排队和重试。服务端实现不在本仓库。
+本文件说明 `report pack` 之后的可选上传路径。线协议、字段与错误码以[报告上传协议](upload-protocol.md)和 [`upload.schema.json`](../schemas/upload.schema.json) 为准；本文件只描述客户端如何配置、排队和重试。自建服务端的启动、存储和读取接口见[上传服务](server.md)。
 
 ## 配置
 
@@ -98,4 +98,4 @@ node dist/cli.js report upload --retry-paused --json
 - 只实现上传（创建、传块、完成）；列表、下载、查看器和对比不在本单范围。
 - 凭据存储首版只支持环境变量引用，不接入系统钥匙串。
 - 队列由 `report upload` 前台处理，没有常驻 daemon；打包后需要调用一次该命令，或由外部调度器周期调用。
-- 真实服务端与真机验收另开单（HAOC-76），本单只做离线可验证实现。
+- 真实服务端见[上传服务](server.md)；`test/support/upload-api.mjs` 只用于客户端协议测试。

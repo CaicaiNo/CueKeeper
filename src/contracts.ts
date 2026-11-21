@@ -120,6 +120,38 @@ const setup = object({
 const conditions = T.Array(setup, { maxItems: 100 });
 const inputText = T.Union([T.String({ minLength: 1, maxLength: 4000 }), object({ param: parameterName })]);
 const step = { id, setup: T.Optional(conditions) };
+// Pointer input beyond the plain left click: a double/triple click keeps the
+// same locator contract, and a scroll records the deltas the capture helper
+// observed (or an authored direction and amount). Delta and direction forms
+// are separate closed objects so a step cannot mix them.
+const clickCount = T.Optional(T.Integer({ minimum: 1, maximum: 3 }));
+const clickButton = T.Optional(T.Union([T.Literal('left'), T.Literal('right')]));
+const scrollDirection = T.Union([
+  T.Literal('up'), T.Literal('down'), T.Literal('left'), T.Literal('right'),
+]);
+const scrollDelta = T.Integer({ minimum: -1000, maximum: 1000 });
+const scrollDuration = T.Optional(time);
+// A drag records both endpoints and its measured duration. The sampled path is
+// evidence of the gesture; replay keeps the endpoints and duration. A drag that
+// starts and ends at the same element is still a drag, not a click.
+const dragPathPoint = T.Tuple([T.Integer(), T.Integer()]);
+const drag = object({
+  ...step, kind: T.Literal('drag'),
+  from: locator, to: locator, durationMs: T.Integer({ minimum: 0, maximum: 60_000 }),
+  path: T.Optional(T.Array(dragPathPoint, { maxItems: 64 })),
+  button: clickButton,
+});
+const scroll = T.Union([
+  object({
+    ...step, kind: T.Literal('scroll'), target: locator,
+    deltaX: scrollDelta, deltaY: scrollDelta, durationMs: scrollDuration,
+  }),
+  object({
+    ...step, kind: T.Literal('scroll'), target: locator,
+    direction: scrollDirection, amount: T.Integer({ minimum: 1, maximum: 1000 }),
+    durationMs: scrollDuration,
+  }),
+]);
 
 // Shell steps are one closed object per execution shape so that argv and
 // command cannot be combined and sudo cannot carry a caller-supplied cwd, env
@@ -176,7 +208,10 @@ const shellSteps = [
 ] as const;
 const shellStep = T.Union([...shellSteps]);
 const action = T.Union([
-  object({ ...step, kind: T.Literal('click'), target: locator }),
+  object({
+    ...step, kind: T.Literal('click'), target: locator,
+    count: clickCount, button: clickButton,
+  }),
   object({ ...step, kind: T.Literal('type'), target: element, text: inputText }),
   object({
     ...step,
@@ -188,6 +223,8 @@ const action = T.Union([
   }),
   object({ ...step, kind: T.Literal('wait'), check, timeoutMs: time }),
   object({ ...step, kind: T.Literal('assert'), check: assertCheck }),
+  drag,
+  scroll,
   ...shellSteps,
 ]);
 const call = object({
@@ -301,7 +338,10 @@ const entry = T.Union([
   }),
   object({
     ...entryFields,
-    kind: T.Union([T.Literal('click'), T.Literal('type'), T.Literal('key'), T.Literal('wait')]),
+    kind: T.Union([
+      T.Literal('click'), T.Literal('type'), T.Literal('key'), T.Literal('wait'), T.Literal('scroll'),
+      T.Literal('drag'),
+    ]),
   }),
   object({
     ...entryFields,
@@ -411,6 +451,9 @@ export const captureActionCheck = TypeCompiler.Compile(action);
 
 export type Flow = Static<typeof flowSchema>;
 export type Action = Static<typeof action>;
+export type ClickAction = Extract<Action, { kind: 'click' }>;
+export type ScrollAction = Extract<Action, { kind: 'scroll' }>;
+export type DragAction = Extract<Action, { kind: 'drag' }>;
 export type Setup = Static<typeof setup>;
 export type Ensure = Static<typeof ensure>;
 export type Locator = Static<typeof locator>;

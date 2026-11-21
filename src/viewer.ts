@@ -55,7 +55,8 @@ function identityBanner(report: Report) {
   </div>`;
 }
 const kindLabels: Record<string, string> = {
-  setup: '前置条件', click: '点击', type: '输入', key: '快捷键', wait: '等待', assert: '断言',
+  setup: '前置条件', click: '点击', type: '输入', key: '快捷键', wait: '等待', assert: '断言', scroll: '滚轮',
+  drag: '拖拽',
 };
 const deliveryLabels: Record<string, string> = {
   delivered_verified: '已送达并验证',
@@ -208,11 +209,38 @@ function shortcutLabel(action: { modifiers?: string[]; key: string }) {
   ].join('+');
 }
 
+const scrollArrows: Record<string, string> = { up: '↑', down: '↓', left: '←', right: '→' };
+
+function scrollLabel(action: Extract<ExecutableAction, { kind: 'scroll' }>) {
+  let direction: string;
+  let amount: number;
+  if ('direction' in action) {
+    direction = action.direction;
+    amount = action.amount;
+  } else {
+    const vertical = Math.abs(action.deltaY) >= Math.abs(action.deltaX) && action.deltaY !== 0;
+    direction = vertical ? (action.deltaY > 0 ? 'up' : 'down') : (action.deltaX > 0 ? 'right' : 'left');
+    amount = Math.max(1, Math.round(Math.abs(vertical ? action.deltaY : action.deltaX)));
+  }
+  return `滚轮 ${scrollArrows[direction] ?? ''} ${amount} 行`;
+}
+
+function gestureLabel(action: ExecutableAction) {
+  if (action.kind === 'click') {
+    if (action.button === 'right') return '右键';
+    if (action.count === 2) return '双击';
+    if (action.count === 3) return '三击';
+  }
+  return kindLabels[action.kind] ?? action.kind;
+}
+
 function summaryFor(entry: Entry, action: ExecutableAction | undefined, setup: Setup | undefined) {
   if (entry.kind === 'setup') return `前置条件 · ${setup?.name ?? entry.id.split('/').pop() ?? entry.id}`;
   if (!action) return `${kindLabels[entry.kind] ?? entry.kind}`;
   switch (action.kind) {
-    case 'click': return `点击 ${locatorShort(action.target)}`;
+    case 'click': return `${gestureLabel(action)} ${locatorShort(action.target)}`;
+    case 'drag': return `拖拽 ${locatorShort(action.from)} → ${locatorShort(action.to)}`;
+    case 'scroll': return `${scrollLabel(action)} ${locatorShort(action.target)}`;
     case 'type': return `输入 ${short(JSON.stringify(action.text), 40)}`;
     case 'key': return `快捷键 ${shortcutLabel(action)}`;
     case 'wait': return `等待 ${expectationText(action.check.expect)}`;
@@ -274,8 +302,10 @@ function errorSection(view: StepView) {
   if (entry.status !== 'failed' && entry.status !== 'blocked') return '';
   const expected = view.expectation ||
     (entry.kind === 'click' ? '元素可解析并完成点击' :
-      entry.kind === 'type' ? '输入已送达并生效' :
-        entry.kind === 'key' ? '快捷键已送达并生效' : '步骤完成');
+      entry.kind === 'scroll' ? '滚动目标可解析并完成滚动' :
+        entry.kind === 'drag' ? '拖拽两端可解析并完成拖拽' :
+          entry.kind === 'type' ? '输入已送达并生效' :
+            entry.kind === 'key' ? '快捷键已送达并生效' : '步骤完成');
   const actual = entry.kind === 'assert' && entry.assertion?.actual !== undefined
     ? actualText(entry.assertion.actual)
     : entry.message ||
@@ -371,6 +401,13 @@ function targetSection(view: StepView, flow: Flow) {
   if (action) {
     if (action.kind === 'click') {
       rows.push(`<div class="target wide"><p class="k">定位器</p><div class="v">${escapeHtml(locatorText(action.target))}</div></div>`);
+    } else if (action.kind === 'scroll') {
+      rows.push(`<div class="target wide"><p class="k">定位器</p><div class="v">${escapeHtml(locatorText(action.target))}</div></div>`);
+      rows.push(`<div class="target"><p class="k">滚动</p><div class="v">${escapeHtml(scrollLabel(action))}</div></div>`);
+    } else if (action.kind === 'drag') {
+      rows.push(`<div class="target wide"><p class="k">起点</p><div class="v">${escapeHtml(locatorText(action.from))}</div></div>`);
+      rows.push(`<div class="target wide"><p class="k">终点</p><div class="v">${escapeHtml(locatorText(action.to))}</div></div>`);
+      rows.push(`<div class="target"><p class="k">拖拽时长</p><div class="v">${formatDuration(action.durationMs)}</div></div>`);
     } else if (action.kind === 'type') {
       rows.push(`<div class="target wide"><p class="k">定位器</p><div class="v">${escapeHtml(locatorText(action.target))}</div></div>`);
       rows.push(`<div class="target wide"><p class="k">文本</p><div class="v">${escapeHtml(action.text)}</div></div>`);
@@ -379,7 +416,7 @@ function targetSection(view: StepView, flow: Flow) {
     } else if (action.kind === 'wait' || action.kind === 'assert') {
       rows.push(`<div class="target wide"><p class="k">定位器</p><div class="v">${escapeHtml(locatorText(action.check.target))}</div></div>`);
     }
-    rows.push(`<div class="target"><p class="k">动作</p><div class="v">${escapeHtml(kindLabels[action.kind] ?? action.kind)}</div></div>`);
+    rows.push(`<div class="target"><p class="k">动作</p><div class="v">${escapeHtml(gestureLabel(action))}</div></div>`);
   }
   rows.push(`<div class="target"><p class="k">应用</p><div class="v">${escapeHtml(flow.target.app)}</div></div>`);
   rows.push(`<div class="target wide"><p class="k">窗口</p><div class="v">${escapeHtml(flow.target.window)}</div></div>`);

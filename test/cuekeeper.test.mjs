@@ -152,7 +152,7 @@ test('record CLI saves three clicks and exits zero with an unsupported input war
 
 test('record CLI returns EMPTY_RECORDING when only unsupported input arrives',
   { skip: process.platform !== 'darwin' }, t => {
-    for (const warning of ['UNSUPPORTED_EVENT', 'DRAG_SKIPPED']) {
+    for (const warning of ['UNSUPPORTED_EVENT', 'DRAG_MODIFIERS_SKIPPED']) {
       const { code, response, recorded } = recordFixture(t, [{ kind: 'warning', code: warning }]);
       assert.equal(code, 1);
       assert.equal(response.ok, false);
@@ -197,6 +197,39 @@ test('record CLI keeps a single click that activates the target and saves across
     assert.equal(recorded.steps[2].key, 's');
   });
 
+test('record CLI binds a drag from the tree read at pickup and saves one drag step',
+  { skip: process.platform !== 'darwin' }, t => {
+    const { code, response, recorded, snapshotWindows } = recordFixture(t, [
+      { kind: 'drag_start' },
+      { kind: 'drag', from: [135, 165], to: [420, 330], path: [[220, 240], [330, 300]],
+        durationMs: 480, button: 'left', modifiers: [] },
+    ]);
+    assert.equal(code, 0);
+    assert.equal(response.ok, true);
+    assert.equal(response.data.warnings, undefined);
+    assert.deepEqual(recorded.steps, [{
+      id: 'step-1', kind: 'drag',
+      from: { kind: 'point', point: [135, 165] },
+      to: { kind: 'point', point: [420, 330] },
+      durationMs: 480, path: [[220, 240], [330, 300]],
+    }]);
+    // One read for the initial window and one at pickup; the drop itself reuses
+    // the pickup tree so a moved file cannot be bound twice.
+    assert.deepEqual(snapshotWindows, [null, fixture.data.window.id]);
+  });
+
+test('record CLI refuses a modifier drag instead of replaying it as a plain drag',
+  { skip: process.platform !== 'darwin' }, t => {
+    const { code, response, recorded } = recordFixture(t, [
+      { kind: 'drag_start' },
+      { kind: 'drag', from: [135, 165], to: [420, 330], path: [], durationMs: 200, button: 'left', modifiers: ['alt'] },
+      { kind: 'click', point: [135, 165] },
+    ]);
+    assert.equal(code, 0);
+    assert.deepEqual(recorded.steps.map(step => step.kind), ['click']);
+    assert.deepEqual(response.data.warnings.map(warning => warning.code), ['DRAG_MODIFIERS_SKIPPED']);
+  });
+
 test('record CLI stops without a flow when the primary indicator is missing',
   { skip: process.platform !== 'darwin' }, t => {
     const detail = 'Primary panel is missing from the Window Server on-screen list';
@@ -221,9 +254,10 @@ test('record CLI traces mouse events before readiness and maps accepted clicks t
       { ...captureClick, traceId: '200:2' },
       { kind: 'click_trace', stage: 'native', event: 'down', id: '270:5', decision: 'filtered',
         reason: 'duplicate_down', eventNumber: 5, clickState: 1, suppressed: true },
-      { kind: 'click_trace', stage: 'native', event: 'down', id: '290:6', decision: 'filtered',
-        reason: 'multi_click_collapsed', eventNumber: 6, clickState: 2, suppressed: true },
-      { kind: 'warning', code: 'MULTI_CLICK_COLLAPSED' },
+      { kind: 'click_trace', stage: 'native', event: 'down', id: '290:6', decision: 'observed',
+        reason: 'awaiting_release', eventNumber: 6, clickState: 2, suppressed: false },
+      { kind: 'click_trace', stage: 'native', event: 'up', id: '295:6', downId: '290:6', decision: 'accepted' },
+      { kind: 'click', point: [135, 165], count: 2, traceId: '290:6' },
       { kind: 'click_trace', stage: 'native', event: 'down', id: '300:3', decision: 'filtered', reason: 'overlay' },
       { kind: 'click_trace', stage: 'native', event: 'down', id: '400:4', decision: 'observed', scope: 'content',
         reason: 'awaiting_release' },
@@ -236,17 +270,62 @@ test('record CLI traces mouse events before readiness and maps accepted clicks t
     assert.match(lines[1], /^Recording for up to/);
     const trace = lines.filter(line => line.startsWith('CLICK_TRACE ')).map(line => JSON.parse(line.slice(12)));
     assert.deepEqual(trace.filter(row => row.suppressed).map(({ reason, eventNumber, clickState }) =>
-      [reason, eventNumber, clickState]), [['duplicate_down', 5, 1], ['multi_click_collapsed', 6, 2]]);
+      [reason, eventNumber, clickState]), [['duplicate_down', 5, 1]]);
     assert.deepEqual(trace.filter(row => row.stage === 'flow'), [
       { stage: 'flow', id: '200:2', decision: 'collected', windowId: fixture.data.window.id },
+      { stage: 'flow', id: '290:6', decision: 'collected', windowId: fixture.data.window.id },
       { stage: 'flow', id: '400:4', decision: 'filtered', reason: 'OUTSIDE_WINDOW' },
     ]);
     assert.equal(code, 0);
     assert.equal(response.ok, true);
     assert.equal(response.data.partial, undefined);
-    assert.deepEqual(response.data.warnings.map(warning => warning.code), ['MULTI_CLICK_COLLAPSED', 'OUTSIDE_WINDOW']);
-    assert.match(response.data.warnings[0].message, /replayed as a single click/);
+    assert.deepEqual(response.data.warnings.map(warning => warning.code), ['OUTSIDE_WINDOW']);
+    assert.match(response.data.warnings[0].message, /outside the requested window/);
     assert.deepEqual(recorded.steps.map(step => step.kind), ['click', 'type', 'key']);
+    assert.equal(recorded.steps[0].count, 2);
+  });
+
+test('record CLI stores double clicks, right clicks and one coalesced scroll step',
+  { skip: process.platform !== 'darwin' }, t => {
+    const { code, response, recorded } = recordFixture(t, [
+      { kind: 'click', point: [135, 165], count: 1 },
+      { kind: 'click', point: [135, 165], count: 2 },
+      { kind: 'click', point: [135, 165], count: 3 },
+      { kind: 'click', point: [105, 110], button: 'right' },
+      { kind: 'scroll', point: [135, 165], deltaX: 0, deltaY: -3, phase: 'began' },
+      { kind: 'scroll', point: [135, 165], deltaX: 0, deltaY: -4, phase: 'changed' },
+      { kind: 'scroll', point: [135, 165], deltaX: 0, deltaY: 1, phase: 'ended' },
+    ]);
+    assert.equal(code, 0);
+    assert.equal(response.ok, true);
+    assert.deepEqual(response.data.warnings, undefined);
+    const [triple, right, scroll] = recorded.steps;
+    assert.equal(recorded.steps.length, 3);
+    assert.deepEqual(triple, {
+      id: 'step-1', kind: 'click', target: { kind: 'element', role: 'textfield', name: '' }, count: 3,
+    });
+    assert.deepEqual(right, {
+      id: 'step-2', kind: 'click', target: { kind: 'point', point: [105, 110] }, button: 'right',
+    });
+    assert.equal(scroll.kind, 'scroll');
+    assert.deepEqual(scroll.target, { kind: 'element', role: 'textfield', name: '' });
+    assert.equal(scroll.deltaX, 0);
+    assert.equal(scroll.deltaY, -6);
+    assert.equal(typeof scroll.durationMs, 'number');
+  });
+
+test('record CLI rejects helper input with an unsupported click count or mouse button',
+  { skip: process.platform !== 'darwin' }, t => {
+    for (const event of [
+      { kind: 'click', point: [135, 165], count: 4 },
+      { kind: 'click', point: [135, 165], button: 'middle' },
+      { kind: 'scroll', point: [135, 165], deltaX: 0, deltaY: 0 },
+    ]) {
+      const { code, response, recorded } = recordFixture(t, [event]);
+      assert.equal(code, 1);
+      assert.equal(response.error.code, 'CAPTURE_PROTOCOL');
+      assert.equal(recorded, undefined);
+    }
   });
 
 test('record CLI rejects a helper that announces ready without indicator verification',

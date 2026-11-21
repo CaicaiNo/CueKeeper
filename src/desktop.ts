@@ -14,12 +14,48 @@ export interface WindowInfo {
   processInstance?: number;
 }
 
+export interface ClickOptions {
+  /** Physical click count. 2 and 3 need headed mode. */
+  count?: 1 | 2 | 3;
+  button?: 'left' | 'right';
+}
+
+export interface ScrollOptions {
+  direction: 'up' | 'down' | 'left' | 'right';
+  amount: number;
+}
+
+export interface WheelOptions {
+  deltaX: number;
+  deltaY: number;
+}
+
+/**
+ * One drag endpoint. A resolved element keeps the drop target semantic; a point
+ * keeps the exact recorded position (text selection, window moves).
+ */
+export interface DragEndpoint {
+  ref?: string;
+  point?: Point;
+}
+
+export interface DragOptions {
+  durationMs: number;
+  button?: 'left' | 'right';
+}
+
 export interface Desktop {
   snapshot(target: Target, timeoutMs?: number, windowId?: string, exactWindow?: boolean): Promise<Snapshot>;
   property(node: Node, property: 'text' | 'value' | 'visible', timeoutMs?: number): Promise<string | boolean | undefined>;
   ensure(action: Ensure, timeoutMs: number, windowId?: string): Promise<string | undefined>;
-  click(ref: string): Promise<Delivery | undefined>;
-  clickPoint(snapshot: Snapshot, target: Target, point: Point): Promise<Delivery | undefined>;
+  click(ref: string, options?: ClickOptions): Promise<Delivery | undefined>;
+  clickPoint(snapshot: Snapshot, target: Target, point: Point, options?: ClickOptions): Promise<Delivery | undefined>;
+  /** Semantic scroll of an element. */
+  scroll(ref: string, options: ScrollOptions): Promise<Delivery | undefined>;
+  /** Physical wheel at a screen point; requires headed mode. */
+  scrollPoint(snapshot: Snapshot, target: Target, point: Point, options: WheelOptions): Promise<Delivery | undefined>;
+  /** Physical press, move and release between two endpoints; requires headed mode. */
+  drag(snapshot: Snapshot, target: Target, from: DragEndpoint, to: DragEndpoint, options: DragOptions): Promise<Delivery | undefined>;
   type(ref: string, text: string): Promise<Delivery | undefined>;
   press(combo: string, snapshot: Snapshot): Promise<Delivery | undefined>;
   /** Read-only application window inventory for window assertions. */
@@ -167,14 +203,37 @@ export async function withDesktop<T>(
       }
     }
 
-    const act = async (command: string, args: string[], input?: string, headed = options.headed) => {
+    const act = async (command: string, args: string[], input?: string, headed = options.headed, timeout = 15_000) => {
       const result = delivery(object(await call(command, [...(headed ? ['--headed'] : []), ...args],
-        input, 15_000 + (input?.length ?? 0) * 30)));
+        input, timeout + (input?.length ?? 0) * 30)));
       if (result === 'not_delivered') throw new DesktopFault('NOT_DELIVERED', command, result);
       if (!result || result === 'unknown' || result === 'delivery_uncertain') {
         throw new DesktopFault('DELIVERY_UNCERTAIN', command, result ?? 'unknown');
       }
       return result;
+    };
+
+    // Coordinate input is global, so it re-focuses the bound window and
+    // re-reads it before delivery. Scrolling at a point needs the same guard.
+    const requirePoint = async (current: Snapshot, target: Target, point: Point) => {
+      if (!options.headed) throw new Fault('HEADED_REQUIRED', 'Physical coordinate input requires --headed');
+      const result = object(await call('focus-window', ['--window-id', current.windowId]));
+      const focused = object(result.focused);
+      const observed = await snapshot(target);
+      if (focused.id !== current.windowId || observed.windowId !== current.windowId ||
+          !contains(observed.tree.bounds, point)) {
+        throw new Fault('UNSAFE_POINT', 'The coordinate is outside the selected window');
+      }
+    };
+
+    const clickCommand = (count: number, button: 'left' | 'right') => {
+      if (button === 'right') {
+        if (count !== 1) throw new Fault('UNSUPPORTED_CLICK_COUNT', 'A right click cannot carry a click count');
+        return 'right-click';
+      }
+      if (count === 2) return 'double-click';
+      if (count === 3) return 'triple-click';
+      return 'click';
     };
 
     return await work({
@@ -280,17 +339,54 @@ export async function withDesktop<T>(
           await rm(path, { force: true });
         }
       },
-      click: ref => act('click', [ref]),
-      async clickPoint(current, target, point) {
-        if (!options.headed) throw new Fault('HEADED_REQUIRED', 'Coordinate clicks require --headed');
-        const result = object(await call('focus-window', ['--window-id', current.windowId]));
-        const focused = object(result.focused);
-        const observed = await snapshot(target);
-        if (focused.id !== current.windowId || observed.windowId !== current.windowId ||
-            !contains(observed.tree.bounds, point)) {
-          throw new Fault('UNSAFE_POINT', 'The coordinate is outside the selected window');
+      click(ref, { count = 1, button = 'left' } = {}) {
+        if (count > 1) {
+          if (!options.headed) {
+            throw new Fault('HEADED_REQUIRED', 'Double and triple clicks are physical input and require --headed');
+          }
+          if (count !== 2 && count !== 3) {
+            throw new Fault('UNSUPPORTED_CLICK_COUNT', 'Only double and triple clicks are supported');
+          }
         }
-        return act('mouse-click', ['--xy', point.join(',')]);
+        return act(clickCommand(count, button), [ref]);
+      },
+      async clickPoint(current, target, point, { count = 1, button = 'left' } = {}) {
+        await requirePoint(current, target, point);
+        return act('mouse-click', [
+          '--xy', point.join(','),
+          ...(button === 'right' ? ['--button', 'right'] : []),
+          ...(count === 1 ? [] : ['--count', String(count)]),
+        ]);
+      },
+      scroll(ref, { direction, amount }) {
+        return act('scroll', [ref, '--direction', direction, '--amount', String(amount)]);
+      },
+      async scrollPoint(current, target, point, { deltaX, deltaY }) {
+        await requirePoint(current, target, point);
+        if (deltaX === 0 && deltaY === 0) throw new Fault('UNSUPPORTED_SCROLL', 'Scroll deltas must not both be zero');
+        return act('mouse-wheel', [
+          '--x', String(point[0]), '--y', String(point[1]),
+          // A negative delta must be written with `=` so it is not read as a flag.
+          `--dx=${deltaX}`, `--dy=${deltaY}`,
+        ]);
+      },
+      async drag(current, target, from, to, { durationMs, button = 'left' }) {
+        if (!options.headed) throw new Fault('HEADED_REQUIRED', 'Drag is physical input and requires --headed');
+        if (button !== 'left') {
+          throw new Fault('UNSUPPORTED_DRAG_BUTTON', 'agent-desktop can only drag with the left button');
+        }
+        if (!from.ref && !from.point) throw new Fault('UNSUPPORTED_DRAG', 'A drag needs a start element or point');
+        if (!to.ref && !to.point) throw new Fault('UNSUPPORTED_DRAG', 'A drag needs a destination element or point');
+        // A point start is global input: re-focus the bound window and confirm
+        // the start still lands inside it before the gesture begins. A started
+        // drag cannot be cancelled, so this check must run first.
+        if (from.point) await requirePoint(current, target, from.point);
+        const timeout = Math.max(5000, durationMs + 5000);
+        return act('drag', [
+          ...(from.ref ? ['--from', from.ref] : [`--from-xy=${from.point!.join(',')}`]),
+          ...(to.ref ? ['--to', to.ref] : [`--to-xy=${to.point!.join(',')}`]),
+          '--duration', String(durationMs), '--timeout-ms', String(timeout),
+        ], undefined, true, timeout + 5000);
       },
       // Keep text out of process arguments. Headed click does not require headed text injection.
       type: (ref, input) => act('type', [ref, '--stdin'], input, false),
@@ -365,6 +461,7 @@ export function offlineDesktop(data: unknown, expected: Target): Desktop {
     async screenshot() {
       throw new Fault('WINDOW_MISMATCH', 'Offline fixtures do not include window screenshots');
     },
-    click: mutate, clickPoint: mutate, type: mutate, press: mutate, ensure: mutate,
+    click: mutate, clickPoint: mutate, scroll: mutate, scrollPoint: mutate, drag: mutate,
+    type: mutate, press: mutate, ensure: mutate,
   };
 }

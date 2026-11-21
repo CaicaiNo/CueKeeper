@@ -8,17 +8,27 @@ import { AppIdentitySession, IdentityFault } from './app-identity.js';
 import type { Desktop } from './desktop.js';
 import { parseFlow } from './flow.js';
 import { Fault, contains, flatten, hitTest, object, resolve, toLocator } from './locator.js';
-import type { Point, Snapshot } from './locator.js';
+import type { Located, Point, Snapshot } from './locator.js';
 import { inferSetup } from './setup.js';
 
 type RawEvent =
-  | { kind: 'click'; t: number; point: Point }
+  | { kind: 'click'; t: number; point: Point; count?: number; button?: 'left' | 'right' }
+  | { kind: 'scroll'; t: number; point: Point; deltaX: number; deltaY: number; phase?: string }
+  | {
+    kind: 'drag'; t: number; from: Point; to: Point; path: Point[]; durationMs: number;
+    button: 'left' | 'right'; modifiers: string[];
+  }
   | { kind: 'text'; t: number; chars: string }
   | { kind: 'key'; t: number; key: string; modifiers: NonNullable<Extract<Action, { kind: 'key' }>['modifiers']> };
 type TimedEvent = RawEvent & { seen: number };
 type Recorded = { event: RawEvent; snapshot: Snapshot };
 
 const textGapMs = 1500;
+// Wheel ticks arrive in bursts; merging them keeps one gesture as one step.
+const scrollGapMs = 350;
+const multiClickGapMs = 1500;
+const multiClickDistance = 4;
+const deltaLimit = 1000;
 const editable = new Set(['textfield', 'textbox', 'textarea', 'searchfield', 'combobox']);
 const stepLimit = flowSchema.properties.steps.maxItems!;
 
@@ -31,10 +41,19 @@ type CaptureWarning = { code: string; message: string };
 type CaptureResult = { flow: Flow; warnings: CaptureWarning[]; partial: boolean; failure?: Fault };
 
 const pointerWarningMessages = new Map([
-  ['MULTI_CLICK_COLLAPSED', 'Only the first click of a multi-click sequence can be replayed as a single click in v1'],
-  ['DRAG_SKIPPED', 'A drag was skipped because v1 only records clicks'],
+  ['DRAG_MODIFIERS_SKIPPED', 'A drag with held modifiers was skipped because v1 replays plain left drags only'],
+  ['DRAG_OUTSIDE_WINDOW', 'A drag that did not start inside the target window was skipped'],
+  ['DRAG_UNVERIFIED', 'A drag was skipped because its start state could not be read'],
+  ['UNTARGETED_DRAG', 'A drag that could not be tied to an element was skipped in this path-bound recording'],
   ['UNTARGETED_POINT', 'A click that could not be tied to an element was skipped in this path-bound recording'],
+  ['MULTI_CLICK_TRUNCATED', 'A click sequence longer than three clicks was recorded as a triple click'],
 ]);
+
+// A drag endpoint only becomes an element locator when the recorded point sits
+// on the element's center, because replaying an element drag starts from that
+// center. A text-selection point or a title-bar grab stays a coordinate.
+const dragCenterTolerance = 4;
+const dragPathLimit = 64;
 
 function validateAction(action: Action) {
   if (!captureActionCheck.Check(action)) {
@@ -43,9 +62,39 @@ function validateAction(action: Action) {
   return action;
 }
 
+function locatorKey(target: Locator) {
+  return JSON.stringify(target);
+}
+
+function clampDelta(value: number) {
+  return Math.max(-deltaLimit, Math.min(deltaLimit, Math.round(value)));
+}
+
+function nearPoint(a: Point, b: Point) {
+  return Math.abs(a[0] - b[0]) <= multiClickDistance && Math.abs(a[1] - b[1]) <= multiClickDistance;
+}
+
+/**
+ * Element endpoints only replay from their center. Keep the exact point unless
+ * the gesture started/ended on that center; otherwise the replay would grab a
+ * different character or row than the recording did.
+ */
+function dragLocator(snapshot: Snapshot, point: Point, hit: Located | undefined): Locator {
+  const bounds = hit?.node.bounds;
+  if (!hit || !bounds) return { kind: 'point', point };
+  const centerX = bounds.x + bounds.width / 2;
+  const centerY = bounds.y + bounds.height / 2;
+  if (Math.abs(centerX - point[0]) > dragCenterTolerance || Math.abs(centerY - point[1]) > dragCenterTolerance) {
+    return { kind: 'point', point };
+  }
+  return toLocator(snapshot, hit);
+}
+
 export class Recording {
   private steps: Action[] = [];
   private text?: { at: number; target: Extract<Locator, { kind: 'element' }>; value: string; ref: string };
+  private scroll?: { at: number; startedAt: number; target: Locator; deltaX: number; deltaY: number };
+  private lastClick?: { at: number; point: Point; index: number; button: 'left' | 'right' };
 
   constructor(private target: Target, private options: { requireElementLocator?: boolean } = {}) {}
 
@@ -57,15 +106,53 @@ export class Recording {
     this.text = undefined;
   }
 
+  /** One wheel gesture becomes one step with its summed deltas. */
+  endScrollBurst() {
+    const pending = this.scroll;
+    if (!pending) return;
+    this.scroll = undefined;
+    const deltaX = clampDelta(pending.deltaX);
+    const deltaY = clampDelta(pending.deltaY);
+    if (!deltaX && !deltaY) return;
+    const durationMs = Math.max(0, Math.round(pending.at - pending.startedAt));
+    this.steps.push(validateAction({
+      id: this.nextId(), kind: 'scroll', target: pending.target, deltaX, deltaY,
+      ...(durationMs ? { durationMs } : {}),
+    }));
+  }
+
   /** Returns a warning code when the event was intentionally skipped. */
   add({ event, snapshot }: Recorded): string | undefined {
     const focused = flatten(snapshot.tree).filter(entry => entry.node.states.includes('focused'));
-    if (focused.some(entry => entry.node.secure)) {
-      throw new Fault('SECURE_INPUT', 'Recording encountered a protected control');
+
+    if (event.kind === 'drag') {
+      this.endTextBurst();
+      this.endScrollBurst();
+      this.lastClick = undefined;
+      if (event.modifiers.length) return 'DRAG_MODIFIERS_SKIPPED';
+      if (!contains(snapshot.tree.bounds, event.from)) return 'DRAG_OUTSIDE_WINDOW';
+      const fromHit = hitTest(snapshot, event.from);
+      const toHit = hitTest(snapshot, event.to);
+      if (fromHit?.node.secure || toHit?.node.secure) {
+        throw new Fault('SECURE_INPUT', 'Drag touched a protected control');
+      }
+      const from = dragLocator(snapshot, event.from, fromHit);
+      const to = dragLocator(snapshot, event.to, toHit);
+      if (this.options.requireElementLocator && (from.kind === 'point' || to.kind === 'point')) {
+        return 'UNTARGETED_DRAG';
+      }
+      this.steps.push(validateAction({
+        id: this.nextId(), kind: 'drag', from, to,
+        durationMs: Math.max(0, Math.min(60_000, Math.round(event.durationMs))),
+        ...(event.path.length ? { path: event.path.slice(0, dragPathLimit) } : {}),
+        ...(event.button === 'right' ? { button: 'right' as const } : {}),
+      }));
+      return;
     }
 
     if (event.kind === 'click') {
       this.endTextBurst();
+      this.endScrollBurst();
       if (!contains(snapshot.tree.bounds, event.point)) {
         throw new Fault('OUTSIDE_WINDOW', 'Click fell outside the requested window');
       }
@@ -74,16 +161,62 @@ export class Recording {
       // A path-fixed flow cannot replay a global coordinate against one copy.
       if (!hit && this.options.requireElementLocator) return 'UNTARGETED_POINT';
       const target: Locator = hit ? toLocator(snapshot, hit) : { kind: 'point', point: event.point };
-      this.steps.push(validateAction({ id: this.nextId(), kind: 'click', target }));
+      const button = event.button ?? 'left';
+      const count = Math.max(1, Math.min(3, event.count ?? 1));
+      // macOS reports each click of a multi-click gesture separately: the first
+      // as clickState 1, then 2 and 3. Upgrade the recorded step instead of
+      // appending a second click at the same place.
+      const previous = this.lastClick;
+      if (count > 1 && previous && previous.index === this.steps.length - 1 && previous.button === 'left' &&
+          event.t - previous.at <= multiClickGapMs && nearPoint(previous.point, event.point)) {
+        const step = this.steps[previous.index];
+        if (step?.kind === 'click') {
+          step.count = count;
+          previous.at = event.t;
+          previous.point = event.point;
+          return;
+        }
+      }
+      this.steps.push(validateAction({
+        id: this.nextId(), kind: 'click', target,
+        ...(count > 1 ? { count } : {}),
+        ...(button === 'right' ? { button } : {}),
+      }));
+      this.lastClick = { at: event.t, point: event.point, index: this.steps.length - 1, button };
+      return;
+    }
+
+    if (event.kind === 'scroll') {
+      this.endTextBurst();
+      if (!contains(snapshot.tree.bounds, event.point)) {
+        throw new Fault('OUTSIDE_WINDOW', 'Scroll fell outside the requested window');
+      }
+      const hit = hitTest(snapshot, event.point);
+      if (!hit && this.options.requireElementLocator) return 'UNTARGETED_POINT';
+      const target: Locator = hit ? toLocator(snapshot, hit) : { kind: 'point', point: event.point };
+      const pending = this.scroll;
+      if (pending && event.t - pending.at <= scrollGapMs && locatorKey(pending.target) === locatorKey(target)) {
+        pending.deltaX = clampDelta(pending.deltaX + event.deltaX);
+        pending.deltaY = clampDelta(pending.deltaY + event.deltaY);
+        pending.at = event.t;
+        return;
+      }
+      this.endScrollBurst();
+      this.scroll = { at: event.t, startedAt: event.t, target, deltaX: event.deltaX, deltaY: event.deltaY };
       return;
     }
 
     if (event.kind === 'key') {
       this.endTextBurst();
+      this.endScrollBurst();
       this.steps.push(validateAction({ id: this.nextId(), kind: 'key', key: event.key, modifiers: event.modifiers }));
       return;
     }
 
+    this.endScrollBurst();
+    if (focused.some(entry => entry.node.secure)) {
+      throw new Fault('SECURE_INPUT', 'Recording encountered a protected control');
+    }
     const [field] = focused;
     if (focused.length !== 1 || !field.node.ref || !editable.has(field.node.role)) {
       throw new Fault('UNSAFE_TEXT_TARGET', 'Printable input needs one focused, non-secure text control');
@@ -105,6 +238,7 @@ export class Recording {
 
   finish(): Flow {
     this.endTextBurst();
+    this.endScrollBurst();
     if (!this.steps.length) throw new Fault('EMPTY_RECORDING', 'No supported actions were captured');
     // Capture stays on one window, so every recorded action belongs to the target.
     const setup = inferSetup(this.target);
@@ -126,8 +260,57 @@ function parseEvent(data: Record<string, unknown>): TimedEvent {
       typeof seen !== 'number' || !Number.isSafeInteger(seen)) {
     throw new Fault('CAPTURE_PROTOCOL', 'Invalid capture timestamps');
   }
+  if (kind === 'drag') {
+    const isPoint = (value: unknown): value is Point => Array.isArray(value) && value.length === 2 &&
+      value.every(Number.isSafeInteger);
+    const { from, to, path, durationMs } = data;
+    const button = data.button ?? 'left';
+    const held = data.modifiers ?? [];
+    if (!isPoint(from) || !isPoint(to) || !Array.isArray(path) || path.length > dragPathLimit ||
+        !path.every(isPoint)) {
+      throw new Fault('CAPTURE_PROTOCOL', 'Invalid drag endpoints from capture helper');
+    }
+    if (typeof durationMs !== 'number' || !Number.isSafeInteger(durationMs) ||
+        durationMs < 0 || durationMs > 60_000) {
+      throw new Fault('CAPTURE_PROTOCOL', 'Invalid drag duration from capture helper');
+    }
+    if (button !== 'left' && button !== 'right') {
+      throw new Fault('CAPTURE_PROTOCOL', 'Invalid mouse button from capture helper');
+    }
+    if (!Array.isArray(held) || !held.every(value => typeof value === 'string' && modifiers.has(value))) {
+      throw new Fault('CAPTURE_PROTOCOL', 'Invalid drag modifiers from capture helper');
+    }
+    return {
+      kind, t, seen, from, to, path, durationMs, button, modifiers: held,
+    };
+  }
   if (kind === 'click' && Array.isArray(data.point) && data.point.length === 2 && data.point.every(Number.isSafeInteger)) {
-    return { kind, t, seen, point: data.point as Point };
+    const count = data.count;
+    const button = data.button ?? 'left';
+    if (count !== undefined && (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 1 || count > 3)) {
+      throw new Fault('CAPTURE_PROTOCOL', 'Invalid multi-click count from capture helper');
+    }
+    if (button !== 'left' && button !== 'right') {
+      throw new Fault('CAPTURE_PROTOCOL', 'Invalid mouse button from capture helper');
+    }
+    return {
+      kind, t, seen, point: data.point as Point,
+      ...(count === undefined ? {} : { count: count as number }),
+      ...(button === 'right' ? { button: 'right' as const } : {}),
+    };
+  }
+  if (kind === 'scroll' && Array.isArray(data.point) && data.point.length === 2 && data.point.every(Number.isSafeInteger)) {
+    const { deltaX, deltaY } = data;
+    const valid = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) &&
+      Math.abs(value) <= deltaLimit;
+    if (!valid(deltaX) || !valid(deltaY) || (deltaX === 0 && deltaY === 0)) {
+      throw new Fault('CAPTURE_PROTOCOL', 'Invalid scroll deltas from capture helper');
+    }
+    const phase = typeof data.phase === 'string' && /^[a-z]{2,12}$/.test(data.phase) ? data.phase : undefined;
+    return {
+      kind, t, seen, point: data.point as Point, deltaX: deltaX as number, deltaY: deltaY as number,
+      ...(phase ? { phase } : {}),
+    };
   }
   if (kind === 'text' && typeof data.chars === 'string' && /^[ -~]{1,16}$/.test(data.chars)) {
     return { kind, t, seen, chars: data.chars };
@@ -208,10 +391,20 @@ export async function record(
   let ready = false;
   let targetActive = true;
   let failure: Fault | undefined;
-  let burst: { at: number; snapshot: Snapshot } | undefined;
-  function endTextBurst() {
+  let burst: { kind: 'text' | 'scroll'; at: number; snapshot: Snapshot } | undefined;
+  // A drag binds its endpoints from the tree read at pickup: after the drop the
+  // source row may already be gone (a moved file), so a later read would point
+  // at the wrong element.
+  let dragSnapshot: Snapshot | undefined;
+  let dragUnverified = false;
+  function endBursts() {
     burst = undefined;
     recording.endTextBurst();
+    recording.endScrollBurst();
+  }
+  function fatalCaptureError(error: unknown): boolean {
+    return !(error instanceof Fault) || error.dependency || error instanceof IdentityFault ||
+      ['PERM_DENIED', 'APP_NOT_FOUND', 'WINDOW_NOT_FOUND', 'WINDOW_MISMATCH', 'WINDOW_CHANGED'].includes(error.code);
   }
   function warn(code: string, message: string) {
     warnings.set(code, { code, message });
@@ -259,16 +452,36 @@ export async function record(
       }
       if (!ready) throw new Fault('CAPTURE_PROTOCOL', 'Input arrived before the helper was ready');
       if (data.kind === 'focus' && typeof data.active === 'boolean') {
-        endTextBurst();
+        endBursts();
         targetActive = data.active;
         if (!targetActive) warn('FOCUS_CHANGED', 'Input in other apps was skipped. Target actions were retained.');
         continue;
       }
       if (data.kind === 'boundary' || data.kind === 'warning') {
-        endTextBurst();
+        endBursts();
         if (data.kind === 'warning') {
           const code = captureCode(data.code);
           warn(code, pointerWarningMessages.get(code) ?? `Some input may have been skipped: ${code}`);
+        }
+        continue;
+      }
+      if (data.kind === 'drag_start') {
+        endBursts();
+        dragSnapshot = undefined;
+        dragUnverified = true;
+        try {
+          dragSnapshot = bound
+            ? await identity.readWindow(desktop, target, { timeoutMs: 1200, preferredWindowId: initial.windowId })
+            : await desktop.snapshot(target, 1200, initial.windowId);
+          if (dragSnapshot.windowId !== initial.windowId) {
+            throw new Fault('WINDOW_CHANGED', 'Capture switched away from the initial window');
+          }
+          dragUnverified = false;
+        } catch (error) {
+          dragSnapshot = undefined;
+          if (fatalCaptureError(error)) throw error;
+          warn(error instanceof Fault ? error.code : 'CAPTURE_FAILED',
+            error instanceof Error ? error.message : 'The drag start could not be read');
         }
         continue;
       }
@@ -278,9 +491,26 @@ export async function record(
         ? data.traceId : undefined;
       // The helper hit-tests mouse-down against the selected native window. Its focus
       // update can reach us after the click that activated that window.
-      if (!targetActive && event.kind !== 'click') continue;
+      if (!targetActive && event.kind !== 'click' && event.kind !== 'drag') continue;
       try {
-        if (event.kind === 'text' && burst && event.t - burst.at <= textGapMs) {
+        if (event.kind === 'drag') {
+          const captured = dragSnapshot;
+          dragSnapshot = undefined;
+          if (dragUnverified || !captured) {
+            dragUnverified = false;
+            warn('DRAG_UNVERIFIED', 'A drag was skipped because its start state could not be read');
+            burst = undefined;
+            continue;
+          }
+          const skipped = recording.add({ event, snapshot: captured });
+          if (skipped) warn(skipped, pointerWarningMessages.get(skipped) ?? `Some input was skipped: ${skipped}`);
+          burst = undefined;
+          continue;
+        }
+        // A burst reuses the snapshot taken for its first event, so a fast
+        // sequence of wheel ticks or keystrokes costs one accessibility read.
+        if ((event.kind === 'text' || event.kind === 'scroll') && burst?.kind === event.kind &&
+            event.t - burst.at <= (event.kind === 'text' ? textGapMs : scrollGapMs)) {
           recording.add({ event, snapshot: burst.snapshot });
           burst.at = event.t;
           continue;
@@ -288,9 +518,10 @@ export async function record(
         if (Date.now() - event.seen > 2000) {
           throw new Fault('STALE_CAPTURE', 'The accessibility snapshot could not keep up with input');
         }
+        const pinWindow = event.kind === 'click' || event.kind === 'scroll' ? initial.windowId : undefined;
         const captured = bound
           ? await identity.readWindow(desktop, target, { timeoutMs: 1200, preferredWindowId: initial.windowId })
-          : await desktop.snapshot(target, 1200, event.kind === 'click' ? initial.windowId : undefined);
+          : await desktop.snapshot(target, 1200, pinWindow);
         if (captured.windowId !== initial.windowId) {
           throw new Fault('WINDOW_CHANGED', 'Capture switched away from the initial window');
         }
@@ -301,19 +532,21 @@ export async function record(
           burst = undefined;
           continue;
         }
-        burst = event.kind === 'text' ? { at: event.t, snapshot: captured } : undefined;
+        burst = event.kind === 'text' || event.kind === 'scroll'
+          ? { kind: event.kind, at: event.t, snapshot: captured } : undefined;
         if (traceId) trace({ stage: 'flow', id: traceId, decision: 'collected', windowId: captured.windowId });
       } catch (error) {
         if (traceId) {
           trace({ stage: 'flow', id: traceId, decision: 'filtered',
             reason: error instanceof Fault ? error.code : 'CAPTURE_FAILED' });
         }
-        if (!(error instanceof Fault) || error.dependency || error instanceof IdentityFault ||
-            ['PERM_DENIED', 'APP_NOT_FOUND', 'WINDOW_NOT_FOUND', 'WINDOW_MISMATCH', 'WINDOW_CHANGED'].includes(error.code)) {
-          throw error;
+        if (!fatalCaptureError(error)) {
+          endBursts();
+          warn(error instanceof Fault ? error.code : 'CAPTURE_FAILED',
+            error instanceof Error ? error.message : 'Capture failed');
+          continue;
         }
-        endTextBurst();
-        warn(error.code, error.message);
+        throw error;
       }
     }
 
