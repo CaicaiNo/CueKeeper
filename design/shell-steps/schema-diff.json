@@ -1,0 +1,312 @@
+{
+  "schemas/flow.schema.json": [
+    {
+      "op": "test",
+      "path": "/properties/steps/items/anyOf/0/anyOf/4/properties/kind/const",
+      "value": "assert"
+    },
+    {
+      "op": "test",
+      "path": "/properties/behaviors/items/properties/steps/items/anyOf/4/properties/kind/const",
+      "value": "assert"
+    },
+    {
+      "op": "add",
+      "path": "/definitions",
+      "value": {
+        "shellStep": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": { "$ref": "#/properties/steps/items/anyOf/0/anyOf/0/properties/id" },
+            "kind": { "type": "string", "const": "shell" },
+            "setup": { "$ref": "#/properties/steps/items/anyOf/0/anyOf/0/properties/setup" },
+            "argv": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 65,
+              "items": [
+                { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000]*$" }
+              ],
+              "additionalItems": { "type": "string", "minLength": 0, "maxLength": 4096, "pattern": "^[^\\u0000]*$" }
+            },
+            "shell": { "type": "boolean", "default": false },
+            "command": { "type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000]*$" },
+            "cwd": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000]*$" },
+            "env": {
+              "type": "object",
+              "additionalProperties": false,
+              "maxProperties": 32,
+              "patternProperties": {
+                "^(?!(?:HOME|USER|LOGNAME|TMPDIR|LANG|PATH|NODE_OPTIONS)$|(?:SUDO_|DYLD_|LD_|CUEKEEPER_))[A-Za-z_][A-Za-z0-9_]{0,63}$": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 0,
+                      "maxLength": 4000,
+                      "pattern": "^[^\\u0000]*$"
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "secretEnv": { "type": "string", "pattern": "^CUEKEEPER_SECRET_[A-Z0-9_]{1,64}$" }
+                      },
+                      "required": ["secretEnv"]
+                    }
+                  ]
+                }
+              }
+            },
+            "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 120000, "default": 30000 },
+            "expectedExitCode": { "type": "integer", "minimum": 0, "maximum": 255, "default": 0 },
+            "privilege": { "type": "string", "enum": ["user", "sudo"], "default": "user" }
+          },
+          "required": ["id", "kind"],
+          "oneOf": [
+            {
+              "required": ["argv"],
+              "properties": { "shell": { "type": "boolean", "const": false } },
+              "not": { "anyOf": [{ "required": ["command"] }] }
+            },
+            {
+              "required": ["command", "shell"],
+              "properties": { "shell": { "type": "boolean", "const": true } },
+              "not": { "anyOf": [{ "required": ["argv"] }] }
+            }
+          ],
+          "if": {
+            "required": ["privilege"],
+            "properties": { "privilege": { "type": "string", "const": "sudo" } }
+          },
+          "then": {
+            "required": ["argv"],
+            "properties": {
+              "argv": {
+                "maxItems": 1,
+                "items": {
+                  "type": "string",
+                  "pattern": "^/Library/CueKeeper/privileged/[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
+                }
+              },
+              "shell": { "type": "boolean", "const": false }
+            },
+            "not": {
+              "anyOf": [
+                { "required": ["command"] },
+                { "required": ["cwd"] },
+                { "required": ["env"] },
+                { "required": ["timeoutMs"] }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "op": "add",
+      "path": "/properties/steps/items/anyOf/0/anyOf/-",
+      "value": { "$ref": "#/definitions/shellStep" }
+    },
+    {
+      "op": "add",
+      "path": "/properties/behaviors/items/properties/steps/items/anyOf/-",
+      "value": { "$ref": "#/definitions/shellStep" }
+    }
+  ],
+  "schemas/behavior.schema.json": [
+    {
+      "op": "test",
+      "path": "/properties/steps/items/anyOf/4/properties/kind/const",
+      "value": "assert"
+    },
+    {
+      "op": "add",
+      "path": "/definitions",
+      "value": {
+        "shellStep": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": { "$ref": "#/properties/steps/items/anyOf/0/properties/id" },
+            "kind": { "type": "string", "const": "shell" },
+            "setup": { "$ref": "#/properties/steps/items/anyOf/0/properties/setup" },
+            "argv": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 65,
+              "items": [
+                { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000]*$" }
+              ],
+              "additionalItems": { "type": "string", "minLength": 0, "maxLength": 4096, "pattern": "^[^\\u0000]*$" }
+            },
+            "shell": { "type": "boolean", "default": false },
+            "command": { "type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000]*$" },
+            "cwd": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000]*$" },
+            "env": {
+              "type": "object",
+              "additionalProperties": false,
+              "maxProperties": 32,
+              "patternProperties": {
+                "^(?!(?:HOME|USER|LOGNAME|TMPDIR|LANG|PATH|NODE_OPTIONS)$|(?:SUDO_|DYLD_|LD_|CUEKEEPER_))[A-Za-z_][A-Za-z0-9_]{0,63}$": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 0,
+                      "maxLength": 4000,
+                      "pattern": "^[^\\u0000]*$"
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "secretEnv": { "type": "string", "pattern": "^CUEKEEPER_SECRET_[A-Z0-9_]{1,64}$" }
+                      },
+                      "required": ["secretEnv"]
+                    }
+                  ]
+                }
+              }
+            },
+            "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 120000, "default": 30000 },
+            "expectedExitCode": { "type": "integer", "minimum": 0, "maximum": 255, "default": 0 },
+            "privilege": { "type": "string", "enum": ["user", "sudo"], "default": "user" }
+          },
+          "required": ["id", "kind"],
+          "oneOf": [
+            {
+              "required": ["argv"],
+              "properties": { "shell": { "type": "boolean", "const": false } },
+              "not": { "anyOf": [{ "required": ["command"] }] }
+            },
+            {
+              "required": ["command", "shell"],
+              "properties": { "shell": { "type": "boolean", "const": true } },
+              "not": { "anyOf": [{ "required": ["argv"] }] }
+            }
+          ],
+          "if": {
+            "required": ["privilege"],
+            "properties": { "privilege": { "type": "string", "const": "sudo" } }
+          },
+          "then": {
+            "required": ["argv"],
+            "properties": {
+              "argv": {
+                "maxItems": 1,
+                "items": {
+                  "type": "string",
+                  "pattern": "^/Library/CueKeeper/privileged/[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
+                }
+              },
+              "shell": { "type": "boolean", "const": false }
+            },
+            "not": {
+              "anyOf": [
+                { "required": ["command"] },
+                { "required": ["cwd"] },
+                { "required": ["env"] },
+                { "required": ["timeoutMs"] }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "op": "add",
+      "path": "/properties/steps/items/anyOf/-",
+      "value": { "$ref": "#/definitions/shellStep" }
+    }
+  ],
+  "schemas/report.schema.json": [
+    {
+      "op": "test",
+      "path": "/properties/entries/items/anyOf/1/properties/kind/anyOf/0/const",
+      "value": "click"
+    },
+    {
+      "op": "test",
+      "path": "/properties/entries/items/anyOf/2/properties/kind/const",
+      "value": "assert"
+    },
+    {
+      "op": "add",
+      "path": "/definitions",
+      "value": {
+        "shellOutput": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "type": "string", "enum": ["text", "binary", "omitted"] },
+            "bytes": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+            "truncated": { "type": "boolean" },
+            "text": { "type": "string", "minLength": 0, "maxLength": 16384, "pattern": "^[^\\u0000]*$" }
+          },
+          "required": ["kind", "bytes", "truncated"],
+          "if": { "properties": { "kind": { "type": "string", "const": "text" } } },
+          "then": { "required": ["text"] },
+          "else": { "not": { "anyOf": [{ "required": ["text"] }] } }
+        },
+        "shellResult": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": { "type": "string", "enum": ["argv", "shell"] },
+            "privilege": { "type": "string", "enum": ["user", "sudo"] },
+            "execution": {
+              "type": "string",
+              "enum": ["preview", "not-run", "finished", "terminated", "unknown"]
+            },
+            "exitCode": { "type": "integer", "minimum": 0, "maximum": 255 },
+            "signal": { "type": "string", "pattern": "^SIG[A-Z0-9]+$" },
+            "cleanup": { "type": "string", "enum": ["complete", "unknown"] },
+            "stdout": { "$ref": "#/definitions/shellOutput" },
+            "stderr": { "$ref": "#/definitions/shellOutput" },
+            "warnings": {
+              "type": "array",
+              "maxItems": 1,
+              "items": { "type": "string", "const": "SHELL_OUTPUT_TRUNCATED" }
+            }
+          },
+          "required": ["mode", "privilege", "execution"],
+          "allOf": [
+            { "not": { "required": ["exitCode", "signal"] } },
+            {
+              "if": { "properties": { "execution": { "enum": ["preview", "not-run"] } } },
+              "then": {
+                "not": {
+                  "anyOf": [
+                    { "required": ["exitCode"] },
+                    { "required": ["signal"] },
+                    { "required": ["cleanup"] },
+                    { "required": ["stdout"] },
+                    { "required": ["stderr"] },
+                    { "required": ["warnings"] }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "op": "copy",
+      "from": "/properties/entries/items/anyOf/1",
+      "path": "/properties/entries/items/anyOf/-"
+    },
+    {
+      "op": "replace",
+      "path": "/properties/entries/items/anyOf/3/properties/kind",
+      "value": { "type": "string", "const": "shell" }
+    },
+    { "op": "remove", "path": "/properties/entries/items/anyOf/3/properties/delivery" },
+    {
+      "op": "add",
+      "path": "/properties/entries/items/anyOf/3/properties/shell",
+      "value": { "$ref": "#/definitions/shellResult" }
+    },
+    { "op": "add", "path": "/properties/entries/items/anyOf/3/required/-", "value": "shell" }
+  ]
+}
