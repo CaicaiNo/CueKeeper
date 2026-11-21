@@ -55,7 +55,7 @@ out/assets/logs/runner.log
 
 ## v1 报告的降级
 
-前置条件触发修复时，原条目记录可选的 `repair`，包含 `attempted`、`kind` 和 `result`。条目 ID 仍为 `<作用域>/setup/<条件 ID>`。执行或观测失败时，条目码为 `ENSURE_FAILED`，`repair.code` 保留具体原因，例如 `APP_NOT_FOUND`、`LAUNCH_TIMEOUT`、`WINDOW_NOT_FOUND` 或系统权限错误。复查仍不满足时，条目码为 `PRECONDITION_FALSE`。
+前置条件触发修复时，`kind: "setup"` 的条目记录可选的 `repair`，包含 `attempted`、`kind` 和 `result`。条目 ID 仍为 `<作用域>/setup/<条件 ID>`。执行或观测失败时，条目码为 `ENSURE_FAILED`，`repair.code` 保留具体原因，例如 `APP_NOT_FOUND`、`LAUNCH_TIMEOUT`、`WINDOW_NOT_FOUND` 或系统权限错误。复查仍不满足时，条目码为 `PRECONDITION_FALSE`。
 
 报告没有截图、重试记录或断流字段时：
 

@@ -1,13 +1,14 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { defaultEnsureTimeoutMs } from './contracts.js';
-import type { Check, Ensure, Entry, Flow, Report, Setup } from './contracts.js';
+import type { Check, Ensure, Entry, Flow, Report, Setup, Target } from './contracts.js';
 import { DesktopFault, isMissingWindow } from './desktop.js';
 import type { Desktop } from './desktop.js';
 import { hashFlow, plan } from './flow.js';
 import { Fault, contains, resolve } from './locator.js';
 import type { Located, Snapshot } from './locator.js';
 
-type Outcome = Pick<Entry, 'status' | 'message' | 'code' | 'delivery' | 'repair'>;
+type Outcome = Pick<Entry, 'status' | 'message' | 'code' | 'delivery'>;
+type SetupOutcome = Outcome & Pick<Extract<Entry, { kind: 'setup' }>, 'repair'>;
 
 function locateCheck(snapshot: Snapshot, check: Check): Located | undefined {
   try {
@@ -54,28 +55,34 @@ export async function runFlow(
   };
   const started = performance.now();
   const elapsed = () => Math.round(performance.now() - started);
-  let windowId: string | undefined;
-  let selectedWindowId: string | undefined;
-  let drySnapshot: Promise<Snapshot> | undefined;
-  async function readSnapshot(timeoutMs?: number, exactWindow = false, repairedWindowId?: string) {
-    const selected = selectedWindowId ?? (exactWindow ? windowId ?? repairedWindowId : undefined);
-    const current = await desktop.snapshot(flow.target, timeoutMs, selected, exactWindow);
-    const expectedId = windowId ?? selected;
-    if (expectedId !== undefined && current.windowId !== expectedId) {
-      throw new Fault('WINDOW_CHANGED', 'The original target window changed during the run');
-    }
-    windowId = current.windowId;
-    if (exactWindow) selectedWindowId = current.windowId;
-    return current;
+  function bindWindow(target: Target) {
+    let windowId: string | undefined;
+    let selectedWindowId: string | undefined;
+    return {
+      get id() { return windowId; },
+      async read(timeoutMs?: number, exactWindow = false, repairedWindowId?: string) {
+        const selected = selectedWindowId ?? (exactWindow ? windowId ?? repairedWindowId : undefined);
+        const current = await desktop.snapshot(target, timeoutMs, selected, exactWindow);
+        const expectedId = windowId ?? selected;
+        if (expectedId !== undefined && current.windowId !== expectedId) {
+          throw new Fault('WINDOW_CHANGED', 'The original target window changed during the run');
+        }
+        windowId = current.windowId;
+        if (exactWindow) selectedWindowId = current.windowId;
+        return current;
+      },
+    };
   }
-  const snapshot = (timeoutMs?: number) => dryRun ? (drySnapshot ??= readSnapshot()) : readSnapshot(timeoutMs);
+  const replayWindow = bindWindow(flow.target);
+  let drySnapshot: Promise<Snapshot> | undefined;
+  const snapshot = (timeoutMs?: number) => dryRun ? (drySnapshot ??= replayWindow.read()) : replayWindow.read(timeoutMs);
 
   async function log(
-    id: string, kind: Entry['kind'], work: () => Promise<Outcome>, failure: 'failed' | 'blocked' = 'failed',
+    id: string, kind: Entry['kind'], work: () => Promise<SetupOutcome>, failure: 'failed' | 'blocked' = 'failed',
   ) {
     signal.throwIfAborted();
     const atMs = elapsed();
-    let outcome: Outcome;
+    let outcome: SetupOutcome;
     try {
       outcome = await work();
     } catch (error) {
@@ -83,7 +90,9 @@ export async function runFlow(
       outcome = errorOutcome(error, failure);
     }
     signal.throwIfAborted();
-    report.entries.push({ id, kind, atMs, durationMs: elapsed() - atMs, ...outcome });
+    const { repair, ...result } = outcome;
+    const entry = { id, atMs, durationMs: elapsed() - atMs, ...result };
+    report.entries.push(kind === 'setup' && repair ? { ...entry, kind, repair } : { ...entry, kind });
     return outcome.status;
   }
 
@@ -98,9 +107,9 @@ export async function runFlow(
     }
   }
 
-  async function ensureThenCheck(check: Check, action: Ensure): Promise<Outcome> {
+  async function ensureThenCheck(check: Check, action: Ensure, window: ReturnType<typeof bindWindow>): Promise<SetupOutcome> {
     try {
-      if (await evaluateSetup(await readSnapshot(undefined, true), check)) return { status: 'passed' };
+      if (await evaluateSetup(await window.read(undefined, true), check)) return { status: 'passed' };
     } catch (error) {
       if (signal.aborted || !isMissingWindow(error)) throw error;
     }
@@ -109,14 +118,14 @@ export async function runFlow(
     const deadline = performance.now() + timeoutMs;
     try {
       signal.throwIfAborted();
-      const repairedWindowId = await desktop.ensure(action, flow.target, timeoutMs, windowId);
+      const repairedWindowId = await desktop.ensure(action, timeoutMs, window.id);
       let current: Snapshot;
       for (;;) {
         signal.throwIfAborted();
         const remaining = Math.ceil(deadline - performance.now());
         if (remaining <= 0) throw new Fault('WINDOW_NOT_FOUND', 'The target window was not ready before the repair deadline');
         try {
-          current = await readSnapshot(remaining, true, repairedWindowId);
+          current = await window.read(remaining, true, repairedWindowId);
           break;
         } catch (error) {
           if (signal.aborted || !isMissingWindow(error) || action.kind === 'window_ready' ||
@@ -144,11 +153,16 @@ export async function runFlow(
         if (condition.state !== 'confirmed') {
           return { status: 'skipped', message: `Setup state is ${condition.state}` };
         }
+        const { ensure } = condition;
+        const window = ensure?.kind === 'window_ready' &&
+          (ensure.app !== flow.target.app || ensure.window !== flow.target.window)
+          ? bindWindow({ app: ensure.app, window: ensure.window }) : replayWindow;
         if (dryRun) {
-          locateCheck(await snapshot(), condition.check);
+          const current = await (window === replayWindow ? snapshot() : window.read(undefined, true));
+          locateCheck(current, condition.check);
           return { status: 'resolved' };
         }
-        if (condition.ensure) return ensureThenCheck(condition.check, condition.ensure);
+        if (ensure) return ensureThenCheck(condition.check, ensure, window);
         if (!await evaluate(desktop, await snapshot(), condition.check)) {
           throw new Fault('PRECONDITION_FALSE', 'Confirmed precondition did not match');
         }

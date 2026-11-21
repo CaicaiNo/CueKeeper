@@ -52,100 +52,17 @@
       "minItems": 1,
       "type": "array",
       "items": {
-        "additionalProperties": false,
-        "type": "object",
-        "properties": {
-          "id": {
-            "minLength": 1,
-            "maxLength": 196,
-            "type": "string"
-          },
-          "kind": {
-            "anyOf": [
-              {
-                "const": "setup",
-                "type": "string"
-              },
-              {
-                "const": "click",
-                "type": "string"
-              },
-              {
-                "const": "type",
-                "type": "string"
-              },
-              {
-                "const": "key",
-                "type": "string"
-              },
-              {
-                "const": "wait",
-                "type": "string"
-              },
-              {
-                "const": "assert",
-                "type": "string"
-              }
-            ]
-          },
-          "status": {
-            "anyOf": [
-              {
-                "const": "passed",
-                "type": "string"
-              },
-              {
-                "const": "failed",
-                "type": "string"
-              },
-              {
-                "const": "blocked",
-                "type": "string"
-              },
-              {
-                "const": "skipped",
-                "type": "string"
-              },
-              {
-                "const": "resolved",
-                "type": "string"
-              }
-            ]
-          },
-          "atMs": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "durationMs": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "message": {
-            "type": "string"
-          },
-          "code": {
-            "type": "string"
-          },
-          "repair": {
+        "anyOf": [
+          {
             "additionalProperties": false,
             "type": "object",
             "properties": {
-              "attempted": {
-                "type": "boolean"
+              "id": {
+                "minLength": 1,
+                "maxLength": 196,
+                "type": "string"
               },
-              "kind": {
-                "anyOf": [
-                  {
-                    "const": "app_running",
-                    "type": "string"
-                  },
-                  {
-                    "const": "window_ready",
-                    "type": "string"
-                  }
-                ]
-              },
-              "result": {
+              "status": {
                 "anyOf": [
                   {
                     "const": "passed",
@@ -154,50 +71,217 @@
                   {
                     "const": "failed",
                     "type": "string"
+                  },
+                  {
+                    "const": "blocked",
+                    "type": "string"
+                  },
+                  {
+                    "const": "skipped",
+                    "type": "string"
+                  },
+                  {
+                    "const": "resolved",
+                    "type": "string"
                   }
                 ]
               },
+              "atMs": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "durationMs": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "message": {
+                "type": "string"
+              },
               "code": {
                 "type": "string"
+              },
+              "delivery": {
+                "anyOf": [
+                  {
+                    "const": "delivered_verified",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivered_unverified",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivery_uncertain",
+                    "type": "string"
+                  },
+                  {
+                    "const": "not_delivered",
+                    "type": "string"
+                  },
+                  {
+                    "const": "unknown",
+                    "type": "string"
+                  }
+                ]
+              },
+              "kind": {
+                "const": "setup",
+                "type": "string"
+              },
+              "repair": {
+                "additionalProperties": false,
+                "type": "object",
+                "properties": {
+                  "attempted": {
+                    "type": "boolean"
+                  },
+                  "kind": {
+                    "anyOf": [
+                      {
+                        "const": "app_running",
+                        "type": "string"
+                      },
+                      {
+                        "const": "window_ready",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "result": {
+                    "anyOf": [
+                      {
+                        "const": "passed",
+                        "type": "string"
+                      },
+                      {
+                        "const": "failed",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "code": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "attempted",
+                  "kind",
+                  "result"
+                ]
               }
             },
             "required": [
-              "attempted",
-              "kind",
-              "result"
+              "id",
+              "status",
+              "atMs",
+              "durationMs",
+              "kind"
             ]
           },
-          "delivery": {
-            "anyOf": [
-              {
-                "const": "delivered_verified",
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "id": {
+                "minLength": 1,
+                "maxLength": 196,
                 "type": "string"
               },
-              {
-                "const": "delivered_unverified",
+              "status": {
+                "anyOf": [
+                  {
+                    "const": "passed",
+                    "type": "string"
+                  },
+                  {
+                    "const": "failed",
+                    "type": "string"
+                  },
+                  {
+                    "const": "blocked",
+                    "type": "string"
+                  },
+                  {
+                    "const": "skipped",
+                    "type": "string"
+                  },
+                  {
+                    "const": "resolved",
+                    "type": "string"
+                  }
+                ]
+              },
+              "atMs": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "durationMs": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "message": {
                 "type": "string"
               },
-              {
-                "const": "delivery_uncertain",
+              "code": {
                 "type": "string"
               },
-              {
-                "const": "not_delivered",
-                "type": "string"
+              "delivery": {
+                "anyOf": [
+                  {
+                    "const": "delivered_verified",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivered_unverified",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivery_uncertain",
+                    "type": "string"
+                  },
+                  {
+                    "const": "not_delivered",
+                    "type": "string"
+                  },
+                  {
+                    "const": "unknown",
+                    "type": "string"
+                  }
+                ]
               },
-              {
-                "const": "unknown",
-                "type": "string"
+              "kind": {
+                "anyOf": [
+                  {
+                    "const": "click",
+                    "type": "string"
+                  },
+                  {
+                    "const": "type",
+                    "type": "string"
+                  },
+                  {
+                    "const": "key",
+                    "type": "string"
+                  },
+                  {
+                    "const": "wait",
+                    "type": "string"
+                  },
+                  {
+                    "const": "assert",
+                    "type": "string"
+                  }
+                ]
               }
+            },
+            "required": [
+              "id",
+              "status",
+              "atMs",
+              "durationMs",
+              "kind"
             ]
           }
-        },
-        "required": [
-          "id",
-          "kind",
-          "status",
-          "atMs",
-          "durationMs"
         ]
       }
     }

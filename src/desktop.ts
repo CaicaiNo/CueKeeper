@@ -10,7 +10,7 @@ import type { Ensure, Entry, Target } from './contracts.js';
 export interface Desktop {
   snapshot(target: Target, timeoutMs?: number, windowId?: string, exactWindow?: boolean): Promise<Snapshot>;
   property(node: Node, property: 'text' | 'value' | 'visible', timeoutMs?: number): Promise<string | boolean | undefined>;
-  ensure(action: Ensure, target: Target, timeoutMs: number, windowId?: string): Promise<string | undefined>;
+  ensure(action: Ensure, timeoutMs: number, windowId?: string): Promise<string | undefined>;
   click(ref: string): Promise<Entry['delivery']>;
   clickPoint(snapshot: Snapshot, target: Target, point: Point): Promise<Entry['delivery']>;
   type(ref: string, text: string): Promise<Entry['delivery']>;
@@ -145,7 +145,7 @@ export async function withDesktop<T>(
 
     return await work({
       snapshot,
-      async ensure(action, target, timeoutMs, windowId) {
+      async ensure(action, timeoutMs, windowId) {
         if (process.platform !== 'darwin') {
           throw new Fault('UNSUPPORTED_PLATFORM', 'Setup repair requires macOS');
         }
@@ -171,7 +171,7 @@ export async function withDesktop<T>(
           return;
         }
 
-        const requested = { app: action.app, window: target.window };
+        const requested = { app: action.app, window: action.window };
         let id = await findWindow(requested, budget(), windowId);
         if (!id) {
           await launch(action.app, true, budget());
@@ -244,7 +244,12 @@ export function offlineDesktop(data: unknown, expected: Target): Desktop {
   const snap = parseSnapshot(fixture.data, expected);
   async function mutate(): Promise<never> { throw new Error('Offline snapshots cannot execute actions'); }
   return {
-    snapshot: async () => snap,
+    async snapshot(requested) {
+      if (requested.app !== expected.app || requested.window !== expected.window) {
+        throw new Fault('WINDOW_MISMATCH', 'Offline fixture does not cover the requested window', true);
+      }
+      return snap;
+    },
     property: async (node, property) => snapshotProperty(node, property),
     click: mutate, clickPoint: mutate, type: mutate, press: mutate, ensure: mutate,
   };

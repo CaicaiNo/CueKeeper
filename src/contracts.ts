@@ -31,11 +31,14 @@ const expectation = T.Union([
 const check = object({ target: element, expect: expectation });
 const ensureKind = T.Union([T.Literal('app_running'), T.Literal('window_ready')]);
 export const defaultEnsureTimeoutMs = 15_000;
-const ensure = object({
-  kind: ensureKind,
+const ensureFields = {
   app: label,
   timeout_ms: T.Optional(T.Integer({ minimum: 1000, maximum: 120_000, default: defaultEnsureTimeoutMs })),
-});
+};
+const ensure = T.Union([
+  object({ kind: T.Literal('app_running'), ...ensureFields }),
+  object({ kind: T.Literal('window_ready'), ...ensureFields, window: label }),
+]);
 const setup = object({
   id, name: label,
   state: T.Union([
@@ -83,28 +86,34 @@ const resultStatus = T.Union([
   T.Literal('passed'), T.Literal('failed'), T.Literal('blocked'),
   T.Literal('skipped'), T.Literal('resolved'),
 ]);
-const entry = object({
+const entryFields = {
   id: T.String({ minLength: 1, maxLength: 196 }),
-  kind: T.Union([
-    T.Literal('setup'), T.Literal('click'), T.Literal('type'), T.Literal('key'),
-    T.Literal('wait'), T.Literal('assert'),
-  ]),
   status: resultStatus,
   atMs: T.Integer({ minimum: 0 }),
   durationMs: T.Integer({ minimum: 0 }),
   message: T.Optional(T.String()),
   code: T.Optional(T.String()),
-  repair: T.Optional(object({
-    attempted: T.Boolean(),
-    kind: ensureKind,
-    result: T.Union([T.Literal('passed'), T.Literal('failed')]),
-    code: T.Optional(T.String()),
-  })),
   delivery: T.Optional(T.Union([
     T.Literal('delivered_verified'), T.Literal('delivered_unverified'),
     T.Literal('delivery_uncertain'), T.Literal('not_delivered'), T.Literal('unknown'),
   ])),
-});
+};
+const entry = T.Union([
+  object({
+    ...entryFields,
+    kind: T.Literal('setup'),
+    repair: T.Optional(object({
+      attempted: T.Boolean(),
+      kind: ensureKind,
+      result: T.Union([T.Literal('passed'), T.Literal('failed')]),
+      code: T.Optional(T.String()),
+    })),
+  }),
+  object({
+    ...entryFields,
+    kind: T.Union([T.Literal('click'), T.Literal('type'), T.Literal('key'), T.Literal('wait'), T.Literal('assert')]),
+  }),
+]);
 export const reportSchema = object({
   version: T.Literal(1), flowId: id, flowSha256: digest, startedAt: timestamp,
   mode: T.Union([T.Literal('replay'), T.Literal('dry-run')]),

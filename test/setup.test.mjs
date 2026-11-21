@@ -5,10 +5,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { TypeCompiler } from '@sinclair/typebox/compiler';
 import { strFromU8, unzipSync } from 'fflate';
-import { reportCheck } from '../dist/contracts.js';
+import { reportCheck, schemas } from '../dist/contracts.js';
+import { offlineDesktop } from '../dist/desktop.js';
 import { parseFlow } from '../dist/flow.js';
 import { packReport } from '../dist/report.js';
+import { runFlow } from '../dist/run.js';
 
 const example = name => JSON.parse(readFileSync(new URL(`../examples/${name}.json`, import.meta.url), 'utf8'));
 const base = example('textedit.flow');
@@ -20,7 +23,7 @@ const condition = {
   check: { target: click.target, expect: { property: 'exists', equals: true } },
   ensure: { kind: 'app_running', app: target.app },
 };
-const windowCondition = { ...condition, ensure: { ...condition.ensure, kind: 'window_ready' } };
+const windowCondition = { ...condition, ensure: { kind: 'window_ready', app: target.app, window: target.window } };
 
 // Run the production CLI and adapter against a stateful executable that never uses the desktop.
 function replay(t, flow, options = {}, flags = []) {
@@ -40,7 +43,7 @@ const log = ${JSON.stringify(log)};
 const history = fs.readFileSync(log, 'utf8').trim().split('\\n').filter(Boolean).map(JSON.parse);
 fs.appendFileSync(log, JSON.stringify({ command, args }) + '\\n');
 const seen = name => history.some(call => call.command === name);
-const { running, hasWindow = running, readyAfter, launchError, focusError, neverOpen } = ${JSON.stringify(options)};
+const { running, hasWindow = running, readyAfter, launchError, focusError, neverOpen, secondaryWindow } = ${JSON.stringify(options)};
 const data = ${JSON.stringify(fixture.data)};
 const app = ${JSON.stringify(target.app)};
 const opened = seen('launch') && !neverOpen;
@@ -57,6 +60,7 @@ switch (command) {
     if (!running && !opened) failure('APP_NOT_FOUND');
     result = [{ id: 'w-other', title: 'Unrelated window' }];
     if (hasWindow || opened) result.push(data.window);
+    if (secondaryWindow && opened) result.push(secondaryWindow);
     break;
   case 'list-apps':
     assert.equal(flag('--app'), app);
@@ -69,14 +73,18 @@ switch (command) {
     break;
   case 'focus-window':
     assert.equal(flag('--app'), app);
-    assert.equal(flag('--window-id'), data.window.id);
+    const focused = secondaryWindow ?? data.window;
+    assert.equal(flag('--window-id'), focused.id);
     if (focusError) failure(focusError);
-    result = { focused: data.window };
+    result = { focused };
     break;
   case 'snapshot':
     assert.equal(flag('--app'), app);
     if (!(hasWindow || opened)) failure(running ? 'WINDOW_NOT_FOUND' : 'APP_NOT_FOUND');
-    if (opened || seen('focus-window') || seen('list-apps')) {
+    if (secondaryWindow && flag('--window-id') === secondaryWindow.id) {
+      assert.ok(opened);
+      data.window = secondaryWindow;
+    } else if (opened || seen('focus-window') || seen('list-apps')) {
       assert.equal(flag('--window-id'), data.window.id);
       data.tree.children[0].children[0].ref_id = '@sfresh:e1';
     }
@@ -118,6 +126,33 @@ test('setup accepts omitted or bounded timeouts in v1 without materializing a de
       assert.throws(() => parseFlow(flow), /Invalid flow/);
     }
   }
+});
+
+test('window_ready requires an explicit nonempty title in flow and standalone setup', () => {
+  const setupCheck = TypeCompiler.Compile(schemas.setup);
+  assert.equal(setupCheck.Check({ ...windowCondition, version: 1 }), true);
+  assert.deepEqual(parseFlow({ ...base, setup: [windowCondition] }).setup, [windowCondition]);
+  for (const ensure of [
+    { kind: 'window_ready', app: target.app },
+    { kind: 'window_ready', app: target.app, window: '' },
+    { kind: 'app_running', app: target.app, window: target.window },
+  ]) {
+    const setup = { ...windowCondition, ensure };
+    assert.equal(setupCheck.Check({ ...setup, version: 1 }), false);
+    assert.throws(() => parseFlow({ ...base, setup: [setup] }), /Invalid flow/);
+  }
+});
+
+test('report rejects repair metadata on every non-setup entry kind', () => {
+  const report = example('textedit.report');
+  const repair = { attempted: true, kind: 'window_ready', result: 'passed' };
+  const entry = { ...report.entries[0], repair };
+  assert.equal(reportCheck.Check({ ...report, entries: [{ ...entry, kind: 'setup' }] }), true);
+  for (const kind of ['click', 'type', 'key', 'wait', 'assert']) {
+    assert.equal(reportCheck.Check({ ...report, entries: [{ ...entry, kind }] }), false, kind);
+  }
+  const altered = { ...report, entries: [entry, ...report.entries.slice(1)] };
+  assert.throws(() => packReport(altered, parseFlow(base)), /Invalid v1 report/);
 });
 
 test('app_running starts a missing app once and the next action uses a fresh ref', mac, t => {
@@ -177,6 +212,27 @@ test('window_ready focuses an existing window without reopening the app', mac, t
   assert.equal(report.status, 'passed');
   assert.deepEqual(commands, ['version', 'list-windows', 'snapshot', 'list-windows',
     'focus-window', 'snapshot', 'snapshot', 'click']);
+});
+
+test('window_ready repairs a named secondary window while the next action stays on the replay window', mac, t => {
+  const secondaryWindow = { id: 'w-settings', title: 'Settings' };
+  const setup = { ...windowCondition, ensure: { ...windowCondition.ensure, window: secondaryWindow.title } };
+  const flow = { ...base, setup: [condition], steps: [{ ...click, setup: [setup] }] };
+  const { report, calls } = replay(t, flow, { running: true, secondaryWindow });
+  assert.equal(report.status, 'passed');
+  assert.deepEqual(report.entries[1].repair, { attempted: true, kind: 'window_ready', result: 'passed' });
+  assert.deepEqual(calls.find(call => call.command === 'focus-window').args,
+    ['--app', target.app, '--window-id', secondaryWindow.id]);
+  assert.deepEqual(calls.filter(call => call.command === 'snapshot').map(({ args }) => args[args.indexOf('--window-id') + 1]),
+    [fixture.data.window.id, secondaryWindow.id, fixture.data.window.id]);
+});
+
+test('offline dry-run rejects a setup window outside the supplied snapshot', async () => {
+  const setup = { ...windowCondition, ensure: { ...windowCondition.ensure, window: 'Settings' } };
+  const flow = parseFlow({ ...base, setup: [setup] });
+  const desktop = offlineDesktop(fixture, target);
+  await assert.rejects(runFlow(flow, desktop, { dryRun: true, signal: new AbortController().signal }),
+    { code: 'WINDOW_MISMATCH' });
 });
 
 test('an unopened window reports WINDOW_NOT_FOUND after one activation request', mac, t => {

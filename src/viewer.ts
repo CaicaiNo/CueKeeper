@@ -189,7 +189,7 @@ function errorSection(view: StepView) {
 function assertionSection(view: StepView) {
   if (!view.check) return '';
   const wait = view.action?.kind === 'wait' ? view.action.timeoutMs : undefined;
-  const repair = view.entry.repair;
+  const repair = view.entry.kind === 'setup' ? view.entry.repair : undefined;
   const repairLabel = repair && [
     repair.kind === 'app_running' ? '确保应用运行' : '打开或聚焦窗口',
     statusLabels[repair.result],
