@@ -18,6 +18,7 @@ final class Capture {
     private var stopReleaseDeadline: TimeInterval?
     private var pauseBoundaryPending = false
     private var seconds: TimeInterval = 0
+    private var readyNotBefore: TimeInterval = 0
     private var indicatorDeadline: TimeInterval = 0
     private var recordingDeadline: Timer?
     private var started: TimeInterval?
@@ -77,21 +78,23 @@ final class Capture {
                 stop("INDICATOR_NOT_VISIBLE", detail: detail)
                 return
             }
-            indicatorDeadline = ProcessInfo.processInfo.systemUptime + 2
-        } else {
-            begin(indicatorEvidence: false)
         }
+        // Both run-loop sources are installed before prepare. Let the taps settle
+        // while the HUD still says it is preparing, then check both before READY.
+        CGEvent.tapEnable(tap: hotkeyTap, enable: true)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        let now = ProcessInfo.processInfo.systemUptime
+        readyNotBefore = now + 0.35
+        indicatorDeadline = now + 2
     }
 
     private func begin(indicatorEvidence: Any) {
         guard !stopped, let tap, let hotkeyTap else { return }
-        CGEvent.tapEnable(tap: hotkeyTap, enable: true)
-        guard CGEvent.tapIsEnabled(tap: hotkeyTap) else {
+        guard CFMachPortIsValid(hotkeyTap), CGEvent.tapIsEnabled(tap: hotkeyTap) else {
             stop("HOTKEY_TAP_UNAVAILABLE", detail: "The recording hotkey filter did not enable")
             return
         }
-        CGEvent.tapEnable(tap: tap, enable: true)
-        guard CGEvent.tapIsEnabled(tap: tap) else {
+        guard CFMachPortIsValid(tap), CGEvent.tapIsEnabled(tap: tap) else {
             stop("TAP_UNAVAILABLE", detail: "The input event tap did not enable")
             return
         }
@@ -159,11 +162,17 @@ final class Capture {
 
     func checkSession() {
         guard !stopped, let tap, let hotkeyTap else { return }
-        if started == nil, let indicator {
+        if started == nil {
+            let now = ProcessInfo.processInfo.systemUptime
+            guard now >= readyNotBefore else { return }
+            guard let indicator else {
+                begin(indicatorEvidence: false)
+                return
+            }
             switch indicator.visibility() {
             case .confirmed(let evidence): begin(indicatorEvidence: evidence)
             case .waiting(let detail):
-                if ProcessInfo.processInfo.systemUptime >= indicatorDeadline {
+                if now >= indicatorDeadline {
                     stop("INDICATOR_NOT_VISIBLE", detail: detail)
                 }
             }
@@ -255,12 +264,14 @@ final class Capture {
             return
         }
 
-        guard let frontmost = refreshFocus(), pausedAt == nil, !checkSecureInput() else { return }
+        guard pausedAt == nil else { return }
         let destination = event.getIntegerValueField(.eventTargetUnixProcessID)
         guard destination != ownPID, event.getIntegerValueField(.eventSourceUnixProcessID) != ownPID else { return }
         if type == .keyDown {
-            guard destination <= 0 || destination == Int64(frontmost.processIdentifier) else { return }
+            guard let frontmost = refreshFocus(), !checkSecureInput(),
+                  destination <= 0 || destination == Int64(frontmost.processIdentifier) else { return }
         } else {
+            // The mouse down may be the event that makes this window frontmost.
             guard let primary = NSScreen.screens.first else { return }
             let point = NSPoint(x: event.location.x, y: primary.frame.maxY - event.location.y)
             guard indicator?.covers(point) != true,

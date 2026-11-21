@@ -7,7 +7,7 @@ import type { Node, Point, Snapshot } from './locator.js';
 import type { Entry, Target } from './contracts.js';
 
 export interface Desktop {
-  snapshot(target: Target, timeoutMs?: number): Promise<Snapshot>;
+  snapshot(target: Target, timeoutMs?: number, windowId?: string): Promise<Snapshot>;
   property(node: Node, property: 'text' | 'value' | 'visible'): Promise<string | boolean | undefined>;
   click(ref: string): Promise<Entry['delivery']>;
   clickPoint(snapshot: Snapshot, target: Target, point: Point): Promise<Entry['delivery']>;

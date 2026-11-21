@@ -75,8 +75,14 @@ function recordFixture(t, events, { captureExit = 0, flags = [], seconds = 1, re
   cpSync(new URL('../package.json', import.meta.url), join(dir, 'package.json'));
   symlinkSync(fileURLToPath(new URL('../node_modules/', import.meta.url)), join(dir, 'node_modules'), 'dir');
   const desktop = join(dir, 'desktop');
+  const snapshotsLog = join(dir, 'snapshots.log');
   writeFileSync(desktop, `#!/usr/bin/env node
-const command = process.argv[2];
+import { appendFileSync } from 'node:fs';
+const [command, ...args] = process.argv.slice(2);
+if (command === 'snapshot') {
+  const windowArg = args.indexOf('--window-id');
+  appendFileSync(${JSON.stringify(snapshotsLog)}, JSON.stringify(windowArg < 0 ? null : args[windowArg + 1]) + '\\n');
+}
 const snapshots = ${JSON.stringify(fixture.data)};
 const data = command === 'version' ? { version: '1.3.1' } : snapshots;
 console.log(JSON.stringify({ version: '2.6', command, ok: true, data }));
@@ -99,16 +105,19 @@ process.exitCode = ${captureExit};
     '--app', fixture.target.app, '--window', fixture.target.window, '--out', path, '--seconds', String(seconds),
     '--json', ...flags], { env: { ...process.env, CUEKEEPER_AGENT_DESKTOP: desktop }, encoding: 'utf8', timeout: 10000 });
   return { code: result.status, response: JSON.parse(result.stdout), stderr: result.stderr,
+    snapshotWindows: readFileSync(snapshotsLog, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line)),
     recorded: existsSync(path) ? parseFlow(JSON.parse(readFileSync(path, 'utf8'))) : undefined };
 }
 
 const captureClick = { kind: 'click', point: [135, 165] };
 const captureSave = { kind: 'key', key: 's', modifiers: ['meta'] };
 
-test('record CLI saves click, type and save after leaving and returning to the target app',
+test('record CLI keeps a single click that activates the target and saves across app switches',
   { skip: process.platform !== 'darwin' }, t => {
-    const { code, response, recorded, stderr } = recordFixture(t, [
-      captureClick, { kind: 'text', chars: 'Cuekeeper' }, { kind: 'text', chars: ' M1' },
+    const { code, response, recorded, stderr, snapshotWindows } = recordFixture(t, [
+      { kind: 'focus', active: false }, { kind: 'text', chars: 'Other app' },
+      captureClick, { kind: 'focus', active: true },
+      { kind: 'text', chars: 'Cuekeeper' }, { kind: 'text', chars: ' M1' },
       { kind: 'focus', active: false }, { kind: 'text', chars: 'Other app' },
       { kind: 'focus', active: true }, { kind: 'boundary' }, captureSave,
     ], { seconds: 90 });
@@ -119,6 +128,7 @@ test('record CLI saves click, type and save after leaving and returning to the t
     assert.equal(response.data.partial, undefined);
     assert.deepEqual(response.data.warnings.map(warning => warning.code), ['FOCUS_CHANGED']);
     assert.deepEqual(recorded.steps.map(step => step.kind), ['click', 'type', 'key']);
+    assert.deepEqual(snapshotWindows, [null, fixture.data.window.id, null, null]);
     assert.equal(recorded.steps[1].text, 'Cuekeeper M1');
     assert.deepEqual(recorded.steps[2].modifiers, ['meta']);
     assert.equal(recorded.steps[2].key, 's');

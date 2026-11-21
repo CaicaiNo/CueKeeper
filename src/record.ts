@@ -219,7 +219,9 @@ export async function record(
       }
 
       const event = parseEvent(data);
-      if (!targetActive) continue;
+      // The helper hit-tests clicks against the selected native window. Its focus
+      // update can reach us after the click that activated that window.
+      if (!targetActive && event.kind !== 'click') continue;
       try {
         if (event.kind === 'text' && burst && event.t - burst.at <= textGapMs) {
           recording.add({ event, snapshot: burst.snapshot });
@@ -229,7 +231,7 @@ export async function record(
         if (Date.now() - event.seen > 2000) {
           throw new Fault('STALE_CAPTURE', 'The accessibility snapshot could not keep up with input');
         }
-        const captured = await desktop.snapshot(target, 1200);
+        const captured = await desktop.snapshot(target, 1200, event.kind === 'click' ? initial.windowId : undefined);
         if (captured.windowId !== initial.windowId) {
           throw new Fault('WINDOW_CHANGED', 'Capture switched away from the initial window');
         }
