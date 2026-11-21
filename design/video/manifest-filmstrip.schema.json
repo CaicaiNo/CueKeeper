@@ -1,0 +1,155 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://cuekeeper.local/schemas/manifest/filmstrip.schema.json",
+  "title": "Cuekeeper manifest v1 · change-frame filmstrip",
+  "description": "Stage 1 of session video: one PNG per accepted change instead of an encoded movie. Also the automatic fallback when no video encoder is available. Sits on manifest.filmstrip. See docs/session-video.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "status"],
+  "properties": {
+    "kind": {
+      "const": "filmstrip"
+    },
+    "status": {
+      "enum": ["complete", "truncated", "skipped"]
+    },
+    "code": {
+      "enum": [
+        "SCREEN_CAPTURE_NOT_AUTHORIZED",
+        "SCREEN_CAPTURE_LOST",
+        "WINDOW_CLOSED",
+        "WINDOW_NOT_DRAWING",
+        "DISK_FULL",
+        "TRUNCATED"
+      ]
+    },
+    "anchor": {
+      "description": "Same mapping as the video artifact: framePtsMs = entry.atMs - videoStartOffsetMs.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reportStartedAt", "videoStartOffsetMs", "method"],
+      "properties": {
+        "reportStartedAt": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "videoStartOffsetMs": {
+          "type": "integer",
+          "minimum": -5000,
+          "maximum": 60000
+        },
+        "method": {
+          "const": "host_clock"
+        }
+      }
+    },
+    "sampling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["thumbnail", "blockThreshold", "structuralBlocks", "maxFps", "churnMinIntervalMs"],
+      "properties": {
+        "thumbnail": { "type": "string", "pattern": "^[0-9]{2,4}x[0-9]{2,4}$" },
+        "blockThreshold": { "type": "integer", "minimum": 1, "maximum": 255 },
+        "structuralBlocks": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "maxFps": { "type": "integer", "minimum": 1, "maximum": 30 },
+        "churnMinIntervalMs": { "type": "integer", "minimum": 0, "maximum": 60000 },
+        "maxWidth": {
+          "description": "Frames are scaled down to this width before PNG encoding; the frame carries its own size.",
+          "type": "integer",
+          "minimum": 320,
+          "maximum": 3840
+        }
+      }
+    },
+    "frames": {
+      "description": "Accepted change frames, in presentation order. Capped by the cap below; beyond it the strip keeps the first and last N.",
+      "type": "array",
+      "maxItems": 2000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ptsMs", "path", "bytes"],
+        "properties": {
+          "ptsMs": {
+            "description": "Frame time in the same axis as video PTS.",
+            "type": "integer",
+            "minimum": 0
+          },
+          "path": {
+            "description": "Archive-relative PNG path. Each frame is also listed in files[] with its SHA-256.",
+            "type": "string",
+            "pattern": "^media/filmstrip/[A-Za-z0-9][A-Za-z0-9._-]{0,63}\\.png$"
+          },
+          "bytes": { "type": "integer", "minimum": 0 },
+          "width": { "type": "integer", "minimum": 16, "maximum": 3840 },
+          "height": { "type": "integer", "minimum": 16, "maximum": 2160 },
+          "changedBlocks": {
+            "description": "Diff score that admitted this frame; diagnostics only, never asserted on.",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000
+          },
+          "class": {
+            "description": "structural frames survived the structural rule, churn frames the rate-limited one.",
+            "enum": ["structural", "churn"]
+          }
+        }
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["fromMs", "toMs", "reason"],
+        "properties": {
+          "fromMs": { "type": "integer", "minimum": 0 },
+          "toMs": { "type": "integer", "minimum": 0 },
+          "reason": { "enum": ["unchanged", "window_not_drawing", "paused", "capture_stalled"] }
+        }
+      }
+    },
+    "truncatedAtMs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "maskedRegions": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["x", "y", "width", "height"],
+        "properties": {
+          "x": { "type": "integer", "minimum": 0 },
+          "y": { "type": "integer", "minimum": 0 },
+          "width": { "type": "integer", "minimum": 1 },
+          "height": { "type": "integer", "minimum": 1 }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "complete" } }, "required": ["status"] },
+      "then": {
+        "required": ["frames", "anchor", "sampling"],
+        "not": { "required": ["code"] }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "truncated" } }, "required": ["status"] },
+      "then": {
+        "required": ["code", "frames", "anchor", "sampling", "truncatedAtMs"]
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "skipped" } }, "required": ["status"] },
+      "then": {
+        "required": ["code"],
+        "not": { "required": ["frames"] }
+      }
+    }
+  ]
+}

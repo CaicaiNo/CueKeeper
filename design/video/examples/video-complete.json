@@ -1,0 +1,28 @@
+{
+  "kind": "video",
+  "status": "complete",
+  "path": "media/session.mp4",
+  "bytes": 997756,
+  "durationMs": 600000,
+  "frames": 281,
+  "codec": "h264",
+  "container": "mp4",
+  "width": 1920,
+  "height": 1080,
+  "timebase": { "timescale": 600, "firstPtsMs": 0 },
+  "anchor": {
+    "reportStartedAt": "2026-11-22T03:12:44.120Z",
+    "videoStartOffsetMs": 236,
+    "method": "host_clock"
+  },
+  "sampling": {
+    "thumbnail": "160x90",
+    "blockThreshold": 24,
+    "structuralBlocks": 4,
+    "maxFps": 10,
+    "churnMinIntervalMs": 500
+  },
+  "gaps": [
+    { "fromMs": 30000, "toMs": 599900, "reason": "unchanged" }
+  ]
+}
