@@ -459,10 +459,10 @@ export function renderViewer(report: Report, flow: Flow, steps: PlannedStep[], a
 
 const stylesheet = `
 :root{
-  --bg:#F5F3EF;--surface:#FFFFFF;--surface-2:#FAF9F6;
-  --ink:#1B1A17;--ink-2:#55514A;--muted:#8B857B;
-  --line:#E4E0D8;--line-strong:#D6D1C7;
-  --accent:#A65A12;--accent-soft:#F4E9DC;
+  --bg:#EFECE4;--surface:#FFFFFF;--surface-2:#FBF9F4;
+  --ink:#191713;--ink-2:#4B463D;--muted:#7A7263;
+  --line:#E2DDD3;--line-strong:#D6D0C4;
+  --accent:#B23C1D;--accent-soft:#F5E6DE;
   --failed:#A3281F;--failed-soft:#FBF3F1;--failed-line:#E5CEC9;
   --warn:#8A5A12;--warn-soft:#FCF6E9;--warn-line:#EADCC2;
   --ok:#2F6B4F;--ok-soft:#EFF5F1;
@@ -604,13 +604,13 @@ body.only-failed .entry:not(.is-failed){display:none}
 .shot-frame.missing{display:grid;place-items:center;padding:18px;aspect-ratio:16/10}
 .shot-cap{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 11px;border-top:1px solid var(--line);font-size:11px;color:var(--muted)}
 .shot-cap .t{font-family:var(--mono);font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.empty-note{margin:0;padding:10px 12px;border:1px dashed var(--line-strong);border-radius:var(--radius-s);
-  background:var(--surface);color:var(--muted);font-size:11.5px}
+.empty-note{margin:0;padding:8px 0;color:var(--muted);font-size:11.5px;line-height:1.65}
 .empty-note code{font-family:var(--mono);font-size:10.5px;color:var(--ink-2)}
 
-.targets{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line);border:1px solid var(--line);
+.targets{display:grid;grid-template-columns:1fr 1fr;background:var(--surface);border:1px solid var(--line);
   border-radius:var(--radius-m);overflow:hidden}
-.target{background:var(--surface);padding:10px 12px;min-width:0}
+.target{background:var(--surface);padding:10px 12px;min-width:0;border-bottom:1px solid var(--line)}
+.target:last-child{border-bottom:0}
 .target .k{font-size:11px;color:var(--muted);margin:0 0 2px}
 .target .v{font-family:var(--mono);font-size:11.5px;color:var(--ink-2);overflow-wrap:anywhere}
 .target.wide{grid-column:1 / -1}

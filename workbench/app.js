@@ -250,6 +250,28 @@ function addAction(action) {
   status(`已加入 ${action.kind}`, 'success');
 }
 
+function renderOverview() {
+  const rows = getRows();
+  const counts = new Map();
+  for (const row of rows) counts.set(row.action.kind, (counts.get(row.action.kind) ?? 0) + 1);
+  const ordered = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  const total = rows.length || 1;
+  return el('div', { className: 'overview' },
+    el('p', { className: 'eyebrow' }, '会话构成'),
+    el('p', { className: 'overview-figure' }, el('strong', {}, String(rows.length)), el('span', {}, '个动作')),
+    el('div', { className: 'composition', role: 'img', 'aria-label': ordered.map(([kind, count]) => `${kind} ${count}`).join('，') },
+      ...ordered.map(([kind, count], index) => el('span', {
+        className: `composition-segment seg-${Math.min(index, 4)}`,
+        style: `width:${(count / total * 100).toFixed(2)}%`,
+        title: `${kind} ${count}`,
+      }))),
+    el('ul', { className: 'legend' }, ...ordered.map(([kind, count], index) => el('li', {},
+      el('span', { className: `legend-dot seg-${Math.min(index, 4)}` }),
+      el('span', { className: 'legend-kind' }, kind),
+      el('span', { className: 'legend-count' }, String(count))))),
+    muted('选择时间线中的动作查看定位器与整理操作。'));
+}
+
 function renderInspector() {
   for (const tab of ['actions', 'library']) $(`${tab}-tab`).setAttribute('aria-pressed', String(state.tab === tab));
   const panel = $('inspector');
@@ -271,7 +293,7 @@ function renderInspector() {
   }
   const row = getRows().find(action => action.id === state.focused);
   if (!row) {
-    panel.replaceChildren(empty('选择时间线中的动作查看定位器与整理操作。'));
+    panel.replaceChildren(state.session ? renderOverview() : empty('选择时间线中的动作查看定位器与整理操作。'));
     return;
   }
   const ignored = state.ignored.has(row.id);
@@ -317,7 +339,7 @@ function renderDraft() {
         button('删除', () => { draft.splice(index, 1); renderDraft(); status('已从草稿移除'); }, { style: 'small danger' })));
   });
   $('draft').replaceChildren(...(items.length ? items : [
-    el('li', {}, empty(session ? '加入动作，或从行为库引用行为。' : '导入会话后开始编排测试项。')),
+    el('li', { className: 'draft-empty' }, empty(session ? '加入动作，或从行为库引用行为。' : '导入会话后开始编排测试项。')),
   ]));
 }
 
