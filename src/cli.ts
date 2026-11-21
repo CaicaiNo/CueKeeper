@@ -22,6 +22,8 @@ import { blockedShellReport, runFlow } from './run.js';
 import type { ShellRunOptions } from './run.js';
 import { flowHasShellDefinitions, reachableShells, shellGate } from './shell.js';
 import { parseTestItem, resolveSecrets } from './test-item.js';
+import { enqueueUpload, processUploadQueue } from './upload-queue.js';
+import { defaultQueueDir, resolveUploadConfig } from './upload.js';
 import { startWorkbench } from './workbench.js';
 
 const help = `Cuekeeper ${buildInfo().version}
@@ -33,7 +35,8 @@ const help = `Cuekeeper ${buildInfo().version}
   cuekeeper workbench [run-directory] [--port <port>] [--library <directory>] [--allow-live-replay] [--allow-shell] [--allow-sudo]
   cuekeeper pick --app <bundle-id> --window <title> [--app-path <path>] [--select <ref>] [--snapshot <snapshot.json>] [--json]
   cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--app-path <path>] [--seconds 25] [--no-indicator] [--sound] [--trace-clicks] [--json]
-  cuekeeper report pack <report.json> --flow <flow.json> --out <report.zip> [--assets <dir>] [--json]
+  cuekeeper report pack <report.json> --flow <flow.json> --out <report.zip> [--assets <dir>] [--no-upload] [--queue <dir>] [--config <upload.json>] [--json]
+  cuekeeper report upload [--queue <dir>] [--retry-paused] [--json]
 
 Exit codes
   0  Completed
@@ -368,6 +371,7 @@ async function main() {
     const { values, positionals } = parseArgs({
       args: rest.slice(1), allowPositionals: true, options: {
         ...common, flow: { type: 'string' }, out: { type: 'string' }, assets: { type: 'string' },
+        'no-upload': { type: 'boolean' }, queue: { type: 'string' }, config: { type: 'string' },
       },
     });
     checkPositionals(positionals, 1);
@@ -378,7 +382,43 @@ async function main() {
     ]);
     const archive = packReport(input, parseFlow(rawFlow), { assets });
     await writeNew(output, archive);
-    success({ output, bytes: archive.length, assets: assets.length }, `Wrote ${output}`);
+    let upload: { queued: boolean; queue?: string; id?: string; duplicate?: boolean; error?: string } | undefined;
+    if (!values['no-upload']) {
+      const queue = values.queue ?? defaultQueueDir(process.env);
+      try {
+        const config = await resolveUploadConfig({ env: process.env, configPath: values.config });
+        if (config) {
+          const queued = await enqueueUpload({ queueDir: queue, config, bundlePath: output, bytes: archive });
+          upload = { queued: true, queue, id: queued.item.id, duplicate: queued.duplicate };
+        }
+      } catch (error) {
+        // The local ZIP is already published; report upload trouble separately.
+        upload = { queued: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+    const data = { output, bytes: archive.length, assets: assets.length, ...(upload ? { upload } : {}) };
+    const details = [`Wrote ${output}`];
+    if (upload?.queued) details.push(`Queued upload ${upload.id}${upload.duplicate ? ' (already queued)' : ''}`);
+    if (upload?.error) details.push(`Upload not queued: ${upload.error}`);
+    success(data, details.join('\n'));
+    return;
+  }
+
+  if (command === 'report' && rest[0] === 'upload') {
+    const { values } = parseArgs({
+      args: rest.slice(1), options: {
+        ...common, queue: { type: 'string' }, 'retry-paused': { type: 'boolean' },
+      },
+    });
+    const queue = values.queue ?? defaultQueueDir(process.env);
+    const summary = await processUploadQueue({
+      queueDir: queue, env: process.env, retryPaused: values['retry-paused'] ?? false, signal,
+    });
+    const data = { queue, ...summary };
+    const message = `Uploads: ${summary.done} done, ${summary.pending} pending, ` +
+      `${summary.paused} paused, ${summary.skipped} skipped`;
+    const code = summary.interrupted || signal.aborted ? 130 : summary.paused ? 1 : 0;
+    success(data, message, code);
     return;
   }
 
