@@ -1,0 +1,55 @@
+{
+  "format": "cuekeeper-flow-doctor",
+  "version": 1,
+  "flowId": "textedit-save",
+  "flowSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "mode": "offline",
+  "status": "warn",
+  "summary": { "fail": 1, "warn": 5, "ok": 1 },
+  "findings": [
+    {
+      "code": "LOCATOR_DRIFT",
+      "severity": "fail",
+      "stepId": "step-2",
+      "message": "录制时 role/name 唯一命中第 2 行；当前快照中同一 locator 命中第 1 行（列表顶部插入了新行）。",
+      "recorded": { "matchCount": 1, "ordinal": 1 },
+      "current": { "matchCount": 1, "ordinal": 0 }
+    },
+    {
+      "code": "POINT_LOCATOR",
+      "severity": "warn",
+      "stepId": "step-3",
+      "message": "坐标点击只校验点是否在窗口 bounds 内，窗口移动后会命中另一个控件；需要截图断言或窗口相对坐标校验。"
+    },
+    {
+      "code": "TYPE_WITHOUT_READBACK",
+      "severity": "warn",
+      "stepId": "step-2",
+      "message": "type 之后没有 assert value/text；批量写入的语义无法从报告状态证明。"
+    },
+    {
+      "code": "CLIPBOARD_DEPENDENT",
+      "severity": "warn",
+      "stepId": "paste-clipboard",
+      "message": "流程含 meta+v，剪贴板内容不在 flow 中；请在粘贴后断言目标值。"
+    },
+    {
+      "code": "MULTI_CLICK_UNSUPPORTED",
+      "severity": "warn",
+      "stepId": "rename-file",
+      "message": "录制时出现 MULTI_CLICK_COLLAPSED；回放会退化成单击，选词/改名行为可能不同。"
+    },
+    {
+      "code": "NO_POST_ASSERT",
+      "severity": "warn",
+      "stepId": "save",
+      "message": "流程末尾没有断言；报告 passed 只代表动作被投递。"
+    },
+    {
+      "code": "WINDOW_TITLE_BOUND",
+      "severity": "ok",
+      "stepId": "save",
+      "message": "执行保存前窗口标题仍与 flow.target.window 精确匹配。"
+    }
+  ]
+}

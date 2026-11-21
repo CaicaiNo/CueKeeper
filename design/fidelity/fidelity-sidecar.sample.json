@@ -1,0 +1,83 @@
+{
+  "format": "cuekeeper-fidelity",
+  "version": 1,
+  "flowId": "textedit-save",
+  "flowSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "capturedAt": "2026-11-22T00:00:00.000Z",
+  "target": {
+    "app": "com.apple.TextEdit",
+    "window": "Cuekeeper-M1.txt",
+    "appPath": "/System/Applications/TextEdit.app"
+  },
+  "window": {
+    "id": "w-1234",
+    "frame": { "x": 120, "y": 80, "width": 900, "height": 600 }
+  },
+  "steps": [
+    {
+      "id": "step-1",
+      "kind": "click",
+      "locator": { "kind": "element", "role": "textfield", "name": "" },
+      "resolution": { "matchCount": 1, "requiredPath": false, "requiredIndex": false },
+      "identity": {
+        "role": "textfield",
+        "name": "",
+        "path": ["window", "scrollarea", "textfield"],
+        "ordinal": 0
+      },
+      "geometry": {
+        "frame": { "x": 140, "y": 120, "width": 860, "height": 520 },
+        "windowRelativeCenter": [0.622, 0.633]
+      },
+      "evidence": {
+        "hitTestNode": true,
+        "pointInsideBounds": true,
+        "focused": false,
+        "nameVolatile": false
+      },
+      "stability": "stable",
+      "reasons": []
+    },
+    {
+      "id": "step-2",
+      "kind": "type",
+      "locator": { "kind": "element", "role": "textfield", "name": "" },
+      "resolution": { "matchCount": 1, "requiredPath": false, "requiredIndex": false },
+      "identity": {
+        "role": "textfield",
+        "name": "",
+        "path": ["window", "scrollarea", "textfield"],
+        "ordinal": 0
+      },
+      "geometry": {
+        "frame": { "x": 140, "y": 120, "width": 860, "height": 520 },
+        "windowRelativeCenter": [0.622, 0.633]
+      },
+      "evidence": {
+        "focused": true,
+        "nameVolatile": false,
+        "editable": true,
+        "initialValueLength": 0
+      },
+      "stability": "fragile",
+      "reasons": ["TYPE_BATCH_SEMANTICS", "NO_POST_ASSERT"]
+    },
+    {
+      "id": "step-3",
+      "kind": "click",
+      "locator": { "kind": "point", "point": [612, 418] },
+      "geometry": {
+        "frame": { "x": 600, "y": 400, "width": 40, "height": 36 },
+        "windowRelativePoint": [0.547, 0.563]
+      },
+      "evidence": {
+        "hitTestNode": false,
+        "pointInsideBounds": true,
+        "focused": false,
+        "nameVolatile": false
+      },
+      "stability": "fragile",
+      "reasons": ["POINT_LOCATOR", "WINDOW_GEOMETRY_DEPENDENT"]
+    }
+  ]
+}

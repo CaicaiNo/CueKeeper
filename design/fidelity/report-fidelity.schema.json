@@ -1,0 +1,94 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://cuekeeper.local/design/fidelity/report-fidelity.schema.json",
+  "title": "Cuekeeper fidelity extension for a v1 report (design proposal)",
+  "description": "Proposed per-report fidelity sidecar. Not published under schemas/ and not part of report v1 yet. It is stored next to report.json so that existing readers, whose report schema sets additionalProperties: false, keep working.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "version", "flowId", "flowSha256", "entries"],
+  "properties": {
+    "format": { "const": "cuekeeper-fidelity-report" },
+    "version": { "const": 1 },
+    "flowId": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
+    },
+    "flowSha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "recordedSidecarSha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Digest of the record-time fidelity sidecar that was used for pre-replay comparison, when one exists."
+    },
+    "entries": {
+      "type": "array",
+      "maxItems": 2000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["entryId"],
+        "properties": {
+          "entryId": { "type": "string", "minLength": 1, "maxLength": 196 },
+          "resolution": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "matchCount": { "type": "integer", "minimum": 0 },
+              "requiredPath": { "type": "boolean" },
+              "requiredIndex": { "type": "boolean" },
+              "chosen": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "role": { "type": "string" },
+                  "name": { "type": "string" },
+                  "ordinal": { "type": "integer", "minimum": 0 }
+                }
+              }
+            }
+          },
+          "drift": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "signature": { "enum": ["same", "changed", "unknown"] },
+              "geometry": { "enum": ["same", "shifted", "resized", "unknown"] },
+              "reasons": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Z][A-Z0-9_]{2,47}$"
+                }
+              }
+            }
+          },
+          "focus": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "windowId": { "type": "string", "pattern": "^w-[a-zA-Z0-9_.:-]+$" },
+              "targetWasFrontmost": { "type": "boolean" },
+              "focusedRole": { "type": "string" },
+              "focusedName": { "type": "string" }
+            }
+          },
+          "delivery": {
+            "enum": ["delivered_verified", "delivered_unverified", "delivery_uncertain", "not_delivered", "unknown"]
+          },
+          "verification": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "asserted": { "type": "boolean" },
+              "kind": { "enum": ["none", "property", "screenshot", "file", "window"] },
+              "stepId": { "type": "string", "minLength": 1, "maxLength": 196 }
+            }
+          }
+        }
+      }
+    }
+  }
+}
