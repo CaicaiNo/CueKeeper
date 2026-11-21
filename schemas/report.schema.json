@@ -417,6 +417,10 @@
                   {
                     "const": "wait",
                     "type": "string"
+                  },
+                  {
+                    "const": "scroll",
+                    "type": "string"
                   }
                 ]
               }

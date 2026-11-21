@@ -1,7 +1,7 @@
 import { createDom } from './dom.js';
 import {
-  canUndo, changeTarget, compileDraft, confirmCondition, confirmedSetup, deleteCondition, id, makeBehavior,
-  retargetCondition, sameTarget, setupDraft, shellDraft, shellSummary, undoCondition, visibleRows,
+  KIND_LABELS, actionKind, canUndo, changeTarget, compileDraft, confirmCondition, confirmedSetup, deleteCondition, id,
+  makeBehavior, retargetCondition, sameTarget, scrollLabel, setupDraft, shellDraft, shellSummary, undoCondition, visibleRows,
 } from './model.js';
 import { createAppPicker } from './picker.js';
 
@@ -16,10 +16,14 @@ const state = {
 const dom = createDom(document);
 const { el, icon, button, empty, muted, input, field, select } = dom;
 
-const KIND_ICONS = { click: 'pointer', type: 'text', key: 'keyboard', wait: 'clock', assert: 'checkCircle', behavior: 'layers', shell: 'terminal' };
-const KIND_LABELS = { behavior: '行为', shell: 'Shell' };
+const KIND_ICONS = {
+  click: 'pointer', doubleClick: 'pointerDouble', tripleClick: 'pointerDouble', rightClick: 'pointerRight',
+  scroll: 'wheel', type: 'text', key: 'keyboard', wait: 'clock', assert: 'checkCircle',
+  behavior: 'layers', shell: 'terminal',
+};
 
-function kindChip(kind) {
+function kindChip(action) {
+  const kind = typeof action === 'string' ? action : actionKind(action);
   return el('span', { className: 'kind', title: kind },
     icon(KIND_ICONS[kind] ?? 'list', 14), el('span', {}, KIND_LABELS[kind] ?? kind));
 }
@@ -97,7 +101,12 @@ const shortcutLabel = action => [
 function actionLabel(action) {
   const label = locatorLabel(actionTarget(action));
   switch (action.kind) {
-    case 'click': return label;
+    case 'click':
+      if (action.button === 'right') return `右键 · ${label}`;
+      if (action.count === 2) return `双击 · ${label}`;
+      if (action.count === 3) return `三击 · ${label}`;
+      return label;
+    case 'scroll': return `${scrollLabel(action)} · ${label}`;
     case 'type': return typeof action.text === 'string' ? `输入 “${short(action.text)}”` : `输入参数 ${action.text.param}`;
     case 'key': return shortcutLabel(action);
     case 'assert':
@@ -293,7 +302,7 @@ function renderTimeline() {
       onclick: () => { state.focused = row.id; state.tab = 'actions'; render(); },
     },
     el('span', { className: 'time' }, timestamp(row.atMs)),
-    kindChip(row.action.kind),
+    kindChip(row.action),
     el('span', { className: 'row-description' }, el('strong', {}, actionLabel(row.action)),
       el('small', {}, `${appLabel(row.app)} · ${row.window}${ignored ? ' · 已忽略' : ''}`)),
     el('span', { className: 'time row-duration', title: '动作耗时' }, duration(row.durationMs)));
@@ -319,21 +328,24 @@ function addAction(action) {
 function renderOverview() {
   const rows = getRows();
   const counts = new Map();
-  for (const row of rows) counts.set(row.action.kind, (counts.get(row.action.kind) ?? 0) + 1);
+  for (const row of rows) {
+    const kind = actionKind(row.action);
+    counts.set(kind, (counts.get(kind) ?? 0) + 1);
+  }
   const ordered = [...counts.entries()].sort((a, b) => b[1] - a[1]);
   const total = rows.length || 1;
   return el('div', { className: 'overview' },
     el('p', { className: 'eyebrow' }, '会话构成'),
     el('p', { className: 'overview-figure' }, el('strong', {}, String(rows.length)), el('span', {}, '个动作')),
-    el('div', { className: 'composition', role: 'img', 'aria-label': ordered.map(([kind, count]) => `${kind} ${count}`).join('，') },
+    el('div', { className: 'composition', role: 'img', 'aria-label': ordered.map(([kind, count]) => `${KIND_LABELS[kind] ?? kind} ${count}`).join('，') },
       ...ordered.map(([kind, count], index) => el('span', {
         className: `composition-segment seg-${Math.min(index, 4)}`,
         style: `width:${(count / total * 100).toFixed(2)}%`,
-        title: `${kind} ${count}`,
+        title: `${KIND_LABELS[kind] ?? kind} ${count}`,
       }))),
     el('ul', { className: 'legend' }, ...ordered.map(([kind, count], index) => el('li', {},
       el('span', { className: `legend-dot seg-${Math.min(index, 4)}` }),
-      el('span', { className: 'legend-kind' }, kind),
+      el('span', { className: 'legend-kind' }, KIND_LABELS[kind] ?? kind),
       el('span', { className: 'legend-count' }, String(count))))),
     infoList([
       ['目标', `${appLabel(state.session.target.app)} · ${state.session.target.window}`],
@@ -378,8 +390,12 @@ function renderInspector() {
   const editable = !ignored && isCompatible(row);
   panel.replaceChildren(el('div', { className: 'stack' },
     el('h3', {}, actionLabel(row.action)),
-    infoList([['动作', row.action.kind], ['应用', appLabel(row.app)], ['窗口', row.window],
-      ['定位器', locatorLabel(actionTarget(row.action))], ['时间', timestamp(row.atMs)], ['耗时', duration(row.durationMs)]], 'meta-grid'),
+    infoList([
+      ['动作', KIND_LABELS[actionKind(row.action)] ?? row.action.kind],
+      ...(row.action.kind === 'scroll' ? [['滚动', scrollLabel(row.action)]] : []),
+      ['应用', appLabel(row.app)], ['窗口', row.window],
+      ['定位器', locatorLabel(actionTarget(row.action))], ['时间', timestamp(row.atMs)], ['耗时', duration(row.durationMs)],
+    ], 'meta-grid'),
     isCompatible(row) ? undefined : muted('该动作属于另一窗口，只能在时间线复盘。'),
     el('div', { className: 'actions' },
       button('加入测试项', () => addAction(row.action), { icon: 'listPlus', disabled: !editable }),
@@ -416,7 +432,7 @@ function renderDraft() {
     };
     const shell = !entry.item && entry.action.kind === 'shell' ? shellSummary(entry.action) : undefined;
     return el('li', { className: 'draft-item' },
-      kindChip(entry.item ? 'behavior' : entry.action.kind),
+      kindChip(entry.item ? 'behavior' : entry.action),
       el('div', { className: 'draft-copy' },
         el('strong', {}, entry.item?.behavior.name ?? actionLabel(entry.action)),
         shell ? muted(`${shell.command} · ${shell.cwd} · ${shell.privilege}`) : undefined),
