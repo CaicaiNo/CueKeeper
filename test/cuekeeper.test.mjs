@@ -141,12 +141,14 @@ test('record CLI saves three clicks and exits zero with an unsupported input war
 
 test('record CLI returns EMPTY_RECORDING when only unsupported input arrives',
   { skip: process.platform !== 'darwin' }, t => {
-    const { code, response, recorded } = recordFixture(t, [{ kind: 'warning', code: 'UNSUPPORTED_EVENT' }]);
-    assert.equal(code, 1);
-    assert.equal(response.ok, false);
-    assert.equal(response.error.code, 'EMPTY_RECORDING');
-    assert.match(response.error.message, /UNSUPPORTED_EVENT/);
-    assert.equal(recorded, undefined);
+    for (const warning of ['UNSUPPORTED_EVENT', 'DRAG_SKIPPED']) {
+      const { code, response, recorded } = recordFixture(t, [{ kind: 'warning', code: warning }]);
+      assert.equal(code, 1);
+      assert.equal(response.ok, false);
+      assert.equal(response.error.code, 'EMPTY_RECORDING');
+      assert.ok(response.error.message.includes(warning));
+      assert.equal(recorded, undefined);
+    }
   });
 
 test('record CLI preserves the captured prefix when the target window is lost',
@@ -202,11 +204,19 @@ test('record CLI traces mouse events before readiness and maps accepted clicks t
     const { code, response, recorded, stderr } = recordFixture(t, [
       { kind: 'click_trace', stage: 'native', event: 'down', id: '100:1', decision: 'filtered', reason: 'before_ready' },
       { kind: 'ready', indicator: false, hotkeysFiltered: true },
-      { kind: 'click_trace', stage: 'native', event: 'down', id: '200:2', decision: 'accepted', scope: 'activation' },
+      { kind: 'click_trace', stage: 'native', event: 'down', id: '200:2', decision: 'observed', scope: 'activation',
+        reason: 'awaiting_release', eventNumber: 2, clickState: 1, suppressed: false },
+      { kind: 'click_trace', stage: 'native', event: 'up', id: '250:2', downId: '200:2', decision: 'accepted' },
       { ...captureClick, traceId: '200:2' },
-      { kind: 'click_trace', stage: 'native', event: 'up', id: '250:2', reason: 'mouse_up_only' },
+      { kind: 'click_trace', stage: 'native', event: 'down', id: '270:5', decision: 'filtered',
+        reason: 'duplicate_down', eventNumber: 5, clickState: 1, suppressed: true },
+      { kind: 'click_trace', stage: 'native', event: 'down', id: '290:6', decision: 'filtered',
+        reason: 'multi_click_collapsed', eventNumber: 6, clickState: 2, suppressed: true },
+      { kind: 'warning', code: 'MULTI_CLICK_COLLAPSED' },
       { kind: 'click_trace', stage: 'native', event: 'down', id: '300:3', decision: 'filtered', reason: 'overlay' },
-      { kind: 'click_trace', stage: 'native', event: 'down', id: '400:4', decision: 'accepted', scope: 'content' },
+      { kind: 'click_trace', stage: 'native', event: 'down', id: '400:4', decision: 'observed', scope: 'content',
+        reason: 'awaiting_release' },
+      { kind: 'click_trace', stage: 'native', event: 'up', id: '450:4', downId: '400:4', decision: 'accepted' },
       { kind: 'click', point: [1, 1], traceId: '400:4' },
       { kind: 'text', chars: 'Cuekeeper M1' }, captureSave,
     ], { ready: false, flags: ['--no-indicator', '--trace-clicks'] });
@@ -214,6 +224,8 @@ test('record CLI traces mouse events before readiness and maps accepted clicks t
     assert.match(lines[0], /before_ready/);
     assert.match(lines[1], /^Recording for up to/);
     const trace = lines.filter(line => line.startsWith('CLICK_TRACE ')).map(line => JSON.parse(line.slice(12)));
+    assert.deepEqual(trace.filter(row => row.suppressed).map(({ reason, eventNumber, clickState }) =>
+      [reason, eventNumber, clickState]), [['duplicate_down', 5, 1], ['multi_click_collapsed', 6, 2]]);
     assert.deepEqual(trace.filter(row => row.stage === 'flow'), [
       { stage: 'flow', id: '200:2', decision: 'collected', windowId: fixture.data.window.id },
       { stage: 'flow', id: '400:4', decision: 'filtered', reason: 'OUTSIDE_WINDOW' },
@@ -221,7 +233,8 @@ test('record CLI traces mouse events before readiness and maps accepted clicks t
     assert.equal(code, 0);
     assert.equal(response.ok, true);
     assert.equal(response.data.partial, undefined);
-    assert.deepEqual(response.data.warnings.map(warning => warning.code), ['OUTSIDE_WINDOW']);
+    assert.deepEqual(response.data.warnings.map(warning => warning.code), ['MULTI_CLICK_COLLAPSED', 'OUTSIDE_WINDOW']);
+    assert.match(response.data.warnings[0].message, /replayed as a single click/);
     assert.deepEqual(recorded.steps.map(step => step.kind), ['click', 'type', 'key']);
   });
 

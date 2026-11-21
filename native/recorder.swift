@@ -16,6 +16,7 @@ final class Capture {
     private var tap: CFMachPort?
     private var hotkeyTap: CFMachPort?
     private var hotkeys = RecordingHotkeys()
+    private var pointer = RecordingPointer()
     private var stopReleaseDeadline: TimeInterval?
     private var pauseBoundaryPending = false
     private var seconds: TimeInterval = 0
@@ -195,6 +196,7 @@ final class Capture {
         }
         guard CFMachPortIsValid(tap) else { stop("TAP_UNAVAILABLE"); return }
         if !CGEvent.tapIsEnabled(tap: tap) {
+            pointer = RecordingPointer()
             traceMouseLifecycle("tap_interrupted")
             warn("TAP_INTERRUPTED")
             CGEvent.tapEnable(tap: tap, enable: true)
@@ -218,6 +220,7 @@ final class Capture {
     }
 
     private func togglePause() {
+        pointer = RecordingPointer()
         let now = ProcessInfo.processInfo.systemUptime
         if let pausedAt {
             totalPaused += now - pausedAt
@@ -259,10 +262,13 @@ final class Capture {
     func receive(_ type: CGEventType, _ event: CGEvent) {
         switch type {
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
-            receivePointer(type, event, down: true)
+            receivePointer(type, event, eventKind: .down)
             return
         case .leftMouseUp, .rightMouseUp, .otherMouseUp:
-            receivePointer(type, event, down: false)
+            receivePointer(type, event, eventKind: .up)
+            return
+        case .leftMouseDragged:
+            receivePointer(type, event, eventKind: .drag)
             return
         default:
             break
@@ -287,7 +293,7 @@ final class Capture {
             guard let frontmost = refreshFocus(), !checkSecureInput(),
                   destination <= 0 || destination == Int64(frontmost.processIdentifier) else { return }
         } else {
-            // The mouse down may be the event that makes this window frontmost.
+            // Scope unsupported pointer input to the selected window.
             guard let primary = NSScreen.screens.first else { return }
             let point = NSPoint(x: event.location.x, y: primary.frame.maxY - event.location.y)
             guard indicator?.covers(point) != true,
@@ -345,18 +351,21 @@ final class Capture {
         emit(row)
     }
 
-    private func receivePointer(_ type: CGEventType, _ event: CGEvent, down: Bool) {
+    private func receivePointer(_ type: CGEventType, _ event: CGEvent, eventKind: PointerObservation.Event) {
         let phase: PointerObservation.Phase
         if stopped || stopReleaseDeadline != nil { phase = .stopping }
         else if started == nil { phase = .preparing }
         else if pausedAt != nil { phase = .paused }
         else { phase = .recording }
-        guard traceClicks || (phase == .recording && down) else { return }
-        let seen = Int(Date().timeIntervalSince1970 * 1000)
+        guard traceClicks || phase == .recording else { return }
         if phase == .recording { flushPauseBoundary() }
 
-        let location = event.location
-        let screenPoint = NSScreen.screens.first.map { NSPoint(x: location.x, y: $0.frame.maxY - location.y) }
+        let sample = PointerSample(timestamp: event.timestamp, location: event.location,
+                                   eventNumber: event.getIntegerValueField(.mouseEventNumber),
+                                   clickState: event.getIntegerValueField(.mouseEventClickState))
+        let screenPoint = eventKind == .down || traceClicks ? NSScreen.screens.first.map {
+            NSPoint(x: sample.location.x, y: $0.frame.maxY - sample.location.y)
+        } : nil
         let hit = screenPoint.map { NSWindow.windowNumber(at: $0, belowWindowWithWindowNumber: 0) }
         let frontmost = traceClicks ? NSWorkspace.shared.frontmostApplication : nil
         let targetAppFrontmost = frontmost.map { $0.bundleIdentifier == app }
@@ -370,44 +379,57 @@ final class Capture {
             }
             frontWindow = (top?[kCGWindowNumber as String] as? NSNumber)?.intValue
         }
-        let clickCount = event.getIntegerValueField(.mouseEventClickState)
         let modifiers = event.flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift])
         let observation = PointerObservation(
-            phase: phase, down: down,
-            plainLeftClick: type == .leftMouseDown && clickCount == 1 && modifiers.isEmpty,
+            phase: phase, event: eventKind,
+            plainLeftClick: type == .leftMouseDown && sample.clickState >= 1 && modifiers.isEmpty,
             recorderEvent: event.getIntegerValueField(.eventTargetUnixProcessID) == ownPID ||
                 event.getIntegerValueField(.eventSourceUnixProcessID) == ownPID,
             overIndicator: screenPoint.map { indicator?.covers($0) == true } ?? false,
             hitWindow: hit.flatMap { $0 > 0 ? $0 : nil }, targetWindow: window,
-            targetAppFrontmost: targetAppFrontmost, frontWindow: frontWindow, atLimit: events >= 1000
+            targetAppFrontmost: targetAppFrontmost, frontWindow: frontWindow
         )
-        let eventNumber = event.getIntegerValueField(.mouseEventNumber)
-        let traceId = "\(event.timestamp):\(eventNumber)"
+        var reason = observation.reason
+        var down: PointerSample?
+        switch reason {
+        case .awaitingRelease:
+            reason = pointer.press(sample)
+        case .unmatchedUp where type == .leftMouseUp:
+            (reason, down) = pointer.release(sample)
+            if reason == .accepted && events >= 1000 { reason = .eventLimit }
+        case .dragObserved:
+            reason = pointer.drag(sample)
+        case .unsupportedClick, .overlay, .otherWindow, .noWindow:
+            if type == .leftMouseDown { pointer = RecordingPointer() }
+        default:
+            break
+        }
         if traceClicks {
-            emit(observation.trace(id: traceId, timestampNs: String(event.timestamp), seenAtMs: seen,
-                                   point: [Double(location.x), Double(location.y)], eventNumber: eventNumber,
-                                   button: event.getIntegerValueField(.mouseEventButtonNumber), clickCount: clickCount,
+            emit(observation.trace(sample: sample, reason: reason, down: down,
+                                   seenAtMs: Int(Date().timeIntervalSince1970 * 1000),
+                                   button: event.getIntegerValueField(.mouseEventButtonNumber),
                                    modifierFlags: modifiers.rawValue,
                                    quartzWindow: event.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent)))
         }
         guard !stopped else { return }
-        switch observation.reason {
+        switch reason {
         case .accepted:
-            guard let started, registerEvent() else { return }
+            guard let started, let down, registerEvent() else { return }
             var click: [String: Any] = [
-                "kind": "click", "point": [Int(location.x.rounded()), Int(location.y.rounded())],
-                "t": Int((ProcessInfo.processInfo.systemUptime - started) * 1000), "seen": seen,
+                "kind": "click", "point": [Int(down.location.x.rounded()), Int(down.location.y.rounded())],
+                "t": Int((ProcessInfo.processInfo.systemUptime - started) * 1000),
+                "seen": Int(Date().timeIntervalSince1970 * 1000),
             ]
-            if traceClicks { click["traceId"] = traceId }
+            if traceClicks { click["traceId"] = down.traceId }
             emit(click)
         case .unsupportedClick:
             if registerEvent() { warn(type == .leftMouseDown ? "UNSUPPORTED_CLICK" : "UNSUPPORTED_EVENT") }
         case .eventLimit:
             _ = registerEvent()
         case .overlay, .otherWindow, .noWindow:
-            if down { emit(["kind": "boundary"]) }
-        case .beforeReady, .paused, .stopping, .mouseUp, .recorderEvent:
-            break
+            emit(["kind": "boundary"])
+        default:
+            if let warning = reason.warning { warn(warning) }
         }
     }
 }
@@ -451,9 +473,9 @@ struct RecorderCommand {
                           "detail": "Recording hotkeys require Accessibility access for this helper"])
             exit(2)
         }
-        var observedTypes: [CGEventType] = [.leftMouseDown, .rightMouseDown, .otherMouseDown,
+        var observedTypes: [CGEventType] = [.leftMouseDown, .leftMouseUp, .rightMouseDown, .otherMouseDown,
                                             .leftMouseDragged, .keyDown, .scrollWheel]
-        if switches.contains("--trace-clicks") { observedTypes += [.leftMouseUp, .rightMouseUp, .otherMouseUp] }
+        if switches.contains("--trace-clicks") { observedTypes += [.rightMouseUp, .otherMouseUp] }
         let mask = observedTypes.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
         let context = Unmanaged.passUnretained(capture).toOpaque()
         let hotkeyMask = (CGEventMask(1) << CGEventType.keyDown.rawValue) |

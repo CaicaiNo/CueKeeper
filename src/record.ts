@@ -24,6 +24,11 @@ type CaptureOptions = { seconds: number; indicator: boolean; sound: boolean; tra
 type CaptureWarning = { code: string; message: string };
 type CaptureResult = { flow: Flow; warnings: CaptureWarning[]; partial: boolean; failure?: Fault };
 
+const pointerWarningMessages = new Map([
+  ['MULTI_CLICK_COLLAPSED', 'Only the first click of a multi-click sequence can be replayed as a single click in v1'],
+  ['DRAG_SKIPPED', 'A drag was skipped because v1 only records clicks'],
+]);
+
 function validateAction(action: Action) {
   if (!captureActionCheck.Check(action)) {
     throw new Fault('UNREPRESENTABLE_ACTION', 'An input action could not be represented in the flow');
@@ -221,7 +226,7 @@ export async function record(
         endTextBurst();
         if (data.kind === 'warning') {
           const code = captureCode(data.code);
-          warn(code, `Some input may have been skipped: ${code}`);
+          warn(code, pointerWarningMessages.get(code) ?? `Some input may have been skipped: ${code}`);
         }
         continue;
       }
@@ -229,7 +234,7 @@ export async function record(
       const event = parseEvent(data);
       const traceId = traceClicks && event.kind === 'click' && typeof data.traceId === 'string'
         ? data.traceId : undefined;
-      // The helper hit-tests clicks against the selected native window. Its focus
+      // The helper hit-tests mouse-down against the selected native window. Its focus
       // update can reach us after the click that activated that window.
       if (!targetActive && event.kind !== 'click') continue;
       try {
