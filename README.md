@@ -20,7 +20,7 @@ node dist/cli.js report pack out/textedit-dry.json \
 unzip -t out/textedit-dry.zip
 ```
 
-解压 ZIP 后打开 `index.html` 可查看时间线。归档中的 `flow.json` 包含录制的文本。M1 将报告保存在本地。输出目录需事先存在，每次写入使用新文件名。
+解压 ZIP 后打开 `index.html` 可查看运行摘要、动作时间线和每一步的详情。查看器完全离线，失败步骤会自动展开，断流态可预览，选中的步骤会在下次打开时恢复。截图、日志和 AX 快照可按步骤放进 `assets/` 一并打包，格式见 [离线报告包](docs/report.md)。归档中的 `flow.json` 包含录制的文本。M1 将报告保存在本地。输出目录需事先存在，每次写入使用新文件名。
 
 ## 在 macOS 录制和回放
 
@@ -32,7 +32,7 @@ unzip -t out/textedit-dry.zip
 | `record --app <bundle-id> --window <精确标题> --out <flow.json>` | 录制目标窗口，显示计时 HUD，支持 `--no-indicator` 和 `--sound` |
 | `run <flow.json> --dry-run` | 用当前窗口解析定位器 |
 | `run <flow.json> --headed --report <report.json>` | 允许物理点击，回放并记录逐步结果 |
-| `report pack <report.json> --flow <flow.json> --out <report.zip>` | 验证报告与流程配对，生成 ZIP |
+| `report pack <report.json> --flow <flow.json> --out <report.zip>` | 验证报告与流程配对，生成可离线打开的 ZIP；`--assets <dir>` 带入截图、日志和 AX 快照 |
 
 默认在主屏显示边框和 HUD。窗口服务器确认面板后，HUD 显示「录制就绪」，终端在标准错误输出 `INDICATOR_READY`。录制时可切到飞书等其他应用，返回目标窗口后继续，已捕获的动作会保留。`Ctrl+Option+P` 暂停或继续，`Ctrl+Option+X` 停止并保存。可用 `--no-indicator` 关闭边框和 HUD，热键仍可用。
 

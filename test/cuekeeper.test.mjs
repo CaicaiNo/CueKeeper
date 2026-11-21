@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { TypeCompiler } from '@sinclair/typebox/compiler';
 import { unzipSync, strFromU8 } from 'fflate';
+import { discoverAssets } from '../dist/assets.js';
 import { schemas } from '../dist/contracts.js';
 import { offlineDesktop, withDesktop } from '../dist/desktop.js';
 import { parseFlow, plan } from '../dist/flow.js';
@@ -22,6 +23,10 @@ const flow = example('textedit.flow');
 const snapshot = parseSnapshot(fixture.data, fixture.target);
 const editor = { kind: 'element', role: 'textfield' };
 const signal = new AbortController().signal;
+const png = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+);
 
 function fakeDesktop(snap = snapshot) {
   const actions = [];
@@ -329,7 +334,7 @@ console.log(JSON.stringify({ version: '2.6', command, ok: true, data }));
   assert.deepEqual(calls[6].args, ['--headed', 'meta+s', '--window-id', 'w-1234']);
 });
 
-test('CLI resolves three steps and packs a report with verified manifest and ordering', t => {
+test('CLI resolves three steps and packs a report with verified manifest and ordering', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const report = join(dir, 'report.json');
@@ -349,17 +354,142 @@ test('CLI resolves three steps and packs a report with verified manifest and ord
   assert.deepEqual(dry.data.entries.map(entry => [entry.kind, entry.status]), [
     ['click', 'resolved'], ['type', 'resolved'], ['key', 'resolved'],
   ]);
-  assert.equal(run('report', 'pack', report, '--flow', 'examples/textedit.flow.json', '--out', zip).code, 0);
+  const packed = run('report', 'pack', report, '--flow', 'examples/textedit.flow.json', '--out', zip);
+  assert.equal(packed.code, 0);
+  assert.equal(packed.data.assets, 0);
   const files = unzipSync(readFileSync(zip));
   const manifest = JSON.parse(strFromU8(files['manifest.json']));
-  assert.deepEqual(Object.keys(files).sort(), ['assets/report.css', 'flow.json', 'index.html', 'manifest.json', 'report.json']);
+  assert.deepEqual(Object.keys(files).sort(),
+    ['flow.json', 'index.html', 'manifest.json', 'report.json']);
+  assert.deepEqual(manifest.assets, []);
   for (const [name, metadata] of Object.entries(manifest.files)) {
     assert.equal(createHash('sha256').update(files[name]).digest('hex'), metadata.sha256);
     assert.equal(files[name].length, metadata.bytes);
   }
-  assert.match(strFromU8(files['index.html']), /click-body[\s\S]*type-text[\s\S]*save<\/strong>/);
+  const html = strFromU8(files['index.html']);
+  assert.match(html, /data-step="click-body"/);
+  assert.match(html, /data-step="type-text"/);
+  assert.match(html, /data-step="save"/);
+  assert.match(html, /click-body[\s\S]*type-text[\s\S]*save/);
+  assert.match(html, /Save a TextEdit document/);
+  assert.match(html, /只看失败/);
+  assert.match(html, /断流预览/);
+  assert.match(html, /<style>/);
+  // The page is self-contained: no external viewer assets are needed.
+  assert.doesNotMatch(html, /assets\/report\.(css|js)/);
+  assert.match(html, /报告未包含该步截图/);
+  // The pre-rendered page is readable without JavaScript, and the inline script parses.
+  assert.match(html, /<article class="detail-step" data-detail="click-body" data-index="0">/);
+  const inlineScript = html.match(/<script>([\s\S]*?)<\/script>/);
+  assert.ok(inlineScript);
+  assert.doesNotThrow(() => new Function(inlineScript[1]));
+  assert.deepEqual(Buffer.from(packReport(dry.data, flow)), Buffer.from(packReport(dry.data, flow)));
+
+  // A sibling assets directory is picked up without an extra flag, and --assets is explicit.
+  const assetsDir = join(dir, 'assets');
+  mkdirSync(join(assetsDir, 'click-body'), { recursive: true });
+  mkdirSync(join(assetsDir, 'logs'), { recursive: true });
+  writeFileSync(join(assetsDir, 'click-body', 'before.png'), png);
+  writeFileSync(join(assetsDir, 'click-body', 'step.log'), 'resolved textfield\n');
+  writeFileSync(join(assetsDir, 'logs', 'run.log'), 'run complete\n');
+  const discovered = await discoverAssets(report);
+  assert.deepEqual(discovered.map(asset => asset.path),
+    ['click-body/before.png', 'click-body/step.log', 'logs/run.log']);
+  const autoZip = join(dir, 'auto.zip');
+  assert.equal(run('report', 'pack', report, '--flow', 'examples/textedit.flow.json', '--out', autoZip).code, 0);
+  const autoFiles = unzipSync(readFileSync(autoZip));
+  assert.ok(autoFiles['assets/click-body/before.png']);
+  assert.ok(autoFiles['assets/logs/run.log']);
+  assert.match(strFromU8(autoFiles['index.html']), /src="assets\/click-body\/before\.png"/);
+  const explicitZip = join(dir, 'explicit.zip');
+  const explicit = run('report', 'pack', report, '--flow', 'examples/textedit.flow.json',
+    '--assets', assetsDir, '--out', explicitZip);
+  assert.equal(explicit.code, 0);
+  assert.equal(explicit.data.assets, 3);
+  assert.ok(unzipSync(readFileSync(explicitZip))['assets/click-body/step.log']);
+
   assert.throws(() => packReport(dry.data, { ...flow, name: 'Different flow' }), /do not match/);
   const malformed = { ...dry.data, entries: [...dry.data.entries].reverse() };
   assert.throws(() => packReport(malformed, flow), /timeline/);
   assert.equal(run('report', 'pack', report, '--flow', 'examples/textedit.flow.json', '--out', zip).code, 2);
 });
+
+test('packed viewer expands the failed step with its error code and expectation', async () => {
+  const steps = [flow.steps[0], {
+    id: 'assert-text', kind: 'assert',
+    check: { target: editor, expect: { property: 'text', equals: 'Expected text' } },
+  }, ...flow.steps.slice(1)];
+  const failing = parseFlow({ ...flow, steps });
+  const report = await runFlow(failing, fakeDesktop(), { dryRun: false, signal });
+  assert.equal(report.status, 'failed');
+  const files = unzipSync(packReport(report, failing));
+  const html = strFromU8(files['index.html']);
+  assert.match(html, /class="run-state state-failed"/);
+  assert.match(html, /<li class="entry status-failed is-failed selected" data-step="assert-text"/);
+  assert.match(html, /<article class="detail-step" data-detail="assert-text" data-index="1">/);
+  assert.match(html, /<article class="detail-step" data-detail="save" data-index="3" hidden>/);
+  assert.match(html, /ASSERTION_FALSE/);
+  assert.match(html, /text = &quot;Expected text&quot;/);
+  assert.match(html, /失败信息/);
+  assert.match(html, /报告未记录重试/);
+  assert.match(html, /断言/);
+});
+
+test('packed viewer exposes a disconnected banner and last-known markers', () => {
+  const broken = structuredClone(example('textedit.report'));
+  broken.status = 'failed';
+  const last = broken.entries[broken.entries.length - 1];
+  last.status = 'failed';
+  last.code = 'INTERRUPTED';
+  last.message = 'Recording stream ended before the result was observed';
+  const files = unzipSync(packReport(broken, flow));
+  const html = strFromU8(files['index.html']);
+  assert.match(html, /<body class="disconnected"/);
+  assert.match(html, /data-stream="disconnected"/);
+  assert.match(html, /<div class="banner" id="banner">/);
+  assert.match(html, /事件流已断开/);
+  assert.match(html, /最后已知/);
+  assert.match(html, /退出断流预览/);
+  assert.match(html, /INTERRUPTED/);
+  assert.match(html, /已断开 · 止于第 03 步/);
+});
+
+test('assets are attached to their step, previewed, and hashed in the manifest', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-assets-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const reportPath = join(dir, 'report.json');
+  const report = example('textedit.report');
+  writeFileSync(reportPath, JSON.stringify(report));
+  const assetsDir = join(dir, 'assets');
+  mkdirSync(join(assetsDir, 'click-body'), { recursive: true });
+  mkdirSync(join(assetsDir, 'logs'), { recursive: true });
+  writeFileSync(join(assetsDir, 'click-body', 'before.png'), png);
+  writeFileSync(join(assetsDir, 'click-body', 'after.png'), png);
+  writeFileSync(join(assetsDir, 'click-body', 'step.log'), '12:06:08  snapshot  refs=14\n');
+  writeFileSync(join(assetsDir, 'click-body', 'ax.json'), '{"role":"textfield"}\n');
+  writeFileSync(join(assetsDir, 'logs', 'run.log'), 'run complete\n');
+  const assets = await discoverAssets(reportPath);
+  const files = unzipSync(packReport(report, flow, { assets }));
+  const manifest = JSON.parse(strFromU8(files['manifest.json']));
+  assert.deepEqual(manifest.assets.map(asset => [asset.path, asset.entryId, asset.role]), [
+    ['assets/click-body/after.png', 'click-body', 'screenshot-after'],
+    ['assets/click-body/ax.json', 'click-body', 'snapshot'],
+    ['assets/click-body/before.png', 'click-body', 'screenshot-before'],
+    ['assets/click-body/step.log', 'click-body', 'log'],
+    ['assets/logs/run.log', undefined, 'log'],
+  ]);
+  const html = strFromU8(files['index.html']);
+  assert.match(html, /操作前截图/);
+  assert.match(html, /操作后截图/);
+  assert.match(html, /src="assets\/click-body\/before\.png"/);
+  assert.match(html, /snapshot {2}refs=14/);
+  assert.match(html, /&quot;role&quot;:&quot;textfield&quot;/);
+  assert.match(html, /运行产物/);
+  assert.match(html, /assets\/logs\/run\.log/);
+  assert.throws(() => packReport(report, flow, { assets: [{ path: '../escape.png', bytes: png }] }),
+    /Invalid asset path/);
+  assert.throws(() => packReport(report, flow, { assets: [
+    { path: 'click-body/a.log', bytes: png }, { path: 'click-body/a.log', bytes: png },
+  ] }), /Duplicate asset path/);
+});
+

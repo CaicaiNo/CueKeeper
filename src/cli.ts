@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
+import { discoverAssets } from './assets.js';
 import { captureTargetCheck } from './contracts.js';
 import { offlineDesktop, withDesktop } from './desktop.js';
 import { ensureNew, readJson, writeNew } from './files.js';
@@ -14,7 +15,7 @@ const help = `Cuekeeper
   cuekeeper flow validate <flow.json> [--json]
   cuekeeper run <flow.json> [--dry-run [--snapshot <snapshot.json>]] [--headed] [--report <report.json>] [--json]
   cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--seconds 25] [--no-indicator] [--sound] [--json]
-  cuekeeper report pack <report.json> --flow <flow.json> --out <report.zip> [--json]
+  cuekeeper report pack <report.json> --flow <flow.json> --out <report.zip> [--assets <dir>] [--json]
 
 Exit codes
   0  Completed
@@ -137,16 +138,18 @@ async function main() {
   if (command === 'report' && rest[0] === 'pack') {
     const { values, positionals } = parseArgs({
       args: rest.slice(1), allowPositionals: true, options: {
-        ...common, flow: { type: 'string' }, out: { type: 'string' },
+        ...common, flow: { type: 'string' }, out: { type: 'string' }, assets: { type: 'string' },
       },
     });
     checkPositionals(positionals, 1);
     const path = requireString(values.flow, '--flow');
     const output = requireString(values.out, '--out');
-    const [input, rawFlow] = await Promise.all([readJson(positionals[0]), readJson(path)]);
-    const archive = packReport(input, parseFlow(rawFlow));
+    const [input, rawFlow, assets] = await Promise.all([
+      readJson(positionals[0]), readJson(path), discoverAssets(positionals[0], values.assets),
+    ]);
+    const archive = packReport(input, parseFlow(rawFlow), { assets });
     await writeNew(output, archive);
-    success({ output, bytes: archive.length }, `Wrote ${output}`);
+    success({ output, bytes: archive.length, assets: assets.length }, `Wrote ${output}`);
     return;
   }
 

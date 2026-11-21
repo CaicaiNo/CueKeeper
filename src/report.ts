@@ -1,27 +1,59 @@
 import { createHash } from 'node:crypto';
 import { zipSync, strToU8 } from 'fflate';
 import { reportCheck } from './contracts.js';
-import type { Flow } from './contracts.js';
+import type { Flow, Report } from './contracts.js';
 import { hashFlow, plan } from './flow.js';
+import { decorateAsset } from './assets.js';
+import type { PackAsset, RawAsset } from './assets.js';
+import { renderViewer } from './viewer.js';
 
-const stylesheet = `
-:root{color-scheme:light dark;font:16px/1.55 system-ui,sans-serif;background:Canvas;color:CanvasText}
-body{max-width:60rem;margin:0 auto;padding:2rem 1rem}
-h1{font-size:clamp(1.6rem,4vw,2.5rem);margin:.2rem 0 .6rem}
-h2{font-size:1.2rem;margin-top:2rem}
-.meta{display:flex;flex-wrap:wrap;gap:.35rem 1.2rem;margin:0;padding:0;list-style:none}
-a{color:LinkText}
-ol{list-style:none;padding:0;margin:0}
-li.entry{padding:.75rem 0;border-top:1px solid GrayText;overflow-wrap:anywhere}
-.status{font-weight:650}
-.detail{margin:0;color:GrayText}
-`;
+export interface PackOptions {
+  /** Files to publish under assets/. Paths are relative to the asset root. */
+  assets?: RawAsset[];
+}
 
-const entities: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-const escape = (value: string) => value.replace(/[&<>"']/g, char => entities[char]);
-const json = (value: unknown) => strToU8(JSON.stringify(value, null, 2) + '\n');
+function json(value: unknown) {
+  return strToU8(JSON.stringify(value, null, 2) + '\n');
+}
 
-export function packReport(input: unknown, flow: Flow): Uint8Array {
+function normalizePath(path: string, original: string) {
+  let value = path.replace(/\\/g, '/').replace(/^\.\//, '');
+  if (value.startsWith('assets/')) value = value.slice('assets/'.length);
+  if (!value || value.startsWith('/') || value.split('/').some(segment => segment === '' || segment === '.' || segment === '..')) {
+    throw new Error(`Invalid asset path: ${original}`);
+  }
+  return value;
+}
+
+/**
+ * Assets follow `assets/<step-id>/<name>` so a failure is visible next to the
+ * step it belongs to. Files that do not start with a step id stay global.
+ */
+function attachAssets(raw: RawAsset[], entries: Report['entries']): PackAsset[] {
+  const ids = [...new Set(entries.map(entry => entry.id))].sort((left, right) => right.length - left.length);
+  const attached: PackAsset[] = [];
+  const seen = new Set<string>();
+  for (const asset of [...raw].sort((left, right) => left.path.localeCompare(right.path))) {
+    const path = normalizePath(asset.path, asset.path);
+    let entryId: string | undefined;
+    let relative = path;
+    for (const id of ids) {
+      if (path.startsWith(`${id}/`)) {
+        entryId = id;
+        relative = path.slice(id.length + 1);
+        break;
+      }
+    }
+    if (!relative) throw new Error(`Invalid asset path: ${asset.path}`);
+    const destination = entryId ? `${entryId}/${relative}` : relative;
+    if (seen.has(destination)) throw new Error(`Duplicate asset path: ${destination}`);
+    seen.add(destination);
+    attached.push(decorateAsset(asset, entryId, destination));
+  }
+  return attached;
+}
+
+export function packReport(input: unknown, flow: Flow, options: PackOptions = {}): Uint8Array {
   if (!reportCheck.Check(input)) throw new Error('Invalid v1 report');
   if (input.flowId !== flow.id || input.flowSha256 !== hashFlow(flow)) {
     throw new Error('Report and flow do not match');
@@ -34,48 +66,29 @@ export function packReport(input: unknown, flow: Flow): Uint8Array {
     throw new Error('Report timeline does not match the flow');
   }
 
-  const timeline = input.entries.map(entry => `
-<li class="entry">
-  <div><strong>${escape(entry.id)}</strong> · ${entry.kind} · <span class="status">${entry.status}</span></div>
-  <p class="detail">${entry.atMs} ms since start · ${entry.durationMs} ms elapsed${entry.delivery ? ` · ${entry.delivery}` : ''}</p>
-  ${entry.message ? `<p>${escape(entry.message)}</p>` : ''}
-</li>`).join('');
-
-  const html = `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; base-uri 'none'">
-  <title>${escape(flow.name)} · Cuekeeper</title>
-  <link rel="stylesheet" href="assets/report.css">
-</head>
-<body>
-<main>
-  <header>
-    <h1>${escape(flow.name)}</h1>
-    <ul class="meta">
-      <li class="status">${input.status}</li><li>${input.mode}</li><li><time>${escape(input.startedAt)}</time></li>
-    </ul>
-  </header>
-  <h2>Timeline</h2>
-  <ol>${timeline}</ol>
-  <p><a href="report.json">Report JSON</a> · <a href="flow.json">Flow JSON</a></p>
-</main>
-</body>
-</html>
-`;
-  const files = {
-    'index.html': strToU8(html),
+  const assets = attachAssets(options.assets ?? [], input.entries);
+  const viewer = renderViewer(input, flow, steps, assets);
+  const files: Record<string, Uint8Array> = {
+    'index.html': strToU8(viewer.html),
     'report.json': json(input),
     'flow.json': json(flow),
-    'assets/report.css': strToU8(stylesheet),
   };
+  for (const asset of assets) files[`assets/${asset.path}`] = asset.bytes;
   const manifest = {
     version: 1,
+    flowId: input.flowId,
+    flowSha256: input.flowSha256,
+    reportStartedAt: input.startedAt,
     files: Object.fromEntries(Object.entries(files).map(([path, contents]) => [
       path, { bytes: contents.length, sha256: createHash('sha256').update(contents).digest('hex') },
     ])),
+    assets: assets.map(asset => ({
+      path: `assets/${asset.path}`,
+      ...(asset.entryId ? { entryId: asset.entryId } : {}),
+      role: asset.role,
+      bytes: asset.bytes.length,
+    })),
   };
-  return zipSync({ ...files, 'manifest.json': json(manifest) });
+  // A fixed timestamp keeps packing reproducible for the same report and assets.
+  return zipSync({ ...files, 'manifest.json': json(manifest) }, { mtime: new Date(1980, 0, 1) });
 }
