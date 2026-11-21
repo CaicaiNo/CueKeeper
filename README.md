@@ -34,7 +34,7 @@ unzip -t out/textedit-dry.zip
 | `run <flow.json> --headed --report <report.json>` | 允许物理点击，回放并记录逐步结果 |
 | `report pack <report.json> --flow <flow.json> --out <report.zip>` | 验证报告与流程配对，生成 ZIP |
 
-录制时可切到飞书等其他应用，返回目标窗口后继续，已捕获的动作会保留。HUD 上的 `Ctrl+Option+P` 暂停或继续，`Ctrl+Option+X` 停止并保存。需要截图或录屏时，用 `--no-indicator` 关闭边框和 HUD，热键仍可用。
+录制时可切到飞书等其他应用，返回目标窗口后继续，已捕获的动作会保留。HUD 上的 `Ctrl+Option+P` 暂停或继续，`Ctrl+Option+X` 停止并保存。可用 `--no-indicator` 关闭边框和 HUD，热键仍可用。
 
 所有命令支持 `--json`，标准输出提供单个 JSON 对象。错误有 `error.code` 和 `error.message`。生成的运行报告放在 `data` 中，失败报告的 `ok` 为 `false`。录制状态提示写标准错误。跳过其他应用输入时，录制成功结果带有 `data.warnings`。中断或跳过目标动作时，已有步骤保存至 `--out`，CLI 返回 `data.partial: true` 及原因。退出码为 `0` 完成、`1` 失败、阻塞或部分录制、`2` 输入文件或依赖错误、`130` 中断。
 

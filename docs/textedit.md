@@ -2,16 +2,16 @@
 
 在批准的时间窗内执行，原生构建和现场运行分开。一轮只构建一次。现场涉及 TextEdit、测试专用文件、辅助功能和输入监控。预留两项授权操作，各最多一次，已有权限时通常为零。权限由操作者在 macOS 手动处理。遇到额外弹窗或窗口错配时结束验收。
 
-## 5 分钟录制验收
+## 主屏录制验收 · 5 分钟
 
 使用下方命令。录制轮次可设 `--seconds 45`，每轮指定新的 `--out`，所有点击和键入由操作者完成。
 
 | 时间 | 操作 | 预期 | 失败判据 |
 | --- | --- | --- | --- |
 | 0–1 分钟 | 单次构建录制器，准备并保存专用空白纯文本文件 | 构建成功，窗口标题唯一，授权提示为 0–2 个 | 构建失败、窗口错配或超过预计的权限提示时停止 |
-| 1–3 分钟 | 开始录制。暂停两秒再继续，点击正文输入 `Cuekeeper M1`，切到飞书再切回 TextEdit，按 Cmd+S 后用停止热键保存 | 边框和 HUD 可见，暂停时计时冻结。切换时会话继续。文件内容准确，flow 依次为 `click → type → key`，CLI 报 `FOCUS_CHANGED` | HUD 或热键失效、切换导致退出、flow 缺失或多出动作、文本不符 |
-| 3–4 分钟 | 另起一轮，让 HUD 覆盖测试窗口中可观察点击效果的正文位置，点击该 HUD 区域，再完成正文点击、输入、保存。多屏或多个 Space 可用时核对显示 | HUD 区点击传给下方窗口，flow 只有一次正文点击。各可用屏幕和 Space 显示指示器 | 底层点击被拦截、HUD 点击进入 flow 或切换后指示器消失 |
-| 4–5 分钟 | 用 `--no-indicator` 再录一轮，手动截图，按停止热键并关闭测试文档 | 截图无边框和 HUD，仍能录制并保存，采集进程已退出 | 截图仍出现指示器、热键或保存失败、采集进程仍存在 |
+| 1–3 分钟 | 开始录制。按 `Ctrl+Option+P` 暂停两秒再继续。点击正文，输入 `Cuekeeper M1`，切到飞书再切回 TextEdit。按 Cmd+S，再按 `Ctrl+Option+X` 停止 | 主屏显示 2–3 像素边框和顶部计时 HUD。暂停时计时冻结，继续后恢复。切换时会话继续，停止后指示器消失 | 指示器或热键失效，切换导致退出，或停止后指示器仍在 |
+| 3–4 分钟 | 另起一轮，分别点主屏边框和 HUD 下方可安全操作、效果可见的位置，再完成一次普通正文点击并停止 | 底层窗口收到点击，这轮 flow 只含一次普通点击 | 底层点击被拦截，指示器上的点击进入 flow，或普通点击缺失 |
+| 4–5 分钟 | 查看第一轮 flow、CLI 输出和磁盘上的专用文件，关闭测试文档 | 三步依次为 `click → type → key`，最后一步是 Cmd+S。文本与磁盘内容逐字节一致，CLI 提示 `FOCUS_CHANGED`。采集进程已退出 | flow 缺失、动作数量或顺序错误、文本不符，或采集进程仍存在 |
 
 该清单用于录制验收。下方十轮回放是单独的完整验收。
 
@@ -19,7 +19,7 @@
 
 1. 执行 `pnpm build:recorder`，生成 `dist/cuekeeper-capture`。agent-desktop 使用 1.3.1，`CUEKEEPER_AGENT_DESKTOP` 可指定可信二进制的绝对路径。
 2. 只使用专用空白纯文本文档 `Cuekeeper-M1.txt`，保存到新建测试目录。确认窗口标题与文件名一致且唯一，并把专用文档选为当前 TextEdit 窗口。
-3. 在终端执行以下命令。确认每块显示器都有边框和顶部 HUD，计时在走。切换到已保存的测试文档并点击正文，使用英文键盘输入 `Cuekeeper M1`。切到飞书，再用 Cmd+Tab 切回 TextEdit，按 Cmd+S，最后用 Ctrl+Option+X 停止。录制时可用 Ctrl+Option+P 暂停或继续。暂停时 HUD 计时冻结，会话仍在 `--seconds` 到点时收尾。
+3. 在终端执行以下录制命令，再按验收清单操作。使用英文键盘输入，切回 TextEdit 可用 Cmd+Tab。暂停时 HUD 计时冻结，会话仍在 `--seconds` 到点时收尾。
 
 ```sh
 mkdir -p out
@@ -29,11 +29,9 @@ node dist/cli.js flow validate out/recorded.flow.json --json
 node dist/cli.js run out/recorded.flow.json --dry-run --json
 ```
 
-4. 确认 flow 的三步依次为 `click`、`type` 和 `key`，输入文本与测试文件一致，CLI 返回一次 `FOCUS_CHANGED` 提示，dry-run 每项为 `resolved`。
-5. 单独录制一轮核对 HUD。把测试窗口放在 HUD 下方，点击 HUD 并观察鼠标事件是否穿透，再点击正文、输入、保存并停止。flow 应只包含正文点击、输入和保存。若有多个屏幕或 Space，确认切换时 HUD 仍可见。
-6. 另开一轮检查截图，可用 `--no-indicator` 关闭边框和 HUD。默认窗口设置为 `sharingType = .none`，较新的系统截图和录屏工具可能仍会拍到 HUD。此 CLI 生成的是动作 flow 与报告 ZIP。 [Apple 窗口共享说明](https://developer.apple.com/documentation/appkit/nswindow/sharingtype-swift.enum/none)
+4. 需要进一步检查定位器时，可执行上面的 `run --dry-run`，三步应均为 `resolved`。
 
-默认静音，`--sound` 开启起止提示音。时间到点或按停止热键时，录制会保存动作。Ctrl+C 和运行中失去权限会写入已有动作，并在 CLI 标记部分录制。没有可用动作时，CLI 会报告具体原因。
+`--no-indicator` 可关闭边框与 HUD，录制热键仍可用。时间到点或按停止热键时，录制会保存动作。Ctrl+C 和运行中失去权限会写入已有动作，并在 CLI 标记部分录制。没有可用动作时，CLI 会报告具体原因。
 
 ## 回放与核对
 
