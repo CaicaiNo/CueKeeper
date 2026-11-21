@@ -55,7 +55,9 @@ out/assets/logs/runner.log
 
 ## v1 报告的降级
 
-查看器不扩展 `schemas/report.schema.json`。报告没有截图、重试记录或断流字段时：
+前置条件触发修复时，原条目记录可选的 `repair`，包含 `attempted`、`kind` 和 `result`。条目 ID 仍为 `<作用域>/setup/<条件 ID>`。执行或观测失败时，条目码为 `ENSURE_FAILED`，`repair.code` 保留具体原因，例如 `APP_NOT_FOUND`、`LAUNCH_TIMEOUT`、`WINDOW_NOT_FOUND` 或系统权限错误。复查仍不满足时，条目码为 `PRECONDITION_FALSE`。
+
+报告没有截图、重试记录或断流字段时：
 
 - 截图区显示「报告未包含该步截图」以及放置路径。
 - 重试区显示「报告未记录重试」。

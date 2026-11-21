@@ -2,13 +2,15 @@ import { execFile } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { Fault, contains, object, parseSnapshot } from './locator.js';
 import type { Node, Point, Snapshot } from './locator.js';
-import type { Entry, Target } from './contracts.js';
+import type { Ensure, Entry, Target } from './contracts.js';
 
 export interface Desktop {
-  snapshot(target: Target, timeoutMs?: number, windowId?: string): Promise<Snapshot>;
-  property(node: Node, property: 'text' | 'value' | 'visible'): Promise<string | boolean | undefined>;
+  snapshot(target: Target, timeoutMs?: number, windowId?: string, exactWindow?: boolean): Promise<Snapshot>;
+  property(node: Node, property: 'text' | 'value' | 'visible', timeoutMs?: number): Promise<string | boolean | undefined>;
+  ensure(action: Ensure, target: Target, timeoutMs: number, windowId?: string): Promise<string | undefined>;
   click(ref: string): Promise<Entry['delivery']>;
   clickPoint(snapshot: Snapshot, target: Target, point: Point): Promise<Entry['delivery']>;
   type(ref: string, text: string): Promise<Entry['delivery']>;
@@ -22,6 +24,14 @@ export class DesktopFault extends Fault {
   constructor(code: string, command: string, public delivery: Entry['delivery']) {
     super(code, `agent-desktop ${command} returned ${code}`);
   }
+}
+
+export function isMissingWindow(error: unknown): error is Fault {
+  return error instanceof Fault && (error.code === 'APP_NOT_FOUND' || error.code === 'WINDOW_NOT_FOUND');
+}
+
+function isCommandTimeout(error: unknown) {
+  return error instanceof Fault && (error.code === 'TIMEOUT' || error.code === 'COMMAND_TIMEOUT');
 }
 
 function delivery(result: Record<string, unknown>): Entry['delivery'] {
@@ -72,11 +82,56 @@ export async function withDesktop<T>(
       throw new Fault('DESKTOP_VERSION', `Expected agent-desktop ${agentDesktopVersion}`, true);
     }
 
-    const snapshot = async (target: Target, timeoutMs = 3000, windowId?: string) =>
-      parseSnapshot(await call('snapshot', [
-        '--app', target.app, '--include-bounds', '--max-depth', '50', '--timeout-ms', String(timeoutMs),
+    async function findWindow(target: Target, timeoutMs: number, windowId?: string) {
+      let data: unknown;
+      try {
+        data = await call('list-windows', ['--app', target.app, '--timeout-ms', String(timeoutMs)], undefined, timeoutMs);
+      } catch (error) {
+        if (isMissingWindow(error)) return undefined;
+        throw error;
+      }
+      if (!Array.isArray(data)) throw new Fault('BAD_RESPONSE', 'Expected a window inventory');
+      const matches = data.map(object).filter(window => window.title === target.window);
+      const candidates = windowId ? matches.filter(window => window.id === windowId) : matches;
+      if (windowId && !candidates.length && matches.length) {
+        throw new Fault('WINDOW_CHANGED', 'The original target window changed during the run');
+      }
+      if (candidates.length > 1) throw new Fault('AMBIGUOUS_TARGET', 'More than one window matches the flow title');
+      if (!candidates.length) return undefined;
+      const id = candidates[0].id;
+      if (typeof id !== 'string' || !/^w-[a-zA-Z0-9_.:-]+$/.test(id)) {
+        throw new Fault('BAD_RESPONSE', 'Missing or invalid window ID');
+      }
+      return id;
+    }
+
+    async function snapshot(target: Target, timeoutMs = 3000, windowId?: string, exactWindow = false) {
+      const deadline = performance.now() + timeoutMs;
+      if (exactWindow && !windowId) {
+        windowId = await findWindow(target, timeoutMs);
+        if (!windowId) throw new Fault('WINDOW_NOT_FOUND', 'The requested window title was not found');
+      }
+      const remaining = exactWindow ? Math.ceil(deadline - performance.now()) : timeoutMs;
+      if (exactWindow && remaining <= 0) throw new Fault('COMMAND_TIMEOUT', 'Timed out resolving the target window');
+      return parseSnapshot(await call('snapshot', [
+        '--app', target.app, '--include-bounds', '--max-depth', '50', '--timeout-ms', String(remaining),
         ...(windowId ? ['--window-id', windowId] : []),
-      ], undefined, timeoutMs + 3000), target);
+      ], undefined, exactWindow ? remaining : timeoutMs + 3000), target);
+    }
+
+    async function launch(app: string, activate: boolean, timeoutMs: number) {
+      // Leave time for CLI startup and for observing the result after the native launch deadline.
+      const budget = Math.max(1, timeoutMs - Math.min(1000, Math.ceil(timeoutMs / 4)));
+      try {
+        await call('launch', ['--timeout', String(budget), ...(activate ? ['--activate'] : []), '--', app],
+          undefined, timeoutMs);
+      } catch (error) {
+        if (error instanceof DesktopFault && isCommandTimeout(error)) {
+          throw new DesktopFault('LAUNCH_TIMEOUT', 'launch', error.delivery);
+        }
+        throw error;
+      }
+    }
 
     const act = async (command: string, args: string[], input?: string, headed = options.headed) => {
       const result = delivery(object(await call(command, [...(headed ? ['--headed'] : []), ...args],
@@ -90,13 +145,59 @@ export async function withDesktop<T>(
 
     return await work({
       snapshot,
-      async property(node, property) {
+      async ensure(action, target, timeoutMs, windowId) {
+        if (process.platform !== 'darwin') {
+          throw new Fault('UNSUPPORTED_PLATFORM', 'Setup repair requires macOS');
+        }
+        const deadline = performance.now() + timeoutMs;
+        const remaining = () => Math.ceil(deadline - performance.now());
+        const budget = () => {
+          options.signal.throwIfAborted();
+          const ms = remaining();
+          if (ms <= 0) throw new Fault('COMMAND_TIMEOUT', 'The setup repair deadline expired');
+          return ms;
+        };
+        if (action.kind === 'app_running') {
+          const ms = budget();
+          const inventory = object(await call('list-apps', ['--app', action.app, '--timeout-ms', String(ms)],
+            undefined, ms));
+          if (!Array.isArray(inventory.apps)) throw new Fault('BAD_RESPONSE', 'Expected an application inventory');
+          if (inventory.apps.length > 1) {
+            throw new Fault('AMBIGUOUS_TARGET', 'More than one running application matches the repair target');
+          }
+          if (inventory.apps.length === 1) return;
+          if (inventory.complete === false) throw new Fault('APP_INVENTORY_INCOMPLETE', 'Application state is unknown');
+          await launch(action.app, false, budget());
+          return;
+        }
+
+        const requested = { app: action.app, window: target.window };
+        let id = await findWindow(requested, budget(), windowId);
+        if (!id) {
+          await launch(action.app, true, budget());
+          while (remaining() > 0) {
+            try {
+              id = await findWindow(requested, budget(), windowId);
+            } catch (error) {
+              if (options.signal.aborted || !isCommandTimeout(error)) throw error;
+              break;
+            }
+            if (id || remaining() <= 100) break;
+            await sleep(100, undefined, { signal: options.signal });
+          }
+        }
+        if (!id) throw new Fault('WINDOW_NOT_FOUND', 'The requested window could not be confirmed before the repair deadline');
+        const result = object(await call('focus-window', ['--app', action.app, '--window-id', id], undefined, budget()));
+        if (object(result.focused).id !== id) throw new Fault('WINDOW_CHANGED', 'Focused window did not match the repair target');
+        return id;
+      },
+      async property(node, property, timeoutMs) {
         if (!node.ref) return snapshotProperty(node, property);
         if (property === 'visible') {
-          const value = object(await call('is', [node.ref, '--property', 'visible']));
+          const value = object(await call('is', [node.ref, '--property', 'visible'], undefined, timeoutMs));
           return value.applicable === true && typeof value.result === 'boolean' ? value.result : undefined;
         }
-        const value = object(await call('get', [node.ref, '--property', property])).value;
+        const value = object(await call('get', [node.ref, '--property', property], undefined, timeoutMs)).value;
         return typeof value === 'string' ? value : undefined;
       },
       click: ref => act('click', [ref]),
@@ -145,6 +246,6 @@ export function offlineDesktop(data: unknown, expected: Target): Desktop {
   return {
     snapshot: async () => snap,
     property: async (node, property) => snapshotProperty(node, property),
-    click: mutate, clickPoint: mutate, type: mutate, press: mutate,
+    click: mutate, clickPoint: mutate, type: mutate, press: mutate, ensure: mutate,
   };
 }

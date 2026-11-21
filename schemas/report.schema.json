@@ -126,6 +126,47 @@
           "code": {
             "type": "string"
           },
+          "repair": {
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "attempted": {
+                "type": "boolean"
+              },
+              "kind": {
+                "anyOf": [
+                  {
+                    "const": "app_running",
+                    "type": "string"
+                  },
+                  {
+                    "const": "window_ready",
+                    "type": "string"
+                  }
+                ]
+              },
+              "result": {
+                "anyOf": [
+                  {
+                    "const": "passed",
+                    "type": "string"
+                  },
+                  {
+                    "const": "failed",
+                    "type": "string"
+                  }
+                ]
+              },
+              "code": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "attempted",
+              "kind",
+              "result"
+            ]
+          },
           "delivery": {
             "anyOf": [
               {

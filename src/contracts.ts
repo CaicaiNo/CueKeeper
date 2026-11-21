@@ -29,12 +29,20 @@ const expectation = T.Union([
   object({ property: T.Union([T.Literal('text'), T.Literal('value')]), equals: text }),
 ]);
 const check = object({ target: element, expect: expectation });
+const ensureKind = T.Union([T.Literal('app_running'), T.Literal('window_ready')]);
+export const defaultEnsureTimeoutMs = 15_000;
+const ensure = object({
+  kind: ensureKind,
+  app: label,
+  timeout_ms: T.Optional(T.Integer({ minimum: 1000, maximum: 120_000, default: defaultEnsureTimeoutMs })),
+});
 const setup = object({
   id, name: label,
   state: T.Union([
     T.Literal('inferred'), T.Literal('confirmed'), T.Literal('invalid'), T.Literal('deleted'),
   ]),
   check,
+  ensure: T.Optional(ensure),
 });
 const conditions = T.Array(setup, { maxItems: 100 });
 const inputText = T.Union([T.String({ minLength: 1, maxLength: 4000 }), object({ param: parameterName })]);
@@ -86,6 +94,12 @@ const entry = object({
   durationMs: T.Integer({ minimum: 0 }),
   message: T.Optional(T.String()),
   code: T.Optional(T.String()),
+  repair: T.Optional(object({
+    attempted: T.Boolean(),
+    kind: ensureKind,
+    result: T.Union([T.Literal('passed'), T.Literal('failed')]),
+    code: T.Optional(T.String()),
+  })),
   delivery: T.Optional(T.Union([
     T.Literal('delivered_verified'), T.Literal('delivered_unverified'),
     T.Literal('delivery_uncertain'), T.Literal('not_delivered'), T.Literal('unknown'),
@@ -112,6 +126,7 @@ export const captureActionCheck = TypeCompiler.Compile(action);
 export type Flow = Static<typeof flowSchema>;
 export type Action = Static<typeof action>;
 export type Setup = Static<typeof setup>;
+export type Ensure = Static<typeof ensure>;
 export type Locator = Static<typeof locator>;
 export type ElementLocator = Static<typeof element>;
 export type Check = Static<typeof check>;
