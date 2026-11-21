@@ -4,6 +4,8 @@ import type {
 } from './contracts.js';
 import type { PlannedStep } from './flow.js';
 import type { PackAsset } from './assets.js';
+import { isPlayableVideo, videoCodeLabels } from './video.js';
+import type { VideoArtifact } from './video.js';
 
 type ExecutableAction = PlannedStep['action'];
 type AnyExpectation = Check['expect'] | AssertCheck['expect'];
@@ -73,6 +75,8 @@ const roleLabels: Record<string, string> = {
   log: '日志',
   snapshot: 'AX 快照',
   file: '附件',
+  video: '会话视频',
+  filmstrip: '变化帧胶片条',
 };
 
 function formatDuration(ms: number) {
@@ -95,6 +99,41 @@ function short(value: string, limit = 72) {
 
 function assetHref(path: string) {
   return path.split('/').map((segment, index) => index === 0 ? `assets/${encodeURIComponent(segment)}` : encodeURIComponent(segment)).join('/');
+}
+
+function mediaHref(path: string) {
+  return path.split('/').map(segment => encodeURIComponent(segment)).join('/');
+}
+
+/**
+ * Video is an optional artifact: an old report shows a one-line note, a skipped
+ * capture shows the closed-set reason, and only a finalized movie gets a player.
+ */
+function videoPanel(video: VideoArtifact | undefined) {
+  if (!video) {
+    return '<p class="empty-note rail-video-note" id="videoMissing">本报告未录制会话视频</p>';
+  }
+  if (!isPlayableVideo(video)) {
+    return `<div class="video-panel skipped" id="videoSkipped">
+  <span class="ic" aria-hidden="true">▤</span>
+  <div><b>本报告未录制会话视频</b><p>${escapeHtml(videoCodeLabels[video.code] ?? video.code)}</p><span class="mono">${escapeHtml(video.code)}</span></div>
+</div>`;
+  }
+  const gaps = video.gaps?.length
+    ? `<p class="video-meta">空闲段 ${video.gaps.length} 处 · ${video.gaps.map(gap =>
+      `${formatDuration(gap.fromMs)}–${formatDuration(gap.toMs)}`).join('、')}</p>`
+    : '';
+  return `<details class="panel rail-video" data-restore-key="video">
+  <summary><span class="chev">▸</span>会话视频 <span class="hint">${escapeHtml(
+    `${formatDuration(video.durationMs)} · ${video.frames} 帧 · ${formatBytes(video.bytes)}`)}</span></summary>
+  <div class="body video-body">
+    <video id="sessionVideo" controls preload="metadata" playsinline
+      data-offset-ms="${video.anchor.videoStartOffsetMs}" data-duration-ms="${video.durationMs}"
+      src="${escapeHtml(mediaHref(video.path))}">浏览器不支持内嵌视频，可下载 ${escapeHtml(video.path)}。</video>
+    <p class="video-meta">${escapeHtml(`采样 ${video.sampling.thumbnail} · 块阈值 ${video.sampling.blockThreshold} · ${video.sampling.maxFps} fps 上限`)}${video.status === 'truncated' ? ' · 录制提前结束' : ''}</p>
+    ${gaps}
+  </div>
+</details>`;
 }
 
 function chip(status: string) {
@@ -467,7 +506,9 @@ const viewerIcons = {
 const viewerIcon = (name: keyof typeof viewerIcons) =>
   `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${viewerIcons[name]}</svg>`;
 
-export function renderViewer(report: Report, flow: Flow, steps: PlannedStep[], assets: PackAsset[]): ViewerBundle {
+export function renderViewer(
+  report: Report, flow: Flow, steps: PlannedStep[], assets: PackAsset[], video?: VideoArtifact,
+): ViewerBundle {
   const views = buildViews(report, flow, steps);
   const perEntry = new Map<string, PackAsset[]>();
   const unassigned: PackAsset[] = [];
@@ -500,7 +541,7 @@ export function renderViewer(report: Report, flow: Flow, steps: PlannedStep[], a
     const failure = entry.status === 'failed' || entry.status === 'blocked';
     const failedAssertion = entry.kind === 'assert' && entry.status === 'failed';
     const selected = initial?.entry.id === entry.id;
-    return `<li class="entry status-${escapeHtml(entry.status)}${failure ? ' is-failed' : ''}${failedAssertion ? ' is-failed-assert' : ''}${selected ? ' selected' : ''}" data-step="${escapeHtml(entry.id)}" data-status="${escapeHtml(entry.status)}" data-kind="${escapeHtml(entry.kind)}">
+    return `<li class="entry status-${escapeHtml(entry.status)}${failure ? ' is-failed' : ''}${failedAssertion ? ' is-failed-assert' : ''}${selected ? ' selected' : ''}" data-step="${escapeHtml(entry.id)}" data-status="${escapeHtml(entry.status)}" data-kind="${escapeHtml(entry.kind)}" data-at="${entry.atMs}">
   <button class="entry-row" type="button" data-select="${escapeHtml(entry.id)}" aria-current="${selected ? 'true' : 'false'}">
     <span class="a-node" aria-hidden="true">${nodeIcon(entry.status)}</span>
     <span class="a-main">
@@ -528,7 +569,7 @@ export function renderViewer(report: Report, flow: Flow, steps: PlannedStep[], a
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data: file:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data: file:; media-src 'self' file: data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
 <title>${escapeHtml(flow.name)} · Cuekeeper</title>
 <style>${stylesheet}</style>
 </head>
@@ -580,6 +621,7 @@ export function renderViewer(report: Report, flow: Flow, steps: PlannedStep[], a
       </div>
       <ol class="timeline" id="timeline">${entries}</ol>
       <p class="empty-note rail-empty" id="railEmpty" hidden>没有失败步骤。</p>
+      ${videoPanel(video)}
       ${unassignedList}
     </section>
 
@@ -782,6 +824,16 @@ body.only-failed-assert .entry:not(.is-failed-assert){display:none}
   color:var(--ink-2);background:var(--surface-2);border-radius:0 0 var(--radius-m) var(--radius-m);overflow:auto}
 .panel .body pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.7;font:inherit}
 
+.rail-video{margin:10px 12px 0}
+.rail-video .body{padding:10px}
+.video-body video{width:100%;max-height:220px;display:block;border-radius:var(--radius-s);background:#000}
+.video-meta{margin:8px 0 0;font-family:var(--mono);font-size:10.5px;color:var(--muted);line-height:1.6}
+.rail-video-note{margin:10px 12px 0}
+.video-panel{display:flex;gap:8px;margin:10px 12px 0;padding:10px 12px;border:1px solid var(--warn-line);
+  border-radius:var(--radius-m);background:var(--warn-soft);color:var(--warn);font-size:11.5px}
+.video-panel p{margin:3px 0 0;color:var(--ink-2);line-height:1.5}
+.video-panel .mono{font-family:var(--mono);font-size:10px;color:var(--muted)}
+
 .artifacts{border:1px solid var(--line);border-radius:var(--radius-m);background:var(--surface);overflow:hidden}
 .artifact{display:grid;grid-template-columns:18px minmax(0,1fr) auto auto;gap:10px;align-items:center;padding:8px 12px;
   border-top:1px solid var(--line);font-size:12px;color:var(--ink-2)}
@@ -896,6 +948,16 @@ const script = `
     panels.forEach(function (panel) {
       panel.hidden = panel.getAttribute('data-detail') !== id;
     });
+    // Clicking a step seeks the optional session video to the moment it ran.
+    var player = document.getElementById('sessionVideo');
+    var target = entryById(id);
+    if (player && target) {
+      var offset = Number(player.getAttribute('data-offset-ms')) || 0;
+      var duration = Number(player.getAttribute('data-duration-ms')) || 0;
+      var at = Number(target.getAttribute('data-at')) || 0;
+      var seconds = Math.max(0, Math.min(duration, at - offset)) / 1000;
+      try { player.currentTime = seconds; } catch (error) { /* unsupported media */ }
+    }
     var detail = document.getElementById('detail');
     if (detail) detail.scrollTop = 0;
     if (persist !== false) {

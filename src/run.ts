@@ -21,6 +21,8 @@ import {
 } from './shell.js';
 import type { ShellBudget, ShellGate, ShellInput, ShellOutcome } from './shell.js';
 import type { PrivilegeRunner } from './shell-privilege.js';
+import type { VideoArtifact } from './video.js';
+import type { VideoCaptureSession } from './video-capture.js';
 
 type AssertionRecord = {
   expected: AssertCheck['expect'];
@@ -142,6 +144,18 @@ export async function runFlow(
     identity?: AppIdentitySession;
     /** Enables shell steps. Omit for flows that contain none. */
     shell?: ShellRunOptions;
+    /**
+     * Optional session video. The runner binds the window once, starts capture,
+     * and stops it in the same `finally` that cleans up shell temp files. A
+     * capture failure is reported through onError and never changes the result.
+     */
+    video?: {
+      start(windowId: string, reportStartedAt: string): Promise<VideoCaptureSession>;
+      /** Receives the live session so the caller can wire pause/resume. */
+      onStart?: (session: VideoCaptureSession) => void;
+      onArtifact?: (artifact: VideoArtifact) => void;
+      onError?: (error: unknown) => void;
+    };
   },
 ): Promise<Report> {
   const planned = plan(flow);
@@ -428,6 +442,17 @@ export async function runFlow(
   let halted = !globalReady;
   let stopped = identityBlock ? 'identity' : undefined;
   if (halted) report.status = 'blocked';
+  let videoSession: VideoCaptureSession | undefined;
+  if (!halted && options.video && !dryRun && !offline) {
+    try {
+      // One extra read binds the CGWindowID capture needs; it has no side effect.
+      const current = await replayWindow.read(5000);
+      videoSession = await options.video.start(current.windowId, report.startedAt);
+      options.video.onStart?.(videoSession);
+    } catch (error) {
+      options.video.onError?.(error);
+    }
+  }
   try {
     for (const { id, action } of planned) {
       if (stopped === 'identity') {
@@ -570,6 +595,15 @@ export async function runFlow(
     }
   } finally {
     if (shellTemp) await removeShellDirectory(shellTemp);
+    if (videoSession) {
+      try {
+        const artifact = await videoSession.stop();
+        options.video?.onArtifact?.(artifact);
+      } catch (error) {
+        // A capture failure is never a replay failure; the report stays as-is.
+        options.video?.onError?.(error);
+      }
+    }
   }
   if (identityBlock) {
     report.status = 'blocked';

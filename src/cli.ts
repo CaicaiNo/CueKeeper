@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { dirname, resolve } from 'node:path';
-import { realpath } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
+import { mkdir, realpath, writeFile } from 'node:fs/promises';
 import { discoverAssets } from './assets.js';
 import { capturePreflight, diagnose, formatDoctor, preflightFault } from './doctor.js';
 import { buildInfo, versionLine } from './version.js';
@@ -26,17 +26,20 @@ import { parseTestItem, resolveSecrets } from './test-item.js';
 import { enqueueUpload, processUploadQueue } from './upload-queue.js';
 import { defaultQueueDir, resolveUploadConfig } from './upload.js';
 import { startWorkbench } from './workbench.js';
+import { loadVideoArtifact, startVideoCapture, videoSidecarFile } from './video-capture.js';
+import type { VideoCaptureSession } from './video-capture.js';
+import type { VideoArtifact } from './video.js';
 
 const help = `Cuekeeper ${buildInfo().version}
 
   cuekeeper --version
   cuekeeper doctor [--json]
   cuekeeper flow validate <flow.json|test.json> [--json]
-  cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--interactive] [--report <report.json>] [--allow-shell] [--allow-sudo] [--capture-shell-output] [--json]
+  cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--interactive] [--report <report.json>] [--video] [--allow-shell] [--allow-sudo] [--capture-shell-output] [--json]
   cuekeeper workbench [run-directory] [--port <port>] [--library <directory>] [--allow-live-replay] [--allow-shell] [--allow-sudo]
   cuekeeper pick --app <bundle-id> --window <title> [--app-path <path>] [--select <ref>] [--snapshot <snapshot.json>] [--json]
   cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--app-path <path>] [--seconds 25] [--no-indicator] [--sound] [--trace-clicks] [--json]
-  cuekeeper report pack <report.json> --flow <flow.json> --out <report.zip> [--assets <dir>] [--no-upload] [--queue <dir>] [--config <upload.json>] [--json]
+  cuekeeper report pack <report.json> --flow <flow.json> --out <report.zip> [--assets <dir>] [--no-media] [--no-upload] [--queue <dir>] [--config <upload.json>] [--json]
   cuekeeper report upload [--queue <dir>] [--retry-paused] [--json]
 
 Exit codes
@@ -90,6 +93,17 @@ function formatCommand(program: string, args: string[]) {
   return [program, ...args]
     .map(part => (!part || /[\s"'\\$`;&|*?<>()]/.test(part) ? JSON.stringify(part) : part))
     .join(' ');
+}
+
+/**
+ * The manifest video artifact lives next to the movie, not inside report.json
+ * (v1 is frozen and additionalProperties: false). `report pack` reads it from
+ * `<report dir>/media/video.json`.
+ */
+async function writeVideoSidecar(reportPath: string, artifact: VideoArtifact) {
+  const directory = join(dirname(reportPath), 'media');
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await writeFile(join(directory, videoSidecarFile), JSON.stringify(artifact, null, 2) + '\n', { mode: 0o600 });
 }
 
 async function main() {
@@ -200,11 +214,15 @@ async function main() {
         report: { type: 'string' }, snapshot: { type: 'string' }, data: { type: 'string' },
         'allow-shell': { type: 'boolean' }, 'allow-sudo': { type: 'boolean' },
         'capture-shell-output': { type: 'boolean' }, interactive: { type: 'boolean' },
+        video: { type: 'boolean' },
       },
     });
     checkPositionals(positionals, 1);
     const dryRun = values['dry-run'] ?? false;
     const interactive = values.interactive ?? false;
+    if (values.video && dryRun) throw new Error('--video requires a real replay, not --dry-run');
+    if (values.video && values.data) throw new Error('--video is not available for batch runs');
+    if (values.video && !values.report) throw new Error('--video requires --report so the movie has a run directory');
     // Machine mode has no human to answer a password dialog; refuse instead of
     // silently downgrading an interactive root step. A dry run never prompts,
     // so it stays allowed under --json.
@@ -289,6 +307,29 @@ async function main() {
       shell,
       ...(values.report ? { evidenceDir: `${resolve(values.report)}.assets` } : {}),
     };
+    const reportPath = values.report ? resolve(values.report) : undefined;
+    let videoArtifact: VideoArtifact | undefined;
+    let videoSession: VideoCaptureSession | undefined;
+    // SIGUSR1/SIGUSR2 pause and resume capture without stealing a keyboard
+    // shortcut from the application under test.
+    const pauseVideo = () => { videoSession?.pause(); };
+    const resumeVideo = () => { videoSession?.resume(); };
+    // Capture is strictly opt-in. It starts only after the runner has bound a
+    // real target window, and a failure leaves `report.json` untouched.
+    const video = values.video && reportPath ? {
+      start: (windowId: string, reportStartedAt: string) => startVideoCapture({
+        windowId, reportStartedAt, signal, mediaDir: join(dirname(reportPath), 'media'),
+      }),
+      onStart: (session: VideoCaptureSession) => { videoSession = session; },
+      onArtifact: (artifact: VideoArtifact) => { videoArtifact = artifact; },
+      onError: (error: unknown) => {
+        console.error(`会话视频：${error instanceof Error ? error.message : String(error)}`);
+      },
+    } : undefined;
+    if (video) {
+      process.on('SIGUSR1', pauseVideo);
+      process.on('SIGUSR2', resumeVideo);
+    }
     let report;
     if (gate) {
       // No desktop adapter and no shell process is created for a blocked run.
@@ -297,6 +338,7 @@ async function main() {
       const needsDesktop = (flow.setup?.length ?? 0) > 0 ||
         planned.some(step => step.action.kind !== 'shell' || (step.action.setup?.length ?? 0) > 0);
       if (!needsDesktop) {
+        if (values.video) console.error('会话视频：本次流程没有桌面步骤，未录制');
         report = await runFlow(flow, undefined, options);
       } else if (values.snapshot) {
         const fixture = await readJson(values.snapshot);
@@ -307,10 +349,13 @@ async function main() {
       } else {
         macOnly();
         report = await withDesktop({ headed: values.headed ?? false, signal },
-          desktop => runFlow(flow, desktop, options));
+          desktop => runFlow(flow, desktop, { ...options, ...(video ? { video } : {}) }));
       }
     }
+    process.off('SIGUSR1', pauseVideo);
+    process.off('SIGUSR2', resumeVideo);
     if (values.report) await writeNew(values.report, JSON.stringify(report, null, 2) + '\n');
+    if (reportPath && videoArtifact) await writeVideoSidecar(reportPath, videoArtifact);
     const details = report.entries
       .map(entry => {
         const shellDetail = entry.kind === 'shell'
@@ -319,7 +364,11 @@ async function main() {
           (entry.message ? ` — ${entry.message}` : '');
       })
       .join('\n');
-    success(report, `${report.mode} ${report.status}\n${details}`,
+    const videoLine = videoArtifact
+      ? `\n会话视频 ${videoArtifact.status}${'code' in videoArtifact ? ` · ${videoArtifact.code}` : ''}`
+      : '';
+    success({ ...report, ...(videoArtifact ? { video: videoArtifact } : {}) },
+      `${report.mode} ${report.status}${videoLine}\n${details}`,
       signal.aborted ? 130 : report.status === 'passed' ? 0 : 1);
     return;
   }
@@ -394,6 +443,7 @@ async function main() {
     const { values, positionals } = parseArgs({
       args: rest.slice(1), allowPositionals: true, options: {
         ...common, flow: { type: 'string' }, out: { type: 'string' }, assets: { type: 'string' },
+        'no-media': { type: 'boolean' },
         'no-upload': { type: 'boolean' }, queue: { type: 'string' }, config: { type: 'string' },
       },
     });
@@ -403,7 +453,17 @@ async function main() {
     const [input, rawFlow, assets] = await Promise.all([
       readJson(positionals[0]), readJson(path), discoverAssets(positionals[0], values.assets),
     ]);
-    const archive = packReport(input, parseFlow(rawFlow), { assets });
+    // A run writes media/ next to its report; --no-media drops the movie but
+    // keeps the report otherwise identical.
+    const mediaBundle = values['no-media']
+      ? { media: [], video: undefined }
+      : await loadVideoArtifact(join(dirname(resolve(positionals[0])), 'media'));
+    const archive = packReport(input, parseFlow(rawFlow), {
+      assets,
+      media: mediaBundle.media,
+      ...(mediaBundle.video ? { video: mediaBundle.video } : {}),
+      onWarning: message => console.error(message),
+    });
     await writeNew(output, archive);
     let upload: { queued: boolean; queue?: string; id?: string; duplicate?: boolean; error?: string } | undefined;
     if (!values['no-upload']) {

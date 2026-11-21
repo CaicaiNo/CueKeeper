@@ -1,6 +1,17 @@
 # 会话视频：帧差采样 + VFR + 时间线对齐
 
-本文设计一次运行的可选会话视频。**本轮只有设计与 schema 草案**：没有改 `src/`，没有启动 GUI，没有申请屏幕录制权限。文中的体积、帧差与 seek 结论来自 `design/video/experiment/` 下的两个离线程序（合成帧 + 本机 VideoToolbox 编码），实测数字与复现命令见 [实验结果](../design/video/experiment/results.md)。
+本文设计一次运行的可选会话视频。**设计已落到离线实现**：帧差、编码、manifest 与查看器都有对应代码和测试；真实窗口采集器已实现但按设计只在 HAOC-76 做真机验证。本轮没有启动 GUI，没有抓屏，没有申请屏幕录制权限。文中的体积、帧差与 seek 结论来自 `design/video/experiment/` 下的两个离线程序（合成帧 + 本机 VideoToolbox 编码），实测数字与复现命令见 [实验结果](../design/video/experiment/results.md)。
+
+## 0. 实现落点
+
+| 落点 | 内容 |
+| --- | --- |
+| `src/video-diff.ts` | 160×90 灰度缩略图、8×8 分块最大差、structural/churn 决策与节流；`test/video-diff.test.mjs` 用 1920×1080 合成帧断言滚动=structural、单字符/小圆点=churn、同帧=0 块 |
+| `src/video.ts` | 视频 artifact 的 TypeBox 契约（complete / truncated / skipped 三种封闭形状）、锚点与 seek 换算、gaps 合并 |
+| `src/video-capture.ts` | 只读 preflight、独立采集器进程、JSONL 事件、pause/resume/stop、finalize 校验、`.partial.mp4` 清理；权限缺失/非 macOS/编码器崩溃一律 `skipped`，不产生半截文件 |
+| `native/video-capture.swift` | 窗口级 `SCContentFilter`、`SCFrameStatus` 过滤、帧差、`AVAssetWriter` VFR、mask、`--self-test` 离线编码自检 |
+| `src/report.ts` + `src/viewer.ts` | `media/` 纳入归档、`manifest.video`、体积护栏、`<video>` 播放器与"点步骤 seek"；旧报告不受影响 |
+| `src/cli.ts` + `src/run.ts` | `run --video`（默认关闭，要求 `--report`）、`report pack --no-media`；采集失败不改变运行结论 |
 
 ## 1. 结论
 
@@ -173,7 +184,7 @@ bytes ≈ I + Σ(structural 帧 × P_active) + Σ(churn 帧 × P_churn) + 关键
 }
 ```
 
-- 字段级约束见 [视频 artifact schema 草案](../design/video/manifest-video.schema.json) 与 [胶片条 schema 草案](../design/video/manifest-filmstrip.schema.json)（Draft-07，`additionalProperties: false`）。
+- 字段级约束见 [视频 artifact schema 草案](../design/video/manifest-video.schema.json) 与 [胶片条 schema 草案](../design/video/manifest-filmstrip.schema.json)（Draft-07，`additionalProperties: false`）。运行时契约由 `src/video.ts` 的 TypeBox 定义，`pnpm schemas:write` 生成并随 `pnpm build --check` 校验 [schemas/video.schema.json](../schemas/video.schema.json)。
 - `status`：`complete` / `truncated` / `skipped`；`code` 只允许封闭枚举（见第 9 节）。
 - `gaps` 上限 64 条，仅用于排错与"等待"提示；超出的省略，不报错。查看器没有 `gaps` 时按 report 的 `atMs` 自己算。
 - **旧报告兼容**：没有 `video` 字段 → 查看器显示"本报告未录制会话视频"，其余不动；`report pack` 照旧。`video.status = "skipped"` 时给一句原因，不显示空播放器。

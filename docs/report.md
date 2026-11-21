@@ -77,13 +77,16 @@ out/assets/logs/runner.log
 
 含 Shell 定义的流程（包括尚未调用的行为）不能使用 `report pack`。打包会把原始 flow 写进 ZIP，而首版不允许发布命令与秘密引用；这类运行仍可用 `--report` 写 JSON，并在工作台查看。
 
-## 会话视频（可选，尚未实现）
+## 会话视频（可选）
 
-运行可以用 `--video` 额外录一段目标窗口的会话视频，作为可选 artifact 放进归档的 `media/session.mp4`，并在 `manifest.json` 的 `video` 里记录编码、时长、track 时间刻度、与报告的锚点（`atMs` → PTS）和采样阈值。设计、体积实测与省略规则见 [会话视频：帧差采样 + VFR + 时间线对齐](session-video.md)。
+运行可以用 `--video --report <run.json>` 额外录一段目标窗口的会话视频。采集器把电影写到报告旁的 `media/session.mp4`，元数据写到 `media/video.json`；`report pack` 会把它带进归档的 `media/`，并在 `manifest.json` 的 `video` 里记录编码、时长、track 时间刻度、与报告的锚点（`atMs` → PTS）和采样阈值。设计、体积实测与实现落点见 [会话视频：帧差采样 + VFR + 时间线对齐](session-video.md)。
 
 - **默认关闭**，只在显式开启的运行里存在；`report.json` 不变，视频不参与通过/失败判断。
-- 没有视频的报告照旧打开，查看器显示「本报告未录制会话视频」。
-- 上传版 ZIP 与 `assets/` 一样默认省略 `media/`；分享前确认是否要带视频。
+- 没有视频的报告照旧打开，查看器显示「本报告未录制会话视频」；`status: "skipped"` 时显示封闭枚举的原因（例如未授权屏幕录制），不显示空播放器。
+- 有视频时查看器显示 `<video>` 面板；点时间线任一步会把视频 seek 到 `(atMs - videoStartOffsetMs)`，空闲段停在最后一帧。
+- `media/` 超过 128 MB 给出警告，超过 512 MB 拒绝打包；`report pack --no-media` 显式剔除电影（`manifest.video` 一并省略）。
+- 运行中可暂停：`kill -USR1 <cuekeeper pid>` 暂停、`kill -USR2 <cuekeeper pid>` 继续。暂停期间画面停在最后一帧，`pausedMs` 记入 `manifest.video`，但不扣减 `durationMs`。
+- 采集失败不会留下半截文件：`.partial.mp4` 只在 `finishWriting` 成功后改名，编码失败会删除它并把原因写进 `manifest.video.code`。
 - ZIP 没有加密：谁拿到归档谁能看里面的视频，等于看到了目标窗口在那段时间里显示的一切。
 
 ## v1 报告的降级

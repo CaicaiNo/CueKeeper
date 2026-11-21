@@ -8,7 +8,7 @@ export interface RawAsset {
 }
 
 export type AssetRole = 'screenshot-before' | 'screenshot-after' | 'screenshot' | 'assertion-baseline' |
-  'assertion-actual' | 'log' | 'snapshot' | 'file';
+  'assertion-actual' | 'log' | 'snapshot' | 'file' | 'video' | 'filmstrip';
 
 export interface PackAsset extends RawAsset {
   /** Report entry this asset belongs to, when the asset was grouped under an entry id. */
@@ -95,6 +95,7 @@ export function decorateAsset(asset: RawAsset, entryId: string | undefined, path
   else if (/(^|[._-])before([._-]|$)/.test(base)) role = 'screenshot-before';
   else if (/(^|[._-])after([._-]|$)/.test(base)) role = 'screenshot-after';
   else if (['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(extension)) role = 'screenshot';
+  else if (extension === '.mp4' || extension === '.mov') role = 'video';
   else if (extension === '.log' || extension === '.txt') role = 'log';
   else if (extension === '.json' || extension === '.jsonl') role = 'snapshot';
   else role = 'file';

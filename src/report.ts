@@ -7,10 +7,22 @@ import { flowHasShellDefinitions } from './shell.js';
 import { decorateAsset } from './assets.js';
 import type { PackAsset, RawAsset } from './assets.js';
 import { renderViewer } from './viewer.js';
+import { videoArtifactCheck } from './video.js';
+import type { VideoArtifact } from './video.js';
+
+/** Packing warns above this media size and refuses above the hard limit. */
+export const mediaWarnBytes = 128 * 1024 * 1024;
+export const mediaLimitBytes = 512 * 1024 * 1024;
 
 export interface PackOptions {
   /** Files to publish under assets/. Paths are relative to the asset root. */
   assets?: RawAsset[];
+  /** Movie files to publish under media/. Paths are archive-relative. */
+  media?: RawAsset[];
+  /** Optional session video metadata, written to manifest.video. */
+  video?: VideoArtifact;
+  /** Receives size warnings; the CLI prints them to stderr. */
+  onWarning?: (message: string) => void;
 }
 
 function json(value: unknown) {
@@ -63,6 +75,43 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 
+const mediaPattern = /^media\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.(?:mp4|mov)$/;
+
+/**
+ * Media are validated separately from assets: they are archive-relative, never
+ * grouped under a step, and must be backed by a video artifact that names them.
+ */
+function attachMedia(raw: RawAsset[], video: VideoArtifact | undefined, warn?: (message: string) => void) {
+  const media: RawAsset[] = [];
+  const seen = new Set<string>();
+  for (const asset of raw) {
+    const path = asset.path.replace(/\\/g, '/');
+    if (!mediaPattern.test(path)) throw new Error(`Invalid media path: ${asset.path}`);
+    if (seen.has(path)) throw new Error(`Duplicate media path: ${path}`);
+    seen.add(path);
+    media.push({ path, bytes: asset.bytes });
+  }
+  const total = media.reduce((sum, asset) => sum + asset.bytes.length, 0);
+  if (total > mediaLimitBytes) throw new Error('MEDIA_TOO_LARGE: media exceeds the 512 MB packing limit');
+  if (total > mediaWarnBytes) warn?.(`媒体超过 128 MB（${(total / 1_048_576).toFixed(1)} MB），归档会很大；可用 --no-media 剔除`);
+  if (!video) {
+    if (media.length) throw new Error('Media files require a video artifact');
+    return [];
+  }
+  if (!videoArtifactCheck.Check(video)) throw new Error('Invalid video manifest');
+  if (video.status === 'skipped') {
+    if (media.length) throw new Error('A skipped video must not publish media files');
+    return [];
+  }
+  const file = media.find(asset => asset.path === video.path);
+  if (!file) throw new Error(`Video artifact is missing: ${video.path}`);
+  if (file.bytes.length !== video.bytes) throw new Error('Video artifact size does not match the manifest');
+  if (media.some(asset => asset.path !== video.path)) {
+    throw new Error('Media file is not referenced by the video artifact');
+  }
+  return media.sort((left, right) => left.path.localeCompare(right.path));
+}
+
 export function packReport(input: unknown, flow: Flow, options: PackOptions = {}): Uint8Array {
   // A packed report embeds the raw flow; shell steps may carry commands and
   // environment references that must not be published.
@@ -107,13 +156,15 @@ export function packReport(input: unknown, flow: Flow, options: PackOptions = {}
     }
   }
 
-  const viewer = renderViewer(input, flow, steps, assets);
+  const media = attachMedia(options.media ?? [], options.video, options.onWarning);
+  const viewer = renderViewer(input, flow, steps, assets, options.video);
   const files: Record<string, Uint8Array> = {
     'index.html': strToU8(viewer.html),
     'report.json': json(input),
     'flow.json': json(flow),
   };
   for (const asset of assets) files[`assets/${asset.path}`] = asset.bytes;
+  for (const asset of media) files[asset.path] = asset.bytes;
   const manifest = {
     version: 1,
     flowId: input.flowId,
@@ -128,6 +179,7 @@ export function packReport(input: unknown, flow: Flow, options: PackOptions = {}
       role: asset.role,
       bytes: asset.bytes.length,
     })),
+    ...(options.video ? { video: options.video } : {}),
   };
   // A fixed timestamp keeps packing reproducible for the same report and assets.
   return zipSync({ ...files, 'manifest.json': json(manifest) }, { mtime: new Date(1980, 0, 1) });

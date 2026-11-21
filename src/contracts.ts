@@ -1,6 +1,7 @@
 import { Type as T } from '@sinclair/typebox';
 import type { Static, TProperties } from '@sinclair/typebox';
 import { TypeCompiler } from '@sinclair/typebox/compiler';
+import { videoArtifactSchema } from './video.js';
 
 const object = <P extends TProperties>(properties: P) =>
   T.Object(properties, { additionalProperties: false });
@@ -402,6 +403,7 @@ export const schemas = {
   setup: object({ version: T.Literal(1), ...setup.properties }),
   report: reportSchema,
   batch: batchReportSchema,
+  video: videoArtifactSchema,
 };
 export const flowCheck = TypeCompiler.Compile(flowSchema);
 export const reportCheck = TypeCompiler.Compile(reportSchema);

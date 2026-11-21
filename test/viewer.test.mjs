@@ -73,9 +73,9 @@ function buildDocument(html) {
   const entries = [];
   const documents = [];
   const buttons = [];
-  for (const match of html.matchAll(/<li class="([^"]*)" data-step="([^"]*)" data-status="([^"]*)" data-kind="([^"]*)">/g)) {
+  for (const match of html.matchAll(/<li class="([^"]*)" data-step="([^"]*)" data-status="([^"]*)" data-kind="([^"]*)" data-at="([^"]*)"[^>]*>/g)) {
     const element = new Element('li', {
-      class: match[1], 'data-step': match[2], 'data-status': match[3], 'data-kind': match[4],
+      class: match[1], 'data-step': match[2], 'data-status': match[3], 'data-kind': match[4], 'data-at': match[5],
     });
     const button = new Element('button', { 'data-select': match[2], 'aria-current': match[1].includes('selected') ? 'true' : 'false' });
     element.button = button;
@@ -91,6 +91,11 @@ function buildDocument(html) {
     .map(match => new Element('details', {
       'data-restore-key': match[1], ...(match[2] ? { open: '' } : {}),
     }));
+  const videoMatch = /<video id="sessionVideo"([^>]*)>/.exec(html);
+  const video = videoMatch ? new Element('video', Object.fromEntries(
+    [...videoMatch[1].matchAll(/data-([a-z-]+)="([^"]*)"/g)].map(match => [`data-${match[1]}`, match[2]]),
+  )) : null;
+  if (video) video.currentTime = 0;
   const bodyMatch = /<body class="([^"]*)" data-report-key="([^"]*)" data-stream="([^"]*)" data-last-step="([^"]*)">/.exec(html);
   assert.ok(bodyMatch, 'body attributes');
   const system = {
@@ -106,12 +111,14 @@ function buildDocument(html) {
     clearRestore: new Element('button'),
     railEmpty: new Element('p', { hidden: '' }),
     detail: new Element('section'),
+    video,
+    sessionVideo: video,
   };
   const ids = {
     failedOnly: 'failedOnly', streamToggle: 'streamToggle', banner: 'banner', bannerExit: 'bannerExit',
     connState: 'connState', restore: 'restore', restoreAt: 'restoreAt',
     clearRestore: 'clearRestore', railEmpty: 'railEmpty', detail: 'detail',
-    assertFailedOnly: 'assertFailedOnly',
+    assertFailedOnly: 'assertFailedOnly', sessionVideo: 'sessionVideo',
   };
   const document = {
     body: system.body,
@@ -264,4 +271,32 @@ test('assertion statistics and the failed-assertion filter work on the shipped s
   const reloaded = runViewer(html, view.storage);
   assert.equal(reloaded.system.body.classList.contains('only-failed-assert'), true);
   assert.equal(reloaded.system.assertFailedOnly.getAttribute('aria-pressed'), 'true');
+});
+
+test('selecting a step seeks the optional session video to its anchored moment', () => {
+  const flow = parseFlow(example('textedit.flow'));
+  const report = structuredClone(example('textedit.report'));
+  report.entries[0].atMs = 1000;
+  report.entries[1].atMs = 2000;
+  report.entries[2].atMs = 3000;
+  const video = {
+    kind: 'video', status: 'complete', path: 'media/session.mp4', bytes: 2048,
+    durationMs: 10_000, frames: 3, codec: 'h264', container: 'mp4', width: 800, height: 600,
+    timebase: { timescale: 600, firstPtsMs: 0 },
+    anchor: { reportStartedAt: report.startedAt, videoStartOffsetMs: 500, method: 'host_clock' },
+    sampling: { thumbnail: '160x90', blockThreshold: 24, structuralBlocks: 4, maxFps: 10, churnMinIntervalMs: 500 },
+  };
+  const html = strFromU8(unzipSync(packReport(report, flow, {
+    video, media: [{ path: 'media/session.mp4', bytes: Buffer.alloc(2048, 1) }],
+  }))['index.html']);
+
+  const view = runViewer(html);
+  assert.ok(view.system.video, 'the session video player is present');
+  // (1000 - 500) / 1000 for the initially selected first step.
+  assert.equal(view.system.video.currentTime, 0.5);
+  view.entries.find(entry => entry.getAttribute('data-step') === 'type-text').button.dispatch('click');
+  assert.equal(view.system.video.currentTime, 1.5);
+  view.entries.find(entry => entry.getAttribute('data-step') === 'save').button.dispatch('click');
+  assert.equal(view.system.video.currentTime, 2.5);
+  assert.equal(view.system.video.getAttribute('data-duration-ms'), '10000');
 });
