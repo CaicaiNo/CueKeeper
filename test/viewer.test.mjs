@@ -69,8 +69,10 @@ function buildDocument(html) {
   const entries = [];
   const documents = [];
   const buttons = [];
-  for (const match of html.matchAll(/<li class="([^"]*)" data-step="([^"]*)" data-status="([^"]*)">/g)) {
-    const element = new Element('li', { class: match[1], 'data-step': match[2], 'data-status': match[3] });
+  for (const match of html.matchAll(/<li class="([^"]*)" data-step="([^"]*)" data-status="([^"]*)" data-kind="([^"]*)">/g)) {
+    const element = new Element('li', {
+      class: match[1], 'data-step': match[2], 'data-status': match[3], 'data-kind': match[4],
+    });
     const button = new Element('button', { 'data-select': match[2], 'aria-current': match[1].includes('selected') ? 'true' : 'false' });
     element.button = button;
     buttons.push(button);
@@ -90,6 +92,7 @@ function buildDocument(html) {
   const system = {
     body: new Element('body', { class: bodyMatch[1], 'data-report-key': bodyMatch[2], 'data-stream': bodyMatch[3] }),
     failedOnly: new Element('button', { 'aria-pressed': 'false' }),
+    assertFailedOnly: new Element('button', { 'aria-pressed': 'false' }),
     streamToggle: new Element('button', { 'aria-pressed': bodyMatch[3] === 'disconnected' ? 'true' : 'false' }),
     banner: new Element('div', bodyMatch[3] === 'disconnected' ? {} : { hidden: '' }),
     bannerExit: new Element('button'),
@@ -104,6 +107,7 @@ function buildDocument(html) {
     failedOnly: 'failedOnly', streamToggle: 'streamToggle', banner: 'banner', bannerExit: 'bannerExit',
     connState: 'connState', restore: 'restore', restoreAt: 'restoreAt',
     clearRestore: 'clearRestore', railEmpty: 'railEmpty', detail: 'detail',
+    assertFailedOnly: 'assertFailedOnly',
   };
   const document = {
     body: system.body,
@@ -217,4 +221,43 @@ test('viewer selects the failed step, filters, previews disconnects, and restore
   second.system.clearRestore.dispatch('click');
   assert.equal(second.system.restore.hidden, true);
   assert.equal(second.storage.size, 0);
+});
+
+test('assertion statistics and the failed-assertion filter work on the shipped script', async () => {
+  const flow = parseFlow({
+    version: 1, id: 'assert-filter', name: 'Assertion filter', target: base.target,
+    steps: [
+      { id: 'ok', kind: 'assert', check: { target: { kind: 'element', role: 'textfield' }, expect: { property: 'value', equals: '' } } },
+      { id: 'bad', kind: 'assert', check: { target: { kind: 'element', role: 'textfield' }, expect: { property: 'value', equals: 'Saved' } } },
+      { id: 'never', kind: 'assert', check: { target: { kind: 'element', role: 'textfield' }, expect: { property: 'exists', equals: true } } },
+    ],
+  });
+  const report = await runFlow(flow, offlineDesktop(fixture, flow.target), {
+    dryRun: false, signal: new AbortController().signal,
+  });
+  assert.deepEqual(report.entries.map(entry => entry.status), ['passed', 'failed', 'skipped']);
+  const html = strFromU8(unzipSync(packReport(report, flow))['index.html']);
+  assert.match(html, /断言 3 条，1 条通过/);
+  assert.match(html, /跳过 1/);
+
+  const view = runViewer(html);
+  const bad = view.entries.find(entry => entry.getAttribute('data-step') === 'bad');
+  assert.ok(bad.classList.contains('selected'), 'failed assertion selected on open');
+  assert.equal(bad.getAttribute('data-kind'), 'assert');
+
+  view.system.assertFailedOnly.dispatch('click');
+  assert.equal(view.system.body.classList.contains('only-failed-assert'), true);
+  assert.equal(view.system.assertFailedOnly.getAttribute('aria-pressed'), 'true');
+
+  // The two filters are exclusive and the legacy filter keeps its own class.
+  view.system.failedOnly.dispatch('click');
+  assert.equal(view.system.body.classList.contains('only-failed'), true);
+  assert.equal(view.system.body.classList.contains('only-failed-assert'), false);
+  assert.equal(view.system.assertFailedOnly.getAttribute('aria-pressed'), 'false');
+
+  // The assertion filter survives a reload.
+  view.system.assertFailedOnly.dispatch('click');
+  const reloaded = runViewer(html, view.storage);
+  assert.equal(reloaded.system.body.classList.contains('only-failed-assert'), true);
+  assert.equal(reloaded.system.assertFailedOnly.getAttribute('aria-pressed'), 'true');
 });

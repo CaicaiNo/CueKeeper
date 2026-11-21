@@ -1,0 +1,212 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Cuekeeper proposed v1 assertion contracts (HAOC-68)",
+  "definitions": {
+    "elementTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "role"],
+      "properties": {
+        "kind": { "const": "element" },
+        "role": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "name": { "type": "string", "maxLength": 256 },
+        "path": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 51,
+          "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+        },
+        "index": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "windowTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "app"],
+      "properties": {
+        "kind": { "const": "window" },
+        "app": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "window": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "match": { "enum": ["equals", "contains", "matches"] }
+      },
+      "dependencies": { "match": ["window"] }
+    },
+    "elementBooleanExpect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["property", "equals"],
+      "properties": {
+        "property": { "enum": ["exists", "visible"] },
+        "equals": { "type": "boolean" }
+      }
+    },
+    "windowExistsExpect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["property", "equals"],
+      "properties": {
+        "property": { "const": "exists" },
+        "equals": { "type": "boolean" }
+      }
+    },
+    "stringExpect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["property"],
+      "properties": {
+        "property": { "enum": ["text", "value", "title"] },
+        "equals": { "type": "string", "maxLength": 4000 },
+        "contains": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "matches": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "normalize": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "ignoreCase": { "type": "boolean" },
+            "whitespace": { "enum": ["trim", "collapse"] }
+          }
+        }
+      },
+      "oneOf": [
+        { "required": ["equals"] },
+        { "required": ["contains"] },
+        { "required": ["matches"] }
+      ]
+    },
+    "region": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "type": "integer", "minimum": 0, "maximum": 8191 },
+        "y": { "type": "integer", "minimum": 0, "maximum": 8191 },
+        "width": { "$ref": "#/definitions/pixelDimension" },
+        "height": { "$ref": "#/definitions/pixelDimension" }
+      }
+    },
+    "pixelDimension": { "type": "integer", "minimum": 1, "maximum": 8192 },
+    "ratio": { "type": "number", "minimum": 0, "maximum": 1 },
+    "screenshotExpect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["property", "region", "baseline", "maxDiffRatio"],
+      "properties": {
+        "property": { "const": "screenshot" },
+        "region": { "$ref": "#/definitions/region" },
+        "baseline": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sha256", "frameWidth", "frameHeight"],
+          "properties": {
+            "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "frameWidth": { "$ref": "#/definitions/pixelDimension" },
+            "frameHeight": { "$ref": "#/definitions/pixelDimension" }
+          }
+        },
+        "maxDiffRatio": { "$ref": "#/definitions/ratio" }
+      }
+    },
+    "check": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["target", "expect"],
+          "properties": {
+            "target": { "$ref": "#/definitions/elementTarget" },
+            "expect": {
+              "anyOf": [
+                { "$ref": "#/definitions/elementBooleanExpect" },
+                {
+                  "allOf": [
+                    { "$ref": "#/definitions/stringExpect" },
+                    { "properties": { "property": { "enum": ["text", "value"] } } }
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["target", "expect"],
+          "properties": {
+            "target": { "$ref": "#/definitions/windowTarget" },
+            "expect": {
+              "anyOf": [
+                { "$ref": "#/definitions/windowExistsExpect" },
+                {
+                  "allOf": [
+                    { "$ref": "#/definitions/stringExpect" },
+                    { "properties": { "property": { "const": "title" } } }
+                  ]
+                },
+                { "$ref": "#/definitions/screenshotExpect" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "screenshotActual": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frameWidth", "frameHeight"],
+      "properties": {
+        "frameWidth": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "frameHeight": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "differentPixels": { "type": "integer", "minimum": 0, "maximum": 16777216 },
+        "diffRatio": { "$ref": "#/definitions/ratio" }
+      },
+      "dependencies": { "differentPixels": ["diffRatio"], "diffRatio": ["differentPixels"] }
+    },
+    "assertionResult": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["expected"],
+          "properties": {
+            "expected": { "$ref": "#/definitions/elementBooleanExpect" },
+            "actual": { "type": "boolean" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["expected"],
+          "properties": {
+            "expected": { "$ref": "#/definitions/stringExpect" },
+            "actual": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["expected"],
+          "properties": {
+            "expected": { "$ref": "#/definitions/screenshotExpect" },
+            "actual": { "$ref": "#/definitions/screenshotActual" },
+            "screenshots": {
+              "type": "object",
+              "additionalProperties": false,
+              "minProperties": 1,
+              "properties": {
+                "baseline": {
+                  "type": "string",
+                  "pattern": "^assets/[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}(/[a-zA-Z0-9][a-zA-Z0-9_-]{0,63})?/assertion-baseline\\.png$"
+                },
+                "actual": {
+                  "type": "string",
+                  "pattern": "^assets/[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}(/[a-zA-Z0-9][a-zA-Z0-9_-]{0,63})?/assertion-actual\\.png$"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

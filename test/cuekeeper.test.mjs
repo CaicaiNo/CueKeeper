@@ -511,11 +511,11 @@ test('packed viewer expands the failed step with its error code and expectation'
   const files = unzipSync(packReport(report, failing));
   const html = strFromU8(files['index.html']);
   assert.match(html, /class="run-state state-failed"/);
-  assert.match(html, /<li class="entry status-failed is-failed selected" data-step="assert-text"/);
+  assert.match(html, /<li class="entry status-failed is-failed is-failed-assert selected" data-step="assert-text"/);
   assert.match(html, /<article class="detail-step" data-detail="assert-text" data-index="1">/);
   assert.match(html, /<article class="detail-step" data-detail="save" data-index="3" hidden>/);
   assert.match(html, /ASSERTION_FALSE/);
-  assert.match(html, /text = &quot;Expected text&quot;/);
+  assert.match(html, /元素文本等于 &quot;Expected text&quot;/);
   assert.match(html, /失败信息/);
   assert.match(html, /报告未记录重试/);
   assert.match(html, /断言/);

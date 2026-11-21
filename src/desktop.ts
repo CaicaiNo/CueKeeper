@@ -1,11 +1,16 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Fault, contains, object, parseSnapshot } from './locator.js';
 import type { Node, Point, Snapshot } from './locator.js';
 import type { Ensure, Entry, Target } from './contracts.js';
+
+export interface WindowInfo {
+  id: string;
+  title: string;
+}
 
 export interface Desktop {
   snapshot(target: Target, timeoutMs?: number, windowId?: string, exactWindow?: boolean): Promise<Snapshot>;
@@ -15,6 +20,10 @@ export interface Desktop {
   clickPoint(snapshot: Snapshot, target: Target, point: Point): Promise<Entry['delivery']>;
   type(ref: string, text: string): Promise<Entry['delivery']>;
   press(combo: string, snapshot: Snapshot): Promise<Entry['delivery']>;
+  /** Read-only application window inventory for window assertions. */
+  listWindows(app: string, timeoutMs?: number): Promise<WindowInfo[]>;
+  /** Capture the whole window as PNG bytes without touching the window. */
+  screenshot(app: string, windowId: string, timeoutMs?: number): Promise<Uint8Array>;
 }
 
 export const agentDesktopVersion = '1.3.1';
@@ -200,6 +209,29 @@ export async function withDesktop<T>(
         const value = object(await call('get', [node.ref, '--property', property], undefined, timeoutMs)).value;
         return typeof value === 'string' ? value : undefined;
       },
+      async listWindows(app, timeoutMs = 3000) {
+        const data = await call('list-windows', ['--app', app, '--timeout-ms', String(timeoutMs)],
+          undefined, timeoutMs + 3000);
+        if (!Array.isArray(data)) throw new Fault('BAD_RESPONSE', 'Expected a window inventory');
+        return data.map(object).map(window => {
+          if (typeof window.id !== 'string' || !/^w-[a-zA-Z0-9_.:-]+$/.test(window.id)) {
+            throw new Fault('BAD_RESPONSE', 'Missing or invalid window ID');
+          }
+          return { id: window.id, title: typeof window.title === 'string' ? window.title : '' };
+        });
+      },
+      async screenshot(app, windowId, timeoutMs = 10_000) {
+        const path = join(state, `assertion-${Date.now()}.png`);
+        try {
+          await call('screenshot', ['--app', app, '--window-id', windowId, path], undefined, timeoutMs);
+          return new Uint8Array(await readFile(path));
+        } catch (error) {
+          if (error instanceof Fault) throw error;
+          throw new Fault('ASSERTION_CAPTURE_FAILED', 'The window screenshot wrote no readable PNG');
+        } finally {
+          await rm(path, { force: true });
+        }
+      },
       click: ref => act('click', [ref]),
       async clickPoint(current, target, point) {
         if (!options.headed) throw new Fault('HEADED_REQUIRED', 'Coordinate clicks require --headed');
@@ -251,6 +283,17 @@ export function offlineDesktop(data: unknown, expected: Target): Desktop {
       return snap;
     },
     property: async (node, property) => snapshotProperty(node, property),
+    async listWindows(app) {
+      if (app !== expected.app) {
+        throw new Fault('WINDOW_MISMATCH', 'Offline fixture does not cover the requested app');
+      }
+      // The fixture describes exactly one window, so window assertions resolve
+      // against it and only that window is visible in the inventory.
+      return [{ id: snap.windowId, title: expected.window }];
+    },
+    async screenshot() {
+      throw new Fault('WINDOW_MISMATCH', 'Offline fixtures do not include window screenshots');
+    },
     click: mutate, clickPoint: mutate, type: mutate, press: mutate, ensure: mutate,
   };
 }

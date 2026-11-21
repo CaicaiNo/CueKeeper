@@ -1422,105 +1422,625 @@
                 "type": "string"
               },
               "check": {
-                "additionalProperties": false,
-                "type": "object",
-                "properties": {
-                  "target": {
+                "anyOf": [
+                  {
                     "additionalProperties": false,
                     "type": "object",
                     "properties": {
-                      "kind": {
-                        "const": "element",
-                        "type": "string"
+                      "target": {
+                        "additionalProperties": false,
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "const": "element",
+                            "type": "string"
+                          },
+                          "role": {
+                            "minLength": 1,
+                            "maxLength": 256,
+                            "type": "string"
+                          },
+                          "name": {
+                            "maxLength": 256,
+                            "type": "string"
+                          },
+                          "path": {
+                            "minItems": 1,
+                            "maxItems": 51,
+                            "type": "array",
+                            "items": {
+                              "minLength": 1,
+                              "maxLength": 256,
+                              "type": "string"
+                            }
+                          },
+                          "index": {
+                            "minimum": 0,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "role"
+                        ]
                       },
-                      "role": {
-                        "minLength": 1,
-                        "maxLength": 256,
-                        "type": "string"
-                      },
-                      "name": {
-                        "maxLength": 256,
-                        "type": "string"
-                      },
-                      "path": {
-                        "minItems": 1,
-                        "maxItems": 51,
-                        "type": "array",
-                        "items": {
-                          "minLength": 1,
-                          "maxLength": 256,
-                          "type": "string"
-                        }
-                      },
-                      "index": {
-                        "minimum": 0,
-                        "type": "integer"
+                      "expect": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "properties": {
+                              "property": {
+                                "anyOf": [
+                                  {
+                                    "const": "exists",
+                                    "type": "string"
+                                  },
+                                  {
+                                    "const": "visible",
+                                    "type": "string"
+                                  }
+                                ]
+                              },
+                              "equals": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "property",
+                              "equals"
+                            ]
+                          },
+                          {
+                            "anyOf": [
+                              {
+                                "additionalProperties": false,
+                                "type": "object",
+                                "properties": {
+                                  "property": {
+                                    "const": "text",
+                                    "type": "string"
+                                  },
+                                  "equals": {
+                                    "maxLength": 4000,
+                                    "type": "string"
+                                  },
+                                  "normalize": {
+                                    "additionalProperties": false,
+                                    "type": "object",
+                                    "properties": {
+                                      "ignoreCase": {
+                                        "type": "boolean"
+                                      },
+                                      "whitespace": {
+                                        "anyOf": [
+                                          {
+                                            "const": "trim",
+                                            "type": "string"
+                                          },
+                                          {
+                                            "const": "collapse",
+                                            "type": "string"
+                                          }
+                                        ]
+                                      }
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "property",
+                                  "equals"
+                                ]
+                              },
+                              {
+                                "additionalProperties": false,
+                                "type": "object",
+                                "properties": {
+                                  "property": {
+                                    "const": "text",
+                                    "type": "string"
+                                  },
+                                  "contains": {
+                                    "minLength": 1,
+                                    "maxLength": 4000,
+                                    "type": "string"
+                                  },
+                                  "normalize": {
+                                    "additionalProperties": false,
+                                    "type": "object",
+                                    "properties": {
+                                      "ignoreCase": {
+                                        "type": "boolean"
+                                      },
+                                      "whitespace": {
+                                        "anyOf": [
+                                          {
+                                            "const": "trim",
+                                            "type": "string"
+                                          },
+                                          {
+                                            "const": "collapse",
+                                            "type": "string"
+                                          }
+                                        ]
+                                      }
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "property",
+                                  "contains"
+                                ]
+                              },
+                              {
+                                "additionalProperties": false,
+                                "type": "object",
+                                "properties": {
+                                  "property": {
+                                    "const": "text",
+                                    "type": "string"
+                                  },
+                                  "matches": {
+                                    "minLength": 1,
+                                    "maxLength": 256,
+                                    "type": "string"
+                                  },
+                                  "normalize": {
+                                    "additionalProperties": false,
+                                    "type": "object",
+                                    "properties": {
+                                      "ignoreCase": {
+                                        "type": "boolean"
+                                      },
+                                      "whitespace": {
+                                        "anyOf": [
+                                          {
+                                            "const": "trim",
+                                            "type": "string"
+                                          },
+                                          {
+                                            "const": "collapse",
+                                            "type": "string"
+                                          }
+                                        ]
+                                      }
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "property",
+                                  "matches"
+                                ]
+                              }
+                            ]
+                          },
+                          {
+                            "anyOf": [
+                              {
+                                "additionalProperties": false,
+                                "type": "object",
+                                "properties": {
+                                  "property": {
+                                    "const": "value",
+                                    "type": "string"
+                                  },
+                                  "equals": {
+                                    "maxLength": 4000,
+                                    "type": "string"
+                                  },
+                                  "normalize": {
+                                    "additionalProperties": false,
+                                    "type": "object",
+                                    "properties": {
+                                      "ignoreCase": {
+                                        "type": "boolean"
+                                      },
+                                      "whitespace": {
+                                        "anyOf": [
+                                          {
+                                            "const": "trim",
+                                            "type": "string"
+                                          },
+                                          {
+                                            "const": "collapse",
+                                            "type": "string"
+                                          }
+                                        ]
+                                      }
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "property",
+                                  "equals"
+                                ]
+                              },
+                              {
+                                "additionalProperties": false,
+                                "type": "object",
+                                "properties": {
+                                  "property": {
+                                    "const": "value",
+                                    "type": "string"
+                                  },
+                                  "contains": {
+                                    "minLength": 1,
+                                    "maxLength": 4000,
+                                    "type": "string"
+                                  },
+                                  "normalize": {
+                                    "additionalProperties": false,
+                                    "type": "object",
+                                    "properties": {
+                                      "ignoreCase": {
+                                        "type": "boolean"
+                                      },
+                                      "whitespace": {
+                                        "anyOf": [
+                                          {
+                                            "const": "trim",
+                                            "type": "string"
+                                          },
+                                          {
+                                            "const": "collapse",
+                                            "type": "string"
+                                          }
+                                        ]
+                                      }
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "property",
+                                  "contains"
+                                ]
+                              },
+                              {
+                                "additionalProperties": false,
+                                "type": "object",
+                                "properties": {
+                                  "property": {
+                                    "const": "value",
+                                    "type": "string"
+                                  },
+                                  "matches": {
+                                    "minLength": 1,
+                                    "maxLength": 256,
+                                    "type": "string"
+                                  },
+                                  "normalize": {
+                                    "additionalProperties": false,
+                                    "type": "object",
+                                    "properties": {
+                                      "ignoreCase": {
+                                        "type": "boolean"
+                                      },
+                                      "whitespace": {
+                                        "anyOf": [
+                                          {
+                                            "const": "trim",
+                                            "type": "string"
+                                          },
+                                          {
+                                            "const": "collapse",
+                                            "type": "string"
+                                          }
+                                        ]
+                                      }
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "property",
+                                  "matches"
+                                ]
+                              }
+                            ]
+                          }
+                        ]
                       }
                     },
                     "required": [
-                      "kind",
-                      "role"
+                      "target",
+                      "expect"
                     ]
                   },
-                  "expect": {
-                    "anyOf": [
-                      {
-                        "additionalProperties": false,
-                        "type": "object",
-                        "properties": {
-                          "property": {
-                            "anyOf": [
-                              {
+                  {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "properties": {
+                      "target": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "const": "window",
+                                "type": "string"
+                              },
+                              "app": {
+                                "minLength": 1,
+                                "maxLength": 256,
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "app"
+                            ]
+                          },
+                          {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "const": "window",
+                                "type": "string"
+                              },
+                              "app": {
+                                "minLength": 1,
+                                "maxLength": 256,
+                                "type": "string"
+                              },
+                              "window": {
+                                "minLength": 1,
+                                "maxLength": 256,
+                                "type": "string"
+                              },
+                              "match": {
+                                "anyOf": [
+                                  {
+                                    "const": "equals",
+                                    "type": "string"
+                                  },
+                                  {
+                                    "const": "contains",
+                                    "type": "string"
+                                  },
+                                  {
+                                    "const": "matches",
+                                    "type": "string"
+                                  }
+                                ]
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "app",
+                              "window"
+                            ]
+                          }
+                        ]
+                      },
+                      "expect": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "properties": {
+                              "property": {
                                 "const": "exists",
                                 "type": "string"
                               },
-                              {
-                                "const": "visible",
-                                "type": "string"
+                              "equals": {
+                                "type": "boolean"
                               }
+                            },
+                            "required": [
+                              "property",
+                              "equals"
                             ]
                           },
-                          "equals": {
-                            "type": "boolean"
-                          }
-                        },
-                        "required": [
-                          "property",
-                          "equals"
-                        ]
-                      },
-                      {
-                        "additionalProperties": false,
-                        "type": "object",
-                        "properties": {
-                          "property": {
+                          {
                             "anyOf": [
                               {
-                                "const": "text",
-                                "type": "string"
+                                "additionalProperties": false,
+                                "type": "object",
+                                "properties": {
+                                  "property": {
+                                    "const": "title",
+                                    "type": "string"
+                                  },
+                                  "equals": {
+                                    "maxLength": 4000,
+                                    "type": "string"
+                                  },
+                                  "normalize": {
+                                    "additionalProperties": false,
+                                    "type": "object",
+                                    "properties": {
+                                      "ignoreCase": {
+                                        "type": "boolean"
+                                      },
+                                      "whitespace": {
+                                        "anyOf": [
+                                          {
+                                            "const": "trim",
+                                            "type": "string"
+                                          },
+                                          {
+                                            "const": "collapse",
+                                            "type": "string"
+                                          }
+                                        ]
+                                      }
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "property",
+                                  "equals"
+                                ]
                               },
                               {
-                                "const": "value",
-                                "type": "string"
+                                "additionalProperties": false,
+                                "type": "object",
+                                "properties": {
+                                  "property": {
+                                    "const": "title",
+                                    "type": "string"
+                                  },
+                                  "contains": {
+                                    "minLength": 1,
+                                    "maxLength": 4000,
+                                    "type": "string"
+                                  },
+                                  "normalize": {
+                                    "additionalProperties": false,
+                                    "type": "object",
+                                    "properties": {
+                                      "ignoreCase": {
+                                        "type": "boolean"
+                                      },
+                                      "whitespace": {
+                                        "anyOf": [
+                                          {
+                                            "const": "trim",
+                                            "type": "string"
+                                          },
+                                          {
+                                            "const": "collapse",
+                                            "type": "string"
+                                          }
+                                        ]
+                                      }
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "property",
+                                  "contains"
+                                ]
+                              },
+                              {
+                                "additionalProperties": false,
+                                "type": "object",
+                                "properties": {
+                                  "property": {
+                                    "const": "title",
+                                    "type": "string"
+                                  },
+                                  "matches": {
+                                    "minLength": 1,
+                                    "maxLength": 256,
+                                    "type": "string"
+                                  },
+                                  "normalize": {
+                                    "additionalProperties": false,
+                                    "type": "object",
+                                    "properties": {
+                                      "ignoreCase": {
+                                        "type": "boolean"
+                                      },
+                                      "whitespace": {
+                                        "anyOf": [
+                                          {
+                                            "const": "trim",
+                                            "type": "string"
+                                          },
+                                          {
+                                            "const": "collapse",
+                                            "type": "string"
+                                          }
+                                        ]
+                                      }
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "property",
+                                  "matches"
+                                ]
                               }
                             ]
                           },
-                          "equals": {
-                            "maxLength": 4000,
-                            "type": "string"
+                          {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "properties": {
+                              "property": {
+                                "const": "screenshot",
+                                "type": "string"
+                              },
+                              "region": {
+                                "additionalProperties": false,
+                                "type": "object",
+                                "properties": {
+                                  "x": {
+                                    "minimum": 0,
+                                    "maximum": 8191,
+                                    "type": "integer"
+                                  },
+                                  "y": {
+                                    "minimum": 0,
+                                    "maximum": 8191,
+                                    "type": "integer"
+                                  },
+                                  "width": {
+                                    "minimum": 1,
+                                    "maximum": 8192,
+                                    "type": "integer"
+                                  },
+                                  "height": {
+                                    "minimum": 1,
+                                    "maximum": 8192,
+                                    "type": "integer"
+                                  }
+                                },
+                                "required": [
+                                  "x",
+                                  "y",
+                                  "width",
+                                  "height"
+                                ]
+                              },
+                              "baseline": {
+                                "additionalProperties": false,
+                                "type": "object",
+                                "properties": {
+                                  "sha256": {
+                                    "pattern": "^[a-f0-9]{64}$",
+                                    "type": "string"
+                                  },
+                                  "frameWidth": {
+                                    "minimum": 1,
+                                    "maximum": 8192,
+                                    "type": "integer"
+                                  },
+                                  "frameHeight": {
+                                    "minimum": 1,
+                                    "maximum": 8192,
+                                    "type": "integer"
+                                  }
+                                },
+                                "required": [
+                                  "sha256",
+                                  "frameWidth",
+                                  "frameHeight"
+                                ]
+                              },
+                              "maxDiffRatio": {
+                                "minimum": 0,
+                                "maximum": 1,
+                                "type": "number"
+                              }
+                            },
+                            "required": [
+                              "property",
+                              "region",
+                              "baseline",
+                              "maxDiffRatio"
+                            ]
                           }
-                        },
-                        "required": [
-                          "property",
-                          "equals"
                         ]
                       }
+                    },
+                    "required": [
+                      "target",
+                      "expect"
                     ]
                   }
-                },
-                "required": [
-                  "target",
-                  "expect"
                 ]
               }
             },

@@ -36,6 +36,8 @@ flowchart LR
 - `"ensure": { "kind": "window_ready", "app": "com.apple.TextEdit", "window": "Cuekeeper-M1.txt" }` 要求显式填写应用和精确窗口标题。setup 在该窗口上检查和复查，必要时先激活应用请求打开窗口，再按窗口 ID 聚焦。后续回放动作使用 `flow.target`。带 `--snapshot` 的离线 dry-run 加载主窗口的单窗口样本，遇到其他 setup 窗口时返回 `WINDOW_MISMATCH`。
 - `timeout_ms` 可省略，默认为 15000，整数范围为 1000–120000。修复和复查共用时限。每轮修复只发出一次启动和一次聚焦请求，随后读取新快照并再次检查。回放始终核对已绑定的窗口 ID。dry-run 只解析定位器。实时修复可能将应用切到前台或触发系统授权提示。
 - 检查支持 `exists`、`visible`、`text`、`value`。前两者要求布尔值，后两者与字符串精确比较。找不到目标只对 `exists: false` 构成匹配，模糊命中、快照缺失和不可读取的属性会明确失败。`wait` 定期重复读取，`assert` 读取一次。dry-run 只验证定位和作用域，结果记为 `resolved`。
+- `assert` 额外支持窗口与区域截图断言：`check.target.kind: "window"` 配 `exists`、`title`（`equals` / `contains` / `matches`）或 `screenshot`（`region`、`baseline`、`maxDiffRatio`）。元素 `text` / `value` 同样支持三种比较与 `normalize`。这些扩展只挂在 `assert`；`wait` 与 `setup` 保持上面的四种属性与精确比较。`src/assertion.ts` 负责规划期校验、500 ms 正则预算和判定，`src/png.ts` 解码 PNG 并按固定区域逐像素比较，`src/desktop.ts` 增加只读的 `list-windows` 与 `screenshot`。窗口清单中的零匹配、歧义与读取失败分别映射为 `WINDOW_NOT_FOUND`、`AMBIGUOUS_TARGET` 和驱动错误码。
+- 截图基线存为流程所在目录的 `baselines/<sha256>.png`，文件本身只包含裁剪区域；`baseline.frameWidth` / `frameHeight` 记录原窗口尺寸。失败证据写入 `<report>.assets/<展开步骤 ID>/assertion-baseline.png` 与 `assertion-actual.png`，`report pack` 会合并该目录并校验摘要与步骤引用。断言结果写在 report 条目的可选 `assertion` 字段（`expected`、`actual`、`screenshots`），旧报告省略该字段仍可打包与查看。工作台的「设为基线」读取整窗 PNG 路径与区域坐标，确认后裁剪落盘；当前实现不含画布圈选预览。
 - Report 的 `mode` 区分 dry-run 与 replay。`entries` 记录动作、前置条件、相对时间、耗时和投递状态。报告以规范化 JSON 的 SHA-256 绑定原始 flow 内容。v1 的破坏性改动需要新版本和显式迁移。
 
 ## 里程碑

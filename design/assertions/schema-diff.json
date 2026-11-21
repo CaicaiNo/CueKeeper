@@ -1,0 +1,62 @@
+{
+  "schemas/flow.schema.json": [
+    {
+      "op": "test",
+      "path": "/properties/steps/items/anyOf/0/anyOf/4/properties/kind/const",
+      "value": "assert"
+    },
+    {
+      "op": "replace",
+      "path": "/properties/steps/items/anyOf/0/anyOf/4/properties/check",
+      "value": { "$ref": "../design/assertions/contracts.schema.json#/definitions/check" }
+    },
+    {
+      "op": "test",
+      "path": "/properties/behaviors/items/properties/steps/items/anyOf/4/properties/kind/const",
+      "value": "assert"
+    },
+    {
+      "op": "replace",
+      "path": "/properties/behaviors/items/properties/steps/items/anyOf/4/properties/check",
+      "value": { "$ref": "../design/assertions/contracts.schema.json#/definitions/check" }
+    }
+  ],
+  "schemas/behavior.schema.json": [
+    {
+      "op": "test",
+      "path": "/properties/steps/items/anyOf/4/properties/kind/const",
+      "value": "assert"
+    },
+    {
+      "op": "replace",
+      "path": "/properties/steps/items/anyOf/4/properties/check",
+      "value": { "$ref": "../design/assertions/contracts.schema.json#/definitions/check" }
+    }
+  ],
+  "schemas/report.schema.json": [
+    {
+      "op": "test",
+      "path": "/properties/entries/items/anyOf/1/properties/kind/anyOf/4/const",
+      "value": "assert"
+    },
+    {
+      "op": "remove",
+      "path": "/properties/entries/items/anyOf/1/properties/kind/anyOf/4"
+    },
+    {
+      "op": "copy",
+      "from": "/properties/entries/items/anyOf/1",
+      "path": "/properties/entries/items/anyOf/-"
+    },
+    {
+      "op": "replace",
+      "path": "/properties/entries/items/anyOf/2/properties/kind",
+      "value": { "const": "assert", "type": "string" }
+    },
+    {
+      "op": "add",
+      "path": "/properties/entries/items/anyOf/2/properties/assertion",
+      "value": { "$ref": "../design/assertions/contracts.schema.json#/definitions/assertionResult" }
+    }
+  ]
+}
