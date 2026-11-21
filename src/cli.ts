@@ -14,7 +14,7 @@ const help = `Cuekeeper
 
   cuekeeper flow validate <flow.json> [--json]
   cuekeeper run <flow.json> [--dry-run [--snapshot <snapshot.json>]] [--headed] [--report <report.json>] [--json]
-  cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--seconds 25] [--no-indicator] [--sound] [--json]
+  cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--seconds 25] [--no-indicator] [--sound] [--trace-clicks] [--json]
   cuekeeper report pack <report.json> --flow <flow.json> --out <report.zip> [--assets <dir>] [--json]
 
 Exit codes
@@ -106,6 +106,7 @@ async function main() {
         ...common, app: { type: 'string' }, window: { type: 'string' },
         out: { type: 'string' }, seconds: { type: 'string', default: '25' },
         'no-indicator': { type: 'boolean' }, sound: { type: 'boolean' },
+        'trace-clicks': { type: 'boolean' },
       },
     });
     const target = { app: values.app, window: values.window };
@@ -117,7 +118,8 @@ async function main() {
     if (!Number.isInteger(seconds) || seconds < 1 || seconds > 90) throw new Error('--seconds must be an integer from 1 to 90');
     macOnly();
     await ensureNew(output);
-    const options = { seconds, indicator: !values['no-indicator'], sound: values.sound ?? false };
+    const options = { seconds, indicator: !values['no-indicator'], sound: values.sound ?? false,
+      traceClicks: values['trace-clicks'] ?? false };
     const { flow, warnings, partial, failure } = await withDesktop({ headed: false, signal },
       desktop => record(desktop, target, options, signal));
     await writeNew(output, JSON.stringify(flow, null, 2) + '\n');

@@ -20,7 +20,7 @@ const textGapMs = 1500;
 const editable = new Set(['textfield', 'textbox', 'textarea', 'searchfield', 'combobox']);
 const stepLimit = flowSchema.properties.steps.maxItems!;
 
-type CaptureOptions = { seconds: number; indicator: boolean; sound: boolean };
+type CaptureOptions = { seconds: number; indicator: boolean; sound: boolean; traceClicks?: boolean };
 type CaptureWarning = { code: string; message: string };
 type CaptureResult = { flow: Flow; warnings: CaptureWarning[]; partial: boolean; failure?: Fault };
 
@@ -141,7 +141,7 @@ function announceIndicator(confirmation: unknown, enabled: boolean) {
 export async function record(
   desktop: Desktop, target: Target, options: CaptureOptions, signal: AbortSignal,
 ): Promise<CaptureResult> {
-  const { seconds, indicator, sound } = options;
+  const { seconds, indicator, sound, traceClicks } = options;
   const initial = await desktop.snapshot(target);
   const windowNumber = /^w-([1-9]\d*)$/.exec(initial.windowId)?.[1];
   if (!windowNumber) throw new Fault('WINDOW_ID', 'Capture requires a macOS window number');
@@ -150,6 +150,7 @@ export async function record(
   const args = [target.app, windowNumber, String(seconds)];
   if (!indicator) args.push('--no-indicator');
   if (sound) args.push('--sound');
+  if (traceClicks) args.push('--trace-clicks');
   const child = spawn(executable, args, { stdio: ['ignore', 'pipe', 'ignore'] });
   const completion = new Promise<number | null>(resolve => {
     child.once('error', () => { /* close also fires after a failed spawn. */ });
@@ -178,11 +179,18 @@ export async function record(
   function warn(code: string, message: string) {
     warnings.set(code, { code, message });
   }
+  function trace(row: Record<string, unknown>) {
+    process.stderr.write(`CLICK_TRACE ${JSON.stringify(row)}\n`);
+  }
 
   try {
     for await (const line of lines) {
       signal.throwIfAborted();
       const data = object(JSON.parse(line));
+      if (data.kind === 'click_trace') {
+        if (traceClicks && data.stage === 'native') trace(data);
+        continue;
+      }
       if (data.kind === 'error') {
         const code = captureCode(data.code);
         const dependency = !ready && ['INPUT_MONITORING_REQUIRED', 'ACCESSIBILITY_REQUIRED',
@@ -219,6 +227,8 @@ export async function record(
       }
 
       const event = parseEvent(data);
+      const traceId = traceClicks && event.kind === 'click' && typeof data.traceId === 'string'
+        ? data.traceId : undefined;
       // The helper hit-tests clicks against the selected native window. Its focus
       // update can reach us after the click that activated that window.
       if (!targetActive && event.kind !== 'click') continue;
@@ -237,8 +247,16 @@ export async function record(
         }
         recording.add({ event, snapshot: captured });
         burst = event.kind === 'text' ? { at: event.t, snapshot: captured } : undefined;
+        if (traceId) trace({ stage: 'flow', id: traceId, decision: 'collected', windowId: captured.windowId });
       } catch (error) {
-        if (!(error instanceof Fault) || error.dependency || error.code === 'PERM_DENIED') throw error;
+        if (traceId) {
+          trace({ stage: 'flow', id: traceId, decision: 'filtered',
+            reason: error instanceof Fault ? error.code : 'CAPTURE_FAILED' });
+        }
+        if (!(error instanceof Fault) || error.dependency ||
+            ['PERM_DENIED', 'APP_NOT_FOUND', 'WINDOW_NOT_FOUND', 'WINDOW_MISMATCH', 'WINDOW_CHANGED'].includes(error.code)) {
+          throw error;
+        }
         endTextBurst();
         warn(error.code, error.message);
       }
@@ -272,6 +290,5 @@ export async function record(
     throw error;
   }
   if (recording.exceededStepLimit) warn('STEP_LIMIT', `The flow retains the first ${stepLimit} actions`);
-  const partial = !!failure || [...warnings.keys()].some(code => code !== 'FOCUS_CHANGED');
-  return { flow, warnings: [...warnings.values()], partial, failure };
+  return { flow, warnings: [...warnings.values()], partial: !!failure, failure };
 }
