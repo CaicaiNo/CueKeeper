@@ -246,7 +246,7 @@ struct RecorderCommand {
         let args = CommandLine.arguments
         let switches = args.dropFirst(4)
         guard args.count >= 4, let window = Int(args[2]), window > 0,
-              let seconds = Double(args[3]), (1...60).contains(seconds),
+              let seconds = Double(args[3]), (1...90).contains(seconds),
               switches.allSatisfy({ $0 == "--no-indicator" || $0 == "--sound" }) else {
             exit(2)
         }

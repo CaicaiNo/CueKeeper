@@ -113,7 +113,7 @@ async function main() {
     }
     const output = requireString(values.out, '--out');
     const seconds = Number(values.seconds);
-    if (!Number.isInteger(seconds) || seconds < 1 || seconds > 60) throw new Error('--seconds must be an integer from 1 to 60');
+    if (!Number.isInteger(seconds) || seconds < 1 || seconds > 90) throw new Error('--seconds must be an integer from 1 to 90');
     macOnly();
     await ensureNew(output);
     const options = { seconds, indicator: !values['no-indicator'], sound: values.sound ?? false };

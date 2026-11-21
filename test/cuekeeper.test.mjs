@@ -65,7 +65,7 @@ test('secure input cannot be added to a flow', () => {
 });
 
 // Exercise the real CLI and output writer without invoking either live macOS executable.
-function recordFixture(t, events, captureExit = 0, flags = []) {
+function recordFixture(t, events, { captureExit = 0, flags = [], seconds = 1 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-record-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const dist = join(dir, 'dist');
@@ -84,7 +84,7 @@ console.log(JSON.stringify({ version: '2.6', command, ok: true, data }));
   writeFileSync(join(dist, 'cuekeeper-capture'), `#!/usr/bin/env node
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
-assert.deepEqual(process.argv.slice(2), ${JSON.stringify([fixture.target.app, '1234', '1', ...flags])});
+assert.deepEqual(process.argv.slice(2), ${JSON.stringify([fixture.target.app, '1234', String(seconds), ...flags])});
 const seen = Date.now();
 const messages = [{ kind: 'ready' }, ...${JSON.stringify(events)}];
 writeFileSync(1, messages.map((event, t) => JSON.stringify({ ...event, seen, t })).join('\\n') + '\\n');
@@ -92,7 +92,7 @@ process.exitCode = ${captureExit};
 `, { mode: 0o700 });
   const path = join(dir, 'recorded.flow.json');
   const result = spawnSync(process.execPath, [join(dist, 'cli.js'), 'record',
-    '--app', fixture.target.app, '--window', fixture.target.window, '--out', path, '--seconds', '1',
+    '--app', fixture.target.app, '--window', fixture.target.window, '--out', path, '--seconds', String(seconds),
     '--json', ...flags], { env: { ...process.env, CUEKEEPER_AGENT_DESKTOP: desktop }, encoding: 'utf8', timeout: 10000 });
   assert.match(result.stderr, /Ctrl\+Option\+X stops and saves/);
   return { code: result.status, response: JSON.parse(result.stdout),
@@ -108,7 +108,7 @@ test('record CLI saves click, type and save after leaving and returning to the t
       captureClick, { kind: 'text', chars: 'Cuekeeper' }, { kind: 'text', chars: ' M1' },
       { kind: 'focus', active: false }, { kind: 'text', chars: 'Other app' },
       { kind: 'focus', active: true }, { kind: 'boundary' }, captureSave,
-    ]);
+    ], { seconds: 90 });
     assert.equal(code, 0);
     assert.equal(response.ok, true);
     assert.equal(response.data.actions, 3);
@@ -125,7 +125,7 @@ test('record CLI saves buffered text and reports partial capture after input per
     const { code, response, recorded } = recordFixture(t, [
       captureClick, { kind: 'text', chars: 'Already captured' },
       { kind: 'error', code: 'INPUT_MONITORING_LOST' },
-    ], 1, ['--no-indicator', '--sound']);
+    ], { captureExit: 1, flags: ['--no-indicator', '--sound'] });
     assert.equal(code, 1);
     assert.equal(response.ok, false);
     assert.equal(response.error.code, 'INPUT_MONITORING_LOST');
