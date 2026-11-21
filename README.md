@@ -2,6 +2,55 @@
 
 Cuekeeper 把桌面操作录成可编辑的 JSON 流程，再按可访问性树定位控件、回放并生成离线报告。M1 提供命令行入口，目标平台为 macOS。执行器固定使用 agent-desktop 1.3.1。流程、报告和离线验证可跨平台使用。
 
+## Quick start
+
+需要 macOS、Node.js 22+ 和 pnpm 10.28.2。GitHub Actions 在 `macos-latest` 上执行相同的安装、构建、测试和录制器编译，工作流见 `.github/workflows/ci.yml`。
+
+安装并验证：
+
+```sh
+git clone git@github.com:CaicaiNo/CueKeeper.git
+cd CueKeeper
+pnpm install --frozen-lockfile
+pnpm build
+pnpm test
+```
+
+录制（需要 macOS 辅助功能和输入监控权限，步骤见 [TextEdit 验收](docs/textedit.md)）：
+
+```sh
+pnpm build:recorder
+mkdir -p out/demo
+node dist/cli.js record --app com.apple.TextEdit --window "无标题" --out out/demo/recorded.flow.json --seconds 30
+```
+
+回放与报告。下面的离线命令使用仓库自带样本，不需要桌面权限，可直接验证安装：
+
+```sh
+mkdir -p out/demo
+cp examples/textedit.flow.json out/demo/flow.json
+node dist/cli.js run examples/textedit.flow.json --dry-run \
+  --snapshot examples/textedit.snapshot.json --report out/demo/report.json --json
+node dist/cli.js report pack out/demo/report.json \
+  --flow examples/textedit.flow.json --out out/demo/report.zip --json
+unzip -t out/demo/report.zip
+```
+
+录制流程的实时回放先干跑确认定位器，再加 `--headed` 执行物理点击：
+
+```sh
+node dist/cli.js run out/demo/recorded.flow.json --dry-run --json
+node dist/cli.js run out/demo/recorded.flow.json --headed --report out/demo/recorded-report.json --json
+```
+
+工作台读取 `flow.json`、`recorded.flow.json`、`report.json` 等同目录文件（终端会打印本机地址，手动打开，`Ctrl+C` 关闭）：
+
+```sh
+node dist/cli.js workbench out/demo
+```
+
+可选：`pnpm link --global` 后可直接用 `cuekeeper` 代替 `node dist/cli.js`，不需要其他全局依赖。
+
 ## 构建与离线验证
 
 需要 Node.js 22+ 和 pnpm 10。以下命令使用仓库自带的 TextEdit 树样本检查定位器和报告。
