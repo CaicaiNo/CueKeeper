@@ -2,6 +2,8 @@
 import { parseArgs } from 'node:util';
 import { dirname, resolve } from 'node:path';
 import { discoverAssets } from './assets.js';
+import { capturePreflight, diagnose, formatDoctor, preflightFault } from './doctor.js';
+import { buildInfo, versionLine } from './version.js';
 import { BatchError, batchExitCode, bindRows, readData, resolveBatchSecrets, runBatch } from './batch.js';
 import { captureTargetCheck } from './contracts.js';
 import { offlineDesktop, withDesktop } from './desktop.js';
@@ -17,8 +19,10 @@ import { runFlow } from './run.js';
 import { parseTestItem, resolveSecrets } from './test-item.js';
 import { startWorkbench } from './workbench.js';
 
-const help = `Cuekeeper
+const help = `Cuekeeper ${buildInfo().version}
 
+  cuekeeper --version
+  cuekeeper doctor [--json]
   cuekeeper flow validate <flow.json|test.json> [--json]
   cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--report <report.json>] [--json]
   cuekeeper workbench [run-directory] [--port <port>] [--library <directory>] [--allow-live-replay]
@@ -77,7 +81,19 @@ async function main() {
     success({ usage: help }, help);
     return;
   }
+  if (argv[0] === '--version' || argv[0] === '-v' || argv[0] === 'version') {
+    const info = buildInfo();
+    success({ ...info }, versionLine(info));
+    return;
+  }
   const [command, ...rest] = argv;
+  if (command === 'doctor') {
+    const { positionals } = parseArgs({ args: rest, options: common, allowPositionals: true });
+    checkPositionals(positionals, 0);
+    const report = await diagnose();
+    success(report, formatDoctor(report), report.ok ? 0 : 1);
+    return;
+  }
   if (command === 'flow' && rest[0] === 'validate') {
     const { positionals } = parseArgs({ args: rest.slice(1), options: common, allowPositionals: true });
     checkPositionals(positionals, 1);
@@ -248,6 +264,8 @@ async function main() {
     const seconds = Number(values.seconds);
     if (!Number.isInteger(seconds) || seconds < 1 || seconds > 90) throw new Error('--seconds must be an integer from 1 to 90');
     macOnly();
+    const preflight = preflightFault(await capturePreflight());
+    if (preflight) throw preflight;
     await ensureNew(output);
     const options = { seconds, indicator: !values['no-indicator'], sound: values.sound ?? false,
       traceClicks: values['trace-clicks'] ?? false };

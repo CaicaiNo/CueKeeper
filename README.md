@@ -2,11 +2,40 @@
 
 Cuekeeper 把桌面操作录成可编辑的 JSON 流程，再按可访问性树定位控件、回放并生成离线报告。M1 提供命令行入口，目标平台为 macOS。执行器固定使用 agent-desktop 1.3.1。流程、报告和离线验证可跨平台使用。
 
-## Quick start
+## 安装
+
+### 从发布包安装（推荐，无需 Node 和 pnpm）
+
+发布产物是自包含目录包 `cuekeeper-<version>-macos-<arch>.tar.gz`，内含 CLI、工作台静态资源、预编译录制器和 Node 运行时。平台为 macOS，架构与产物名一致。
+
+```sh
+# 1. 校验下载产物（.sha256 文件与包同目录）
+shasum -a 256 -c cuekeeper-<version>-macos-<arch>.tar.gz.sha256
+
+# 2. 解到用户目录，不要用 sudo
+mkdir -p ~/Applications
+tar -xzf cuekeeper-<version>-macos-<arch>.tar.gz -C ~/Applications
+export PATH="$HOME/Applications/cuekeeper-<version>-macos-<arch>/bin:$PATH"
+
+# 3. 自检：Node 运行时、文件完整性、agent-desktop、录制器与权限
+cuekeeper doctor
+```
+
+`doctor` 全部 `[ok ]` 后即可录制。它只读取状态：不弹授权框、不打开应用、不占用桌面。缺 `agent-desktop` 时按提示安装 1.3.1——Cuekeeper 锁定该版本，其他版本会拒绝执行。缺辅助功能或输入监控权限时，终端会打印系统设置直达入口与逐步说明，手动授权后重新运行 `cuekeeper doctor`；`record` 启动前也会做同样的自检，缺权限时以退出码 `2` 结束并给出同一份说明。
+
+首次打开未签名产物时 macOS 会拦截。发布包没有 Developer ID 签名，也没有公证：右击产物 → 打开，或在「系统设置 → 隐私与安全性」中选择「仍要打开」；也可以在终端移除隔离属性后重试：
+
+```sh
+xattr -dr com.apple.quarantine ~/Applications/cuekeeper-<version>-macos-<arch>
+```
+
+升级：下载新版本，解到同一路径覆盖安装。保持路径不变，macOS 才会沿用录制器的权限授权。卸载：删除该目录即可；行为库留在 `~/.cuekeeper`，需要时手动删除。没有自动更新服务。
+
+产物结构、打包命令、校验和、版本命名与签名边界见 [打包与分发](docs/packaging.md)。
+
+### 从源码运行（开发者）
 
 需要 macOS、Node.js 22+ 和 pnpm 10.28.2。GitHub Actions 在 `macos-latest` 上执行相同的安装、构建、测试和录制器编译，工作流见 `.github/workflows/ci.yml`。
-
-安装并验证：
 
 ```sh
 git clone git@github.com:CaicaiNo/CueKeeper.git
@@ -16,7 +45,7 @@ pnpm build
 pnpm test
 ```
 
-录制（需要 macOS 辅助功能和输入监控权限，步骤见 [TextEdit 验收](docs/textedit.md)）：
+录制（首次使用先运行 `node dist/cli.js doctor` 检查环境；需要 macOS 辅助功能和输入监控权限，步骤见 [TextEdit 验收](docs/textedit.md)）：
 
 ```sh
 pnpm build:recorder
@@ -49,7 +78,7 @@ node dist/cli.js run out/demo/recorded.flow.json --headed --report out/demo/reco
 node dist/cli.js workbench out/demo
 ```
 
-可选：`pnpm link --global` 后可直接用 `cuekeeper` 代替 `node dist/cli.js`，不需要其他全局依赖。
+可选：`pnpm link --global` 后可直接用 `cuekeeper` 代替 `node dist/cli.js`，不需要其他全局依赖。发布包用 `pnpm package` 生成，详细参数见 [打包与分发](docs/packaging.md)。
 
 ## 构建与离线验证
 
@@ -122,6 +151,8 @@ node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --selec
 
 | 命令 | 用途 |
 | --- | --- |
+| `doctor [--json]` | 只读自检：Node 运行时、文件完整性、agent-desktop 版本、录制器与辅助功能/输入监控权限；末行为下一步 |
+| `--version` | 打印版本，发布包还带构建提交 |
 | `flow validate <flow.json>` | 检查 v1 结构、ID、行为引用和参数绑定 |
 | `record --app <bundle-id> --window <精确标题> --out <flow.json>` | 录制目标窗口，显示计时 HUD，支持 `--no-indicator` 和 `--sound` |
 | `pick --app <bundle-id> --window <精确标题> [--select <ref>] [--snapshot <snapshot.json>]` | 只读快照，按可交互元素优先列出候选，或输出可写入 flow 的定位器 |
@@ -141,6 +172,6 @@ node dist/cli.js report pack out/demo/batch.json.rows/row-000001/report.json \
   --flow out/demo/batch.json.rows/row-000001/flow.json --out out/demo/row-1.zip --json
 ```
 
-所有命令支持 `--json`，标准输出提供单个 JSON 对象。错误有 `error.code` 和 `error.message`。生成的运行报告放在 `data` 中，失败报告的 `ok` 为 `false`。录制状态提示写标准错误。正常结束且有有效动作时，CLI 返回 `ok: true`，跳过的事件记录在 `data.warnings`。录制失败或中断时，已有步骤保存至 `--out`，CLI 返回 `data.partial: true` 及原因。没有有效动作时返回错误。退出码为 `0` 完成、`1` 失败、阻塞或部分录制、`2` 输入文件或依赖错误、`130` 中断。
+所有命令支持 `--json`，标准输出提供单个 JSON 对象。错误有 `error.code` 和 `error.message`。生成的运行报告放在 `data` 中，失败报告的 `ok` 为 `false`。录制状态提示写标准错误。正常结束且有有效动作时，CLI 返回 `ok: true`，跳过的事件记录在 `data.warnings`。录制失败或中断时，已有步骤保存至 `--out`，CLI 返回 `data.partial: true` 及原因。没有有效动作时返回错误。退出码为 `0` 完成、`1` 失败、阻塞或部分录制、`2` 输入文件或依赖错误、`130` 中断。`doctor` 用 `0` 表示全部检查通过、`1` 表示有检查失败；`record` 的启动自检使用 `2`，错误码为 `RECORDER_MISSING`、`RECORDER_UNUSABLE` 或 `PERMISSIONS_REQUIRED`。
 
 [架构与里程碑](docs/architecture.md)说明 schema、适配接口、录制限制与后续工作。

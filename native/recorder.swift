@@ -454,6 +454,13 @@ struct RecorderCommand {
     @MainActor
     static func main() {
         let args = CommandLine.arguments
+        // Read-only TCC preflight for `cuekeeper doctor`; it never prompts.
+        if args.count == 2, args[1] == "--permissions" {
+            let accessibility = AXIsProcessTrusted()
+            let inputMonitoring = CGPreflightListenEventAccess()
+            print("{\"accessibility\":\(accessibility),\"inputMonitoring\":\(inputMonitoring)}")
+            exit(0)
+        }
         let switches = args.dropFirst(4)
         guard args.count >= 4, let window = Int(args[2]), window > 0,
               let seconds = Double(args[3]), (1...90).contains(seconds),

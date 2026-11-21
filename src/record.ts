@@ -155,7 +155,8 @@ export async function record(
   const windowNumber = /^w-([1-9]\d*)$/.exec(initial.windowId)?.[1];
   if (!windowNumber) throw new Fault('WINDOW_ID', 'Capture requires a macOS window number');
   signal.throwIfAborted();
-  const executable = fileURLToPath(new URL('./cuekeeper-capture', import.meta.url));
+  const executable = process.env.CUEKEEPER_RECORDER?.trim() ||
+    fileURLToPath(new URL('./cuekeeper-capture', import.meta.url));
   const args = [target.app, windowNumber, String(seconds)];
   if (!indicator) args.push('--no-indicator');
   if (sound) args.push('--sound');
