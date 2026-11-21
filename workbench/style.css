@@ -127,6 +127,9 @@ input::placeholder { color: #a5a199; }
 .app-picker-icon img { width: 18px; height: 18px; display: block; border-radius: 3px; }
 .app-picker-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .app-picker-chevron { margin-left: auto; display: grid; place-items: center; color: var(--muted); }
+.app-search-bar { display: flex; align-items: center; gap: 8px; }
+.app-search-bar .app-search { flex: 1; min-width: 0; }
+.app-search-bar .button { min-height: 32px; flex: none; }
 .app-search { position: relative; }
 .app-search > svg { position: absolute; left: 9px; top: 9px; color: var(--muted); pointer-events: none; }
 .app-search input { padding-left: 30px; }
@@ -148,6 +151,12 @@ input::placeholder { color: #a5a199; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .app-row-check { display: grid; place-items: center; color: var(--accent); }
+.app-row-stale {
+  display: inline-block; margin-top: 2px; padding: 1px 5px; border-radius: 2px;
+  background: var(--accent-soft); color: var(--danger); font: 10px/1.4 var(--mono);
+}
+.app-row.stale .app-row-name { color: var(--danger); }
+.path-stale { color: var(--danger); font-size: 11.5px; }
 .app-glyph { position: relative; width: 18px; height: 18px; flex: none; display: grid; place-items: center; }
 .app-glyph img { width: 18px; height: 18px; display: block; border-radius: 3px; }
 .app-icon-fallback {

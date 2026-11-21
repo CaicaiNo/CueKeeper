@@ -1,7 +1,9 @@
+import { createDom } from './dom.js';
 import {
   canUndo, changeTarget, compileDraft, confirmCondition, confirmedSetup, deleteCondition, id, makeBehavior,
   retargetCondition, sameTarget, setupDraft, undoCondition, visibleRows,
 } from './model.js';
+import { createAppPicker } from './picker.js';
 
 const $ = name => document.getElementById(name);
 const dialog = $('dialog');
@@ -10,45 +12,8 @@ const state = {
   expanded: new Set(), showIgnored: false, focused: null, draft: [], tab: 'actions', saving: false, setup: null, appPaths: {}, catalog: null, catalogAt: 0, catalogError: null, appNames: {},
 };
 
-function el(tag, attributes = {}, ...children) {
-  const node = document.createElement(tag);
-  for (const [key, value] of Object.entries(attributes)) {
-    if (value === undefined || value === false) continue;
-    if (key in node && !key.startsWith('aria')) node[key] = value;
-    else node.setAttribute(key, value);
-  }
-  node.append(...children.filter(child => child !== undefined && child !== null));
-  return node;
-}
-
-const ICONS = {
-  up: '<path d="m18 15-6-6-6 6"/>',
-  down: '<path d="m6 9 6 6 6-6"/>',
-  trash: '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M10 11v6"/><path d="M14 11v6"/>',
-  plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
-  copy: '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2"/>',
-  play: '<path d="m6 3 14 9-14 9V3z"/>',
-  save: '<path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/>',
-  folder: '<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/>',
-  check: '<path d="M20 6 9 17l-5-5"/>',
-  refresh: '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
-  undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11"/>',
-  eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>',
-  eyeOff: '<path d="m2 2 20 20"/><path d="M6.71 6.71A10.9 10.9 0 0 0 2 12a10.9 10.9 0 0 0 10 6 10.9 10.9 0 0 0 5.29-1.29"/><path d="M10.73 5.08A10.9 10.9 0 0 1 12 5c4.48 0 8.27 2.94 10 7a11.8 11.8 0 0 1-1.67 2.68"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/>',
-  crosshair: '<circle cx="12" cy="12" r="10"/><path d="M22 12h-4"/><path d="M6 12H2"/><path d="M12 6V2"/><path d="M12 22v-4"/>',
-  listPlus: '<path d="M11 12H3"/><path d="M16 6H3"/><path d="M16 18H3"/><path d="M18 9v6"/><path d="M21 12h-6"/>',
-  checkCircle: '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
-  sliders: '<path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M2 14h4"/><path d="M10 8h4"/><path d="M18 16h4"/>',
-  x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
-  layers: '<path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 12.18-9.17 4.16a2 2 0 0 1-1.66 0L2 12.18"/><path d="m22 17.18-9.17 4.16a2 2 0 0 1-1.66 0L2 17.18"/>',
-  list: '<path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/>',
-  appWindow: '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="M10 4v4"/><path d="M2 8h20"/><path d="M6 4v4"/>',
-  search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
-  pointer: '<path d="M4 4l7.07 17 2.51-7.39L21 11.07z"/>',
-  text: '<path d="M17 22h-1a4 4 0 0 1-4-4V6a4 4 0 0 1 4-4h1"/><path d="M7 2h1a4 4 0 0 1 4 4v12a4 4 0 0 1-4 4H7"/>',
-  keyboard: '<rect width="20" height="16" x="2" y="4" rx="2"/><path d="M6 8h.01"/><path d="M10 8h.01"/><path d="M14 8h.01"/><path d="M18 8h.01"/><path d="M6 12h.01"/><path d="M10 12h.01"/><path d="M14 12h.01"/><path d="M18 12h.01"/><path d="M7 16h10"/>',
-  clock: '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
-};
+const dom = createDom(document);
+const { el, icon, button, empty, muted, input, field, select } = dom;
 
 const KIND_ICONS = { click: 'pointer', type: 'text', key: 'keyboard', wait: 'clock', assert: 'checkCircle', behavior: 'layers' };
 const KIND_LABELS = { behavior: '行为' };
@@ -58,29 +23,6 @@ function kindChip(kind) {
     icon(KIND_ICONS[kind] ?? 'list', 14), el('span', {}, KIND_LABELS[kind] ?? kind));
 }
 
-function icon(name, size = 16) {
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  for (const [key, value] of Object.entries({
-    viewBox: '0 0 24 24', width: String(size), height: String(size), fill: 'none', stroke: 'currentColor',
-    'stroke-width': '1.5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true',
-  })) svg.setAttribute(key, value);
-  svg.innerHTML = ICONS[name] ?? '';
-  return svg;
-}
-
-function button(label, onclick, { style = '', disabled = false, key, title, icon: iconName, iconOnly = false } = {}) {
-  const children = [];
-  if (iconName) children.push(icon(iconName));
-  if (!iconOnly && label) children.push(el('span', {}, label));
-  return el('button', {
-    type: 'button', className: `button ${style}${iconOnly ? ' icon' : ''}`, onclick, disabled, id: key,
-    title: title ?? (iconOnly ? label : undefined),
-    'aria-label': iconOnly ? (title ?? label) : undefined,
-  }, ...children);
-}
-
-const empty = text => el('p', { className: 'empty' }, text);
-const muted = text => el('p', { className: 'muted' }, text);
 const duration = ms => ms === undefined ? '—' : ms >= 1000 ? `${(ms / 1000).toFixed(2)} s` : `${ms} ms`;
 const timestamp = ms => ms === undefined ? '—' : `+${(ms / 1000).toFixed(2)} s`;
 const actionTarget = action => action.target ?? action.check?.target;
@@ -125,131 +67,13 @@ function appGlyph(app, onDuplicate, size = 18) {
 }
 
 async function openAppPicker() {
-  if (!state.session) return;
-  const search = input({ placeholder: '搜索应用', 'aria-label': '搜索应用' });
-  const list = el('div', { className: 'app-list', role: 'listbox', 'aria-label': '本机应用' });
-  const searchWrap = el('div', { className: 'app-search' }, icon('search', 14), search);
-  const body = el('div', { className: 'stack' }, searchWrap, list);
-  list.replaceChildren(muted('正在读取本机应用…'));
-  openDialog('选择应用', [body], undefined);
-  requestAnimationFrame(() => search.focus());
-
-  if (!state.catalog || Date.now() - state.catalogAt > 60_000) {
-    status('正在读取本机应用…');
-    try {
-      state.catalog = (await api('apps')).apps;
-      state.catalogAt = Date.now();
-      state.catalogError = null;
-      for (const app of state.catalog) state.appNames[app.bundleId] = app.name;
-      status(state.catalog.length ? '已读取本机应用' : '没有读取到本机应用');
-    } catch (error) {
-      state.catalogError = error.message;
-      if (!state.catalog) state.catalog = Object.values(state.session.apps ?? {});
-      status(`应用目录读取失败，只显示本次会话的应用：${error.message}`, 'error');
-    }
-  }
-  if (!dialog.open) return;
-  const catalog = [...state.catalog];
-  for (const app of Object.values(state.session.apps ?? {})) {
-    if (!catalog.some(item => item.bundleId === app.bundleId)) catalog.push({ ...app, paths: app.paths ?? [] });
-  }
-
-  const choose = (bundleId, path, app) => {
-    if (bundleId && app?.paths?.length > 1 && !path) {
-      showPaths(app);
-      return;
-    }
-    state.app = bundleId;
-    if (bundleId && app) state.appNames[bundleId] = app.name;
-    if (bundleId && path) state.appPaths[bundleId] = path;
-    dialog.close();
-    render();
-    status(bundleId ? `已筛选「${app?.name ?? appLabel(bundleId)}」` : '已显示全部应用');
-  };
-
-  const showPaths = app => {
-    const current = state.appPaths[app.bundleId];
-    const options = app.paths.map((path, index) => el('label', { className: 'path-option' },
-      el('input', { type: 'radio', name: 'app-path', value: path, checked: current ? current === path : index === 0 }),
-      el('span', {}, path)));
-    const back = button('返回', () => {
-      body.replaceChildren(searchWrap, list);
-      draw(search.value);
-      search.focus();
-    }, { style: 'small', icon: 'undo' });
-    const apply = el('button', {
-      type: 'button', className: 'button primary',
-      onclick: () => {
-        const checked = body.querySelector('input[name="app-path"]:checked');
-        if (checked) choose(app.bundleId, checked.value, app);
-      },
-    }, icon('check'), el('span', {}, '使用此副本'));
-    body.replaceChildren(
-      el('div', { className: 'path-step-head' }, back, el('strong', {}, app.name)),
-      muted(`「${app.name}」有 ${app.paths.length} 份副本。保存测试项时会写入这条路径；回放按路径锁定在下一步接入。`),
-      el('div', { className: 'path-list' }, ...options),
-      el('div', { className: 'actions' }, apply));
-  };
-
-  const appEmpty = (title, detail, clearSearch = false) => el('div', { className: 'app-empty' },
-    el('span', { className: 'app-empty-icon' }, icon(clearSearch ? 'search' : 'appWindow', 20)),
-    el('strong', {}, title),
-    muted(detail),
-    clearSearch
-      ? button('清除搜索', () => { search.value = ''; draw(''); search.focus(); }, { style: 'small', icon: 'x' })
-      : button('重新读取', () => {
-        state.catalog = null;
-        state.catalogError = null;
-        dialog.close();
-        openAppPicker();
-      }, { style: 'small', icon: 'refresh' }));
-
-  const draw = query => {
-    const value = query.trim().toLowerCase();
-    if (!catalog.length) {
-      list.replaceChildren(appEmpty(
-        state.catalogError ? '应用目录读取失败' : '没有读取到本机应用',
-        state.catalogError ?? '只读取 /Applications、/System/Applications 和 ~/Applications。',
-      ));
-      return;
-    }
-    const matches = catalog.filter(app => !value ||
-      app.name.toLowerCase().includes(value) || app.bundleId.toLowerCase().includes(value)).slice(0, 80);
-    if (value && !matches.length) {
-      list.replaceChildren(appEmpty('没有匹配的应用', `没有找到「${value}」，换个名称或 bundle id 试试。`, true));
-      return;
-    }
-    const rows = matches.map(app => el('div', {
-      className: 'app-row', role: 'option', tabindex: '0', 'aria-selected': String(state.app === app.bundleId),
-      title: appTitle(app.bundleId),
-      onclick: () => choose(app.bundleId, undefined, app),
-      onkeydown: event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); choose(app.bundleId, undefined, app); } },
-    },
-    appGlyph(app.bundleId, () => showPaths(app), 24),
-    el('span', {}, el('span', { className: 'app-row-name' }, app.name), el('span', { className: 'app-row-id' }, app.bundleId)),
-    state.app === app.bundleId ? el('span', { className: 'app-row-check' }, icon('check', 14)) : undefined));
-    if (!value) {
-      rows.unshift(el('div', {
-        className: 'app-row', role: 'option', tabindex: '0', 'aria-selected': String(!state.app),
-        onclick: () => choose('', undefined, undefined),
-        onkeydown: event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); choose('', undefined, undefined); } },
-      },
-      el('span', { className: 'app-glyph app-glyph-all' }, icon('appWindow', 14)),
-      el('span', {}, el('span', { className: 'app-row-name' }, '全部应用'), el('span', { className: 'app-row-id' }, '不过滤应用')),
-      !state.app ? el('span', { className: 'app-row-check' }, icon('check', 14)) : undefined));
-    }
-    list.replaceChildren(...rows);
-  };
-
-  search.addEventListener('input', () => draw(search.value));
-  search.addEventListener('keydown', event => {
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      list.querySelector('.app-row')?.click();
-    }
-  });
-  draw('');
+  return appPicker.open();
 }
+
+const appPicker = createAppPicker({
+  requestAnimationFrame, dialog, dom, state, api, openDialog, status, render,
+  appGlyph, appTitle,
+});
 function locatorLabel(target) {
   if (!target) return '目标窗口';
   if (target.kind === 'point') return `坐标 (${target.point.join(', ')})`;
@@ -584,11 +408,6 @@ function render() {
   renderDraft();
   if (focus && !dialog.open) $(focus)?.focus({ preventScroll: true });
 }
-
-const field = (label, input) => el('label', { className: 'field' }, label, input);
-const input = (options = {}) => el('input', { type: 'text', ...options });
-const select = (items, onchange) => el('select', { onchange },
-  ...items.map(([value, label]) => el('option', { value }, label)));
 
 function openDialog(title, content, submitLabel, submit) {
   let busy = false;

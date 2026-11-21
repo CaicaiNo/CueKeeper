@@ -117,6 +117,34 @@ export function undoCondition(draft, id) {
   return previous;
 }
 
+export const APP_ROW_LIMIT = 80;
+
+export function filterApps(catalog, query, limit = APP_ROW_LIMIT) {
+  const value = query.trim().toLowerCase();
+  return catalog.filter(app => !value ||
+    app.name.toLowerCase().includes(value) || app.bundleId.toLowerCase().includes(value)).slice(0, limit);
+}
+
+export function staleAppPath(app, appPaths = {}) {
+  const chosen = appPaths?.[app.bundleId];
+  return Boolean(chosen) && !(app.paths ?? []).includes(chosen);
+}
+
+export function pickerRows(catalog, query, { current = '', appPaths = {} } = {}) {
+  const rows = filterApps(catalog, query).map(app => ({
+    kind: 'app', app, bundleId: app.bundleId,
+    selected: current === app.bundleId, stale: staleAppPath(app, appPaths),
+  }));
+  if (!query.trim()) rows.unshift({ kind: 'all', app: undefined, bundleId: '', selected: !current, stale: false });
+  return rows;
+}
+
+export function moveAppFocus(index, delta, length) {
+  if (length <= 0) return -1;
+  if (index < 0) return delta > 0 ? 0 : length - 1;
+  return ((index + delta) % length + length) % length;
+}
+
 export function visibleRows(rows, app, ignored, showIgnored) {
   return rows.filter(row => (!app || row.app === app) && (showIgnored || !ignored.has(row.id)));
 }
