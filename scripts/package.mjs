@@ -201,6 +201,17 @@ function main() {
   mkdirSync(join(staging, 'runtime'), { recursive: true });
   copyFileSync(options.node, join(staging, 'runtime', 'node'));
   chmodSync(join(staging, 'runtime', 'node'), 0o755);
+  // Ship the bundled runtime's license when the installed Node provides one.
+  for (const candidate of [join(dirname(options.node), 'LICENSE'), join(dirname(options.node), '..', 'LICENSE')]) {
+    if (existsSync(candidate)) {
+      copyFileSync(candidate, join(staging, 'runtime', 'LICENSE'));
+      break;
+    }
+  }
+  writeFileSync(join(staging, 'runtime', 'NOTICE'),
+    `This release bundles the Node.js runtime (${process.version}) so Cuekeeper runs without a local install.\n` +
+    'Node.js is distributed under the MIT license and additional third-party licenses:\n' +
+    'https://nodejs.org/en/about/previous-releases#license\n');
 
   const commit = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' });
   const commitText = commit.status === 0 ? commit.stdout.trim() : undefined;
