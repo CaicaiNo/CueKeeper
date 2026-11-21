@@ -24,15 +24,14 @@ struct PointerObservation {
         case recorderEvent = "recorder_event", overlay, otherWindow = "other_window", noWindow = "no_window"
         case unsupportedClick = "unsupported_click", eventLimit = "event_limit"
         case awaitingRelease = "awaiting_release", unmatchedUp = "unmatched_up", dragObserved = "drag_observed", accepted
-        case duplicateDown = "duplicate_down", multiClickCollapsed = "multi_click_collapsed", dragSkipped = "drag_skipped"
+        case duplicateDown = "duplicate_down", dragSkipped = "drag_skipped"
 
         var suppressed: Bool {
-            self == .duplicateDown || self == .multiClickCollapsed || self == .dragSkipped
+            self == .duplicateDown || self == .dragSkipped
         }
 
         var warning: String? {
             switch self {
-            case .multiClickCollapsed: return "MULTI_CLICK_COLLAPSED"
             case .dragSkipped: return "DRAG_SKIPPED"
             default: return nil
             }
@@ -41,13 +40,14 @@ struct PointerObservation {
 
     let phase: Phase
     let event: Event
-    let plainLeftClick: Bool
+    let plainClick: Bool
     let recorderEvent: Bool
     let overIndicator: Bool
     let hitWindow: Int?
     let targetWindow: Int
     let targetAppFrontmost: Bool?
     let frontWindow: Int?
+    let button: Int64
 
     var scope: Scope {
         if overIndicator { return .overlay }
@@ -76,7 +76,7 @@ struct PointerObservation {
         case .unresolved: return .noWindow
         case .activation, .content: break
         }
-        guard plainLeftClick else { return .unsupportedClick }
+        guard plainClick else { return .unsupportedClick }
         return .awaitingRelease
     }
 
@@ -107,27 +107,41 @@ struct PointerObservation {
 
 struct RecordingPointer {
     typealias Reason = PointerObservation.Reason
+    struct Click {
+        let down: PointerSample
+        let button: Int64
+        let count: Int64
+        let truncated: Bool
+    }
     private struct Press {
         let down: PointerSample
+        let button: Int64
+        let count: Int64
+        let truncated: Bool
         var eventNumbers: Set<Int64>
     }
 
     private static let debounceNs: UInt64 = 120_000_000
     private static let maxDistanceSquared: CGFloat = 9
+    private static let maxCount: Int64 = 3
     private var lastDown: PointerSample?
     private var pending: Press?
 
-    mutating func press(_ sample: PointerSample) -> Reason {
-        if sample.clickState > 1 { return .multiClickCollapsed }
-        defer { lastDown = sample }
-        if let lastDown, sample.timestamp >= lastDown.timestamp,
-           sample.timestamp - lastDown.timestamp < Self.debounceNs,
-           sample.squaredDistance(to: lastDown) < Self.maxDistanceSquared {
-            // A repeated down can have its own event number and matching up.
-            pending?.eventNumbers.insert(sample.eventNumber)
-            return .duplicateDown
+    mutating func press(_ sample: PointerSample, button: Int64) -> Reason {
+        let rawCount = button == 0 ? max(sample.clickState, 1) : 1
+        let count = min(rawCount, Self.maxCount)
+        if button == 0, sample.clickState <= 1 {
+            defer { lastDown = sample }
+            if let lastDown, sample.timestamp >= lastDown.timestamp,
+               sample.timestamp - lastDown.timestamp < Self.debounceNs,
+               sample.squaredDistance(to: lastDown) < Self.maxDistanceSquared {
+                // A repeated down can have its own event number and matching up.
+                pending?.eventNumbers.insert(sample.eventNumber)
+                return .duplicateDown
+            }
         }
-        pending = Press(down: sample, eventNumbers: [sample.eventNumber])
+        pending = Press(down: sample, button: button, count: count, truncated: rawCount > Self.maxCount,
+                        eventNumbers: [sample.eventNumber])
         return .awaitingRelease
     }
 
@@ -138,11 +152,12 @@ struct RecordingPointer {
         return .dragSkipped
     }
 
-    mutating func release(_ sample: PointerSample) -> (reason: Reason, down: PointerSample?) {
+    mutating func release(_ sample: PointerSample) -> (reason: Reason, click: Click?) {
         guard let pending, pending.eventNumbers.contains(sample.eventNumber),
               sample.timestamp >= pending.down.timestamp else { return (.unmatchedUp, nil) }
-        if drag(sample) == .dragSkipped { return (.dragSkipped, pending.down) }
+        if drag(sample) == .dragSkipped { return (.dragSkipped, nil) }
         self.pending = nil
-        return (.accepted, pending.down)
+        return (.accepted, Click(down: pending.down, button: pending.button,
+                                 count: pending.count, truncated: pending.truncated))
     }
 }

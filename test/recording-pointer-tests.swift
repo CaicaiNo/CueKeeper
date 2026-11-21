@@ -5,11 +5,11 @@ struct RecordingPointerTests {
     static func main() throws {
         let target = 1234
         func click(_ phase: PointerObservation.Phase = .recording, event: PointerObservation.Event = .down,
-                   overlay: Bool = false, hit: Int? = 1234,
+                   overlay: Bool = false, hit: Int? = 1234, button: Int64 = 0,
                    targetAppFrontmost: Bool = true, frontWindow: Int? = nil) -> PointerObservation {
-            PointerObservation(phase: phase, event: event, plainLeftClick: event == .down, recorderEvent: false,
+            PointerObservation(phase: phase, event: event, plainClick: event == .down, recorderEvent: false,
                                overIndicator: overlay, hitWindow: hit, targetWindow: target,
-                               targetAppFrontmost: targetAppFrontmost, frontWindow: frontWindow)
+                               targetAppFrontmost: targetAppFrontmost, frontWindow: frontWindow, button: button)
         }
 
         let cases: [(PointerObservation, PointerObservation.Scope, PointerObservation.Reason)] = [
@@ -18,6 +18,7 @@ struct RecordingPointerTests {
             (click(event: .up), .content, .unmatchedUp),
             (click(frontWindow: 5678), .activation, .awaitingRelease),
             (click(), .content, .awaitingRelease),
+            (click(button: 1), .content, .awaitingRelease),
             (click(overlay: true), .overlay, .overlay),
             (click(hit: 5678), .otherWindow, .otherWindow),
             (click(hit: nil), .unresolved, .noWindow),
@@ -55,9 +56,11 @@ struct RecordingPointerTests {
         }
 
         func scenario(_ name: String, _ inputs: [Input], _ reasons: [Reason],
-                      _ clickNumbers: [Int64], _ warnings: [String] = [])
-            -> (name: String, inputs: [Input], reasons: [Reason], clickNumbers: [Int64], warnings: [String]) {
-            (name, inputs, reasons, clickNumbers, warnings)
+                      _ clickNumbers: [Int64], _ warnings: [String] = [], counts: [Int64] = [])
+            -> (name: String, inputs: [Input], reasons: [Reason], clickNumbers: [Int64],
+                warnings: [String], counts: [Int64]) {
+            (name, inputs, reasons, clickNumbers, warnings,
+             counts.isEmpty ? clickNumbers.map { _ in 1 } : counts)
         }
         let burst = (0..<5).map { input(.down, UInt64($0 * 10), Int64($0 + 1)) }
         let pairedBurst: [Input] = burst.flatMap { down -> [Input] in
@@ -76,7 +79,19 @@ struct RecordingPointerTests {
              [1]),
             scenario("double click", [input(.down, 0, 1), input(.up, 10, 1),
                               input(.down, 140, 2, state: 2), input(.up, 150, 2, state: 2)],
-             [.awaitingRelease, .accepted, .multiClickCollapsed, .unmatchedUp], [1], ["MULTI_CLICK_COLLAPSED"]),
+             [.awaitingRelease, .accepted, .awaitingRelease, .accepted], [1, 2], counts: [1, 2]),
+            scenario("triple click", [input(.down, 0, 1), input(.up, 10, 1),
+                              input(.down, 140, 2, state: 2), input(.up, 150, 2, state: 2),
+                              input(.down, 280, 3, state: 3), input(.up, 290, 3, state: 3)],
+             [.awaitingRelease, .accepted, .awaitingRelease, .accepted, .awaitingRelease, .accepted],
+             [1, 2, 3], counts: [1, 2, 3]),
+            scenario("four fast clicks clamp to a triple click",
+             [input(.down, 0, 1), input(.up, 10, 1),
+              input(.down, 140, 2, state: 2), input(.up, 150, 2, state: 2),
+              input(.down, 280, 3, state: 3), input(.up, 290, 3, state: 3),
+              input(.down, 420, 4, state: 4), input(.up, 430, 4, state: 4)],
+             [.awaitingRelease, .accepted, .awaitingRelease, .accepted, .awaitingRelease, .accepted,
+              .awaitingRelease, .accepted], [1, 2, 3, 4], counts: [1, 2, 3, 3]),
             scenario("two independent clicks 300 ms apart", [input(.down, 0, 1), input(.up, 10, 1),
                                                       input(.down, 300, 2), input(.up, 310, 2)],
              [.awaitingRelease, .accepted, .awaitingRelease, .accepted], [1, 2]),
@@ -99,29 +114,29 @@ struct RecordingPointerTests {
         for scenario in cases {
             var pointer = RecordingPointer()
             var reasons: [Reason] = []
-            var clicks: [PointerSample] = []
+            var clicks: [RecordingPointer.Click] = []
             for input in scenario.inputs {
                 let reason: Reason
-                let down: PointerSample?
+                let click: RecordingPointer.Click?
                 switch input.event {
-                case .down: (reason, down) = (pointer.press(input.sample), nil)
-                case .up: (reason, down) = pointer.release(input.sample)
-                case .drag: (reason, down) = (pointer.drag(input.sample), nil)
+                case .down: (reason, click) = (pointer.press(input.sample, button: 0), nil)
+                case .up: (reason, click) = pointer.release(input.sample)
+                case .drag: (reason, click) = (pointer.drag(input.sample), nil)
                 }
                 reasons.append(reason)
-                if reason == .accepted, let down { clicks.append(down) }
+                if reason == .accepted, let click { clicks.append(click) }
                 let observation = PointerObservation(
-                    phase: .recording, event: input.event, plainLeftClick: input.event == .down,
+                    phase: .recording, event: input.event, plainClick: input.event == .down,
                     recorderEvent: false, overIndicator: false, hitWindow: 1234, targetWindow: 1234,
-                    targetAppFrontmost: true, frontWindow: 1234
+                    targetAppFrontmost: true, frontWindow: 1234, button: 0
                 )
-                let row = observation.trace(sample: input.sample, reason: reason, down: down,
+                let row = observation.trace(sample: input.sample, reason: reason, down: click?.down,
                                             seenAtMs: 1_700_000_000_000, button: 0, modifierFlags: 0, quartzWindow: 1234)
                 precondition(row["reason"] as? String == reason.rawValue)
                 precondition(row["clickState"] as? Int64 == input.sample.clickState)
                 precondition(row["eventNumber"] as? Int64 == input.sample.eventNumber)
-                precondition(row["suppressed"] as? Bool == [.duplicateDown, .multiClickCollapsed, .dragSkipped].contains(reason))
-                precondition(row["downId"] as? String == down?.traceId)
+                precondition(row["suppressed"] as? Bool == [.duplicateDown, .dragSkipped].contains(reason))
+                precondition(row["downId"] as? String == click?.down.traceId)
                 if emitTrace {
                     let line = try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys])
                     print(String(decoding: line, as: UTF8.self))
@@ -129,9 +144,10 @@ struct RecordingPointerTests {
             }
             precondition(reasons == scenario.reasons, "Unexpected decisions for \(scenario.name): \(reasons)")
             let expectedDowns = scenario.inputs.filter { $0.event == .down && scenario.clickNumbers.contains($0.sample.eventNumber) }
-            precondition(clicks.map(\.eventNumber) == scenario.clickNumbers, "Unexpected clicks for \(scenario.name)")
-            precondition(zip(clicks, expectedDowns).allSatisfy { $0.squaredDistance(to: $1.sample) == 0 },
+            precondition(clicks.map(\.down.eventNumber) == scenario.clickNumbers, "Unexpected clicks for \(scenario.name)")
+            precondition(zip(clicks, expectedDowns).allSatisfy { $0.down.squaredDistance(to: $1.sample) == 0 },
                          "Click moved from its press location")
+            precondition(clicks.map(\.count) == scenario.counts, "Unexpected click counts for \(scenario.name)")
             precondition(reasons.compactMap(\.warning) == scenario.warnings, "Unexpected warnings for \(scenario.name)")
         }
         return cases.count

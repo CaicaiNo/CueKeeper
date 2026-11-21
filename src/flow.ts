@@ -28,6 +28,45 @@ function validateShell(action: Action, where: string) {
   if (!argv[0]) throw new Error(`${where}: shell program name must not be empty`);
 }
 
+function validatePointer(action: Action, where: string) {
+  if (action.kind === 'click') {
+    // A right click opens one context menu; a counted right click has no
+    // distinct driver command and would silently replay as a single click.
+    if (action.button === 'right' && (action.count ?? 1) !== 1) {
+      throw new Error(`${where}: a right click cannot carry a click count`);
+    }
+    return;
+  }
+  if (action.kind !== 'scroll') return;
+  if ('deltaX' in action) {
+    if (action.deltaX === 0 && action.deltaY === 0) {
+      throw new Error(`${where}: scroll deltas must not both be zero`);
+    }
+  } else if (!action.direction || !action.amount) {
+    throw new Error(`${where}: scroll needs a direction and a positive amount`);
+  }
+}
+
+export type ScrollDirection = 'up' | 'down' | 'left' | 'right';
+
+/**
+ * Resolves a scroll to the semantic direction/amount the driver accepts for
+ * element targets. Recorded deltas use CGEvent line units, where a positive
+ * vertical delta scrolls up (the same sign the driver posts for `direction up`).
+ */
+export function scrollIntent(action: Extract<Action, { kind: 'scroll' }>): {
+  direction: ScrollDirection; amount: number;
+} {
+  if ('direction' in action) return { direction: action.direction, amount: action.amount };
+  const { deltaX, deltaY } = action;
+  const vertical = Math.abs(deltaY) >= Math.abs(deltaX) && deltaY !== 0;
+  const magnitude = Math.abs(vertical ? deltaY : deltaX);
+  return {
+    direction: vertical ? (deltaY > 0 ? 'up' : 'down') : (deltaX > 0 ? 'right' : 'left'),
+    amount: Math.max(1, Math.min(1000, Math.round(magnitude))),
+  };
+}
+
 export function parseFlow(input: unknown): Flow {
   if (!flowCheck.Check(input)) {
     const error = flowCheck.Errors(input).First();
@@ -48,6 +87,7 @@ export function plan(flow: Flow): PlannedStep[] {
     for (const action of behavior.steps) {
       validateConditions(action.setup, `Behavior ${behavior.id}/${action.id}`);
       validateShell(action, `Behavior ${behavior.id}/${action.id}`);
+      validatePointer(action, `Behavior ${behavior.id}/${action.id}`);
       if (action.kind === 'type' && typeof action.text !== 'string' && !parameters.has(action.text.param)) {
         throw new Error(`Unknown parameter ${action.text.param} in behavior ${behavior.id}`);
       }
@@ -58,6 +98,7 @@ export function plan(flow: Flow): PlannedStep[] {
   function add(action: Action, path: string, args: Record<string, string>) {
     validateConditions(action.setup, path);
     validateShell(action, path);
+    validatePointer(action, path);
     if (action.kind === 'assert') validateAssertCheck(action.check, path);
     if (action.kind === 'type') {
       const value = typeof action.text === 'string' ? action.text :

@@ -42,9 +42,11 @@ node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --selec
 
 `--no-indicator` 可关闭边框与 HUD，此时以标准错误的 `Recording for up to ...` 提示开始，热键仍可用。时间到点或按停止热键时，录制会保存动作。Ctrl+C 和运行中失去权限会写入已有动作，并在 CLI 标记部分录制。没有可用动作时，CLI 会报告具体原因。
 
-单击在鼠标松开时入录。相邻两次按下间隔小于 120 ms 且距离小于 3 个逻辑点时，重复按下会被合并。系统识别为双击或三击时，v1 只保留首击用于回放，并报告 `MULTI_CLICK_COLLAPSED`。按住鼠标移动超过 3 个逻辑点时跳过本次拖动，并报告 `DRAG_SKIPPED`。
+单击在鼠标松开时入录。相邻两次按下间隔小于 120 ms 且距离小于 3 个逻辑点时，重复按下会被合并。系统识别为双击或三击时，后续按下不会新增步骤，而是把上一步升级为 `count: 2` 或 `count: 3`；超过三次的连续点击按三击记录并报告 `MULTI_CLICK_TRUNCATED`。右键记为 `button: "right"`。滚轮记录 `deltaX`/`deltaY`（CGEvent 行增量，各轴 ±1000）；同一目标 350 ms 内的滚轮事件合并为一步，`durationMs` 记录整段时长。按住鼠标移动超过 3 个逻辑点时跳过本次拖动，并报告 `DRAG_SKIPPED`。
 
-排查点击时，可为上述录制命令加 `--trace-clicks`，并单独保留标准错误中的 `CLICK_TRACE` 行。日志含原生鼠标按下、拖动和松开，附坐标、`eventNumber`、`clickState`、AppKit 命中窗口和 Quartz 窗口字段。查看 `suppressed` 和 `reason` 可判断是否因 `duplicate_down`、`multi_click_collapsed` 或 `drag_skipped` 被过滤。松开事件的 `downId` 对应原生按下的 `id`，也用于对照 flow 收录结果。`before_ready`、`overlay` 和 `OUTSIDE_WINDOW` 分别表示就绪前、指示器范围内和 CLI 快照检查拒绝。激活分类根据回调时观察到的应用和窗口推断。日志包含会话期间的鼠标位置，适合只在专用测试时开启。
+双击、三击和右键在回放中分别调用 `double-click`、`triple-click`、`right-click`；双击与三击是物理输入，需要 `--headed`，否则以 `HEADED_REQUIRED` 失败而不是退化成单击。元素滚动调用 `scroll --direction/--amount`，坐标滚动调用 `mouse-wheel --dx/--dy`，同样需要 `--headed`。真机上的滚轮方向、惯性和游戏/远程桌面场景尚未在本轮验收。
+
+排查点击时，可为上述录制命令加 `--trace-clicks`，并单独保留标准错误中的 `CLICK_TRACE` 行。日志含原生鼠标按下、拖动和松开，附坐标、`eventNumber`、`clickState`、AppKit 命中窗口和 Quartz 窗口字段。查看 `suppressed` 和 `reason` 可判断是否因 `duplicate_down` 或 `drag_skipped` 被过滤。松开事件的 `downId` 对应原生按下的 `id`，也用于对照 flow 收录结果。`before_ready`、`overlay` 和 `OUTSIDE_WINDOW` 分别表示就绪前、指示器范围内和 CLI 快照检查拒绝。激活分类根据回调时观察到的应用和窗口推断。日志包含会话期间的鼠标位置，适合只在专用测试时开启。
 
 ## 回放与核对
 

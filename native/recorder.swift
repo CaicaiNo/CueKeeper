@@ -320,8 +320,11 @@ final class Capture {
         case .leftMouseUp, .rightMouseUp, .otherMouseUp:
             receivePointer(type, event, eventKind: .up)
             return
-        case .leftMouseDragged:
+        case .leftMouseDragged, .rightMouseDragged:
             receivePointer(type, event, eventKind: .drag)
+            return
+        case .scrollWheel:
+            receiveScroll(event)
             return
         default:
             break
@@ -416,6 +419,7 @@ final class Capture {
         let sample = PointerSample(timestamp: event.timestamp, location: event.location,
                                    eventNumber: event.getIntegerValueField(.mouseEventNumber),
                                    clickState: event.getIntegerValueField(.mouseEventClickState))
+        let button = event.getIntegerValueField(.mouseEventButtonNumber)
         let screenPoint = eventKind == .down || traceClicks ? NSScreen.screens.first.map {
             NSPoint(x: sample.location.x, y: $0.frame.maxY - sample.location.y)
         } : nil
@@ -440,48 +444,52 @@ final class Capture {
             frontWindow = (top?[kCGWindowNumber as String] as? NSNumber)?.intValue
         }
         let modifiers = event.flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift])
+        let plainClick = modifiers.isEmpty &&
+            (type == .leftMouseDown || (type == .rightMouseDown && button == 1))
         let observation = PointerObservation(
-            phase: phase, event: eventKind,
-            plainLeftClick: type == .leftMouseDown && sample.clickState >= 1 && modifiers.isEmpty,
+            phase: phase, event: eventKind, plainClick: plainClick,
             recorderEvent: event.getIntegerValueField(.eventTargetUnixProcessID) == ownPID ||
                 event.getIntegerValueField(.eventSourceUnixProcessID) == ownPID,
             overIndicator: screenPoint.map { indicator?.covers($0) == true } ?? false,
             hitWindow: hit.flatMap { $0 > 0 ? $0 : nil }, targetWindow: window,
-            targetAppFrontmost: targetAppFrontmost, frontWindow: frontWindow
+            targetAppFrontmost: targetAppFrontmost, frontWindow: frontWindow, button: button
         )
         var reason = observation.reason
-        var down: PointerSample?
+        var click: RecordingPointer.Click?
         switch reason {
         case .awaitingRelease:
-            reason = pointer.press(sample)
-        case .unmatchedUp where type == .leftMouseUp:
-            (reason, down) = pointer.release(sample)
+            reason = pointer.press(sample, button: button)
+        case .unmatchedUp where type == .leftMouseUp || type == .rightMouseUp:
+            (reason, click) = pointer.release(sample)
             if reason == .accepted && events >= 1000 { reason = .eventLimit }
         case .dragObserved:
             reason = pointer.drag(sample)
         case .unsupportedClick, .overlay, .otherWindow, .noWindow:
-            if type == .leftMouseDown { pointer = RecordingPointer() }
+            if type == .leftMouseDown || type == .rightMouseDown { pointer = RecordingPointer() }
         default:
             break
         }
         if traceClicks {
-            emit(observation.trace(sample: sample, reason: reason, down: down,
+            emit(observation.trace(sample: sample, reason: reason, down: click?.down,
                                    seenAtMs: Int(Date().timeIntervalSince1970 * 1000),
-                                   button: event.getIntegerValueField(.mouseEventButtonNumber),
+                                   button: button,
                                    modifierFlags: modifiers.rawValue,
                                    quartzWindow: event.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent)))
         }
         guard !stopped else { return }
         switch reason {
         case .accepted:
-            guard let started, let down, registerEvent() else { return }
-            var click: [String: Any] = [
-                "kind": "click", "point": [Int(down.location.x.rounded()), Int(down.location.y.rounded())],
+            guard let started, let click, registerEvent() else { return }
+            if click.truncated { warn("MULTI_CLICK_TRUNCATED") }
+            var emitted: [String: Any] = [
+                "kind": "click", "point": [Int(click.down.location.x.rounded()), Int(click.down.location.y.rounded())],
+                "count": Int(click.count),
                 "t": Int((ProcessInfo.processInfo.systemUptime - started) * 1000),
                 "seen": Int(Date().timeIntervalSince1970 * 1000),
             ]
-            if traceClicks { click["traceId"] = down.traceId }
-            emit(click)
+            if click.button == 1 { emitted["button"] = "right" }
+            if traceClicks { emitted["traceId"] = click.down.traceId }
+            emit(emitted)
         case .unsupportedClick:
             if registerEvent() { warn(type == .leftMouseDown ? "UNSUPPORTED_CLICK" : "UNSUPPORTED_EVENT") }
         case .eventLimit:
@@ -491,6 +499,61 @@ final class Capture {
         default:
             if let warning = reason.warning { warn(warning) }
         }
+    }
+
+    /// Wheel input is scoped to the selected window and recorded as line deltas,
+    /// which replay posts back through the driver's wheel command.
+    private func receiveScroll(_ event: CGEvent) {
+        guard let started, !stopped, stopReleaseDeadline == nil, pausedAt == nil else { return }
+        flushPauseBoundary()
+        let destination = event.getIntegerValueField(.eventTargetUnixProcessID)
+        guard destination != ownPID, event.getIntegerValueField(.eventSourceUnixProcessID) != ownPID else { return }
+        guard refreshFocus() != nil else { return }
+        guard let primary = NSScreen.screens.first else { return }
+        let point = NSPoint(x: event.location.x, y: primary.frame.maxY - event.location.y)
+        guard indicator?.covers(point) != true,
+              NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0) == window else {
+            emit(["kind": "boundary"])
+            return
+        }
+        var deltaY = event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
+        var deltaX = event.getIntegerValueField(.scrollWheelEventDeltaAxis2)
+        if deltaX == 0 && deltaY == 0 {
+            // Continuous devices report point or fixed-point deltas instead.
+            deltaY = Int64(event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1).rounded())
+            deltaX = Int64(event.getDoubleValueField(.scrollWheelEventPointDeltaAxis2).rounded())
+        }
+        if deltaX == 0 && deltaY == 0 {
+            deltaY = Int64(event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1).rounded())
+            deltaX = Int64(event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2).rounded())
+        }
+        guard deltaX != 0 || deltaY != 0 else { return }
+        guard registerEvent() else { return }
+        emit([
+            "kind": "scroll",
+            "point": [Int(point.x.rounded()), Int(point.y.rounded())],
+            "deltaX": Int(deltaX.clamped(to: -scrollDeltaLimit...scrollDeltaLimit)),
+            "deltaY": Int(deltaY.clamped(to: -scrollDeltaLimit...scrollDeltaLimit)),
+            "phase": scrollPhase(event.getIntegerValueField(.scrollWheelEventScrollPhase)),
+            "t": Int((ProcessInfo.processInfo.systemUptime - started) * 1000),
+            "seen": Int(Date().timeIntervalSince1970 * 1000),
+        ])
+    }
+
+    private func scrollPhase(_ value: Int64) -> String {
+        if value & 8 != 0 { return "cancelled" }
+        if value & 4 != 0 { return "ended" }
+        if value & 2 != 0 { return "changed" }
+        if value & 1 != 0 { return "began" }
+        return "none"
+    }
+}
+
+private let scrollDeltaLimit: Int64 = 1000
+
+private extension Int64 {
+    func clamped(to range: ClosedRange<Int64>) -> Int64 {
+        Swift.min(Swift.max(self, range.lowerBound), range.upperBound)
     }
 }
 
@@ -561,9 +624,10 @@ struct RecorderCommand {
                           "detail": "Recording hotkeys require Accessibility access for this helper"])
             exit(2)
         }
-        var observedTypes: [CGEventType] = [.leftMouseDown, .leftMouseUp, .rightMouseDown, .otherMouseDown,
-                                            .leftMouseDragged, .keyDown, .scrollWheel]
-        if switches.contains("--trace-clicks") { observedTypes += [.rightMouseUp, .otherMouseUp] }
+        var observedTypes: [CGEventType] = [.leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
+                                            .otherMouseDown, .leftMouseDragged, .rightMouseDragged,
+                                            .keyDown, .scrollWheel]
+        if switches.contains("--trace-clicks") { observedTypes += [.otherMouseUp] }
         let mask = observedTypes.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
         let context = Unmanaged.passUnretained(capture).toOpaque()
         let hotkeyMask = (CGEventMask(1) << CGEventType.keyDown.rawValue) |

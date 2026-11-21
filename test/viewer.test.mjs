@@ -227,6 +227,27 @@ test('viewer selects the failed step, filters, previews disconnects, and restore
   assert.equal(second.storage.size, 0);
 });
 
+test('the viewer summary names double clicks, right clicks and scroll direction', async () => {
+  const flow = parseFlow({
+    version: 1, id: 'gesture-summary', name: 'Gesture summary', target: base.target,
+    steps: [
+      { id: 'double', kind: 'click', target: { kind: 'element', role: 'textfield' }, count: 2 },
+      { id: 'right', kind: 'click', target: { kind: 'element', role: 'textfield' }, button: 'right' },
+      { id: 'wheel', kind: 'scroll', target: { kind: 'element', role: 'textfield' }, deltaX: 0, deltaY: -5 },
+    ],
+  });
+  const report = await runFlow(flow, offlineDesktop(fixture, flow.target), {
+    dryRun: true, signal: new AbortController().signal,
+  });
+  assert.deepEqual(report.entries.map(entry => [entry.kind, entry.status]), [
+    ['click', 'resolved'], ['click', 'resolved'], ['scroll', 'resolved'],
+  ]);
+  const html = strFromU8(unzipSync(packReport(report, flow))['index.html']);
+  assert.match(html, /双击 textfield/);
+  assert.match(html, /右键 textfield/);
+  assert.match(html, /滚轮 ↓ 5 行 textfield/);
+});
+
 test('assertion statistics and the failed-assertion filter work on the shipped script', async () => {
   const flow = parseFlow({
     version: 1, id: 'assert-filter', name: 'Assertion filter', target: base.target,

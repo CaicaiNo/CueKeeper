@@ -25,6 +25,8 @@ import { flowHasShellDefinitions, reachableShells, shellGate } from './shell.js'
 import { parseTestItem, resolveSecrets } from './test-item.js';
 import { enqueueUpload, processUploadQueue } from './upload-queue.js';
 import { defaultQueueDir, resolveUploadConfig } from './upload.js';
+import { hashToken, loadServerConfig, parseServerHost } from './server-config.js';
+import { startServer } from './server.js';
 import { startWorkbench } from './workbench.js';
 
 const help = `Cuekeeper ${buildInfo().version}
@@ -38,6 +40,8 @@ const help = `Cuekeeper ${buildInfo().version}
   cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--app-path <path>] [--seconds 25] [--no-indicator] [--sound] [--trace-clicks] [--json]
   cuekeeper report pack <report.json> --flow <flow.json> --out <report.zip> [--assets <dir>] [--no-upload] [--queue <dir>] [--config <upload.json>] [--json]
   cuekeeper report upload [--queue <dir>] [--retry-paused] [--json]
+  cuekeeper serve --config <server.json> --data <dir> [--host <host>] [--port <port>] [--json]
+  cuekeeper serve --hash-token            (read a token from stdin and print its SHA-256)
 
 Exit codes
   0  Completed
@@ -75,6 +79,12 @@ function macOnly() {
 function success(data: unknown, message: string, code = 0) {
   console[code && !machine ? 'error' : 'log'](machine ? JSON.stringify({ ok: code === 0, data }) : message);
   process.exitCode = code;
+}
+
+async function readStdin() {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks).toString('utf8');
 }
 
 function describeCandidate(candidate: PickCandidate) {
@@ -321,6 +331,36 @@ async function main() {
       .join('\n');
     success(report, `${report.mode} ${report.status}\n${details}`,
       signal.aborted ? 130 : report.status === 'passed' ? 0 : 1);
+    return;
+  }
+
+  if (command === 'serve') {
+    const { values } = parseArgs({
+      args: rest, options: {
+        ...common, config: { type: 'string' }, data: { type: 'string' },
+        host: { type: 'string' }, port: { type: 'string' }, 'hash-token': { type: 'boolean' },
+      },
+    });
+    if (values['hash-token']) {
+      const token = (await readStdin()).trim();
+      if (!token) throw new Error('Read the token to hash from stdin');
+      success({ sha256: hashToken(token) }, hashToken(token));
+      return;
+    }
+    const configPath = requireString(values.config, '--config');
+    const dataDir = resolve(requireString(values.data, '--data'));
+    const config = await loadServerConfig(configPath);
+    if (values.host) config.host = parseServerHost(values.host);
+    let port = config.port;
+    if (values.port !== undefined) {
+      if (!/^\d+$/.test(values.port) || Number(values.port) > 65535 || Number(values.port) < 1) {
+        throw new Error('--port must be an integer from 1 to 65535');
+      }
+      port = Number(values.port);
+    }
+    const server = await startServer({ config, dataDir, port, signal });
+    success({ url: server.url, data: dataDir }, `Cuekeeper server listening on ${server.url}\nData ${dataDir}`);
+    await server.closed;
     return;
   }
 
