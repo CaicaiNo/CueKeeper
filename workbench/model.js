@@ -154,3 +154,84 @@ export function changeTarget(action, target) {
   if (action.kind === 'assert' || action.kind === 'wait') return { ...action, check: { ...action.check, target } };
   throw new Error('快捷键使用目标窗口。');
 }
+
+const shellKey = /^(?!(?:HOME|USER|LOGNAME|TMPDIR|LANG|PATH|NODE_OPTIONS)$|(?:SUDO_|DYLD_|LD_|CUEKEEPER_))[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+const shellSecret = /^CUEKEEPER_SECRET_[A-Z0-9_]{1,64}$/;
+const privilegedTask = /^\/Library\/CueKeeper\/privileged\/[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
+
+/**
+ * Builds a closed shell step from the draft editor. The workbench validates
+ * locally so imported and hand-edited steps fail before replay; the runner
+ * validates again from the generated schema.
+ */
+export function shellDraft(input = {}) {
+  const mode = input.mode === 'script' ? 'script' : 'argv';
+  const privilege = input.privilege === 'sudo' ? 'sudo' : 'user';
+  const cwd = typeof input.cwd === 'string' ? input.cwd.trim() : '';
+  const timeoutMs = input.timeoutMs === undefined || input.timeoutMs === '' ? 30000 : Number(input.timeoutMs);
+  const expectedExitCode = input.expectedExitCode === undefined || input.expectedExitCode === ''
+    ? 0 : Number(input.expectedExitCode);
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000) {
+    throw new Error('超时必须为 1–120000 毫秒。');
+  }
+  if (!Number.isInteger(expectedExitCode) || expectedExitCode < 0 || expectedExitCode > 255) {
+    throw new Error('预期退出码必须为 0–255。');
+  }
+  if (cwd.length > 4096) throw new Error('工作目录过长。');
+  if (privilege === 'sudo') {
+    const path = Array.isArray(input.argv) ? input.argv.join('').trim() : '';
+    if (!privilegedTask.test(path)) {
+      throw new Error('管理员任务必须是 /Library/CueKeeper/privileged/<任务 ID> 的绝对路径。');
+    }
+    if (cwd || mode === 'script') throw new Error('管理员任务不能使用工作目录或脚本模式。');
+    return {
+      kind: 'shell', argv: [path], privilege: 'sudo',
+      ...(expectedExitCode ? { expectedExitCode } : {}),
+    };
+  }
+  const env = {};
+  for (const [key, value, secret] of input.env ?? []) {
+    const name = String(key ?? '').trim();
+    const content = String(value ?? '');
+    if (!name) continue;
+    if (!shellKey.test(name)) throw new Error(`环境变量名 ${name} 无效或属于保留键。`);
+    if (Object.hasOwn(env, name)) throw new Error(`环境变量 ${name} 重复。`);
+    if (Object.keys(env).length >= 32) throw new Error('环境变量最多 32 个。');
+    if (secret) {
+      if (!shellSecret.test(content)) throw new Error('环境引用必须是以 CUEKEEPER_SECRET_ 开头的变量名。');
+      env[name] = { secretEnv: content };
+    } else {
+      if (content.length > 4000 || content.includes('\u0000')) throw new Error(`环境变量 ${name} 的值无效。`);
+      env[name] = content;
+    }
+  }
+  const common = {
+    kind: 'shell',
+    ...(cwd ? { cwd } : {}),
+    ...(Object.keys(env).length ? { env } : {}),
+    ...(timeoutMs === 30000 ? {} : { timeoutMs }),
+    ...(expectedExitCode ? { expectedExitCode } : {}),
+  };
+  if (mode === 'script') {
+    const command = typeof input.command === 'string' ? input.command : '';
+    if (!command.trim() || command.length > 16384) throw new Error('填写 1–16384 个字符的 Shell 脚本。');
+    return { ...common, shell: true, command };
+  }
+  if (typeof input.command === 'string' && input.command.trim()) {
+    throw new Error('逐项参数模式不能同时填写 Shell 脚本。');
+  }
+  const argv = (input.argv ?? []).map(part => String(part ?? ''));
+  if (!argv.length || !argv[0]) throw new Error('填写要执行的程序。');
+  if (argv.length > 65) throw new Error('参数最多 65 项。');
+  if (argv.some(part => part.length > 4096 || part.includes('\u0000'))) throw new Error('参数过长或包含无效字符。');
+  return { ...common, argv };
+}
+
+export function shellSummary(action) {
+  if (action.kind !== 'shell') throw new Error('不是 Shell 步骤。');
+  const privilege = action.privilege === 'sudo' ? '需管理员预配置' : '用户态';
+  const command = action.shell === true
+    ? `/bin/sh -c ${action.command}`
+    : action.argv.map(part => /\s/.test(part) ? JSON.stringify(part) : part).join(' ');
+  return { command, cwd: action.cwd ?? '输入目录', privilege };
+}

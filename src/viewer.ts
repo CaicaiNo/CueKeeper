@@ -162,7 +162,17 @@ function summaryFor(entry: Entry, action: ExecutableAction | undefined, setup: S
     case 'key': return `快捷键 ${[...(action.modifiers ?? []), action.key].join('+')}`;
     case 'wait': return `等待 ${expectationText(action.check.expect)}`;
     case 'assert': return `断言 ${expectationText(action.check.expect, action.check.target.kind)}`;
+    case 'shell': return `Shell · ${'argv' in action ? action.argv[0] : action.command}`;
   }
+}
+
+function deliveryOf(entry: Entry) {
+  return 'delivery' in entry ? entry.delivery : undefined;
+}
+
+function deliveryText(entry: Entry) {
+  const delivery = deliveryOf(entry);
+  return delivery ? deliveryLabels[delivery] ?? delivery : undefined;
 }
 
 function nodeIcon(status: string) {
@@ -235,7 +245,7 @@ function errorSection(view: StepView) {
         <dt>期望</dt><dd class="good">${escapeHtml(expected)}</dd>
         <dt>实际</dt><dd class="bad">${escapeHtml(actual)}</dd>
         ${view.check ? `<dt>定位器</dt><dd>${escapeHtml(locatorText(view.check.target))}</dd>` : ''}
-        ${entry.delivery ? `<dt>送达</dt><dd>${escapeHtml(deliveryLabels[entry.delivery] ?? entry.delivery)}</dd>` : ''}
+        ${deliveryText(entry) ? `<dt>送达</dt><dd>${escapeHtml(deliveryText(entry)!)}</dd>` : ''}
         <dt>重试</dt>${retry}
       </dl>
     </div>
@@ -318,8 +328,9 @@ function targetSection(view: StepView, flow: Flow) {
   }
   rows.push(`<div class="target"><p class="k">应用</p><div class="v">${escapeHtml(flow.target.app)}</div></div>`);
   rows.push(`<div class="target wide"><p class="k">窗口</p><div class="v">${escapeHtml(flow.target.window)}</div></div>`);
-  if (entry.delivery) {
-    rows.push(`<div class="target"><p class="k">送达状态</p><div class="v">${escapeHtml(deliveryLabels[entry.delivery] ?? entry.delivery)}</div></div>`);
+  const delivery = deliveryOf(entry);
+  if (delivery) {
+    rows.push(`<div class="target"><p class="k">送达状态</p><div class="v">${escapeHtml(deliveryLabels[delivery] ?? delivery)}</div></div>`);
   }
   return `<section class="sect">
   <div class="sect-head"><h3>目标</h3><span class="rule"></span></div>

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Fault, contains, object, parseSnapshot } from './locator.js';
 import type { Node, Point, Snapshot } from './locator.js';
-import type { Ensure, Entry, Target } from './contracts.js';
+import type { Delivery, Ensure, Target } from './contracts.js';
 
 export interface WindowInfo {
   id: string;
@@ -16,10 +16,10 @@ export interface Desktop {
   snapshot(target: Target, timeoutMs?: number, windowId?: string, exactWindow?: boolean): Promise<Snapshot>;
   property(node: Node, property: 'text' | 'value' | 'visible', timeoutMs?: number): Promise<string | boolean | undefined>;
   ensure(action: Ensure, timeoutMs: number, windowId?: string): Promise<string | undefined>;
-  click(ref: string): Promise<Entry['delivery']>;
-  clickPoint(snapshot: Snapshot, target: Target, point: Point): Promise<Entry['delivery']>;
-  type(ref: string, text: string): Promise<Entry['delivery']>;
-  press(combo: string, snapshot: Snapshot): Promise<Entry['delivery']>;
+  click(ref: string): Promise<Delivery | undefined>;
+  clickPoint(snapshot: Snapshot, target: Target, point: Point): Promise<Delivery | undefined>;
+  type(ref: string, text: string): Promise<Delivery | undefined>;
+  press(combo: string, snapshot: Snapshot): Promise<Delivery | undefined>;
   /** Read-only application window inventory for window assertions. */
   listWindows(app: string, timeoutMs?: number): Promise<WindowInfo[]>;
   /** Capture the whole window as PNG bytes without touching the window. */
@@ -30,7 +30,7 @@ export const agentDesktopVersion = '1.3.1';
 const deliveryStates = new Set(['delivered_verified', 'delivered_unverified', 'delivery_uncertain', 'not_delivered', 'unknown']);
 
 export class DesktopFault extends Fault {
-  constructor(code: string, command: string, public delivery: Entry['delivery']) {
+  constructor(code: string, command: string, public delivery: Delivery | undefined) {
     super(code, `agent-desktop ${command} returned ${code}`);
   }
 }
@@ -43,10 +43,10 @@ function isCommandTimeout(error: unknown) {
   return error instanceof Fault && (error.code === 'TIMEOUT' || error.code === 'COMMAND_TIMEOUT');
 }
 
-function delivery(result: Record<string, unknown>): Entry['delivery'] {
+function delivery(result: Record<string, unknown>): Delivery | undefined {
   if (result.disposition === undefined) return undefined;
   const value = object(result.disposition).delivery;
-  return typeof value === 'string' && deliveryStates.has(value) ? value as Entry['delivery'] : undefined;
+  return typeof value === 'string' && deliveryStates.has(value) ? value as Delivery : undefined;
 }
 
 function commandRunner(env: NodeJS.ProcessEnv, signal: AbortSignal) {

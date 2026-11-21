@@ -51,6 +51,27 @@ jobs:
       - name: Build macOS recorder
         run: pnpm build:recorder
 
+      - name: Package unsigned release
+        run: node scripts/package.mjs --skip-build --skip-recorder --out out/release
+
+      - name: Smoke-test the packaged CLI
+        run: |
+          set -euo pipefail
+          bin=$(echo out/release/cuekeeper-*/bin/cuekeeper)
+          "$bin" --version
+          "$bin" flow validate examples/textedit.flow.json --json
+
+      - name: Upload unsigned release
+        uses: actions/upload-artifact@v4
+        with:
+          name: cuekeeper-unsigned-${{ github.sha }}
+          path: |
+            out/release/*.tar.gz
+            out/release/*.sha256
+            out/release/*-RELEASE.md
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Upload failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4

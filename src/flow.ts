@@ -21,6 +21,13 @@ function validateConditions(conditions: Setup[] = [], where: string) {
   unique(conditions, where);
 }
 
+function validateShell(action: Action, where: string) {
+  if (action.kind !== 'shell') return;
+  const argv = 'argv' in action ? action.argv : undefined;
+  if (!argv || !argv.length) return;
+  if (!argv[0]) throw new Error(`${where}: shell program name must not be empty`);
+}
+
 export function parseFlow(input: unknown): Flow {
   if (!flowCheck.Check(input)) {
     const error = flowCheck.Errors(input).First();
@@ -40,6 +47,7 @@ export function plan(flow: Flow): PlannedStep[] {
     const parameters = new Set(behavior.parameters);
     for (const action of behavior.steps) {
       validateConditions(action.setup, `Behavior ${behavior.id}/${action.id}`);
+      validateShell(action, `Behavior ${behavior.id}/${action.id}`);
       if (action.kind === 'type' && typeof action.text !== 'string' && !parameters.has(action.text.param)) {
         throw new Error(`Unknown parameter ${action.text.param} in behavior ${behavior.id}`);
       }
@@ -49,6 +57,7 @@ export function plan(flow: Flow): PlannedStep[] {
   const expanded: PlannedStep[] = [];
   function add(action: Action, path: string, args: Record<string, string>) {
     validateConditions(action.setup, path);
+    validateShell(action, path);
     if (action.kind === 'assert') validateAssertCheck(action.check, path);
     if (action.kind === 'type') {
       const value = typeof action.text === 'string' ? action.text :

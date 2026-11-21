@@ -10,6 +10,7 @@ import { pickCandidates } from './pick.js';
 import type { PickCandidate } from './pick.js';
 import { describeApps } from './apps.js';
 import { inferSetup } from './setup.js';
+import { summarizeShellUsage } from './shell.js';
 
 export const sameTarget = (a: { app: string; window: string }, b: { app: string; window: string }) =>
   a.app === b.app && a.window === b.window;
@@ -164,6 +165,7 @@ export async function loadSession(path: string) {
       durationMs, timingSource: fromCapture ? 'capture' : report?.mode,
       startedAt: fromCapture ? undefined : report?.startedAt,
       hasSnapshot: snapshot !== undefined,
+      shell: summarizeShellUsage(flow, planned),
     },
   };
 }
