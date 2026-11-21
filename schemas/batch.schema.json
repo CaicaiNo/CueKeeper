@@ -1,0 +1,205 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Cuekeeper batch v1",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "format": {
+      "const": "cuekeeper-batch-report",
+      "type": "string"
+    },
+    "version": {
+      "const": 1,
+      "type": "number"
+    },
+    "flowId": {
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
+      "type": "string"
+    },
+    "mode": {
+      "anyOf": [
+        {
+          "const": "replay",
+          "type": "string"
+        },
+        {
+          "const": "dry-run",
+          "type": "string"
+        }
+      ]
+    },
+    "startedAt": {
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+      "type": "string"
+    },
+    "status": {
+      "anyOf": [
+        {
+          "const": "passed",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "type": "string"
+        },
+        {
+          "const": "blocked",
+          "type": "string"
+        },
+        {
+          "const": "error",
+          "type": "string"
+        },
+        {
+          "const": "interrupted",
+          "type": "string"
+        }
+      ]
+    },
+    "counts": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "total": {
+          "minimum": 1,
+          "maximum": 1000,
+          "type": "integer"
+        },
+        "passed": {
+          "minimum": 0,
+          "maximum": 1000,
+          "type": "integer"
+        },
+        "failed": {
+          "minimum": 0,
+          "maximum": 1000,
+          "type": "integer"
+        },
+        "blocked": {
+          "minimum": 0,
+          "maximum": 1000,
+          "type": "integer"
+        },
+        "notCompleted": {
+          "minimum": 0,
+          "maximum": 1000,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total",
+        "passed",
+        "failed",
+        "blocked",
+        "notCompleted"
+      ]
+    },
+    "rows": {
+      "maxItems": 1000,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "row": {
+            "minimum": 1,
+            "maximum": 1000,
+            "type": "integer"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "const": "passed",
+                "type": "string"
+              },
+              {
+                "const": "failed",
+                "type": "string"
+              },
+              {
+                "const": "blocked",
+                "type": "string"
+              }
+            ]
+          },
+          "parameters": {
+            "type": "object",
+            "patternProperties": {
+              "^(.*)$": {
+                "type": "string"
+              }
+            }
+          },
+          "issues": {
+            "maxItems": 2000,
+            "type": "array",
+            "items": {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "stepId": {
+                  "minLength": 1,
+                  "maxLength": 196,
+                  "type": "string"
+                },
+                "code": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "stepId"
+              ]
+            }
+          },
+          "report": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "flow": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "row",
+          "status",
+          "parameters",
+          "issues"
+        ]
+      }
+    },
+    "error": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "code": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "message": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "row": {
+          "minimum": 1,
+          "maximum": 1000,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ]
+    }
+  },
+  "required": [
+    "format",
+    "version",
+    "flowId",
+    "mode",
+    "startedAt",
+    "status",
+    "counts",
+    "rows"
+  ]
+}
