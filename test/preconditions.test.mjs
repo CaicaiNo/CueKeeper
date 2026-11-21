@@ -171,6 +171,11 @@ test('the workbench analyzes an imported recording, saves confirmed conditions, 
     ['inferred', 'app_running'], ['inferred', 'window_ready'],
   ]);
 
+  // The served page carries the precondition panel the analysis feeds.
+  const page = await (await fetch(url)).text();
+  assert.match(page, /id="setup" class="setup-list"/);
+  assert.match(await (await fetch(`${url}/app.js`)).text(), /function renderSetup\(/);
+
   const draft = setupDraft(session.setup);
   const entries = session.timeline.map(row => ({ id: row.id, action: row.action }));
   // A test item may still carry unconfirmed suggestions from an older build.
