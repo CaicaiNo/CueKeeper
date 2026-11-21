@@ -1,13 +1,15 @@
-import { randomUUID } from 'node:crypto';
-import { readFile, readdir, mkdir } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
+import { loadBaseline } from './assertion.js';
 import { offlineDesktop, withDesktop } from './desktop.js';
 import { readJson, writeNew } from './files.js';
 import { plan } from './flow.js';
 import { object } from './locator.js';
+import { crop, decodePng, encodePng } from './png.js';
 import { runFlow } from './run.js';
 import { keepConfirmedSetup } from './setup.js';
 import { parseLibraryItem, parseTestItem, resolveSecrets } from './test-item.js';
@@ -34,6 +36,49 @@ async function readBody(request: IncomingMessage) {
 function send(response: ServerResponse, status: number, data: unknown) {
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
   response.end(JSON.stringify(data));
+}
+
+function readRegion(input: unknown) {
+  const value = object(input);
+  const numbers = ['x', 'y', 'width', 'height'].map(key => value[key]);
+  if (!numbers.every(item => typeof item === 'number' && Number.isSafeInteger(item))) {
+    throw new Error('Region coordinates must be whole pixels');
+  }
+  const [x, y, width, height] = numbers as number[];
+  if (x < 0 || y < 0 || x > 8191 || y > 8191 || width < 1 || height < 1 || width > 8192 || height > 8192) {
+    throw new Error('Region is outside the supported pixel area');
+  }
+  if (width * height > 16_777_216) throw new Error('Region exceeds the pixel limit');
+  return { x, y, width, height };
+}
+
+async function saveBaseline(directory: string, source: string, region: ReturnType<typeof readRegion>) {
+  const path = isAbsolute(source) ? source : join(directory, source);
+  const info = await lstat(path);
+  if (info.isSymbolicLink() || !info.isFile()) throw new Error('Choose a regular full-window PNG file');
+  if (info.size > 64 * 1024 * 1024) throw new Error('The baseline source is too large');
+  const bytes = new Uint8Array(await readFile(path));
+  let image;
+  try {
+    image = decodePng(bytes);
+  } catch {
+    throw new Error('The baseline source is not a usable PNG');
+  }
+  const cropped = encodePng(crop(image, region.x, region.y, region.width, region.height));
+  const sha256 = createHash('sha256').update(cropped).digest('hex');
+  const baselines = join(directory, 'baselines');
+  await mkdir(baselines, { recursive: true, mode: 0o700 });
+  const target = join(baselines, `${sha256}.png`);
+  try {
+    const existing = await readFile(target);
+    if (!Buffer.from(existing).equals(Buffer.from(cropped))) {
+      throw new Error('A different baseline file already uses this digest');
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    await writeFile(target, cropped, { mode: 0o600 });
+  }
+  return { sha256, frameWidth: image.width, frameHeight: image.height };
 }
 
 export async function startWorkbench(options: {
@@ -102,13 +147,27 @@ export async function startWorkbench(options: {
       await writeNew(join(library, `${item.behavior.id}.behavior.json`), JSON.stringify(item, null, 2) + '\n');
       return send(response, 201, item);
     }
+    if (path === '/api/baseline') {
+      const source = typeof data.source === 'string' ? data.source.trim() : '';
+      if (!source) throw new Error('Choose a full-window PNG file');
+      const region = readRegion(data.region);
+      const saved = await saveBaseline(current.directory, source, region);
+      return send(response, 201, { ...saved, region });
+    }
     if (path !== '/api/save' && path !== '/api/run') return send(response, 404, { error: 'Unknown workbench endpoint' });
+    const baselines = join(current.directory, 'baselines');
     if (path === '/api/save') {
       // Only confirmed conditions belong in a saved test item; the runner already
       // skips the rest, but a saved file should not carry unapproved setup.
       const test = keepConfirmedSetup(data.test);
       const { flow, secrets } = parseTestItem(test);
       if (!sameTarget(flow.target, current.flow.target)) throw new Error('Test target must match the session');
+      for (const { action } of plan(flow)) {
+        if (action.kind === 'assert' && action.check.target.kind === 'window' &&
+            action.check.expect.property === 'screenshot') {
+          await loadBaseline(baselines, action.check.expect);
+        }
+      }
       const extension = secrets.size ? 'test' : 'flow';
       const output = join(current.directory, `test-${randomUUID()}.${extension}.json`);
       await writeNew(output, JSON.stringify(test, null, 2) + '\n');
@@ -128,9 +187,10 @@ export async function startWorkbench(options: {
         throw new Error('Save and run coordinate clicks explicitly with the CLI --headed option');
       }
       const secretTexts = dryRun ? undefined : resolveSecrets(secrets, process.env);
+      const baselineDir = join(current.directory, 'baselines');
       const report = dryRun
-        ? await runFlow(flow, offlineDesktop(current.snapshot, flow.target), { dryRun, signal })
-        : await withDesktop({ headed: true, signal }, desktop => runFlow(flow, desktop, { dryRun, signal, secretTexts }));
+        ? await runFlow(flow, offlineDesktop(current.snapshot, flow.target), { dryRun, signal, baselineDir })
+        : await withDesktop({ headed: true, signal }, desktop => runFlow(flow, desktop, { dryRun, signal, secretTexts, baselineDir }));
       return send(response, 200, report);
     } finally {
       running = false;

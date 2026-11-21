@@ -1,13 +1,22 @@
 import { setTimeout as sleep } from 'node:timers/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { evaluateAssertion, resolveAssertion } from './assertion.js';
+import type { AssertionObservation } from './assertion.js';
 import { defaultEnsureTimeoutMs } from './contracts.js';
-import type { Check, Ensure, Entry, Flow, Report, Setup, Target } from './contracts.js';
+import type { AssertCheck, Check, Ensure, Entry, Flow, Report, ScreenshotActual, Setup, Target } from './contracts.js';
 import { DesktopFault, isMissingWindow } from './desktop.js';
 import type { Desktop } from './desktop.js';
 import { hashFlow, plan } from './flow.js';
 import { Fault, contains, resolve } from './locator.js';
 import type { Located, Snapshot } from './locator.js';
 
-type Outcome = Pick<Entry, 'status' | 'message' | 'code' | 'delivery'>;
+type AssertionRecord = {
+  expected: AssertCheck['expect'];
+  actual?: boolean | string | ScreenshotActual;
+  screenshots?: { baseline: string; actual: string };
+};
+type Outcome = Pick<Entry, 'status' | 'message' | 'code' | 'delivery'> & { assertion?: AssertionRecord };
 type SetupOutcome = Outcome & Pick<Extract<Entry, { kind: 'setup' }>, 'repair'>;
 
 function locateCheck(snapshot: Snapshot, check: Check): Located | undefined {
@@ -39,8 +48,31 @@ function errorOutcome(error: unknown, status: 'failed' | 'blocked'): Outcome {
   };
 }
 
+async function saveAssertionEvidence(directory: string, stepId: string, observation: AssertionObservation) {
+  const folder = join(directory, ...stepId.split('/'));
+  try {
+    await mkdir(folder, { recursive: true, mode: 0o700 });
+    await writeFile(join(folder, 'assertion-baseline.png'), observation.evidence!.baseline);
+    await writeFile(join(folder, 'assertion-actual.png'), observation.evidence!.actual);
+    return {
+      screenshots: {
+        baseline: `assets/${stepId}/assertion-baseline.png`,
+        actual: `assets/${stepId}/assertion-actual.png`,
+      },
+    };
+  } catch {
+    return { message: '截图证据未能写入报告目录' };
+  }
+}
+
 export async function runFlow(
-  flow: Flow, desktop: Desktop, options: { dryRun: boolean; signal: AbortSignal; secretTexts?: ReadonlyMap<string, string> },
+  flow: Flow, desktop: Desktop, options: {
+    dryRun: boolean; signal: AbortSignal; secretTexts?: ReadonlyMap<string, string>;
+    /** Directory holding `baselines/<sha256>.png` next to the flow file. */
+    baselineDir?: string;
+    /** Directory receiving assertion evidence, one subdirectory per step. */
+    evidenceDir?: string;
+  },
 ): Promise<Report> {
   const planned = plan(flow);
   const { dryRun, signal } = options;
@@ -92,7 +124,7 @@ export async function runFlow(
     signal.throwIfAborted();
     const { repair, ...result } = outcome;
     const entry = { id, atMs, durationMs: elapsed() - atMs, ...result };
-    report.entries.push(kind === 'setup' && repair ? { ...entry, kind, repair } : { ...entry, kind });
+    report.entries.push((kind === 'setup' && repair ? { ...entry, kind, repair } : { ...entry, kind }) as Entry);
     return outcome.status;
   }
 
@@ -197,27 +229,59 @@ export async function runFlow(
     }
 
     const status = await log(id, action.kind, async () => {
-      if (action.kind === 'assert' || action.kind === 'wait') {
+      if (action.kind === 'assert') {
+        const context = {
+          desktop,
+          snapshot: () => snapshot(),
+          baselineDir: options.baselineDir,
+          secretTexts: options.secretTexts,
+        };
+        if (dryRun) {
+          await resolveAssertion(action.check, context);
+          return { status: 'resolved' };
+        }
+        let observation: AssertionObservation;
+        try {
+          observation = await evaluateAssertion(action.check, context);
+        } catch (error) {
+          if (signal.aborted || (error instanceof Fault && error.dependency)) throw error;
+          const outcome = errorOutcome(error, 'failed');
+          return { ...outcome, assertion: { expected: action.check.expect } };
+        }
+        const saved = observation.evidence && options.evidenceDir
+          ? await saveAssertionEvidence(options.evidenceDir, id, observation)
+          : undefined;
+        const screenshots = saved && 'screenshots' in saved ? saved.screenshots : undefined;
+        const assertion: AssertionRecord = {
+          expected: action.check.expect,
+          ...(observation.actual !== undefined ? { actual: observation.actual } : {}),
+          ...(screenshots ? { screenshots } : {}),
+        };
+        let message = observation.message;
+        if (saved && 'message' in saved) message = [message, saved.message].filter(Boolean).join('；') || saved.message;
+        if (observation.passed) return { status: 'passed', ...(message ? { message } : {}), assertion };
+        return {
+          status: 'failed',
+          code: observation.code ?? 'ASSERTION_FALSE',
+          message: message ?? `Expected ${action.check.expect.property} did not match`,
+          assertion,
+        };
+      }
+      if (action.kind === 'wait') {
         if (dryRun) {
           locateCheck(await snapshot(), action.check);
           return { status: 'resolved' };
         }
-        if (action.kind === 'assert') {
-          if (!await evaluate(desktop, await snapshot(), action.check)) {
-            throw new Fault('ASSERTION_FALSE', `Expected ${action.check.expect.property} did not match`);
+        const deadline = performance.now() + action.timeoutMs;
+        for (;;) {
+          const remaining = Math.max(0, Math.ceil(deadline - performance.now()));
+          try {
+            if (await evaluate(desktop, await snapshot(Math.min(3000, remaining)), action.check)) break;
+          } catch (error) {
+            if (!(error instanceof Fault && ['NOT_FOUND', 'INCOMPLETE_TREE'].includes(error.code))) throw error;
           }
-        } else {
-          const deadline = performance.now() + action.timeoutMs;
-          for (;;) {
-            const remaining = Math.max(0, Math.ceil(deadline - performance.now()));
-            try {
-              if (await evaluate(desktop, await snapshot(Math.min(3000, remaining)), action.check)) break;
-            } catch (error) {
-              if (!(error instanceof Fault && ['NOT_FOUND', 'INCOMPLETE_TREE'].includes(error.code))) throw error;
-            }
-            if (performance.now() >= deadline) throw new Fault('WAIT_TIMEOUT', 'Wait condition did not match');
-            await sleep(Math.min(100, Math.max(0, deadline - performance.now())), undefined, { signal });
-          }
+          if (performance.now() >= deadline) throw new Fault('WAIT_TIMEOUT', 'Wait condition did not match');
+          await sleep(Math.min(100, Math.max(0, deadline - performance.now())), undefined, { signal });
         }
         return { status: 'passed' };
       }

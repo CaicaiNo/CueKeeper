@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
+import { dirname, resolve } from 'node:path';
 import { discoverAssets } from './assets.js';
 import { captureTargetCheck } from './contracts.js';
 import { offlineDesktop, withDesktop } from './desktop.js';
@@ -147,7 +148,12 @@ async function main() {
     if (values.headed && dryRun) throw new Error('--headed is only for replay');
     if (values.report) await ensureNew(values.report);
     const { flow, secrets } = parseTestItem(await readJson(positionals[0]));
-    const options = { dryRun, signal, secretTexts: dryRun ? undefined : resolveSecrets(secrets, process.env) };
+    const options = {
+      dryRun, signal,
+      secretTexts: dryRun ? undefined : resolveSecrets(secrets, process.env),
+      baselineDir: resolve(dirname(resolve(positionals[0])), 'baselines'),
+      ...(values.report ? { evidenceDir: `${resolve(values.report)}.assets` } : {}),
+    };
     let report;
     if (values.snapshot) {
       report = await runFlow(flow, offlineDesktop(await readJson(values.snapshot), flow.target), options);

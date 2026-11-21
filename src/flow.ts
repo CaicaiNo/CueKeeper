@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { validateAssertCheck } from './assertion.js';
 import { flowCheck } from './contracts.js';
 import type { Action, Flow, Setup } from './contracts.js';
 
@@ -48,6 +49,7 @@ export function plan(flow: Flow): PlannedStep[] {
   const expanded: PlannedStep[] = [];
   function add(action: Action, path: string, args: Record<string, string>) {
     validateConditions(action.setup, path);
+    if (action.kind === 'assert') validateAssertCheck(action.check, path);
     if (action.kind === 'type') {
       const value = typeof action.text === 'string' ? action.text :
         (Object.hasOwn(args, action.text.param) ? args[action.text.param] : undefined);

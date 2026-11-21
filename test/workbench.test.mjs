@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { offlineDesktop } from '../dist/desktop.js';
 import { plan } from '../dist/flow.js';
+import { crop, encodePng } from '../dist/png.js';
 import { runFlow } from '../dist/run.js';
 import { parseTestItem, resolveSecrets } from '../dist/test-item.js';
 import { loadSession } from '../dist/workbench-session.js';
@@ -222,4 +223,60 @@ test('a secret binding stores an environment variable name and passes only the r
   assert.deepEqual(actual, [value]);
   assert.equal(report.status, 'passed');
   assert.doesNotMatch(JSON.stringify(report), /only-in-memory-42/);
+});
+
+test('the workbench saves a cropped baseline and refuses flows without one', async t => {
+  const { root, directory, flow } = await fixture(t);
+  const full = { width: 4, height: 4, data: new Uint8Array(4 * 4 * 4) };
+  for (let index = 0; index < 16; index++) full.data.set([10 + index, 20, 30, 255], index * 4);
+  await writeFile(join(directory, 'window.png'), encodePng(full));
+  const cancellation = new AbortController();
+  const { url, closed } = await startWorkbench({
+    port: 0, allowLive: false, library: join(root, 'library'), signal: cancellation.signal,
+  });
+  t.after(async () => { cancellation.abort(); await closed; });
+  async function post(route, payload, status = 200) {
+    const response = await fetch(`${url}/api/${route}`, {
+      method: 'POST',
+      headers: { origin: url, 'content-type': 'application/json', 'x-cuekeeper-workbench': '1' },
+      body: JSON.stringify(payload),
+    });
+    const body = await response.json();
+    assert.equal(response.status, status, JSON.stringify(body));
+    return body;
+  }
+
+  const session = await post('import', { directory });
+  const region = { x: 1, y: 1, width: 2, height: 2 };
+  const saved = await post('baseline', { session: session.id, source: 'window.png', region }, 201);
+  assert.equal(saved.frameWidth, 4);
+  assert.equal(saved.frameHeight, 4);
+  assert.deepEqual(saved.region, region);
+  const written = await readFile(join(directory, 'baselines', `${saved.sha256}.png`));
+  assert.ok(Buffer.from(written).equals(Buffer.from(encodePng(crop(full, 1, 1, 2, 2)))));
+
+  // Region bounds and symlinked sources are rejected before anything is written.
+  await post('baseline', { session: session.id, source: 'window.png', region: { x: 3, y: 0, width: 2, height: 2 } }, 400);
+  await post('baseline', { session: session.id, source: 'missing.png', region }, 400);
+
+  const check = {
+    target: { kind: 'window', app: flow.target.app, window: flow.target.window },
+    expect: {
+      property: 'screenshot', region,
+      baseline: { sha256: saved.sha256, frameWidth: 4, frameHeight: 4 },
+      maxDiffRatio: 0.01,
+    },
+  };
+  const test = {
+    version: 1, id: 'shot', name: 'Screenshot', target: flow.target,
+    steps: [{ id: 'shot', kind: 'assert', check }],
+  };
+  const generated = await post('save', { session: session.id, test }, 201);
+  const savedFlow = JSON.parse(await readFile(generated.output, 'utf8'));
+  assert.deepEqual(savedFlow.steps[0].check, check);
+
+  const missing = structuredClone(test);
+  missing.steps[0].check.expect.baseline.sha256 = 'f'.repeat(64);
+  await post('save', { session: session.id, test: missing }, 400);
+  await post('baseline', { session: session.id, source: 'window.png', region: { x: 0, y: 0, width: 1, height: 1 } }, 201);
 });

@@ -53,6 +53,15 @@ function attachAssets(raw: RawAsset[], entries: Report['entries']): PackAsset[] 
   return attached;
 }
 
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonical(record[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
 export function packReport(input: unknown, flow: Flow, options: PackOptions = {}): Uint8Array {
   if (!reportCheck.Check(input)) throw new Error('Invalid v1 report');
   if (input.flowId !== flow.id || input.flowSha256 !== hashFlow(flow)) {
@@ -67,6 +76,31 @@ export function packReport(input: unknown, flow: Flow, options: PackOptions = {}
   }
 
   const assets = attachAssets(options.assets ?? [], input.entries);
+  const assertions = new Map(steps.flatMap(({ id, action }) =>
+    action.kind === 'assert' ? [[id, action.check.expect] as const] : []));
+  for (const entry of input.entries) {
+    if (entry.kind !== 'assert' || !entry.assertion) continue;
+    const expected = assertions.get(entry.id);
+    if (expected === undefined || canonical(entry.assertion.expected) !== canonical(expected)) {
+      throw new Error('Assertion expected value does not match the flow');
+    }
+    const screenshots = 'screenshots' in entry.assertion ? entry.assertion.screenshots : undefined;
+    if (!screenshots) continue;
+    const digest = 'baseline' in expected ? expected.baseline.sha256 : undefined;
+    for (const [role, path] of Object.entries(screenshots)) {
+      if (typeof path !== 'string') continue;
+      if (path !== `assets/${entry.id}/assertion-${role}.png`) {
+        throw new Error('Assertion evidence path does not match its report entry');
+      }
+      const asset = assets.find(candidate => `assets/${candidate.path}` === path);
+      if (!asset) throw new Error(`Assertion evidence is missing: ${path}`);
+      if (role === 'baseline' && digest &&
+          createHash('sha256').update(asset.bytes).digest('hex') !== digest) {
+        throw new Error('Assertion baseline evidence does not match the flow digest');
+      }
+    }
+  }
+
   const viewer = renderViewer(input, flow, steps, assets);
   const files: Record<string, Uint8Array> = {
     'index.html': strToU8(viewer.html),

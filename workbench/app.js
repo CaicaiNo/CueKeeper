@@ -37,6 +37,7 @@ const short = (text, length = 82) => text.length > length ? text.slice(0, length
 
 function locatorLabel(target) {
   if (!target) return '目标窗口';
+  if (target.kind === 'window') return [target.app, target.window, target.match].filter(Boolean).join(' · ');
   if (target.kind === 'point') return `坐标 (${target.point.join(', ')})`;
   return [target.role, target.name, target.path?.join(' › '), target.index === undefined ? '' : `[${target.index}]`]
     .filter(Boolean).join(' · ');
@@ -49,9 +50,16 @@ function actionLabel(action) {
     case 'type': return typeof action.text === 'string' ? `输入 “${short(action.text)}”` : `输入参数 ${action.text.param}`;
     case 'key': return [...(action.modifiers ?? []), action.key].join(' + ');
     case 'assert':
-    case 'wait': return `${label} · ${action.check.expect.property} = ${short(String(action.check.expect.equals))}`;
+    case 'wait': return `${label} · ${describeExpectation(action.check.expect)}`;
     default: return action.kind;
   }
+}
+
+function describeExpectation(expect) {
+  if (expect.property === 'screenshot') return '区域截图';
+  if ('equals' in expect) return `${expect.property} = ${short(String(expect.equals))}`;
+  if ('contains' in expect) return `${expect.property} 包含 ${short(expect.contains)}`;
+  return `${expect.property} 匹配 /${expect.matches}/`;
 }
 
 function infoList(entries, className) {
@@ -306,7 +314,9 @@ function renderInspector() {
     el('div', { className: 'actions' },
       button('加入测试项', () => addAction(row.action), { disabled: !editable }),
       button('添加断言', () => assertionDialog(row), { disabled: !editable }),
-      button('重新拾取', () => locatorDialog(row), { disabled: !editable || row.action.kind === 'key' }),
+      button('重新拾取', () => locatorDialog(row), {
+        disabled: !editable || row.action.kind === 'key' || actionTarget(row.action)?.kind === 'window',
+      }),
       button(ignored ? '恢复动作' : '忽略动作', () => {
         if (ignored) state.ignored.delete(row.id);
         else {
@@ -478,9 +488,9 @@ function candidateLabel(candidate) {
   return `${candidate.interactive ? '可交互' : '容器'} · ${locatorLabel(candidate.locator)}`;
 }
 
-function locatorFields(original) {
+function locatorFields(original, { required = true } = {}) {
   const initial = original?.kind === 'element' ? original : undefined;
-  const role = input({ required: true, maxLength: 256, value: initial?.role ?? '' });
+  const role = input({ required, maxLength: 256, value: initial?.role ?? '' });
   const name = input({ maxLength: 256, value: initial?.name ?? '' });
   const exactName = el('input', { type: 'checkbox', checked: initial?.name !== undefined });
   const path = input({ value: initial?.path?.join(' / ') ?? '', placeholder: 'window / scrollarea / textfield' });
@@ -533,23 +543,158 @@ function locatorDialog(row) {
 }
 
 function assertionDialog(row) {
-  const picker = locatorFields(actionTarget(row.action));
-  const equals = input({ maxLength: 4000 });
-  const toggle = select([['true', '成立'], ['false', '不成立']]);
-  const textField = field('预期内容', equals);
-  const boolField = field('预期结果', toggle);
-  textField.hidden = true;
-  const property = select([['exists', '存在'], ['visible', '可见'], ['text', '文本'], ['value', '值']], event => {
-    textField.hidden = ['exists', 'visible'].includes(event.target.value);
-    boolField.hidden = !textField.hidden;
-  });
-  openDialog('添加断言', [...picker.controls, field('属性', property), boolField, textField], '加入测试项', () => {
-    addAction({
-      id: id('assert'), kind: 'assert',
-      check: { target: picker.value(), expect: {
-        property: property.value, equals: textField.hidden ? toggle.value === 'true' : equals.value,
-      } },
-    });
+  const picker = locatorFields(actionTarget(row.action), { required: false });
+  const type = select([['element', '元素'], ['window', '窗口'], ['screenshot', '区域截图']]);
+  const property = select([['exists', '存在'], ['visible', '可见'], ['text', '文本'], ['value', '值']]);
+  const windowProperty = select([['exists', '存在'], ['title', '标题']]);
+  const booleanValue = select([['true', '成立'], ['false', '不成立']]);
+  const comparator = select([['equals', '精确'], ['contains', '包含'], ['matches', '正则']]);
+  const expectedInput = input({ maxLength: 4000 });
+  const ignoreCase = el('input', { type: 'checkbox' });
+  const whitespace = select([['', '保留空白'], ['trim', '去首尾空白'], ['collapse', '折叠连续空白']]);
+
+  const windowApp = input({ maxLength: 256, value: row.app ?? state.session.target.app });
+  const windowEnabled = el('input', { type: 'checkbox', checked: true });
+  const windowTitle = input({ maxLength: 256, value: row.window ?? state.session.target.window });
+  const windowMatch = select([['equals', '精确'], ['contains', '包含'], ['matches', '正则']]);
+
+  const region = {
+    x: el('input', { type: 'number', min: '0', max: '8191', step: '1', value: '0' }),
+    y: el('input', { type: 'number', min: '0', max: '8191', step: '1', value: '0' }),
+    width: el('input', { type: 'number', min: '1', max: '8192', step: '1', value: '100' }),
+    height: el('input', { type: 'number', min: '1', max: '8192', step: '1', value: '100' }),
+  };
+  const threshold = el('input', { type: 'number', min: '0', max: '100', step: '0.01', value: '0' });
+  const source = input({ placeholder: '/…/整窗截图.png' });
+  const baselineNote = muted('尚未设置基线。');
+  let baseline;
+
+  const stringControls = el('div', { className: 'stack' },
+    field('比较方式', comparator),
+    field('预期值', expectedInput),
+    el('label', { className: 'checkbox' }, ignoreCase, '忽略大小写'),
+    field('空白处理', whitespace));
+  const booleanControl = field('预期结果', booleanValue);
+  const elementSection = el('div', { className: 'stack' },
+    ...picker.controls, field('属性', property));
+  const windowTargetSection = el('div', { className: 'stack' },
+    field('应用标识', windowApp),
+    el('label', { className: 'checkbox' }, windowEnabled, '按窗口标题筛选'),
+    field('窗口标题', windowTitle),
+    field('标题匹配', windowMatch));
+  const windowSection = el('div', { className: 'stack' }, field('属性', windowProperty));
+  const screenshotSection = el('div', { className: 'stack' },
+    el('div', { className: 'parameter-list stack' },
+      field('区域 X', region.x), field('区域 Y', region.y),
+      field('区域宽', region.width), field('区域高', region.height)),
+    field('允许差异（%）', threshold),
+    field('整窗截图 PNG 路径', source),
+    el('div', { className: 'actions' }, button('设为基线', async () => {
+      try {
+        baseline = await api('baseline', {
+          session: state.session.id, source: source.value.trim(), region: regionValue(),
+        });
+        baselineNote.textContent = `基线 ${baseline.sha256.slice(0, 12)}… · 原图 ${baseline.frameWidth}×${baseline.frameHeight} · ` +
+          `裁剪 ${baseline.region.width}×${baseline.region.height}`;
+        baselineNote.className = 'muted';
+      } catch (error) {
+        baseline = undefined;
+        baselineNote.textContent = error.message;
+        baselineNote.className = 'form-error';
+      }
+    }, { style: 'small' })),
+    baselineNote);
+
+  function regionValue() {
+    const values = Object.fromEntries(Object.entries(region).map(([key, node]) => [key, Number(node.value)]));
+    if (Object.values(values).some(value => !Number.isSafeInteger(value))) throw new Error('区域坐标必须是整数像素。');
+    const { x, y, width, height } = values;
+    if (x < 0 || y < 0 || width < 1 || height < 1) throw new Error('检查区域坐标与尺寸。');
+    return { x, y, width, height };
+  }
+
+  function windowTarget() {
+    const app = windowApp.value.trim();
+    if (!app) throw new Error('填写应用标识。');
+    if (!windowEnabled.checked) return { kind: 'window', app };
+    const window = windowTitle.value.trim();
+    if (!window) throw new Error('填写窗口标题，或取消标题筛选。');
+    return { kind: 'window', app, window, match: windowMatch.value };
+  }
+
+  function stringExpect(targetProperty) {
+    const expected = { property: targetProperty };
+    const value = expectedInput.value;
+    if (comparator.value === 'equals') expected.equals = value;
+    else if (comparator.value === 'contains') {
+      if (!value.length) throw new Error('包含比较需要非空文本。');
+      expected.contains = value;
+    } else {
+      if (!value.length || value.length > 256) throw new Error('正则比较需要 1–256 个字符。');
+      expected.matches = value;
+    }
+    const normalize = {};
+    if (ignoreCase.checked) normalize.ignoreCase = true;
+    if (whitespace.value) normalize.whitespace = whitespace.value;
+    if (Object.keys(normalize).length) expected.normalize = normalize;
+    return expected;
+  }
+
+  function elementExpect() {
+    if (property.value === 'exists' || property.value === 'visible') {
+      return { property: property.value, equals: booleanValue.value === 'true' };
+    }
+    return stringExpect(property.value);
+  }
+
+  function windowExpect() {
+    if (windowProperty.value === 'exists') return { property: 'exists', equals: booleanValue.value === 'true' };
+    return stringExpect('title');
+  }
+
+  function refresh() {
+    const kind = type.value;
+    elementSection.hidden = kind !== 'element';
+    windowTargetSection.hidden = kind === 'element';
+    windowSection.hidden = kind !== 'window';
+    screenshotSection.hidden = kind !== 'screenshot';
+    const isBoolean = kind === 'element' ? ['exists', 'visible'].includes(property.value) :
+      kind === 'window' ? windowProperty.value === 'exists' : false;
+    booleanControl.hidden = kind === 'screenshot' || !isBoolean;
+    stringControls.hidden = kind === 'screenshot' || isBoolean;
+    windowTitle.disabled = !windowEnabled.checked;
+    windowMatch.disabled = !windowEnabled.checked;
+  }
+  type.onchange = refresh;
+  property.onchange = refresh;
+  windowProperty.onchange = refresh;
+  windowEnabled.onchange = refresh;
+  refresh();
+
+  openDialog('添加断言', [
+    field('断言类型', type),
+    elementSection, windowTargetSection, windowSection,
+    booleanControl, stringControls,
+    screenshotSection,
+    muted('窗口与截图断言在离线运行时会提示夹具不覆盖，需实时回放或真机验证。切换类型后只提交当前类型对应的字段。'),
+  ], '加入测试项', () => {
+    let actionCheck;
+    if (type.value === 'element') actionCheck = { target: picker.value(), expect: elementExpect() };
+    else if (type.value === 'window') actionCheck = { target: windowTarget(), expect: windowExpect() };
+    else {
+      if (!baseline) throw new Error('先选择整窗截图并点击「设为基线」。');
+      const ratio = Number(threshold.value);
+      if (!Number.isFinite(ratio) || ratio < 0 || ratio > 100) throw new Error('差异上限需在 0–100% 之间。');
+      actionCheck = {
+        target: windowTarget(),
+        expect: {
+          property: 'screenshot', region: baseline.region,
+          baseline: { sha256: baseline.sha256, frameWidth: baseline.frameWidth, frameHeight: baseline.frameHeight },
+          maxDiffRatio: ratio / 100,
+        },
+      };
+    }
+    addAction({ id: id('assert'), kind: 'assert', check: actionCheck });
   });
 }
 

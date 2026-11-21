@@ -7,7 +7,8 @@ export interface RawAsset {
   bytes: Uint8Array;
 }
 
-export type AssetRole = 'screenshot-before' | 'screenshot-after' | 'screenshot' | 'log' | 'snapshot' | 'file';
+export type AssetRole = 'screenshot-before' | 'screenshot-after' | 'screenshot' | 'assertion-baseline' |
+  'assertion-actual' | 'log' | 'snapshot' | 'file';
 
 export interface PackAsset extends RawAsset {
   /** Report entry this asset belongs to, when the asset was grouped under an entry id. */
@@ -62,26 +63,36 @@ export async function collectAssets(directory: string): Promise<RawAsset[]> {
  * screenshots and logs next to the report. Everything is optional.
  */
 export async function discoverAssets(reportPath: string, requested?: string): Promise<RawAsset[]> {
-  if (requested) return collectAssets(requested);
+  const evidence = `${resolve(reportPath)}.assets`;
+  const evidenceAssets = await isDirectory(evidence) ? await collectAssets(evidence) : [];
+  if (requested) return [...await collectAssets(requested), ...evidenceAssets];
   const directory = dirname(resolve(reportPath));
   const assets = join(directory, 'assets');
-  if (await isDirectory(assets)) return collectAssets(assets);
-  const names = await readdir(directory, { withFileTypes: true });
-  const loose: RawAsset[] = [];
-  for (const entry of names.sort((left, right) => left.name.localeCompare(right.name))) {
-    if (!entry.isFile() || entry.name.startsWith('.')) continue;
-    const extension = extname(entry.name).toLowerCase();
-    if (!looseExtensions.has(extension)) continue;
-    loose.push({ path: entry.name, bytes: await readFile(join(directory, entry.name)) });
+  const found: RawAsset[] = [];
+  if (await isDirectory(assets)) found.push(...await collectAssets(assets));
+  else {
+    const names = await readdir(directory, { withFileTypes: true });
+    const loose: RawAsset[] = [];
+    for (const entry of names.sort((left, right) => left.name.localeCompare(right.name))) {
+      if (!entry.isFile() || entry.name.startsWith('.')) continue;
+      const extension = extname(entry.name).toLowerCase();
+      if (!looseExtensions.has(extension)) continue;
+      loose.push({ path: entry.name, bytes: await readFile(join(directory, entry.name)) });
+    }
+    found.push(...loose);
   }
-  return loose;
+  // Assertion evidence keeps expanded step directories under `<report>.assets`.
+  found.push(...evidenceAssets);
+  return found;
 }
 
 export function decorateAsset(asset: RawAsset, entryId: string | undefined, path: string): PackAsset {
   const extension = extname(path).toLowerCase();
   const base = path.slice(path.lastIndexOf('/') + 1).toLowerCase();
   let role: AssetRole;
-  if (/(^|[._-])before([._-]|$)/.test(base)) role = 'screenshot-before';
+  if (base === 'assertion-baseline.png') role = 'assertion-baseline';
+  else if (base === 'assertion-actual.png') role = 'assertion-actual';
+  else if (/(^|[._-])before([._-]|$)/.test(base)) role = 'screenshot-before';
   else if (/(^|[._-])after([._-]|$)/.test(base)) role = 'screenshot-after';
   else if (['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(extension)) role = 'screenshot';
   else if (extension === '.log' || extension === '.txt') role = 'log';
