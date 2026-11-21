@@ -18,7 +18,8 @@ import { parseTestItem, resolveSecrets } from '../dist/test-item.js';
 import { loadSession } from '../dist/workbench-session.js';
 import { startWorkbench } from '../dist/workbench.js';
 import {
-  KIND_LABELS, actionKind, changeTarget, compileDraft, makeBehavior, scrollLabel, shellDraft, shellSummary, visibleRows,
+  KIND_LABELS, actionKind, changeTarget, compileDraft, dragSummary, makeBehavior, scrollLabel, shellDraft,
+  shellSummary, visibleRows,
 } from '../workbench/model.js';
 
 const example = async name => JSON.parse(await readFile(new URL(`../examples/${name}.json`, import.meta.url), 'utf8'));
@@ -478,6 +479,15 @@ test('the timeline labels distinguish double, triple, right clicks and scroll di
   assert.equal(KIND_LABELS[actionKind({ kind: 'click', count: 3 })], '三击');
   assert.equal(KIND_LABELS[actionKind({ kind: 'click', button: 'right' })], '右键');
   assert.equal(KIND_LABELS[actionKind({ kind: 'scroll', deltaY: -5 })], '滚轮');
+  assert.equal(KIND_LABELS[actionKind({ kind: 'drag' })], '拖拽');
+  assert.equal(dragSummary({
+    from: { kind: 'point', point: [135, 165] },
+    to: { kind: 'element', role: 'textfield' },
+  }), '拖拽 坐标 (135, 165) → textfield');
+  assert.equal(dragSummary({
+    from: { kind: 'element', role: 'row', name: 'Report.txt' },
+    to: { kind: 'element', role: 'row', name: 'Archive' },
+  }), '拖拽 row “Report.txt” → row “Archive”');
   assert.equal(scrollLabel({ kind: 'scroll', deltaX: 0, deltaY: -5 }), '滚轮 ↓ 5 行');
   assert.equal(scrollLabel({ kind: 'scroll', deltaX: 0, deltaY: 4 }), '滚轮 ↑ 4 行');
   assert.equal(scrollLabel({ kind: 'scroll', deltaX: 0, deltaY: 0 }), '滚轮 ← 1 行');

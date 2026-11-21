@@ -131,6 +131,16 @@ const scrollDirection = T.Union([
 ]);
 const scrollDelta = T.Integer({ minimum: -1000, maximum: 1000 });
 const scrollDuration = T.Optional(time);
+// A drag records both endpoints and its measured duration. The sampled path is
+// evidence of the gesture; replay keeps the endpoints and duration. A drag that
+// starts and ends at the same element is still a drag, not a click.
+const dragPathPoint = T.Tuple([T.Integer(), T.Integer()]);
+const drag = object({
+  ...step, kind: T.Literal('drag'),
+  from: locator, to: locator, durationMs: T.Integer({ minimum: 0, maximum: 60_000 }),
+  path: T.Optional(T.Array(dragPathPoint, { maxItems: 64 })),
+  button: clickButton,
+});
 const scroll = T.Union([
   object({
     ...step, kind: T.Literal('scroll'), target: locator,
@@ -213,6 +223,7 @@ const action = T.Union([
   }),
   object({ ...step, kind: T.Literal('wait'), check, timeoutMs: time }),
   object({ ...step, kind: T.Literal('assert'), check: assertCheck }),
+  drag,
   scroll,
   ...shellSteps,
 ]);
@@ -329,6 +340,7 @@ const entry = T.Union([
     ...entryFields,
     kind: T.Union([
       T.Literal('click'), T.Literal('type'), T.Literal('key'), T.Literal('wait'), T.Literal('scroll'),
+      T.Literal('drag'),
     ]),
   }),
   object({
@@ -441,6 +453,7 @@ export type Flow = Static<typeof flowSchema>;
 export type Action = Static<typeof action>;
 export type ClickAction = Extract<Action, { kind: 'click' }>;
 export type ScrollAction = Extract<Action, { kind: 'scroll' }>;
+export type DragAction = Extract<Action, { kind: 'drag' }>;
 export type Setup = Static<typeof setup>;
 export type Ensure = Static<typeof ensure>;
 export type Locator = Static<typeof locator>;

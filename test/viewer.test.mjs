@@ -234,18 +234,22 @@ test('the viewer summary names double clicks, right clicks and scroll direction'
       { id: 'double', kind: 'click', target: { kind: 'element', role: 'textfield' }, count: 2 },
       { id: 'right', kind: 'click', target: { kind: 'element', role: 'textfield' }, button: 'right' },
       { id: 'wheel', kind: 'scroll', target: { kind: 'element', role: 'textfield' }, deltaX: 0, deltaY: -5 },
+      { id: 'drag', kind: 'drag', from: { kind: 'point', point: [135, 165] },
+        to: { kind: 'element', role: 'textfield' }, durationMs: 480 },
     ],
   });
   const report = await runFlow(flow, offlineDesktop(fixture, flow.target), {
     dryRun: true, signal: new AbortController().signal,
   });
   assert.deepEqual(report.entries.map(entry => [entry.kind, entry.status]), [
-    ['click', 'resolved'], ['click', 'resolved'], ['scroll', 'resolved'],
+    ['click', 'resolved'], ['click', 'resolved'], ['scroll', 'resolved'], ['drag', 'resolved'],
   ]);
   const html = strFromU8(unzipSync(packReport(report, flow))['index.html']);
   assert.match(html, /双击 textfield/);
   assert.match(html, /右键 textfield/);
   assert.match(html, /滚轮 ↓ 5 行 textfield/);
+  assert.match(html, /拖拽 坐标 \(135, 165\) → textfield/);
+  assert.match(html, /拖拽时长/);
 });
 
 test('assertion statistics and the failed-assertion filter work on the shipped script', async () => {

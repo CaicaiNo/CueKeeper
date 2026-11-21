@@ -1,7 +1,8 @@
 import { createDom } from './dom.js';
 import {
   KIND_LABELS, actionKind, canUndo, changeTarget, compileDraft, confirmCondition, confirmedSetup, deleteCondition, id,
-  makeBehavior, retargetCondition, sameTarget, scrollLabel, setupDraft, shellDraft, shellSummary, undoCondition, visibleRows,
+  makeBehavior, retargetCondition, sameTarget, scrollLabel, setupDraft, shellDraft, shellSummary, dragSummary,
+  undoCondition, visibleRows,
 } from './model.js';
 import { createAppPicker } from './picker.js';
 
@@ -18,7 +19,7 @@ const { el, icon, button, empty, muted, input, field, select } = dom;
 
 const KIND_ICONS = {
   click: 'pointer', doubleClick: 'pointerDouble', tripleClick: 'pointerDouble', rightClick: 'pointerRight',
-  scroll: 'wheel', type: 'text', key: 'keyboard', wait: 'clock', assert: 'checkCircle',
+  scroll: 'wheel', drag: 'drag', type: 'text', key: 'keyboard', wait: 'clock', assert: 'checkCircle',
   behavior: 'layers', shell: 'terminal',
 };
 
@@ -99,7 +100,8 @@ const shortcutLabel = action => [
 ].join('+');
 
 function actionLabel(action) {
-  const label = locatorLabel(actionTarget(action));
+  const target = actionTarget(action);
+  const label = target ? locatorLabel(target) : '';
   switch (action.kind) {
     case 'click':
       if (action.button === 'right') return `右键 · ${label}`;
@@ -107,6 +109,7 @@ function actionLabel(action) {
       if (action.count === 3) return `三击 · ${label}`;
       return label;
     case 'scroll': return `${scrollLabel(action)} · ${label}`;
+    case 'drag': return `${dragSummary(action)} · ${action.durationMs} ms`;
     case 'type': return typeof action.text === 'string' ? `输入 “${short(action.text)}”` : `输入参数 ${action.text.param}`;
     case 'key': return shortcutLabel(action);
     case 'assert':
@@ -388,19 +391,25 @@ function renderInspector() {
   }
   const ignored = state.ignored.has(row.id);
   const editable = !ignored && isCompatible(row);
+  const target = actionTarget(row.action);
   panel.replaceChildren(el('div', { className: 'stack' },
     el('h3', {}, actionLabel(row.action)),
     infoList([
       ['动作', KIND_LABELS[actionKind(row.action)] ?? row.action.kind],
       ...(row.action.kind === 'scroll' ? [['滚动', scrollLabel(row.action)]] : []),
+      ...(row.action.kind === 'drag'
+        ? [['起点', locatorLabel(row.action.from)], ['终点', locatorLabel(row.action.to)],
+          ['时长', `${row.action.durationMs} ms`]]
+        : []),
       ['应用', appLabel(row.app)], ['窗口', row.window],
-      ['定位器', locatorLabel(actionTarget(row.action))], ['时间', timestamp(row.atMs)], ['耗时', duration(row.durationMs)],
+      ...(target ? [['定位器', locatorLabel(target)]] : []),
+      ['时间', timestamp(row.atMs)], ['耗时', duration(row.durationMs)],
     ], 'meta-grid'),
     isCompatible(row) ? undefined : muted('该动作属于另一窗口，只能在时间线复盘。'),
     el('div', { className: 'actions' },
       button('加入测试项', () => addAction(row.action), { icon: 'listPlus', disabled: !editable }),
       button('添加断言', () => assertionDialog(row), { icon: 'checkCircle', disabled: !editable }),
-      button('重新拾取', () => locatorDialog(row), {
+      button('重新拾取', () => row.action.kind === 'drag' ? dragDialog(row) : locatorDialog(row), {
         icon: 'crosshair', disabled: !editable || row.action.kind === 'key' || row.action.kind === 'shell',
       }),
       button(ignored ? '恢复动作' : '忽略动作', () => {
@@ -649,8 +658,61 @@ function locatorDialog(row) {
   });
 }
 
+/**
+ * A drag has two endpoints. A coordinate keeps the exact recorded position
+ * (text selection, window moves); an element replays from its center.
+ */
+function dragEndpointFields(title, original) {
+  const mode = select([['point', '坐标'], ['element', '元素']]);
+  mode.value = original?.kind === 'element' ? 'element' : 'point';
+  const coord = input({
+    placeholder: 'x, y', maxLength: 40,
+    value: original?.kind === 'point' ? original.point.join(', ') : '',
+  });
+  const picker = locatorFields(original?.kind === 'element' ? original : undefined);
+  const coordBox = field('坐标（屏幕逻辑点）', coord);
+  const elementBox = el('div', { className: 'stack' }, ...picker.controls);
+  const sync = () => {
+    coordBox.hidden = mode.value !== 'point';
+    elementBox.hidden = mode.value !== 'element';
+  };
+  mode.onchange = sync;
+  sync();
+  return {
+    controls: [el('h3', {}, title), field('类型', mode), coordBox, elementBox],
+    value() {
+      if (mode.value === 'element') return picker.value();
+      const parts = coord.value.split(',').map(part => Number(part.trim()));
+      if (parts.length !== 2 || !parts.every(Number.isSafeInteger)) throw new Error('坐标需填写 “x, y” 整数。');
+      return { kind: 'point', point: parts };
+    },
+  };
+}
+
+function dragDialog(row) {
+  const from = dragEndpointFields('起点', row.action.from);
+  const to = dragEndpointFields('终点', row.action.to);
+  const durationMs = el('input', {
+    type: 'number', min: '0', max: '60000', step: '10', value: String(row.action.durationMs),
+  });
+  openDialog('重新拾取拖拽', [
+    ...from.controls, ...to.controls, field('时长（毫秒）', durationMs),
+  ], '替换拖拽', () => {
+    const value = { from: from.value(), to: to.value(), durationMs: Number(durationMs.value) };
+    if (!Number.isSafeInteger(value.durationMs) || value.durationMs < 0 || value.durationMs > 60000) {
+      throw new Error('拖拽时长需为 0–60000 毫秒的整数。');
+    }
+    // The stored path described the old endpoints; it is stale after a re-pick.
+    const { path, ...rest } = row.action;
+    row.action = { ...rest, ...value };
+    render();
+    status('已替换拖拽的起止点与时长。可重新加入草稿。', 'success');
+  });
+}
+
 function assertionDialog(row) {
-  const picker = locatorFields(actionTarget(row.action));
+  const picker = locatorFields(actionTarget(row.action) ??
+    (row.action.kind === 'drag' ? row.action.from : undefined));
   const equals = input({ maxLength: 4000 });
   const toggle = select([['true', '成立'], ['false', '不成立']]);
   const textField = field('预期内容', equals);

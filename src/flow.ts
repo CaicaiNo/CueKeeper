@@ -37,6 +37,14 @@ function validatePointer(action: Action, where: string) {
     }
     return;
   }
+  if (action.kind === 'drag') {
+    // The driver has one drag gesture and it presses the left button. A right
+    // drag must fail here instead of replaying as a plain drag.
+    if (action.button === 'right') {
+      throw new Error(`${where}: right-button drags are not supported`);
+    }
+    return;
+  }
   if (action.kind !== 'scroll') return;
   if ('deltaX' in action) {
     if (action.deltaX === 0 && action.deltaY === 0) {

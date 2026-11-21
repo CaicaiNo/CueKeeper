@@ -3,7 +3,7 @@ export const sameTarget = (a, b) => a.app === b.app && a.window === b.window;
 
 export const KIND_LABELS = {
   click: '点击', doubleClick: '双击', tripleClick: '三击', rightClick: '右键', scroll: '滚轮',
-  type: '输入', key: '快捷键', wait: '等待', assert: '断言', behavior: '行为', shell: 'Shell',
+  drag: '拖拽', type: '输入', key: '快捷键', wait: '等待', assert: '断言', behavior: '行为', shell: 'Shell',
 };
 
 /** The timeline shows pointer variants as their own kind without changing the flow. */
@@ -31,6 +31,14 @@ export function scrollDetail(action) {
 export function scrollLabel(action) {
   const { direction, amount } = scrollDetail(action);
   return `滚轮 ${scrollArrows[direction] ?? ''} ${amount} 行`;
+}
+
+/** The timeline names both drag endpoints; a re-picked endpoint stays visible. */
+export function dragSummary(action) {
+  const endpoint = target => target.kind === 'point'
+    ? `坐标 (${target.point[0]}, ${target.point[1]})`
+    : `${target.role}${target.name ? ` “${target.name}”` : ''}`;
+  return `拖拽 ${endpoint(action.from)} → ${endpoint(action.to)}`;
 }
 
 export function makeBehavior(rows, name, bindings, target) {

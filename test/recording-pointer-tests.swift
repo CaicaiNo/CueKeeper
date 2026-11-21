@@ -56,10 +56,10 @@ struct RecordingPointerTests {
         }
 
         func scenario(_ name: String, _ inputs: [Input], _ reasons: [Reason],
-                      _ clickNumbers: [Int64], _ warnings: [String] = [], counts: [Int64] = [])
+                      _ clickNumbers: [Int64], counts: [Int64] = [])
             -> (name: String, inputs: [Input], reasons: [Reason], clickNumbers: [Int64],
-                warnings: [String], counts: [Int64]) {
-            (name, inputs, reasons, clickNumbers, warnings,
+                counts: [Int64]) {
+            (name, inputs, reasons, clickNumbers,
              counts.isEmpty ? clickNumbers.map { _ in 1 } : counts)
         }
         let burst = (0..<5).map { input(.down, UInt64($0 * 10), Int64($0 + 1)) }
@@ -104,9 +104,10 @@ struct RecordingPointerTests {
              [.awaitingRelease, .accepted, .awaitingRelease, .accepted], [1, 2]),
             scenario("drag returns to origin", [input(.down, 0, 1), input(.drag, 10, 1, x: 155),
                                          input(.drag, 20, 1), input(.up, 30, 1)],
-             [.awaitingRelease, .dragSkipped, .dragObserved, .unmatchedUp], [], ["DRAG_SKIPPED"]),
-            scenario("release away from origin", [input(.down, 0, 1), input(.up, 10, 1, x: 155)],
-             [.awaitingRelease, .dragSkipped], [], ["DRAG_SKIPPED"]),
+             [.awaitingRelease, .dragStarted, .dragging, .dragAccepted], []),
+            scenario("release away from origin without a dragged event",
+                     [input(.down, 0, 1), input(.up, 10, 1, x: 155)],
+             [.awaitingRelease, .dragAccepted], []),
             scenario("up must belong to the press", [input(.up, 0, 1), input(.down, 10, 2),
                                              input(.up, 20, 1), input(.up, 30, 2)],
              [.unmatchedUp, .awaitingRelease, .unmatchedUp, .accepted], [2]),
@@ -115,16 +116,22 @@ struct RecordingPointerTests {
             var pointer = RecordingPointer()
             var reasons: [Reason] = []
             var clicks: [RecordingPointer.Click] = []
+            var drags: [RecordingPointer.Drag] = []
             for input in scenario.inputs {
                 let reason: Reason
                 let click: RecordingPointer.Click?
+                let drag: RecordingPointer.Drag?
                 switch input.event {
-                case .down: (reason, click) = (pointer.press(input.sample, button: 0), nil)
-                case .up: (reason, click) = pointer.release(input.sample)
-                case .drag: (reason, click) = (pointer.drag(input.sample), nil)
+                case .down:
+                    reason = pointer.press(input.sample, button: 0, modifiers: [])
+                    click = nil
+                    drag = nil
+                case .up: (reason, click, drag) = pointer.release(input.sample)
+                case .drag: (reason, click, drag) = (pointer.drag(input.sample, modifiers: []), nil, nil)
                 }
                 reasons.append(reason)
                 if reason == .accepted, let click { clicks.append(click) }
+                if reason == .dragAccepted, let drag { drags.append(drag) }
                 let observation = PointerObservation(
                     phase: .recording, event: input.event, plainClick: input.event == .down,
                     recorderEvent: false, overIndicator: false, hitWindow: 1234, targetWindow: 1234,
@@ -135,7 +142,7 @@ struct RecordingPointerTests {
                 precondition(row["reason"] as? String == reason.rawValue)
                 precondition(row["clickState"] as? Int64 == input.sample.clickState)
                 precondition(row["eventNumber"] as? Int64 == input.sample.eventNumber)
-                precondition(row["suppressed"] as? Bool == [.duplicateDown, .dragSkipped].contains(reason))
+                precondition(row["suppressed"] as? Bool == (reason == .duplicateDown))
                 precondition(row["downId"] as? String == click?.down.traceId)
                 if emitTrace {
                     let line = try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys])
@@ -148,8 +155,59 @@ struct RecordingPointerTests {
             precondition(zip(clicks, expectedDowns).allSatisfy { $0.down.squaredDistance(to: $1.sample) == 0 },
                          "Click moved from its press location")
             precondition(clicks.map(\.count) == scenario.counts, "Unexpected click counts for \(scenario.name)")
-            precondition(reasons.compactMap(\.warning) == scenario.warnings, "Unexpected warnings for \(scenario.name)")
+            let expectedDrags = scenario.reasons.filter { $0 == .dragAccepted }.count
+            precondition(drags.count == expectedDrags, "Unexpected drags for \(scenario.name)")
         }
-        return cases.count
+        return cases.count + testDrags()
+    }
+
+    /// Drag sampling, endpoints and duration are asserted directly: a wrong
+    /// path or duration would replay a different gesture than the recorded one.
+    private static func testDrags() -> Int {
+        func sample(_ ms: UInt64, _ x: CGFloat, _ number: Int64 = 1) -> PointerSample {
+            PointerSample(timestamp: ms * 1_000_000, location: CGPoint(x: x, y: 165),
+                          eventNumber: number, clickState: 1)
+        }
+
+        // A movement below the 3 pt threshold stays a click.
+        var below = RecordingPointer()
+        precondition(below.press(sample(0, 135), button: 0) == .awaitingRelease)
+        precondition(below.drag(sample(10, 137), modifiers: []) == .dragObserved)
+        let (belowReason, belowClick, belowDrag) = below.release(sample(20, 137))
+        precondition(belowReason == .accepted && belowClick != nil && belowDrag == nil)
+
+        // Distance and time sampling: 4 px in 5 ms is not a sample, 10 px is, and
+        // a 20 ms pause at the same place is. Endpoints never enter the path.
+        var pointer = RecordingPointer()
+        precondition(pointer.press(sample(0, 135), button: 0) == .awaitingRelease)
+        precondition(pointer.drag(sample(5, 139), modifiers: []) == .dragStarted)
+        precondition(pointer.drag(sample(20, 145), modifiers: []) == .dragging)
+        precondition(pointer.drag(sample(25, 147), modifiers: []) == .dragging)
+        let (reason, click, drag) = pointer.release(sample(40, 150))
+        precondition(reason == .dragAccepted && click == nil)
+        guard let drag else { preconditionFailure("A drag must produce a drag record") }
+        precondition(drag.from.location.x == 135, "Drag must keep its press origin")
+        precondition(drag.to.location.x == 150, "Drag must keep its release point")
+        precondition(drag.path.map(\.location.x) == [145], "Unexpected sampled path \(drag.path.map(\.location.x))")
+        precondition(drag.durationMs == 40, "Unexpected drag duration \(drag.durationMs)")
+        precondition(drag.button == 0)
+
+        // A modifier drag keeps the modifiers so the CLI can refuse to replay it
+        // instead of silently turning a copy-drag into a move-drag.
+        var modified = RecordingPointer()
+        precondition(modified.press(sample(0, 135), button: 0, modifiers: ["alt"]) == .awaitingRelease)
+        precondition(modified.drag(sample(10, 160), modifiers: []) == .dragStarted)
+        let (modifiedReason, _, modifiedDrag) = modified.release(sample(20, 160))
+        precondition(modifiedReason == .dragAccepted && modifiedDrag?.modifiers == ["alt"])
+
+        // The path is capped instead of growing without bound.
+        var long = RecordingPointer()
+        precondition(long.press(sample(0, 135), button: 0) == .awaitingRelease)
+        for index in 1...80 {
+            _ = long.drag(sample(UInt64(index * 20), 135 + CGFloat(index * 10)), modifiers: [])
+        }
+        let (longReason, _, longDrag) = long.release(sample(1700, 935))
+        precondition(longReason == .dragAccepted && longDrag?.path.count == 64)
+        return 3
     }
 }

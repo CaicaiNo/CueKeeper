@@ -456,14 +456,15 @@ final class Capture {
         )
         var reason = observation.reason
         var click: RecordingPointer.Click?
+        var drag: RecordingPointer.Drag?
         switch reason {
         case .awaitingRelease:
-            reason = pointer.press(sample, button: button)
+            reason = pointer.press(sample, button: button, modifiers: modifierNames(modifiers))
         case .unmatchedUp where type == .leftMouseUp || type == .rightMouseUp:
-            (reason, click) = pointer.release(sample)
-            if reason == .accepted && events >= 1000 { reason = .eventLimit }
+            (reason, click, drag) = pointer.release(sample, modifiers: modifierNames(modifiers))
+            if (reason == .accepted || reason == .dragAccepted) && events >= 1000 { reason = .eventLimit }
         case .dragObserved:
-            reason = pointer.drag(sample)
+            reason = pointer.drag(sample, modifiers: modifierNames(modifiers))
         case .unsupportedClick, .overlay, .otherWindow, .noWindow:
             if type == .leftMouseDown || type == .rightMouseDown { pointer = RecordingPointer() }
         default:
@@ -490,6 +491,26 @@ final class Capture {
             if click.button == 1 { emitted["button"] = "right" }
             if traceClicks { emitted["traceId"] = click.down.traceId }
             emit(emitted)
+        case .dragStarted:
+            // Announce pickup before the drop so the CLI can bind both endpoints
+            // against the tree the gesture started from.
+            guard started != nil else { return }
+            emit(["kind": "drag_start"])
+        case .dragAccepted:
+            guard let started, let drag, registerEvent() else { return }
+            var emitted: [String: Any] = [
+                "kind": "drag",
+                "from": [Int(drag.from.location.x.rounded()), Int(drag.from.location.y.rounded())],
+                "to": [Int(drag.to.location.x.rounded()), Int(drag.to.location.y.rounded())],
+                "path": drag.path.map { [Int($0.location.x.rounded()), Int($0.location.y.rounded())] },
+                "durationMs": drag.durationMs,
+                "modifiers": drag.modifiers,
+                "button": drag.button == 1 ? "right" : "left",
+                "t": Int((ProcessInfo.processInfo.systemUptime - started) * 1000),
+                "seen": Int(Date().timeIntervalSince1970 * 1000),
+            ]
+            if traceClicks { emitted["traceId"] = drag.from.traceId }
+            emit(emitted)
         case .unsupportedClick:
             if registerEvent() { warn(type == .leftMouseDown ? "UNSUPPORTED_CLICK" : "UNSUPPORTED_EVENT") }
         case .eventLimit:
@@ -497,8 +518,15 @@ final class Capture {
         case .overlay, .otherWindow, .noWindow:
             emit(["kind": "boundary"])
         default:
-            if let warning = reason.warning { warn(warning) }
+            break
         }
+    }
+
+    private func modifierNames(_ flags: CGEventFlags) -> [String] {
+        let names: [(CGEventFlags, String)] = [
+            (.maskCommand, "meta"), (.maskControl, "ctrl"), (.maskAlternate, "alt"), (.maskShift, "shift"),
+        ]
+        return names.compactMap { flag, name in flags.contains(flag) ? name : nil }
     }
 
     /// Wheel input is scoped to the selected window and recorded as line deltas,

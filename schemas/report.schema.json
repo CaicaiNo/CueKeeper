@@ -421,6 +421,10 @@
                   {
                     "const": "scroll",
                     "type": "string"
+                  },
+                  {
+                    "const": "drag",
+                    "type": "string"
                   }
                 ]
               }

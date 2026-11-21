@@ -582,6 +582,18 @@ test('duplicate titles, secondary windows, and bare coordinates follow the desig
     entryId: 'point',
   });
   assert.equal(pointDesktop.calls.some(call => call.call === 'clickPoint' || call.call === 'focusWindow'), false);
+
+  // A drag with a coordinate endpoint is equally unprovable for one copy.
+  const dragReport = await replay(flowFor(pathTarget(requested), [{
+    id: 'drag', kind: 'drag', from: { kind: 'point', point: [135, 165] },
+    to: { kind: 'element', role: 'textfield' }, durationMs: 200,
+  }]), pointDesktop, point.identity);
+  assert.equal(dragReport.status, 'blocked');
+  assert.deepEqual(dragReport.appIdentity, {
+    app, mode: 'bundle_path', status: 'blocked', code: 'UNSAFE_POINT', reason: 'untargeted_input',
+    entryId: 'drag',
+  });
+  assert.equal(pointDesktop.calls.some(call => call.call === 'drag' || call.call === 'focusWindow'), false);
 });
 
 test('window-only driver calls carry the window ID and never --app', { skip: process.platform !== 'darwin' }, async t => {

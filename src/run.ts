@@ -6,11 +6,11 @@ import type { AssertionObservation } from './assertion.js';
 import { AppIdentitySession, IdentityFault, unsafePoint } from './app-identity.js';
 import { defaultEnsureTimeoutMs } from './contracts.js';
 import type {
-  AssertCheck, Check, ClickAction, Delivery, Ensure, Entry, Flow, Report, ScreenshotActual,
-  ScrollAction, Setup, Target,
+  AssertCheck, Check, ClickAction, Delivery, Ensure, Entry, Flow, Locator, Report,
+  ScreenshotActual, ScrollAction, Setup, Target,
 } from './contracts.js';
 import { DesktopFault, isMissingWindow } from './desktop.js';
-import type { ClickOptions, Desktop } from './desktop.js';
+import type { ClickOptions, Desktop, DragEndpoint } from './desktop.js';
 import { hashFlow, plan, scrollIntent } from './flow.js';
 import type { PlannedStep } from './flow.js';
 import { Fault, contains, resolve } from './locator.js';
@@ -68,6 +68,14 @@ function clickOptions(action: ClickAction): ClickOptions {
     ...(action.count === undefined ? {} : { count: action.count as 1 | 2 | 3 }),
     ...(action.button === undefined ? {} : { button: action.button }),
   };
+}
+
+/** An element endpoint keeps its ref; a point endpoint keeps its coordinates. */
+function dragEndpoint(snapshot: Snapshot, locator: Locator): DragEndpoint {
+  if (locator.kind !== 'element') return { point: locator.point };
+  const { node } = resolve(snapshot, locator);
+  if (!node.ref || node.secure) throw new Fault('UNSAFE_TARGET', 'Drag endpoint is secure or has no action reference');
+  return { ref: node.ref };
 }
 
 /** The wheel deltas a point scroll posts, in the driver's line units. */
@@ -551,6 +559,28 @@ export async function runFlow(
 
         const current = await snapshot();
         const client = requireDesktop();
+        if (action.kind === 'drag') {
+          // A path-fixed flow cannot prove which copy receives global
+          // coordinates, so both endpoints must resolve to elements.
+          if (pathBound && (action.from.kind === 'point' || action.to.kind === 'point')) {
+            throw unsafePoint(flow.target.app, identity.mode);
+          }
+          // The start must be inside the bound window. The destination may be
+          // outside it (a window move or a drop onto another surface).
+          if (action.from.kind === 'point' && !contains(current.tree.bounds, action.from.point)) {
+            throw new Fault('UNSAFE_POINT', 'The drag start is outside the selected window');
+          }
+          const from = dragEndpoint(current, action.from);
+          const to = dragEndpoint(current, action.to);
+          if (dryRun) return { status: 'resolved', message: 'Drag endpoints resolved' };
+          if (pathBound) await identity.verifyWindowId(current.windowId, flow.target.window);
+          return { status: 'passed', delivery: await client.drag(
+            current, flow.target, from, to, {
+              durationMs: action.durationMs,
+              ...(action.button ? { button: action.button } : {}),
+            },
+          ) };
+        }
         if (action.kind === 'key') {
           if (dryRun) return { status: 'resolved', message: 'Window resolved for shortcut' };
           if (pathBound) await identity.verifyWindowId(current.windowId, flow.target.window);

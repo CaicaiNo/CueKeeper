@@ -56,6 +56,7 @@ function identityBanner(report: Report) {
 }
 const kindLabels: Record<string, string> = {
   setup: '前置条件', click: '点击', type: '输入', key: '快捷键', wait: '等待', assert: '断言', scroll: '滚轮',
+  drag: '拖拽',
 };
 const deliveryLabels: Record<string, string> = {
   delivered_verified: '已送达并验证',
@@ -238,6 +239,7 @@ function summaryFor(entry: Entry, action: ExecutableAction | undefined, setup: S
   if (!action) return `${kindLabels[entry.kind] ?? entry.kind}`;
   switch (action.kind) {
     case 'click': return `${gestureLabel(action)} ${locatorShort(action.target)}`;
+    case 'drag': return `拖拽 ${locatorShort(action.from)} → ${locatorShort(action.to)}`;
     case 'scroll': return `${scrollLabel(action)} ${locatorShort(action.target)}`;
     case 'type': return `输入 ${short(JSON.stringify(action.text), 40)}`;
     case 'key': return `快捷键 ${shortcutLabel(action)}`;
@@ -301,8 +303,9 @@ function errorSection(view: StepView) {
   const expected = view.expectation ||
     (entry.kind === 'click' ? '元素可解析并完成点击' :
       entry.kind === 'scroll' ? '滚动目标可解析并完成滚动' :
-        entry.kind === 'type' ? '输入已送达并生效' :
-          entry.kind === 'key' ? '快捷键已送达并生效' : '步骤完成');
+        entry.kind === 'drag' ? '拖拽两端可解析并完成拖拽' :
+          entry.kind === 'type' ? '输入已送达并生效' :
+            entry.kind === 'key' ? '快捷键已送达并生效' : '步骤完成');
   const actual = entry.kind === 'assert' && entry.assertion?.actual !== undefined
     ? actualText(entry.assertion.actual)
     : entry.message ||
@@ -401,6 +404,10 @@ function targetSection(view: StepView, flow: Flow) {
     } else if (action.kind === 'scroll') {
       rows.push(`<div class="target wide"><p class="k">定位器</p><div class="v">${escapeHtml(locatorText(action.target))}</div></div>`);
       rows.push(`<div class="target"><p class="k">滚动</p><div class="v">${escapeHtml(scrollLabel(action))}</div></div>`);
+    } else if (action.kind === 'drag') {
+      rows.push(`<div class="target wide"><p class="k">起点</p><div class="v">${escapeHtml(locatorText(action.from))}</div></div>`);
+      rows.push(`<div class="target wide"><p class="k">终点</p><div class="v">${escapeHtml(locatorText(action.to))}</div></div>`);
+      rows.push(`<div class="target"><p class="k">拖拽时长</p><div class="v">${formatDuration(action.durationMs)}</div></div>`);
     } else if (action.kind === 'type') {
       rows.push(`<div class="target wide"><p class="k">定位器</p><div class="v">${escapeHtml(locatorText(action.target))}</div></div>`);
       rows.push(`<div class="target wide"><p class="k">文本</p><div class="v">${escapeHtml(action.text)}</div></div>`);

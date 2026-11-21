@@ -95,7 +95,8 @@ const confirmationTtlMs = 120_000;
 
 function stepsNeedLive(planned: ReturnType<typeof plan>) {
   return planned.some(({ action }) =>
-    (action.kind === 'click' || action.kind === 'scroll') && action.target.kind === 'point');
+    ((action.kind === 'click' || action.kind === 'scroll') && action.target.kind === 'point') ||
+    (action.kind === 'drag' && (action.from.kind === 'point' || action.to.kind === 'point')));
 }
 
 function planHash(sessionId: string, flowSha256: string, steps: unknown, captureOutput: boolean) {

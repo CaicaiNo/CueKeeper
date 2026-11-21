@@ -152,7 +152,7 @@ test('record CLI saves three clicks and exits zero with an unsupported input war
 
 test('record CLI returns EMPTY_RECORDING when only unsupported input arrives',
   { skip: process.platform !== 'darwin' }, t => {
-    for (const warning of ['UNSUPPORTED_EVENT', 'DRAG_SKIPPED']) {
+    for (const warning of ['UNSUPPORTED_EVENT', 'DRAG_MODIFIERS_SKIPPED']) {
       const { code, response, recorded } = recordFixture(t, [{ kind: 'warning', code: warning }]);
       assert.equal(code, 1);
       assert.equal(response.ok, false);
@@ -195,6 +195,39 @@ test('record CLI keeps a single click that activates the target and saves across
     assert.equal(recorded.steps[1].text, 'Cuekeeper M1');
     assert.deepEqual(recorded.steps[2].modifiers, ['meta']);
     assert.equal(recorded.steps[2].key, 's');
+  });
+
+test('record CLI binds a drag from the tree read at pickup and saves one drag step',
+  { skip: process.platform !== 'darwin' }, t => {
+    const { code, response, recorded, snapshotWindows } = recordFixture(t, [
+      { kind: 'drag_start' },
+      { kind: 'drag', from: [135, 165], to: [420, 330], path: [[220, 240], [330, 300]],
+        durationMs: 480, button: 'left', modifiers: [] },
+    ]);
+    assert.equal(code, 0);
+    assert.equal(response.ok, true);
+    assert.equal(response.data.warnings, undefined);
+    assert.deepEqual(recorded.steps, [{
+      id: 'step-1', kind: 'drag',
+      from: { kind: 'point', point: [135, 165] },
+      to: { kind: 'point', point: [420, 330] },
+      durationMs: 480, path: [[220, 240], [330, 300]],
+    }]);
+    // One read for the initial window and one at pickup; the drop itself reuses
+    // the pickup tree so a moved file cannot be bound twice.
+    assert.deepEqual(snapshotWindows, [null, fixture.data.window.id]);
+  });
+
+test('record CLI refuses a modifier drag instead of replaying it as a plain drag',
+  { skip: process.platform !== 'darwin' }, t => {
+    const { code, response, recorded } = recordFixture(t, [
+      { kind: 'drag_start' },
+      { kind: 'drag', from: [135, 165], to: [420, 330], path: [], durationMs: 200, button: 'left', modifiers: ['alt'] },
+      { kind: 'click', point: [135, 165] },
+    ]);
+    assert.equal(code, 0);
+    assert.deepEqual(recorded.steps.map(step => step.kind), ['click']);
+    assert.deepEqual(response.data.warnings.map(warning => warning.code), ['DRAG_MODIFIERS_SKIPPED']);
   });
 
 test('record CLI stops without a flow when the primary indicator is missing',

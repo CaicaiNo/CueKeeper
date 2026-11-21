@@ -25,6 +25,7 @@ const ICONS = {
   pointerDouble: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/>',
   pointerRight: '<rect x="7" y="2" width="10" height="20" rx="5"/><path d="M12 2v6"/><path d="M12 8h5"/>',
   wheel: '<rect x="7" y="2" width="10" height="20" rx="5"/><path d="M12 7v4"/>',
+  drag: '<circle cx="5" cy="19" r="2"/><path d="M7.1 16.9 16.9 7.1"/><circle cx="19" cy="5" r="2"/><path d="M13 5h-3"/><path d="M5 11V8"/>',
   text: '<path d="M17 22h-1a4 4 0 0 1-4-4V6a4 4 0 0 1 4-4h1"/><path d="M7 2h1a4 4 0 0 1 4 4v12a4 4 0 0 1-4 4H7"/>',
   keyboard: '<rect width="20" height="16" x="2" y="4" rx="2"/><path d="M6 8h.01"/><path d="M10 8h.01"/><path d="M14 8h.01"/><path d="M18 8h.01"/><path d="M6 12h.01"/><path d="M10 12h.01"/><path d="M14 12h.01"/><path d="M18 12h.01"/><path d="M7 16h10"/>',
   clock: '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
