@@ -2,10 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { realpath, stat } from 'node:fs/promises';
 import { extname, isAbsolute, join, relative, sep } from 'node:path';
 import { reportCheck } from './contracts.js';
-import type { Action, ElementLocator, Report } from './contracts.js';
+import type { Action, Report } from './contracts.js';
 import { readJson } from './files.js';
 import { hashFlow, parseFlow, plan } from './flow.js';
-import { flatten, object, parseSnapshot, toLocator } from './locator.js';
+import { object, parseSnapshot } from './locator.js';
+import { pickCandidates } from './pick.js';
+import type { PickCandidate } from './pick.js';
 
 export const sameTarget = (a: { app: string; window: string }, b: { app: string; window: string }) =>
   a.app === b.app && a.window === b.window;
@@ -127,7 +129,7 @@ export async function loadSession(path: string) {
     };
   }));
 
-  const candidates: ElementLocator[] = [];
+  let candidates: PickCandidate[] = [];
   if (snapshot !== undefined) {
     const envelope = object(snapshot);
     const target = object(envelope.target);
@@ -135,12 +137,7 @@ export async function loadSession(path: string) {
         target.app !== flow.target.app || target.window !== flow.target.window) {
       throw new Error('snapshot.json does not match the selected flow target');
     }
-    const tree = parseSnapshot(envelope.data, flow.target);
-    for (const entry of flatten(tree.tree)) {
-      if (entry.node.ref && !entry.node.secure && !entry.node.states.includes('hidden')) {
-        candidates.push(toLocator(tree, entry));
-      }
-    }
+    candidates = pickCandidates(parseSnapshot(envelope.data, flow.target));
   }
   const completeTimings = timeline.every(action => action.atMs !== undefined && action.durationMs !== undefined);
   const durationMs = fromCapture

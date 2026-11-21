@@ -87,7 +87,7 @@ test('workbench imports timeline metadata, reuses the library, and runs a saved 
   assert.throws(() => makeBehavior(session.timeline, 'Mixed target', new Map(), flow.target), /目标窗口/);
   const three = session.timeline.slice(0, 3);
   const type = three.find(row => row.action.kind === 'type');
-  const picked = session.candidates.find(candidate => candidate.role === 'textfield');
+  const picked = session.candidates.find(candidate => candidate.locator.role === 'textfield').locator;
   assert.equal(changeTarget(type.action, picked).text, type.action.text);
   const before = { ...type.action, target: { kind: 'element', role: 'stale-role' } };
   type.action = changeTarget(before, picked);
@@ -136,6 +136,57 @@ test('legacy recordings import with no timestamps; foreign reports and action in
   await writeJson(join(directory, 'flow.json'), flow);
   await writeJson(join(directory, 'actions.json'), { version: 1, flowId: 'wrong-flow', actions: [] });
   await assert.rejects(loadSession(directory), /current flowId/);
+});
+
+test('repicking in the workbench writes a snapshot locator that the saved test replays', async t => {
+  const { root, directory } = await fixture(t);
+  const cancellation = new AbortController();
+  const { url, closed } = await startWorkbench({
+    port: 0, allowLive: false, library: join(root, 'library'), signal: cancellation.signal,
+  });
+  t.after(async () => { cancellation.abort(); await closed; });
+  async function post(route, payload, status = 200) {
+    const response = await fetch(`${url}/api/${route}`, {
+      method: 'POST',
+      headers: { origin: url, 'content-type': 'application/json', 'x-cuekeeper-workbench': '1' },
+      body: JSON.stringify(payload),
+    });
+    const body = await response.json();
+    assert.equal(response.status, status, JSON.stringify(body));
+    return body;
+  }
+
+  const session = await post('import', { directory });
+  assert.equal(session.candidates.length, 1);
+  const [candidate] = session.candidates;
+  assert.equal(candidate.ref, '@scuekeeper:e1');
+  assert.equal(candidate.interactive, true);
+  assert.deepEqual(candidate.point, [419, 319]);
+  assert.deepEqual(candidate.bounds, { x: 112, y: 130, width: 615, height: 378 });
+  assert.deepEqual(candidate.locator, { kind: 'element', role: 'textfield', name: '' });
+
+  // Same write-back the 重新拾取 dialog performs on the selected timeline action.
+  const row = session.timeline.find(entry => entry.action.kind === 'click');
+  row.action = changeTarget(row.action, candidate.locator);
+  assert.deepEqual(row.action.target, candidate.locator);
+  const test = compileDraft(session, 'Repicked replay', [{ id: 'repicked', action: row.action }]);
+  const { output } = await post('save', { session: session.id, test }, 201);
+  const saved = JSON.parse(await readFile(output, 'utf8'));
+  assert.deepEqual(saved.steps[0].target, candidate.locator);
+
+  const validate = spawnSync(process.execPath, [cliPath, 'flow', 'validate', output, '--json'],
+    { encoding: 'utf8' });
+  assert.equal(validate.status, 0, validate.stdout + validate.stderr);
+  const replay = spawnSync(process.execPath, [cliPath, 'run', output, '--dry-run',
+    '--snapshot', join(directory, 'snapshot.json'), '--json'], { encoding: 'utf8' });
+  assert.equal(replay.status, 0, replay.stdout + replay.stderr);
+  assert.deepEqual(JSON.parse(replay.stdout).data.entries.map(entry => [entry.kind, entry.status]),
+    [['click', 'resolved']]);
+
+  const offline = await post('run', { session: session.id, test, mode: 'offline' });
+  assert.equal(offline.status, 'passed');
+  assert.deepEqual(offline.entries.filter(entry => entry.kind !== 'setup').map(entry => entry.status),
+    ['resolved']);
 });
 
 test('a secret binding stores an environment variable name and passes only the resolved value to desktop input', async t => {

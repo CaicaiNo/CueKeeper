@@ -52,6 +52,17 @@ node dist/cli.js run /path/to/test.flow.json --dry-run --snapshot /path/to/snaps
 
 工作台在本机监听。离线模式只读快照。实时回放需要 macOS、`--allow-live-replay` 启动选项和界面中的目标窗口确认。含坐标点击的测试项由 CLI 使用 `--headed` 回放。
 
+### 从快照拾取元素
+
+不录制也能把动作绑定到目标控件。`pick` 只读取窗口快照，不点击、不抢焦点，也不改变前台窗口。
+
+```sh
+node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --json
+node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --select e1 --json
+```
+
+不带 `--select` 时按可交互元素优先列出候选，每项含 `ref`、`role`、`name`、`path`、`bounds` 和 `point`。`ref` 可用完整值（`@scuekeeper:e1`）或结尾序号（`e1`）。带 `--select` 时输出 `locator`，可直接作为 `click.target` 或 `type.target` 写入 flow，并通过 `flow validate`；`point` 和 `frame` 只用于核对位置。加 `--snapshot <snapshot.json>` 可对保存的快照离线拾取，便于先在没有图形界面时检查候选。工作台动作详情的「重新拾取」使用同一套候选与定位器逻辑。
+
 ## 在 macOS 录制和回放
 
 现场步骤和权限清单见 [TextEdit 验收](docs/textedit.md)。录制器单独构建。普通 `pnpm build` 只编译 TypeScript 并核对发布的 JSON Schema。实时 `--dry-run` 读取桌面可访问性树。带 `--snapshot` 的离线运行只读样本文件。
@@ -60,6 +71,7 @@ node dist/cli.js run /path/to/test.flow.json --dry-run --snapshot /path/to/snaps
 | --- | --- |
 | `flow validate <flow.json>` | 检查 v1 结构、ID、行为引用和参数绑定 |
 | `record --app <bundle-id> --window <精确标题> --out <flow.json>` | 录制目标窗口，显示计时 HUD，支持 `--no-indicator` 和 `--sound` |
+| `pick --app <bundle-id> --window <精确标题> [--select <ref>] [--snapshot <snapshot.json>]` | 只读快照，按可交互元素优先列出候选，或输出可写入 flow 的定位器 |
 | `run <flow.json> --dry-run` | 用当前窗口解析定位器 |
 | `run <flow.json> --headed --report <report.json>` | 允许物理点击，回放并记录逐步结果 |
 | `report pack <report.json> --flow <flow.json> --out <report.zip>` | 验证报告与流程配对，生成可离线打开的 ZIP；`--assets <dir>` 带入截图、日志和 AX 快照 |

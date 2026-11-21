@@ -31,6 +31,15 @@ node dist/cli.js run out/recorded.flow.json --dry-run --json
 
 4. 需要进一步检查定位器时，可执行上面的 `run --dry-run`，三步应均为 `resolved`。
 
+元素拾取可单独复核。`pick` 只读取一次可访问性树，不点击、不抢焦点；先确认目标窗口标题唯一：
+
+```sh
+node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --json
+node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --select e1 --json
+```
+
+候选应包含正文 `textfield`。`--select` 输出带 `role`、`name`、`path`、`point` 和 `frame`，其中的 `locator` 写入 flow 后仍要通过 `flow validate` 和离线 dry-run。没有图形界面时可加 `--snapshot <snapshot.json>` 对保存的快照复核同一逻辑。
+
 `--no-indicator` 可关闭边框与 HUD，此时以标准错误的 `Recording for up to ...` 提示开始，热键仍可用。时间到点或按停止热键时，录制会保存动作。Ctrl+C 和运行中失去权限会写入已有动作，并在 CLI 标记部分录制。没有可用动作时，CLI 会报告具体原因。
 
 单击在鼠标松开时入录。相邻两次按下间隔小于 120 ms 且距离小于 3 个逻辑点时，重复按下会被合并。系统识别为双击或三击时，v1 只保留首击用于回放，并报告 `MULTI_CLICK_COLLAPSED`。按住鼠标移动超过 3 个逻辑点时跳过本次拖动，并报告 `DRAG_SKIPPED`。

@@ -370,6 +370,16 @@ function behaviorDialog(item, copy, entry) {
   });
 }
 
+function frameLabel(candidate) {
+  if (!candidate.bounds) return '快照未提供边界';
+  const { x, y, width, height } = candidate.bounds;
+  return `${x}, ${y} · ${width} × ${height}${candidate.point ? ` · 中心 ${candidate.point.join(', ')}` : ''}`;
+}
+
+function candidateLabel(candidate) {
+  return `${candidate.interactive ? '可交互' : '容器'} · ${locatorLabel(candidate.locator)}`;
+}
+
 function locatorFields(original) {
   const initial = original?.kind === 'element' ? original : undefined;
   const role = input({ required: true, maxLength: 256, value: initial?.role ?? '' });
@@ -378,19 +388,26 @@ function locatorFields(original) {
   const path = input({ value: initial?.path?.join(' / ') ?? '', placeholder: 'window / scrollarea / textfield' });
   const index = el('input', { type: 'number', min: '0', step: '1', value: initial?.index ?? '' });
   const candidates = state.session.candidates;
-  const picker = select([['', '手动填写'], ...candidates.map((locator, i) => [String(i), locatorLabel(locator)])],
+  const detail = el('p', { className: 'muted' });
+  const picker = select([['', '手动填写'], ...candidates.map((candidate, i) => [String(i), candidateLabel(candidate)])],
     event => {
-      if (!event.target.value) return;
-      const target = candidates[Number(event.target.value)];
+      if (!event.target.value) {
+        detail.textContent = '';
+        return;
+      }
+      const candidate = candidates[Number(event.target.value)];
+      const target = candidate.locator;
       role.value = target.role;
       name.value = target.name ?? '';
       exactName.checked = target.name !== undefined;
       path.value = target.path?.join(' / ') ?? '';
       index.value = target.index ?? '';
+      detail.textContent = `${candidate.ref} · ${frameLabel(candidate)}`;
     });
   return {
     controls: [
       candidates.length ? field('从快照拾取控件', picker) : muted('此目录没有可拾取的控件快照。可手动填写 AX 定位器。'),
+      candidates.length ? detail : undefined,
       field('角色', role), field('名称', name), el('label', { className: 'checkbox' }, exactName, '匹配名称（可匹配空名称）'),
       field('角色路径，可选', path), field('匹配索引，从 0 开始，可选', index),
     ],
