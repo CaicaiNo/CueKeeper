@@ -53,3 +53,5 @@ flowchart LR
 `design/` 保存六份既有原型，供 M2 复用。执行协议以 [agent-desktop v1.3.1](https://github.com/vercel-labs/agent-desktop/tree/v1.3.1) 为准。
 
 M3 的 Windows 可行性、与 macOS 的差异、驱动接口改动清单和实机待确认项见 [Windows 适配](windows.md)；首版做到哪一步、文件级实施拆分与稳定标题编辑器验收清单见 [Windows 首版（W1）范围决策](windows-scope.md)。
+
+会话视频（帧差采样 + VFR + 报告时间轴对齐）的设计与离线实测见 [会话视频](session-video.md)，本轮只有设计与 schema 草案，`src/` 未改动。

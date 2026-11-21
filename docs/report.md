@@ -77,6 +77,15 @@ out/assets/logs/runner.log
 
 含 Shell 定义的流程（包括尚未调用的行为）不能使用 `report pack`。打包会把原始 flow 写进 ZIP，而首版不允许发布命令与秘密引用；这类运行仍可用 `--report` 写 JSON，并在工作台查看。
 
+## 会话视频（可选，尚未实现）
+
+运行可以用 `--video` 额外录一段目标窗口的会话视频，作为可选 artifact 放进归档的 `media/session.mp4`，并在 `manifest.json` 的 `video` 里记录编码、时长、track 时间刻度、与报告的锚点（`atMs` → PTS）和采样阈值。设计、体积实测与省略规则见 [会话视频：帧差采样 + VFR + 时间线对齐](session-video.md)。
+
+- **默认关闭**，只在显式开启的运行里存在；`report.json` 不变，视频不参与通过/失败判断。
+- 没有视频的报告照旧打开，查看器显示「本报告未录制会话视频」。
+- 上传版 ZIP 与 `assets/` 一样默认省略 `media/`；分享前确认是否要带视频。
+- ZIP 没有加密：谁拿到归档谁能看里面的视频，等于看到了目标窗口在那段时间里显示的一切。
+
 ## v1 报告的降级
 
 前置条件触发修复时，`kind: "setup"` 的条目记录可选的 `repair`，包含 `attempted`、`kind` 和 `result`。条目 ID 仍为 `<作用域>/setup/<条件 ID>`。执行或观测失败时，条目码为 `ENSURE_FAILED`，`repair.code` 保留具体原因，例如 `APP_NOT_FOUND`、`LAUNCH_TIMEOUT`、`WINDOW_NOT_FOUND` 或系统权限错误。复查仍不满足时，条目码为 `PRECONDITION_FALSE`。

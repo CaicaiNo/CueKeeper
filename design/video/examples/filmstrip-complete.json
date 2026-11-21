@@ -1,0 +1,25 @@
+{
+  "kind": "filmstrip",
+  "status": "complete",
+  "anchor": {
+    "reportStartedAt": "2026-11-22T03:12:44.120Z",
+    "videoStartOffsetMs": 236,
+    "method": "host_clock"
+  },
+  "sampling": {
+    "thumbnail": "160x90",
+    "blockThreshold": 24,
+    "structuralBlocks": 4,
+    "maxFps": 10,
+    "churnMinIntervalMs": 500,
+    "maxWidth": 1280
+  },
+  "frames": [
+    { "ptsMs": 0, "path": "media/filmstrip/000000.png", "bytes": 48197, "width": 1280, "height": 720, "changedBlocks": 240, "class": "structural" },
+    { "ptsMs": 2000, "path": "media/filmstrip/002000.png", "bytes": 51204, "width": 1280, "height": 720, "changedBlocks": 122, "class": "structural" },
+    { "ptsMs": 2500, "path": "media/filmstrip/002500.png", "bytes": 12088, "width": 1280, "height": 720, "changedBlocks": 1, "class": "churn" }
+  ],
+  "gaps": [
+    { "fromMs": 2600, "toMs": 599900, "reason": "unchanged" }
+  ]
+}
