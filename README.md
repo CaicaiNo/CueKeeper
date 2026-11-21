@@ -177,7 +177,7 @@ node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --selec
 | `doctor [--json]` | 只读自检：Node 运行时、文件完整性、agent-desktop 版本、录制器与辅助功能/输入监控权限；末行为下一步 |
 | `--version` | 打印版本，发布包还带构建提交 |
 | `flow validate <flow.json>` | 检查 v1 结构、ID、行为引用和参数绑定 |
-| `record --app <bundle-id> --window <精确标题> --out <flow.json> [--app-path <路径>]` | 录制目标窗口，显示计时 HUD，支持 `--no-indicator` 和 `--sound` |
+| `record --app <bundle-id> --window <精确标题> --out <flow.json> [--app-path <路径>]` | 录制目标窗口，显示计时 HUD，支持 `--no-indicator`、`--sound` 与显式开启剪贴板文本的 `--clipboard` |
 | `pick --app <bundle-id> --window <精确标题> [--app-path <路径>] [--select <ref>] [--snapshot <snapshot.json>]` | 只读快照，按可交互元素优先列出候选，或输出可写入 flow 的定位器 |
 | `run <flow.json> --dry-run` | 用当前窗口解析定位器；纯 Shell 流程无需快照 |
 | `run <flow.json> --allow-shell [--allow-sudo] [--interactive] [--capture-shell-output]` | 执行 Shell 步骤；固定任务首版禁用，root 步骤走密码框或 sudoers |

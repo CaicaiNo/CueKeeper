@@ -56,7 +56,7 @@ function identityBanner(report: Report) {
 }
 const kindLabels: Record<string, string> = {
   setup: '前置条件', click: '点击', type: '输入', key: '快捷键', wait: '等待', assert: '断言', scroll: '滚轮',
-  drag: '拖拽',
+  drag: '拖拽', hover: '悬停', paste: '粘贴',
 };
 const deliveryLabels: Record<string, string> = {
   delivered_verified: '已送达并验证',
@@ -241,7 +241,10 @@ function summaryFor(entry: Entry, action: ExecutableAction | undefined, setup: S
     case 'click': return `${gestureLabel(action)} ${locatorShort(action.target)}`;
     case 'drag': return `拖拽 ${locatorShort(action.from)} → ${locatorShort(action.to)}`;
     case 'scroll': return `${scrollLabel(action)} ${locatorShort(action.target)}`;
-    case 'type': return `输入 ${short(JSON.stringify(action.text), 40)}`;
+    case 'hover': return `悬停 ${locatorShort(action.target)} · ${action.durationMs} ms`;
+    // Clipboard content is deliberately not rendered; only its size is evidence.
+    case 'paste': return `粘贴 ${action.text.length} 字 ${locatorShort(action.target)}`;
+    case 'type': return `${action.ime ? 'IME 文本插入' : '输入'} ${short(JSON.stringify(action.text), 40)}`;
     case 'key': return `快捷键 ${shortcutLabel(action)}`;
     case 'wait': return `等待 ${expectationText(action.check.expect)}`;
     case 'assert': return `断言 ${expectationText(action.check.expect, action.check.target.kind)}`;
@@ -304,8 +307,10 @@ function errorSection(view: StepView) {
     (entry.kind === 'click' ? '元素可解析并完成点击' :
       entry.kind === 'scroll' ? '滚动目标可解析并完成滚动' :
         entry.kind === 'drag' ? '拖拽两端可解析并完成拖拽' :
-          entry.kind === 'type' ? '输入已送达并生效' :
-            entry.kind === 'key' ? '快捷键已送达并生效' : '步骤完成');
+          entry.kind === 'hover' ? '悬停目标可解析并完成移动' :
+            entry.kind === 'paste' ? '粘贴目标可聚焦并完成粘贴' :
+              entry.kind === 'type' ? '输入已送达并生效' :
+                entry.kind === 'key' ? '快捷键已送达并生效' : '步骤完成');
   const actual = entry.kind === 'assert' && entry.assertion?.actual !== undefined
     ? actualText(entry.assertion.actual)
     : entry.message ||
@@ -408,6 +413,12 @@ function targetSection(view: StepView, flow: Flow) {
       rows.push(`<div class="target wide"><p class="k">起点</p><div class="v">${escapeHtml(locatorText(action.from))}</div></div>`);
       rows.push(`<div class="target wide"><p class="k">终点</p><div class="v">${escapeHtml(locatorText(action.to))}</div></div>`);
       rows.push(`<div class="target"><p class="k">拖拽时长</p><div class="v">${formatDuration(action.durationMs)}</div></div>`);
+    } else if (action.kind === 'hover') {
+      rows.push(`<div class="target wide"><p class="k">定位器</p><div class="v">${escapeHtml(locatorText(action.target))}</div></div>`);
+      rows.push(`<div class="target"><p class="k">停留</p><div class="v">${formatDuration(action.durationMs)}</div></div>`);
+    } else if (action.kind === 'paste') {
+      rows.push(`<div class="target wide"><p class="k">定位器</p><div class="v">${escapeHtml(locatorText(action.target))}</div></div>`);
+      rows.push(`<div class="target"><p class="k">文本</p><div class="v">${action.text.length} 字（内容不写入报告）</div></div>`);
     } else if (action.kind === 'type') {
       rows.push(`<div class="target wide"><p class="k">定位器</p><div class="v">${escapeHtml(locatorText(action.target))}</div></div>`);
       rows.push(`<div class="target wide"><p class="k">文本</p><div class="v">${escapeHtml(action.text)}</div></div>`);

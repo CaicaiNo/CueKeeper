@@ -44,6 +44,11 @@ export interface DragOptions {
   button?: 'left' | 'right';
 }
 
+/** The plain-text form of the clipboard, or a type we do not record. */
+export type ClipboardRead =
+  | { type: 'text'; text: string }
+  | { type: 'image' | 'file_urls' | 'empty' };
+
 export interface Desktop {
   snapshot(target: Target, timeoutMs?: number, windowId?: string, exactWindow?: boolean): Promise<Snapshot>;
   property(node: Node, property: 'text' | 'value' | 'visible', timeoutMs?: number): Promise<string | boolean | undefined>;
@@ -54,10 +59,18 @@ export interface Desktop {
   scroll(ref: string, options: ScrollOptions): Promise<Delivery | undefined>;
   /** Physical wheel at a screen point; requires headed mode. */
   scrollPoint(snapshot: Snapshot, target: Target, point: Point, options: WheelOptions): Promise<Delivery | undefined>;
+  /** Physical pointer move to a screen point; requires headed mode. */
+  hoverAt(snapshot: Snapshot, target: Target, point: Point): Promise<Delivery | undefined>;
   /** Physical press, move and release between two endpoints; requires headed mode. */
   drag(snapshot: Snapshot, target: Target, from: DragEndpoint, to: DragEndpoint, options: DragOptions): Promise<Delivery | undefined>;
   type(ref: string, text: string): Promise<Delivery | undefined>;
   press(combo: string, snapshot: Snapshot): Promise<Delivery | undefined>;
+  /** Put keyboard focus on one element before a clipboard paste. */
+  focus(ref: string): Promise<void>;
+  /** Read the plain-text clipboard without writing anything. */
+  readClipboard(): Promise<ClipboardRead>;
+  /** Write plain text to the clipboard; the text travels through stdin. */
+  writeClipboard(text: string): Promise<Delivery | undefined>;
   /** Read-only application window inventory for window assertions. */
   listWindows(app: string, timeoutMs?: number): Promise<WindowInfo[]>;
   /** Read-only inventory without an app filter, for identity cross-checks. */
@@ -370,6 +383,26 @@ export async function withDesktop<T>(
           `--dx=${deltaX}`, `--dy=${deltaY}`,
         ]);
       },
+      async hoverAt(current, target, point) {
+        await requirePoint(current, target, point);
+        // A negative coordinate must be written with `=` so it is not read as a flag.
+        return act('mouse-move', [`--xy=${point.join(',')}`]);
+      },
+      focus(ref) {
+        return call('focus', [ref]).then(() => undefined);
+      },
+      async readClipboard() {
+        // `auto` prefers file references, then images, then text. Only text is
+        // recorded; any other representation stays an explicit type here.
+        const data = object(await call('clipboard-get', ['--format', 'auto']));
+        if (data.type === 'text' && typeof data.text === 'string') return { type: 'text', text: data.text };
+        if (data.type === 'image' || data.type === 'file_urls') return { type: data.type };
+        return { type: 'empty' };
+      },
+      writeClipboard(text) {
+        // Keep clipboard text out of process arguments.
+        return act('clipboard-set', ['--stdin'], text, false);
+      },
       async drag(current, target, from, to, { durationMs, button = 'left' }) {
         if (!options.headed) throw new Fault('HEADED_REQUIRED', 'Drag is physical input and requires --headed');
         if (button !== 'left') {
@@ -462,6 +495,9 @@ export function offlineDesktop(data: unknown, expected: Target): Desktop {
       throw new Fault('WINDOW_MISMATCH', 'Offline fixtures do not include window screenshots');
     },
     click: mutate, clickPoint: mutate, scroll: mutate, scrollPoint: mutate, drag: mutate,
-    type: mutate, press: mutate, ensure: mutate,
+    hoverAt: mutate, type: mutate, press: mutate, ensure: mutate,
+    async focus() { throw new Fault('WINDOW_MISMATCH', 'Offline fixtures cannot focus elements'); },
+    async readClipboard() { throw new Fault('WINDOW_MISMATCH', 'Offline fixtures do not include a clipboard'); },
+    async writeClipboard() { throw new Fault('WINDOW_MISMATCH', 'Offline fixtures cannot write the clipboard'); },
   };
 }

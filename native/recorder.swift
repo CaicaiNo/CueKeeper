@@ -19,6 +19,7 @@ final class Capture {
     private var hotkeyTap: CFMachPort?
     private var hotkeys = RecordingHotkeys()
     private var pointer = RecordingPointer()
+    private var hover = HoverTracker()
     private var stopReleaseDeadline: TimeInterval?
     private var pauseBoundaryPending = false
     private var seconds: TimeInterval = 0
@@ -72,6 +73,7 @@ final class Capture {
     func stop(_ code: String? = nil, detail: String? = nil) {
         guard !stopped else { return }
         stopped = true
+        hover.reset()
         recordingDeadline?.invalidate()
         traceMouseLifecycle("stopped", code: code)
         if let code {
@@ -256,6 +258,7 @@ final class Capture {
         }
         flushPauseBoundary()
         refreshFocus()
+        flushHover()
         if targetIsFrontmost && pausedAt == nil { checkSecureInput() }
         updateIndicator()
     }
@@ -274,6 +277,7 @@ final class Capture {
 
     private func togglePause() {
         pointer = RecordingPointer()
+        hover.reset()
         let now = ProcessInfo.processInfo.systemUptime
         if let pausedAt {
             totalPaused += now - pausedAt
@@ -313,6 +317,13 @@ final class Capture {
     }
 
     func receive(_ type: CGEventType, _ event: CGEvent) {
+        if type == .mouseMoved {
+            receiveHover(event)
+            return
+        }
+        // Any button, wheel or key action ends the current dwell; a later move
+        // starts a new one.
+        hover.reset()
         switch type {
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
             receivePointer(type, event, eventKind: .down)
@@ -377,8 +388,20 @@ final class Capture {
                                              actualStringLength: &length, unicodeString: &buffer)
                 if length > 0 && length <= buffer.count {
                     let chars = String(decoding: buffer.prefix(length), as: UTF16.self)
-                    if chars.unicodeScalars.allSatisfy({ $0.value >= 32 && $0.value <= 126 }) {
-                        emit(["kind": "text", "chars": chars, "t": t, "seen": seen])
+                    // IME commits and other Unicode text reach the tap as a
+                    // printable string. Control characters stay unsupported.
+                    let printable = chars.unicodeScalars.allSatisfy { scalar in
+                        scalar.value >= 32 && scalar.value != 127 &&
+                            !(scalar.value >= 0x80 && scalar.value <= 0x9f)
+                    }
+                    if printable {
+                        let ime = chars.unicodeScalars.contains { $0.value > 126 }
+                        var payload: [String: Any] = [
+                            "kind": "text", "chars": chars,
+                            "t": t, "seen": seen,
+                        ]
+                        if ime { payload["ime"] = true }
+                        emit(payload)
                         return
                     }
                 }
@@ -529,6 +552,60 @@ final class Capture {
         return names.compactMap { flag, name in flags.contains(flag) ? name : nil }
     }
 
+    /// An unpressed move becomes a hover step only after the pointer settles in
+    /// one small area. The tracker ignores every shorter pass.
+    private func receiveHover(_ event: CGEvent) {
+        guard started != nil, !stopped, stopReleaseDeadline == nil, pausedAt == nil else {
+            hover.reset()
+            return
+        }
+        flushPauseBoundary()
+        let destination = event.getIntegerValueField(.eventTargetUnixProcessID)
+        guard destination != ownPID, event.getIntegerValueField(.eventSourceUnixProcessID) != ownPID else {
+            hover.reset()
+            return
+        }
+        guard refreshFocus() != nil, let primary = NSScreen.screens.first else {
+            hover.reset()
+            return
+        }
+        let point = NSPoint(x: event.location.x, y: primary.frame.maxY - event.location.y)
+        guard indicator?.covers(point) != true,
+              NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0) == window else {
+            hover.reset()
+            return
+        }
+        _ = started
+        _ = started
+        guard let dwellMs = hover.sample(location: event.location, timestamp: event.timestamp),
+              let anchor = hover.location else { return }
+        emitHover(dwellMs, point: NSPoint(x: anchor.x, y: primary.frame.maxY - anchor.y))
+    }
+
+    /// Called from the session timer: a pointer that stopped moving sends no
+    /// further samples, so its dwell would otherwise never be reported.
+    private func flushHover() {
+        guard started != nil, !stopped, stopReleaseDeadline == nil, pausedAt == nil,
+              targetIsFrontmost, let primary = NSScreen.screens.first else {
+            hover.reset()
+            return
+        }
+        guard let dwellMs = hover.flush(now: DispatchTime.now().uptimeNanoseconds),
+              let anchor = hover.location else { return }
+        emitHover(dwellMs, point: NSPoint(x: anchor.x, y: primary.frame.maxY - anchor.y))
+    }
+
+    private func emitHover(_ dwellMs: Int, point: NSPoint) {
+        guard let started, registerEvent() else { return }
+        emit([
+            "kind": "hover",
+            "point": [Int(point.x.rounded()), Int(point.y.rounded())],
+            "dwellMs": max(300, min(60_000, dwellMs)),
+            "t": Int((ProcessInfo.processInfo.systemUptime - started) * 1000),
+            "seen": Int(Date().timeIntervalSince1970 * 1000),
+        ])
+    }
+
     /// Wheel input is scoped to the selected window and recorded as line deltas,
     /// which replay posts back through the driver's wheel command.
     private func receiveScroll(_ event: CGEvent) {
@@ -654,7 +731,7 @@ struct RecorderCommand {
         }
         var observedTypes: [CGEventType] = [.leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
                                             .otherMouseDown, .leftMouseDragged, .rightMouseDragged,
-                                            .keyDown, .scrollWheel]
+                                            .keyDown, .scrollWheel, .mouseMoved]
         if switches.contains("--trace-clicks") { observedTypes += [.otherMouseUp] }
         let mask = observedTypes.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
         let context = Unmanaged.passUnretained(capture).toOpaque()

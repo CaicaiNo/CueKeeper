@@ -41,7 +41,7 @@ struct RecordingPointerTests {
                 print(String(decoding: line, as: UTF8.self))
             }
         }
-        let count = cases.count + (try testSequences(emitTrace: emitTrace))
+        let count = cases.count + (try testSequences(emitTrace: emitTrace)) + testHover()
         if !emitTrace { print("Recording pointer: \(count)/\(count) passed") }
     }
 
@@ -209,5 +209,40 @@ struct RecordingPointerTests {
         let (longReason, _, longDrag) = long.release(sample(1700, 935))
         precondition(longReason == .dragAccepted && longDrag?.path.count == 64)
         return 3
+    }
+
+    /// Hover is a settled dwell, not a single move sample. Each assertion is a
+    /// real tracker sequence: a short pass, a settled dwell, a moved-away point
+    /// and an explicit reset.
+    private static func testHover() -> Int {
+        func ms(_ value: UInt64) -> UInt64 { value * 1_000_000 }
+
+        // A 200 ms pass never becomes a hover.
+        var passing = HoverTracker()
+        precondition(passing.sample(location: CGPoint(x: 10, y: 10), timestamp: ms(0)) == nil)
+        precondition(passing.sample(location: CGPoint(x: 11, y: 10), timestamp: ms(200)) == nil)
+        precondition(passing.flush(now: ms(250)) == nil)
+        precondition(passing.location?.x == 10)
+
+        // A settled point reports once with its dwell, then stays quiet.
+        var settled = HoverTracker()
+        precondition(settled.sample(location: CGPoint(x: 40, y: 50), timestamp: ms(0)) == nil)
+        precondition(settled.sample(location: CGPoint(x: 41, y: 50), timestamp: ms(400)) == 400)
+        precondition(settled.sample(location: CGPoint(x: 41, y: 51), timestamp: ms(900)) == nil)
+        precondition(settled.flush(now: ms(1200)) == nil)
+
+        // Moving beyond the radius starts a new dwell anchored at the new point.
+        var moved = HoverTracker()
+        precondition(moved.sample(location: CGPoint(x: 10, y: 10), timestamp: ms(0)) == nil)
+        precondition(moved.sample(location: CGPoint(x: 50, y: 10), timestamp: ms(500)) == nil)
+        precondition(moved.location?.x == 50)
+        precondition(moved.flush(now: ms(900)) == 400)
+
+        // A reset (pause, press, other window) discards the pending dwell.
+        var reset = HoverTracker()
+        precondition(reset.sample(location: CGPoint(x: 10, y: 10), timestamp: ms(0)) == nil)
+        reset.reset()
+        precondition(reset.flush(now: ms(1000)) == nil)
+        return 4
     }
 }

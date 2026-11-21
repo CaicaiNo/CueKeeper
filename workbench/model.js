@@ -3,7 +3,8 @@ export const sameTarget = (a, b) => a.app === b.app && a.window === b.window;
 
 export const KIND_LABELS = {
   click: '点击', doubleClick: '双击', tripleClick: '三击', rightClick: '右键', scroll: '滚轮',
-  drag: '拖拽', type: '输入', key: '快捷键', wait: '等待', assert: '断言', behavior: '行为', shell: 'Shell',
+  drag: '拖拽', hover: '悬停', paste: '粘贴', type: '输入', key: '快捷键', wait: '等待',
+  assert: '断言', behavior: '行为', shell: 'Shell',
 };
 
 /** The timeline shows pointer variants as their own kind without changing the flow. */
@@ -190,7 +191,8 @@ export function visibleRows(rows, app, ignored, showIgnored) {
 }
 
 export function changeTarget(action, target) {
-  if (action.kind === 'click' || action.kind === 'type' || action.kind === 'scroll') return { ...action, target };
+  if (action.kind === 'click' || action.kind === 'type' || action.kind === 'scroll' ||
+      action.kind === 'hover' || action.kind === 'paste') return { ...action, target };
   if (action.kind === 'assert' || action.kind === 'wait') return { ...action, check: { ...action.check, target } };
   throw new Error('快捷键使用目标窗口。');
 }

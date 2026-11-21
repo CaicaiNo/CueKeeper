@@ -95,6 +95,7 @@ const confirmationTtlMs = 120_000;
 
 function stepsNeedLive(planned: ReturnType<typeof plan>) {
   return planned.some(({ action }) =>
+    action.kind === 'hover' ||
     ((action.kind === 'click' || action.kind === 'scroll') && action.target.kind === 'point') ||
     (action.kind === 'drag' && (action.from.kind === 'point' || action.to.kind === 'point')));
 }
@@ -307,7 +308,7 @@ export async function startWorkbench(options: {
         throw new Error('Offline replay requires snapshot.json in the run directory');
       }
       if (!dryRun && stepsNeedLive(planned)) {
-        throw new Error('Save and run coordinate clicks or scrolls explicitly with the CLI --headed option');
+        throw new Error('Save and run hover or coordinate steps explicitly with the CLI --headed option');
       }
       const shell: ShellRunOptions = {
         allowShell, allowSudo, interactive, baseDir: current.directory,

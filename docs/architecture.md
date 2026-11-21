@@ -19,6 +19,9 @@ flowchart LR
 - `src/record.ts` 读取录制开始时的窗口 ID，为点击及文字段首取快照。点击取包含事件坐标且层级最深的可操作节点，同层优先选面积更小的节点。文字根据焦点控件和时间间隙合并。受保护控件、无法及时观测的输入和不支持的操作会被跳过。权限丢失时停止采集。已捕获步骤按 v1 schema 写入，跳过与中断的原因由 CLI 返回。
 - 双击、三击和右键由原生指针状态机识别：`clickState` 2/3 的后续按下不新增步骤，而是把上一步升级为 `count` 2/3；右键记 `button: "right"`；`scrollWheel` 记录行单位的 `deltaX`/`deltaY` 与相位，同一目标 350 ms 内的滚轮事件合并为一步（`durationMs` 为整段时长）。回放把双击/三击映射到驱动的 `double-click`/`triple-click`，右键映射到 `right-click`；元素滚动用 `scroll --direction/--amount`，坐标滚动用 `mouse-wheel --dx/--dy`。`double-click`、`triple-click` 与坐标类输入是物理输入，必须 `--headed`，否则以 `HEADED_REQUIRED` 失败而不是降级成单击。
 - 拖拽由同一个指针状态机采集：按下后移动超过 3 个逻辑点即进入拖拽，按 8 px 或 16 ms 抽稀路径点（最多 64 个），松开时记录起点、终点、路径与 `durationMs`。拾取瞬间会读取一次可访问性树，起止点都在该树上绑定，避免文件被移走后终点指到别处。起点或终点落在元素中心 4 pt 内时记元素定位器，否则记坐标（文本选择、窗口移动必须用坐标）。回放驱动 `drag --from/--to`（坐标用 `--from-xy`/`--to-xy`）并保留时长；必须 `--headed`。右键拖拽、按住修饰键的拖拽在录制时显式跳过并给出警告，不会静默改成普通左键拖拽。
+- 悬停由 `HoverTracker` 在 `mouseMoved` 流上识别：指针在 3 pt 内停留 ≥300 ms 才产生一个 `kind: "hover"`，`durationMs` 记实际停留，事件只在目标窗口、目标应用前台且不在 HUD 上采集；停止移动后由会话定时器补发。回放必须 `--headed`，元素目标取快照 bounds 中心并驱动 `mouse-move --xy`，随后等待 `durationMs`；元素无 bounds 报 `HOVER_UNRESOLVED`，固定应用路径的流程拒绝坐标悬停。
+- 剪贴板默认关闭。`record --clipboard` 显式开启后，Cmd+V 会先读取 pasteboard：只有 ≤4000 字符的纯文本固化为 `kind: "paste"`（目标为当时唯一聚焦的可编辑、非安全控件），其它类型、超长、含 NUL、读取失败或无安全目标都保留 `meta+v` 快捷键并给出录制警告。回放先 `focus <ref>`，再用 `clipboard-set --stdin` 写入记录文本，最后 `press meta+v --window-id`；文本不进 argv、日志或报告条目。`report pack` 拒绝含 `paste` 的流程，避免把文本打进报告 ZIP。
+- IME 只记录提交后的 Unicode 文本：原生侧接受可打印的非 ASCII 字符串并标 `ime: true`，录制合并成一条 `type` 文本插入，同时报 `IME_COMPOSITION_UNSUPPORTED`。回放用驱动 `type --stdin` 插入 Unicode，不重放 marked text、候选框或逐键物理输入。
 - `src/desktop.ts` 调用 agent-desktop 的 JSON CLI。版本固定为 1.3.1，使用独立临时状态目录，退出时清理。文本经 stdin 传递。定位和执行分开，每次执行重新抓树并取得当次 ref。执行不自动重试。
 - `src/run.ts` 将流程展开为动作，校验窗口和前置条件，执行业务动作。全局前置条件失败会阻塞整个流程，局部失败只阻塞所属动作。回放中的动作或断言失败会停止后续动作。报告保留投递状态，保存是否生效需要对应断言或外部文件核对。
 - `src/pick.ts` 从只读窗口快照生成可交互元素优先的候选，并复用 `src/locator.ts` 的定位器生成规则。CLI `pick` 与工作台「重新拾取」共用该模块；它只读取快照，不点击、不聚焦。
@@ -26,13 +29,13 @@ flowchart LR
 - `src/doctor.ts` 提供只读环境自检与录制前预检：Node 版本、`dist/` 与 `workbench/` 文件、agent-desktop 1.3.1、录制器可执行性和辅助功能/输入监控状态。权限状态由录制器的 `--permissions` 预检返回，不触发系统弹框；`record` 在启动 agent-desktop 前调用同一套检查。`src/version.ts` 从 `build-info.json`（发布包）或 `package.json`（源码）读取版本。
 - 分发产物由 `scripts/package.mjs` 组装：内置 Node 运行时、`dist/`、`workbench/`、预编译录制器和运行时依赖闭包，并生成两级校验和。细节见 [打包与分发](packaging.md)。
 
-接口以 v1 契约为准。录制和回放绑定一个标题精确匹配的应用窗口；macOS 回放可在 setup 中按需启动应用或打开窗口。录制支持左键（单击/双击/三击）、右键、滚轮、拖拽、ASCII 连续输入和常用快捷键。滚轮以 CGEvent 行增量记录，正 `deltaY` 记为向上；这一符号约定与驱动 `mouse-wheel --dy` 一致，但真机顺滑度与惯性仍列入实机验证。拖拽只回放左键直线路径与总时长，不承诺复刻路径曲率、spring-loaded 文件夹、拖拽自动滚动或跨应用拖放。IME、多窗口及系统对话框将在相应支持进入里程碑后验收。坐标以当前屏幕的逻辑点表示，回放会检查落点和窗口焦点，依然需要真实显示布局与无遮挡的测试窗口。保护字段判断依赖操作系统与控件提供的安全状态，测试流程请使用专用测试数据。
+接口以 v1 契约为准。录制和回放绑定一个标题精确匹配的应用窗口；macOS 回放可在 setup 中按需启动应用或打开窗口。录制支持左键（单击/双击/三击）、右键、滚轮、拖拽、悬停、ASCII 与 IME 提交的 Unicode 连续输入、剪贴板粘贴（显式开启）和常用快捷键。滚轮以 CGEvent 行增量记录，正 `deltaY` 记为向上；这一符号约定与驱动 `mouse-wheel --dy` 一致，但真机顺滑度与惯性仍列入实机验证。拖拽只回放左键直线路径与总时长，不承诺复刻路径曲率、spring-loaded 文件夹、拖拽自动滚动或跨应用拖放。悬停只回放指针移动与停留，不保证 tooltip / 菜单瞬时出现。剪贴板只固化纯文本且默认关闭，IME 只保留提交结果、不重放组合过程。多窗口及系统对话框将在相应支持进入里程碑后验收。坐标以当前屏幕的逻辑点表示，回放会检查落点和窗口焦点，依然需要真实显示布局与无遮挡的测试窗口。保护字段判断依赖操作系统与控件提供的安全状态，测试流程请使用专用测试数据。
 
 ## v1 契约
 
 `schemas/` 提供 flow、behavior、setup 和 report 四份 Draft-07 JSON Schema。相应示例放在 `examples/`。构建校验 Schema 与 `src/contracts.ts` 的生成结果一致。
 
-- Flow 必须声明应用标识和精确窗口标题。动作包括 `click`、`type`、`key`、`wait`、`assert` 与 `scroll`。`click` 可选 `count`（1–3）和 `button`（`left`/`right`），`scroll` 用 `target` 加 `deltaX`/`deltaY`（记录的原生行增量，各轴 ±1000）或作者填写的 `direction`/`amount`（1–1000），可选 `durationMs`；两种滚动写法互斥。元素定位器用 `role`、可选 `name`、从窗口根开始的角色 `path` 和显式零基 `index` 组成。匹配采用精确比较，`name: ""` 表示无名称。多个命中且未指定序号时，回放会返回歧义错误。`point` 只用于点击与滚动，需要 `--headed`；固定应用路径的流程拒绝坐标输入，避免点到另一份副本。
+- Flow 必须声明应用标识和精确窗口标题。动作包括 `click`、`type`、`key`、`wait`、`assert`、`scroll`、`drag`、`hover` 与 `paste`。`click` 可选 `count`（1–3）和 `button`（`left`/`right`）；`scroll` 用 `target` 加 `deltaX`/`deltaY`（记录的原生行增量，各轴 ±1000）或作者填写的 `direction`/`amount`（1–1000），可选 `durationMs`，两种滚动写法互斥；`hover` 用 `target`（元素或坐标）加 `durationMs`（停留毫秒，0–60000）并要求 `--headed`；`paste` 用可编辑元素 `target` 加 1–4000 字符纯文本 `text`，回放写入剪贴板后发 Cmd+V。元素定位器用 `role`、可选 `name`、从窗口根开始的角色 `path` 和显式零基 `index` 组成。匹配采用精确比较，`name: ""` 表示无名称。多个命中且未指定序号时，回放会返回歧义错误。`point` 可用于点击、滚动和悬停，需要 `--headed`；固定应用路径的流程拒绝坐标输入，避免点到另一份副本。
 - `behavior` 是命名动作组。流程内可以把动作组放入 `behaviors`，用 `kind: "behavior"` 引用并提供 `args`。v1 支持在 `type.text` 中绑定字符串参数。独立 behavior 文件的 `version` 属于文件封装，嵌入流程时保留其余字段。编排者可在 JSON 中复制动作组或展开其动作。
 - `setup` 可放在 flow 或 action 上。只有 `confirmed` 会参与回放，其他三态 `inferred`、`invalid` 和 `deleted` 在报告中记为跳过。独立 setup 文件嵌入时同样移除文件的 `version`。撤销属于工作台编辑功能。
 - `src/setup.ts` 从流程目标与每个动作的应用/窗口推断建议：首次出现的应用生成 `app_running`，首次出现的窗口生成 `window_ready`，状态为 `inferred`，检查目标是窗口根元素的 `exists`。检查使用窗口根时，回放会按该元素名称绑定窗口，因此另一个应用的条件读取自己的窗口。已存在同应用/同窗口的条件（含失效与删除）不会重复推断。录制、导入工作台和保存测试项都复用这一模块：录制结果直接带推断条件，保存时只保留 `confirmed`。

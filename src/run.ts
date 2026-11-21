@@ -14,7 +14,7 @@ import type { ClickOptions, Desktop, DragEndpoint } from './desktop.js';
 import { hashFlow, plan, scrollIntent } from './flow.js';
 import type { PlannedStep } from './flow.js';
 import { Fault, contains, resolve } from './locator.js';
-import type { Located, Snapshot } from './locator.js';
+import type { Located, Point, Snapshot } from './locator.js';
 import {
   ShellFault, hasShellSecrets, planShellStep, previewShell, privateShellDirectory,
   removeShellDirectory, reachableShells, runShell, shellBudget, shellEntry, shellGate,
@@ -33,6 +33,10 @@ type Outcome = {
   assertion?: AssertionRecord;
 };
 type SetupOutcome = Outcome & Pick<Extract<Entry, { kind: 'setup' }>, 'repair'>;
+
+// Paste needs a control that accepts typed text; a non-editable first
+// responder would swallow Cmd+V without an error.
+const pasteEditable = new Set(['textfield', 'textbox', 'textarea', 'searchfield', 'combobox']);
 
 function locateCheck(snapshot: Snapshot, check: Check): Located | undefined {
   try {
@@ -606,6 +610,46 @@ export async function runFlow(
           if (dryRun) return { status: 'resolved', message: `Resolved ${node.role}` };
           if (pathBound) await identity.verifyWindowId(current.windowId, flow.target.window);
           return { status: 'passed', delivery: await client.scroll(node.ref, scrollIntent(action)) };
+        }
+        if (action.kind === 'hover') {
+          let point: Point;
+          if (action.target.kind === 'point') {
+            // A path-fixed flow cannot prove which copy receives a global move.
+            if (pathBound) throw unsafePoint(flow.target.app, identity.mode);
+            point = action.target.point;
+          } else {
+            const { node } = resolve(current, action.target);
+            if (node.secure) throw new Fault('UNSAFE_TARGET', 'Hover target is secure');
+            if (!node.bounds) throw new Fault('HOVER_UNRESOLVED', 'Hover target has no bounds to move to');
+            point = [
+              Math.round(node.bounds.x + node.bounds.width / 2),
+              Math.round(node.bounds.y + node.bounds.height / 2),
+            ];
+          }
+          if (!contains(current.tree.bounds, point)) {
+            throw new Fault('UNSAFE_POINT', 'Hover coordinate is outside the selected window');
+          }
+          if (dryRun) return { status: 'resolved', message: 'Hover target is within the selected window' };
+          if (pathBound) await identity.verifyWindowId(current.windowId, flow.target.window);
+          const delivery = await client.hoverAt(current, flow.target, point);
+          // The dwell is what opens a tooltip or menu; a failed move above
+          // already stops the step instead of waiting on the wrong element.
+          if (action.durationMs > 0) await sleep(action.durationMs, undefined, { signal });
+          return { status: 'passed', delivery };
+        }
+        if (action.kind === 'paste') {
+          const { node } = resolve(current, action.target);
+          if (!node.ref || node.secure) throw new Fault('UNSAFE_TARGET', 'Paste target is secure or has no action reference');
+          if (!pasteEditable.has(node.role)) {
+            throw new Fault('UNSAFE_TARGET', 'Paste target is not an editable control');
+          }
+          if (dryRun) return { status: 'resolved', message: 'Paste target resolved' };
+          if (pathBound) await identity.verifyWindowId(current.windowId, flow.target.window);
+          // Focus the recorded control before the clipboard and shortcut: Cmd+V
+          // goes wherever the app's first responder is at that moment.
+          await client.focus(node.ref);
+          await client.writeClipboard(action.text);
+          return { status: 'passed', delivery: await client.press('meta+v', current) };
         }
         if (action.target.kind === 'point') {
           if (action.kind !== 'click') throw new Fault('UNSUPPORTED_POINT', 'Only a click can target a coordinate');

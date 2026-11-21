@@ -42,7 +42,7 @@ node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --selec
 
 `--no-indicator` 可关闭边框与 HUD，此时以标准错误的 `Recording for up to ...` 提示开始，热键仍可用。时间到点或按停止热键时，录制会保存动作。Ctrl+C 和运行中失去权限会写入已有动作，并在 CLI 标记部分录制。没有可用动作时，CLI 会报告具体原因。
 
-单击在鼠标松开时入录。相邻两次按下间隔小于 120 ms 且距离小于 3 个逻辑点时，重复按下会被合并。系统识别为双击或三击时，后续按下不会新增步骤，而是把上一步升级为 `count: 2` 或 `count: 3`；超过三次的连续点击按三击记录并报告 `MULTI_CLICK_TRUNCATED`。右键记为 `button: "right"`。滚轮记录 `deltaX`/`deltaY`（CGEvent 行增量，各轴 ±1000）；同一目标 350 ms 内的滚轮事件合并为一步，`durationMs` 记录整段时长。按住鼠标移动超过 3 个逻辑点时记为 `kind: "drag"`：起点、终点、`path`（8 px 或 16 ms 抽稀，最多 64 点）和 `durationMs` 都入录；按住修饰键的拖拽或落在目标窗口外的拖拽会跳过并分别报告 `DRAG_MODIFIERS_SKIPPED` / `DRAG_OUTSIDE_WINDOW`。
+单击在鼠标松开时入录。相邻两次按下间隔小于 120 ms 且距离小于 3 个逻辑点时，重复按下会被合并。系统识别为双击或三击时，后续按下不会新增步骤，而是把上一步升级为 `count: 2` 或 `count: 3`；超过三次的连续点击按三击记录并报告 `MULTI_CLICK_TRUNCATED`。右键记为 `button: "right"`。滚轮记录 `deltaX`/`deltaY`（CGEvent 行增量，各轴 ±1000）；同一目标 350 ms 内的滚轮事件合并为一步，`durationMs` 记录整段时长。按住鼠标移动超过 3 个逻辑点时记为 `kind: "drag"`：起点、终点、`path`（8 px 或 16 ms 抽稀，最多 64 点）和 `durationMs` 都入录；按住修饰键的拖拽或落在目标窗口外的拖拽会跳过并分别报告 `DRAG_MODIFIERS_SKIPPED` / `DRAG_OUTSIDE_WINDOW`。无按键移动在 3 pt 内停留 ≥300 ms 记 `kind: "hover"`，元素回放取 bounds 中心并等待原停留时长。Cmd+V 默认仍录快捷键；加 `--clipboard` 后只固化 ≤4000 字符的纯文本，记为 `kind: "paste"`。IME 提交的 Unicode 文本按 `type` 记录并标 `ime: true`，组合过程不重放。
 
 双击、三击和右键在回放中分别调用 `double-click`、`triple-click`、`right-click`；双击与三击是物理输入，需要 `--headed`，否则以 `HEADED_REQUIRED` 失败而不是退化成单击。元素滚动调用 `scroll --direction/--amount`，坐标滚动调用 `mouse-wheel --dx/--dy`，同样需要 `--headed`。真机上的滚轮方向、惯性和游戏/远程桌面场景尚未在本轮验收。
 

@@ -37,7 +37,7 @@ const help = `Cuekeeper ${buildInfo().version}
   cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--interactive] [--report <report.json>] [--allow-shell] [--allow-sudo] [--capture-shell-output] [--json]
   cuekeeper workbench [run-directory] [--port <port>] [--library <directory>] [--allow-live-replay] [--allow-shell] [--allow-sudo]
   cuekeeper pick --app <bundle-id> --window <title> [--app-path <path>] [--select <ref>] [--snapshot <snapshot.json>] [--json]
-  cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--app-path <path>] [--seconds 25] [--no-indicator] [--sound] [--trace-clicks] [--json]
+  cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--app-path <path>] [--seconds 25] [--clipboard] [--no-indicator] [--sound] [--trace-clicks] [--json]
   cuekeeper report pack <report.json> --flow <flow.json> --out <report.zip> [--assets <dir>] [--no-upload] [--queue <dir>] [--config <upload.json>] [--json]
   cuekeeper report upload [--queue <dir>] [--retry-paused] [--json]
   cuekeeper serve --config <server.json> --data <dir> [--host <host>] [--port <port>] [--json]
@@ -394,7 +394,7 @@ async function main() {
         'app-path': { type: 'string' },
         out: { type: 'string' }, seconds: { type: 'string', default: '25' },
         'no-indicator': { type: 'boolean' }, sound: { type: 'boolean' },
-        'trace-clicks': { type: 'boolean' },
+        'trace-clicks': { type: 'boolean' }, clipboard: { type: 'boolean' },
       },
     });
     const target = {
@@ -412,7 +412,7 @@ async function main() {
     if (preflight) throw preflight;
     await ensureNew(output);
     const options = { seconds, indicator: !values['no-indicator'], sound: values.sound ?? false,
-      traceClicks: values['trace-clicks'] ?? false };
+      traceClicks: values['trace-clicks'] ?? false, clipboard: values.clipboard ?? false };
     const { flow, warnings, partial, failure } = await withDesktop({ headed: false, signal },
       desktop => record(desktop, target, options, signal));
     await writeNew(output, JSON.stringify(flow, null, 2) + '\n');

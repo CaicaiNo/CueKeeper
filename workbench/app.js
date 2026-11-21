@@ -19,7 +19,7 @@ const { el, icon, button, empty, muted, input, field, select } = dom;
 
 const KIND_ICONS = {
   click: 'pointer', doubleClick: 'pointerDouble', tripleClick: 'pointerDouble', rightClick: 'pointerRight',
-  scroll: 'wheel', drag: 'drag', type: 'text', key: 'keyboard', wait: 'clock', assert: 'checkCircle',
+  scroll: 'wheel', drag: 'drag', hover: 'pointer', paste: 'clipboard', type: 'text', key: 'keyboard', wait: 'clock', assert: 'checkCircle',
   behavior: 'layers', shell: 'terminal',
 };
 
@@ -110,6 +110,8 @@ function actionLabel(action) {
       return label;
     case 'scroll': return `${scrollLabel(action)} · ${label}`;
     case 'drag': return `${dragSummary(action)} · ${action.durationMs} ms`;
+    case 'hover': return `悬停 · ${label} · ${action.durationMs} ms`;
+    case 'paste': return `粘贴 ${action.text.length} 字 · ${label}`;
     case 'type': return typeof action.text === 'string' ? `输入 “${short(action.text)}”` : `输入参数 ${action.text.param}`;
     case 'key': return shortcutLabel(action);
     case 'assert':
@@ -401,6 +403,8 @@ function renderInspector() {
         ? [['起点', locatorLabel(row.action.from)], ['终点', locatorLabel(row.action.to)],
           ['时长', `${row.action.durationMs} ms`]]
         : []),
+      ...(row.action.kind === 'hover' ? [['停留', `${row.action.durationMs} ms`]] : []),
+      ...(row.action.kind === 'paste' ? [['文本', `${row.action.text.length} 字（内容不写入报告）`]] : []),
       ['应用', appLabel(row.app)], ['窗口', row.window],
       ...(target ? [['定位器', locatorLabel(target)]] : []),
       ['时间', timestamp(row.atMs)], ['耗时', duration(row.durationMs)],

@@ -141,6 +141,20 @@ const drag = object({
   path: T.Optional(T.Array(dragPathPoint, { maxItems: 64 })),
   button: clickButton,
 });
+// Hover is a physical pointer move plus a dwell. The locator names the element
+// or coordinate under the cursor; durationMs is the recorded dwell, not a
+// promise that a tooltip or menu survives replay.
+const hover = object({
+  ...step, kind: T.Literal('hover'), target: locator,
+  durationMs: T.Integer({ minimum: 0, maximum: 60_000 }),
+});
+// A paste pins the text recorded from the clipboard. The target is the editable
+// control that had focus when Cmd+V was pressed. Replay writes the text to the
+// clipboard and sends the shortcut; the content never enters a report entry.
+const pasteText = T.String({ minLength: 1, maxLength: 4000, pattern: '^[^\\u0000]*$' });
+const paste = object({
+  ...step, kind: T.Literal('paste'), target: element, text: pasteText,
+});
 const scroll = T.Union([
   object({
     ...step, kind: T.Literal('scroll'), target: locator,
@@ -212,7 +226,7 @@ const action = T.Union([
     ...step, kind: T.Literal('click'), target: locator,
     count: clickCount, button: clickButton,
   }),
-  object({ ...step, kind: T.Literal('type'), target: element, text: inputText }),
+  object({ ...step, kind: T.Literal('type'), target: element, text: inputText, ime: T.Optional(T.Boolean()) }),
   object({
     ...step,
     kind: T.Literal('key'),
@@ -225,6 +239,8 @@ const action = T.Union([
   object({ ...step, kind: T.Literal('assert'), check: assertCheck }),
   drag,
   scroll,
+  hover,
+  paste,
   ...shellSteps,
 ]);
 const call = object({
@@ -340,7 +356,7 @@ const entry = T.Union([
     ...entryFields,
     kind: T.Union([
       T.Literal('click'), T.Literal('type'), T.Literal('key'), T.Literal('wait'), T.Literal('scroll'),
-      T.Literal('drag'),
+      T.Literal('drag'), T.Literal('hover'), T.Literal('paste'),
     ]),
   }),
   object({
@@ -454,6 +470,8 @@ export type Action = Static<typeof action>;
 export type ClickAction = Extract<Action, { kind: 'click' }>;
 export type ScrollAction = Extract<Action, { kind: 'scroll' }>;
 export type DragAction = Extract<Action, { kind: 'drag' }>;
+export type HoverAction = Extract<Action, { kind: 'hover' }>;
+export type PasteAction = Extract<Action, { kind: 'paste' }>;
 export type Setup = Static<typeof setup>;
 export type Ensure = Static<typeof ensure>;
 export type Locator = Static<typeof locator>;

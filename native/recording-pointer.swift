@@ -15,6 +15,57 @@ struct PointerSample {
     }
 }
 
+/**
+ * Turns a stream of unpressed pointer moves into at most one hover per dwell.
+ * A dwell starts at the first sample, survives movement inside a small radius,
+ * and is reported once it reaches the minimum duration. `flush` handles the
+ * common case where the pointer stops moving and no further sample arrives.
+ */
+struct HoverTracker {
+    static let minimumNs: UInt64 = 300_000_000
+    static let radiusSquared: CGFloat = 9
+
+    private struct Dwell {
+        let location: CGPoint
+        let started: UInt64
+        var emitted: Bool
+    }
+
+    private var dwell: Dwell?
+
+    var location: CGPoint? { dwell?.location }
+
+    mutating func reset() {
+        dwell = nil
+    }
+
+    mutating func sample(location: CGPoint, timestamp: UInt64) -> Int? {
+        guard let current = dwell, timestamp >= current.started,
+              current.location.squaredDistance(to: location) <= Self.radiusSquared else {
+            dwell = Dwell(location: location, started: timestamp, emitted: false)
+            return nil
+        }
+        guard !current.emitted, timestamp - current.started >= Self.minimumNs else { return nil }
+        dwell?.emitted = true
+        return Int((timestamp - current.started) / 1_000_000)
+    }
+
+    mutating func flush(now: UInt64) -> Int? {
+        guard let current = dwell, !current.emitted, now >= current.started,
+              now - current.started >= Self.minimumNs else { return nil }
+        dwell?.emitted = true
+        return Int((now - current.started) / 1_000_000)
+    }
+}
+
+private extension CGPoint {
+    func squaredDistance(to other: CGPoint) -> CGFloat {
+        let x = self.x - other.x
+        let y = self.y - other.y
+        return x * x + y * y
+    }
+}
+
 struct PointerObservation {
     enum Phase: String { case preparing, recording, paused, stopping }
     enum Event: String { case down, up, drag }

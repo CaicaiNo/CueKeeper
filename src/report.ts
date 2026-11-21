@@ -63,11 +63,21 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 
+/** Clipboard text lives in the flow by explicit opt-in; never republish it. */
+function flowHasClipboardText(flow: Flow) {
+  const actions = [...flow.steps, ...(flow.behaviors ?? []).flatMap(behavior => behavior.steps)];
+  return actions.some(action => action.kind === 'paste');
+}
+
 export function packReport(input: unknown, flow: Flow, options: PackOptions = {}): Uint8Array {
   // A packed report embeds the raw flow; shell steps may carry commands and
-  // environment references that must not be published.
+  // environment references that must not be published, and paste steps carry
+  // clipboard text the report is not allowed to repeat.
   if (flowHasShellDefinitions(flow)) {
     throw new Error('Report packing is unavailable for flows with shell steps');
+  }
+  if (flowHasClipboardText(flow)) {
+    throw new Error('Report packing is unavailable for flows with clipboard text');
   }
   if (!reportCheck.Check(input)) throw new Error('Invalid v1 report');
   if (input.flowId !== flow.id || input.flowSha256 !== hashFlow(flow)) {

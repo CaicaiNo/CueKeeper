@@ -5,7 +5,7 @@ import { createInterface } from 'node:readline';
 import { captureActionCheck, flowSchema } from './contracts.js';
 import type { Action, Flow, Locator, Target } from './contracts.js';
 import { AppIdentitySession, IdentityFault } from './app-identity.js';
-import type { Desktop } from './desktop.js';
+import type { ClipboardRead, Desktop } from './desktop.js';
 import { parseFlow } from './flow.js';
 import { Fault, contains, flatten, hitTest, object, resolve, toLocator } from './locator.js';
 import type { Located, Point, Snapshot } from './locator.js';
@@ -18,7 +18,8 @@ type RawEvent =
     kind: 'drag'; t: number; from: Point; to: Point; path: Point[]; durationMs: number;
     button: 'left' | 'right'; modifiers: string[];
   }
-  | { kind: 'text'; t: number; chars: string }
+  | { kind: 'hover'; t: number; point: Point; dwellMs: number }
+  | { kind: 'text'; t: number; chars: string; ime?: boolean }
   | { kind: 'key'; t: number; key: string; modifiers: NonNullable<Extract<Action, { kind: 'key' }>['modifiers']> };
 type TimedEvent = RawEvent & { seen: number };
 type Recorded = { event: RawEvent; snapshot: Snapshot };
@@ -31,9 +32,14 @@ const multiClickDistance = 4;
 const deltaLimit = 1000;
 const editable = new Set(['textfield', 'textbox', 'textarea', 'searchfield', 'combobox']);
 const stepLimit = flowSchema.properties.steps.maxItems!;
+// A clipboard paste pins at most one text field's worth of text. Anything
+// larger, binary, or NUL-bearing stays a shortcut and is reported as skipped.
+const clipboardLimit = 4000;
 
 type CaptureOptions = {
   seconds: number; indicator: boolean; sound: boolean; traceClicks?: boolean;
+  /** Explicit opt-in: record plain-text clipboard content at Cmd+V. */
+  clipboard?: boolean;
   /** Identity session for a path-fixed target; created from the target otherwise. */
   identity?: AppIdentitySession;
 };
@@ -46,7 +52,14 @@ const pointerWarningMessages = new Map([
   ['DRAG_UNVERIFIED', 'A drag was skipped because its start state could not be read'],
   ['UNTARGETED_DRAG', 'A drag that could not be tied to an element was skipped in this path-bound recording'],
   ['UNTARGETED_POINT', 'A click that could not be tied to an element was skipped in this path-bound recording'],
+  ['UNTARGETED_HOVER', 'A hover that could not be tied to an element was skipped in this path-bound recording'],
   ['MULTI_CLICK_TRUNCATED', 'A click sequence longer than three clicks was recorded as a triple click'],
+  ['CLIPBOARD_UNSUPPORTED_TYPE', 'The clipboard did not hold plain text, so the paste was recorded as the shortcut only'],
+  ['CLIPBOARD_TOO_LARGE', 'The clipboard text exceeded the recording limit, so the paste was recorded as the shortcut only'],
+  ['CLIPBOARD_INVALID_TEXT', 'The clipboard text contained a NUL character, so the paste was recorded as the shortcut only'],
+  ['CLIPBOARD_READ_FAILED', 'The clipboard could not be read, so the paste was recorded as the shortcut only'],
+  ['UNSAFE_CLIPBOARD_TARGET', 'A paste had no single editable, non-secure target, so it was recorded as the shortcut only'],
+  ['IME_COMPOSITION_UNSUPPORTED', 'IME composition was recorded as its committed Unicode text; candidate keys are not replayed'],
 ]);
 
 // A drag endpoint only becomes an element locator when the recorded point sits
@@ -74,6 +87,29 @@ function nearPoint(a: Point, b: Point) {
   return Math.abs(a[0] - b[0]) <= multiClickDistance && Math.abs(a[1] - b[1]) <= multiClickDistance;
 }
 
+/** Cmd+V with no other chord modifier is the only paste shortcut we pin. */
+export function isPasteChord(event: { kind: 'key'; key: string; modifiers?: string[] }) {
+  const held = event.modifiers ?? [];
+  return event.key === 'v' && held.length === 1 && held[0] === 'meta';
+}
+
+/**
+ * Decides whether Cmd+V becomes a content-pinned paste. Clipboard recording is
+ * opt-in (no clipboard means the shortcut is kept), and only bounded plain text
+ * is representable. Every rejection returns a warning code instead of dropping
+ * the paste silently.
+ */
+export function pasteIntent(
+  event: { kind: 'key'; key: string; modifiers?: string[] },
+  clipboard: ClipboardRead | undefined,
+): { text: string } | { warning: string } | undefined {
+  if (!isPasteChord(event) || !clipboard) return undefined;
+  if (clipboard.type !== 'text' || !clipboard.text) return { warning: 'CLIPBOARD_UNSUPPORTED_TYPE' };
+  if (clipboard.text.length > clipboardLimit) return { warning: 'CLIPBOARD_TOO_LARGE' };
+  if (clipboard.text.includes('\u0000')) return { warning: 'CLIPBOARD_INVALID_TEXT' };
+  return { text: clipboard.text };
+}
+
 /**
  * Element endpoints only replay from their center. Keep the exact point unless
  * the gesture started/ended on that center; otherwise the replay would grab a
@@ -92,7 +128,9 @@ function dragLocator(snapshot: Snapshot, point: Point, hit: Located | undefined)
 
 export class Recording {
   private steps: Action[] = [];
-  private text?: { at: number; target: Extract<Locator, { kind: 'element' }>; value: string; ref: string };
+  private text?: {
+    at: number; target: Extract<Locator, { kind: 'element' }>; value: string; ref: string; ime?: boolean;
+  };
   private scroll?: { at: number; startedAt: number; target: Locator; deltaX: number; deltaY: number };
   private lastClick?: { at: number; point: Point; index: number; button: 'left' | 'right' };
 
@@ -102,7 +140,10 @@ export class Recording {
 
   endTextBurst() {
     if (!this.text) return;
-    this.steps.push({ id: this.nextId(), kind: 'type', target: this.text.target, text: this.text.value });
+    this.steps.push(validateAction({
+      id: this.nextId(), kind: 'type', target: this.text.target, text: this.text.value,
+      ...(this.text.ime ? { ime: true } : {}),
+    }));
     this.text = undefined;
   }
 
@@ -122,8 +163,27 @@ export class Recording {
   }
 
   /** Returns a warning code when the event was intentionally skipped. */
-  add({ event, snapshot }: Recorded): string | undefined {
+  add({ event, snapshot }: Recorded, clipboard?: ClipboardRead): string | undefined {
     const focused = flatten(snapshot.tree).filter(entry => entry.node.states.includes('focused'));
+
+    if (event.kind === 'hover') {
+      this.endTextBurst();
+      this.endScrollBurst();
+      this.lastClick = undefined;
+      if (!contains(snapshot.tree.bounds, event.point)) {
+        throw new Fault('OUTSIDE_WINDOW', 'Hover fell outside the requested window');
+      }
+      const hit = hitTest(snapshot, event.point);
+      if (hit?.node.secure) throw new Fault('SECURE_INPUT', 'Hover touched a protected control');
+      // A path-fixed flow cannot replay a global coordinate against one copy.
+      if (!hit && this.options.requireElementLocator) return 'UNTARGETED_HOVER';
+      const target: Locator = hit ? toLocator(snapshot, hit) : { kind: 'point', point: event.point };
+      this.steps.push(validateAction({
+        id: this.nextId(), kind: 'hover', target,
+        durationMs: Math.max(0, Math.min(60_000, Math.round(event.dwellMs))),
+      }));
+      return;
+    }
 
     if (event.kind === 'drag') {
       this.endTextBurst();
@@ -209,8 +269,27 @@ export class Recording {
     if (event.kind === 'key') {
       this.endTextBurst();
       this.endScrollBurst();
+      const intent = pasteIntent(event, clipboard);
+      if (intent && 'text' in intent) {
+        if (focused.some(entry => entry.node.secure)) {
+          throw new Fault('SECURE_INPUT', 'Recording encountered a protected control');
+        }
+        const [field] = focused;
+        if (focused.length !== 1 || !field.node.ref || !editable.has(field.node.role)) {
+          // Keep the shortcut so the step is still visible; the warning names
+          // why the content could not be pinned.
+          this.steps.push(validateAction({ id: this.nextId(), kind: 'key', key: event.key, modifiers: event.modifiers }));
+          return 'UNSAFE_CLIPBOARD_TARGET';
+        }
+        const target = toLocator(snapshot, field);
+        resolve(snapshot, target);
+        this.steps.push(validateAction({
+          id: this.nextId(), kind: 'paste', target, text: intent.text,
+        }));
+        return;
+      }
       this.steps.push(validateAction({ id: this.nextId(), kind: 'key', key: event.key, modifiers: event.modifiers }));
-      return;
+      return intent && 'warning' in intent ? intent.warning : undefined;
     }
 
     this.endScrollBurst();
@@ -234,6 +313,8 @@ export class Recording {
     }
     this.text.value += event.chars;
     this.text.at = event.t;
+    if (event.ime) this.text.ime = true;
+    return event.ime ? 'IME_COMPOSITION_UNSUPPORTED' : undefined;
   }
 
   finish(): Flow {
@@ -312,8 +393,18 @@ function parseEvent(data: Record<string, unknown>): TimedEvent {
       ...(phase ? { phase } : {}),
     };
   }
-  if (kind === 'text' && typeof data.chars === 'string' && /^[ -~]{1,16}$/.test(data.chars)) {
-    return { kind, t, seen, chars: data.chars };
+  if (kind === 'hover' && Array.isArray(data.point) && data.point.length === 2 && data.point.every(Number.isSafeInteger)) {
+    const { dwellMs } = data;
+    if (typeof dwellMs !== 'number' || !Number.isSafeInteger(dwellMs) || dwellMs < 0 || dwellMs > 60_000) {
+      throw new Fault('CAPTURE_PROTOCOL', 'Invalid hover dwell from capture helper');
+    }
+    return { kind, t, seen, point: data.point as Point, dwellMs };
+  }
+  if (kind === 'text' && typeof data.chars === 'string' &&
+      data.chars.length >= 1 && data.chars.length <= 16 && !/[\u0000-\u001f\u007f]/.test(data.chars)) {
+    // Non-ASCII text is the committed IME result. The capture helper marks it so
+    // the flow can say that composition was text insertion, not key presses.
+    return { kind, t, seen, chars: data.chars, ...(data.ime === true ? { ime: true } : {}) };
   }
   if (kind === 'key' && typeof data.key === 'string' && Array.isArray(data.modifiers) &&
       data.modifiers.every(value => typeof value === 'string' && modifiers.has(value))) {
@@ -511,21 +602,33 @@ export async function record(
         // sequence of wheel ticks or keystrokes costs one accessibility read.
         if ((event.kind === 'text' || event.kind === 'scroll') && burst?.kind === event.kind &&
             event.t - burst.at <= (event.kind === 'text' ? textGapMs : scrollGapMs)) {
-          recording.add({ event, snapshot: burst.snapshot });
+          const skipped = recording.add({ event, snapshot: burst.snapshot });
+          if (skipped) warn(skipped, pointerWarningMessages.get(skipped) ?? `Some input was skipped: ${skipped}`);
           burst.at = event.t;
           continue;
         }
         if (Date.now() - event.seen > 2000) {
           throw new Fault('STALE_CAPTURE', 'The accessibility snapshot could not keep up with input');
         }
-        const pinWindow = event.kind === 'click' || event.kind === 'scroll' ? initial.windowId : undefined;
+        const pinWindow = event.kind === 'click' || event.kind === 'scroll' || event.kind === 'hover'
+          ? initial.windowId : undefined;
         const captured = bound
           ? await identity.readWindow(desktop, target, { timeoutMs: 1200, preferredWindowId: initial.windowId })
           : await desktop.snapshot(target, 1200, pinWindow);
         if (captured.windowId !== initial.windowId) {
           throw new Fault('WINDOW_CHANGED', 'Capture switched away from the initial window');
         }
-        const skipped = recording.add({ event, snapshot: captured });
+        let clipboardRead: ClipboardRead | undefined;
+        if (options.clipboard && event.kind === 'key' && isPasteChord(event)) {
+          try {
+            clipboardRead = await desktop.readClipboard();
+          } catch {
+            // The shortcut is still recordable; content just stays unpinned.
+            warn('CLIPBOARD_READ_FAILED',
+              'The clipboard could not be read, so the paste was recorded as the shortcut only');
+          }
+        }
+        const skipped = recording.add({ event, snapshot: captured }, clipboardRead);
         if (skipped) {
           warn(skipped, pointerWarningMessages.get(skipped) ?? `Some input was skipped: ${skipped}`);
           if (traceId) trace({ stage: 'flow', id: traceId, decision: 'filtered', reason: skipped });

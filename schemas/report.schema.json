@@ -425,6 +425,14 @@
                   {
                     "const": "drag",
                     "type": "string"
+                  },
+                  {
+                    "const": "hover",
+                    "type": "string"
+                  },
+                  {
+                    "const": "paste",
+                    "type": "string"
                   }
                 ]
               }
