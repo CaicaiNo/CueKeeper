@@ -185,6 +185,7 @@ node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --selec
 | `run <test.json> --data <rows.json> [--report <batch.json>]` | 每行覆盖行为调用参数后串行执行；报告写汇总与逐行 v1 报告 |
 | `report pack <report.json> --flow <flow.json> --out <report.zip>` | 验证报告与流程配对，生成可离线打开的 ZIP；`--assets <dir>` 带入截图、日志和 AX 快照；配置上传后自动入队 |
 | `report upload [--queue <dir>] [--retry-paused]` | 处理本地上传队列；暂停项修复原因后用 `--retry-paused` 手动继续 |
+| `serve --config <server.json> --data <dir>` | 启动自建上传服务；列表、下载、查看器接口见[上传服务](docs/server.md) |
 
 默认在主屏显示边框和 HUD。窗口服务器确认面板后，HUD 显示「录制就绪」，终端在标准错误输出 `INDICATOR_READY`。录制时可切到飞书等其他应用，返回目标窗口后继续，已捕获的动作会保留。`Ctrl+Option+P` 暂停或继续，`Ctrl+Option+X` 停止并保存。可用 `--no-indicator` 关闭边框和 HUD，热键仍可用。
 

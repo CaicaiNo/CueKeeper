@@ -125,9 +125,11 @@ agent-desktop 在 Windows 上有跨进程**独占交互租约**（按 token 派�
 
 `ensure` 的 `process.platform !== 'darwin'` 硬门槛、`cli.ts` 的 `macOnly()`、`workbench.ts` 的 `allowLive` 都是"平台开关"，不是接口缺陷。
 
-## 6. 驱动接口改动清单（文件级）
+## 6. 驱动接口改动清单（文件级，调研建议）
 
-不改 flow/report/behavior/setup schema，不改 `Desktop` 方法签名。下表是必须改的地方。
+> **本节的定位**：这是 HAOC-67 调研阶段列出的候选改动，**不是 W1 实施契约**。现行文件级改动、平台门禁与验收以 [Windows 首版（W1）范围决策](windows-scope.md) §3.2、§3.3、§6 为准；两处不一致时按该文执行。本节保留作差异来源与背景说明。
+
+不改 flow/report/behavior/setup schema，不改 `Desktop` 方法签名。下表是调研阶段认为需要改的地方。
 
 | 文件 | 改动 | 原因 |
 | --- | --- | --- |
@@ -135,16 +137,16 @@ agent-desktop 在 Windows 上有跨进程**独占交互租约**（按 token 派�
 | 同上 | `type` 分平台：Windows 传 `--headed` | 无头 `type` 在 Windows 返回 `POLICY_DENIED`。文本仍走 `--stdin`，不进命令行 |
 | 同上 | `DesktopFault` 对 `PERM_DENIED`/`POLICY_DENIED`/`PLATFORM_NOT_SUPPORTED` 标 `dependency = true` | 现在这些是普通失败（退出码 1），应走依赖错误（退出码 2），并在消息里区分"权限/策略" |
 | 同上 | `snapshot`：平台相关预算，`INCOMPLETE_TREE`/`identity_unproven` 重试一次更大预算 | Chromium 冷启动 10–25s；现有 3s/6s 预算必挂 |
-| 同上 | `ensure` 去掉 `process.platform !== 'darwin'`；`window_ready` 的聚焦确认在 Windows 上改为"list-windows 的 `is_focused` + 允许一次重试"，失败报 `WINDOW_FOCUS_UNCONFIRMED` | `focus-window` 受前台锁，探针空载 5/5 失败；直接比 `focused.id` 会误报 `WINDOW_CHANGED` |
+| 同上 | `ensure` 的 win32 处理：**调研建议**是"`is_focused` + 一次重试"；**W1 决定不修复**——win32 `ensure` 直接报 `ENSURE_FAILED`，提示手动打开目标窗口（[范围决策](windows-scope.md) §3.2） | `focus-window` 受前台锁，探针空载 5/5 失败；W1 不替用户抢前台 |
 | 同上 | 新增（可选）`restore?(target)`、`status?()` | §5 的两个缺口；`restore` 只为最小化兜底，`status` 只为 preflight。不加这两个方法也能出首版，但最小化会静默假通过 |
 | `src/cli.ts` | `macOnly()` → 按命令的平台能力判断（live 命令允许 `darwin` 与 `win32`；`record` 只允许"有采集桥"的平台） | 现在 Windows 上 `pick`/`run`/`record` 一律 `UNSUPPORTED_PLATFORM` |
-| 同上 | `--app` 校验分平台：Windows 接受镜像名（`notepad.exe`）与绝对路径；macOS 保持 bundle ID | 现有正则要求"带点的两段"，会拒绝 `Notepad` 之类名字，又会接受语义错误的 `foo.bar` |
+| 同上 | `--app` 校验分平台：**调研建议**接受镜像名与绝对路径；**W1 只接受镜像名**（拒绝路径分隔符，`flow.target.app` 只用于 `list-*`，见[范围决策](windows-scope.md) §3.2）；macOS 保持 bundle ID | 现有正则要求"带点的两段"，会拒绝 `Notepad` 之类名字，又会接受语义错误的 `foo.bar` |
 | `src/record.ts` | 采集桥路径与扩展名：`dist/cuekeeper-capture.exe`（win32），二进制缺失时给"用 `pnpm build:recorder` 构建"的提示 | `fileURLToPath(new URL('./cuekeeper-capture', …))` 在 Windows 上找不到 `.exe` |
 | 同上 | 窗口标识：不要用 `/^w-([1-9]\d*)$/` 提取"窗口号"再当 macOS 参数传；改为把 `windowId`（含平台语义）和 `target.app` 传给采集桥 | 现在这段只在 macOS 有意义；HWND 是句柄不是序号 |
 | 同上 | 预热快照：录制开始前先做一次长预算快照（30s），失败直接报错而不是开始计时 | Chromium 冷启动 |
 | `src/locator.ts` | 无 schema 改动。可在 `parseSnapshot` 加"bounds 明显异常（−32000 锚点）→ `INCOMPLETE_TREE`"的判定，或保持现状由 §5 的窗口状态兜底 | 最小化窗口的假 bounds |
-| `src/run.ts` | 无需改动。可选：动作前查窗口状态 | — |
-| `src/workbench.ts` | `allowLive && (darwin || win32)`，并把"录制/回放互斥"的提示写进 UI 文案 | 交互租约 |
+| `src/run.ts` | **调研建议**是"无需改动"；**W1 需要改**：首个快照前 `preflight`、后续快照传预检窗口 ID、输入前确认焦点（[范围决策](windows-scope.md) §3.1.1、§3.2） | 预检绑定必须传到后续调用，否则焦点丢失可能仍然输入 |
+| `src/workbench.ts` | **调研建议**是 `allowLive && (darwin || win32)`；**W1 决定不开** win32 实时回放，只保留离线查看（[范围决策](windows-scope.md) §2、§7.4） | 交互租约 + 工作台叠前端驱动收益低 |
 | `native/windows/`（新增） | 采集桥：hooks + 指示窗 + 热键 host，输出与现有 `native/recorder.swift` **完全相同的 JSON 行协议** | §7 |
 | `scripts/build-recorder.sh` | 改为按平台分派（mac: swiftc；win: 独立脚本），`package.json` 的 `build:recorder` 保持一个入口 | 现在脚本开头 `uname -s` 不是 Darwin 直接 exit 2 |
 | `.github/workflows/ci.yml` | **不改**（本轮边界：不引入 Windows CI） | — |
@@ -220,21 +222,23 @@ HUD 内容（边框 + 计时 + 暂停状态）沿用 macOS 的呈现，不需要
 | R14 | `delete`/`backspace` 等键名别名不确定 | 快捷键录错键 | 实机确认（§11），必要时在文档里给出映射 |
 | R15 | `meta` 在 Windows 是 Win 键 | macOS 录的流程在 Windows 上语义改变 | flow 是**按平台**的产物；不做跨平台迁移 |
 
-## 9. 起步任务（建议 3 个）
+## 9. 起步任务（调研建议，已被 HAOC-74 的拆分取代）
 
-依赖顺序：T1 → T2 → T3。每个任务一台 Windows 10 1809+/11 实机，且不引入 Windows CI。
+> **不要按本节的任务名开工。** 本节是 HAOC-67 调研阶段的三任务草案，已被 [Windows 首版（W1）范围决策](windows-scope.md) §6 取代：现在 T1 = HAOC-84（驱动层平台化，离线可测，不上实机），T2 = HAOC-83（实机验收，含批量/断言/point/workbench 与负例），T3 = HAOC-85（录制桥，不在 W1）。本节保留作历史背景；验收以范围决策 §7 为准。
 
-**T1 · 驱动层平台化（无录制）**
-目标：在 Windows 上用一条手写 flow 对记事本完成 `pick` → `run --dry-run` → `run --headed` 全链路。
+调研阶段的依赖顺序：T1 → T2 → T3。每个实机任务一台 Windows 10 1809+/11 实机，且不引入 Windows CI。
+
+**T1 · 驱动层平台化（无录制）——调研草案，已被 HAOC-84 取代**
+调研目标：在 Windows 上用一条手写 flow 对记事本完成 `pick` → `run --dry-run` → `run --headed` 全链路（现行验收不再用记事本作门禁，改标题稳定编辑器，见 [范围决策](windows-scope.md) §7.1；T1 本身改为 macOS 离线用例）。
 验收：同一份 flow 在 Windows 上 dry-run 全部 `resolved`；`--headed` 回放"点击 + 文本输入 + 快捷键"三步后报告 `passed`，且输入内容与文档内容一致（读回文件/文本核对）；全程不使用 `--snapshot`。
 覆盖参数：原生 exe 解析、`type --headed`、平台化 `--app`、快照预算、错误码分级、$4.6 的"应用已运行"前置。
 
-**T2 · 采集桥最小闭环**
+**T2 · 采集桥最小闭环——调研草案，现为 HAOC-85（W2，不在 W1）**
 目标：`record` 在记事本录出 3 步 flow（点击、ASCII 输入、快捷键），HUD 可见且可确认，停止后立刻能回放。
 验收：录制产物 `flow validate` 通过；`run --dry-run` 全解析；`--headed` 回放 `passed`；HUD 在录屏中不出现（`WDA_EXCLUDEFROMCAPTURE` 生效）且录制期间不抢焦点（目标窗口保持前台）；`Ctrl+Alt+P/X` 生效且目标应用收不到这两个组合键。
 不含：Chromium、IME、拖拽、右键菜单。
 
-**T3 · 高延迟与失真的目标（Chromium/WPF）**
+**T3 · 高延迟与失真的目标（Chromium/WPF）——调研草案，W1 之后另议**
 目标：冷启动的 Electron 应用（VS Code/Obsidian 一类）能在一次录制里稳定拿到完整树，而不是被薄树或 `identity_unproven` 打断。
 验收：两次独立冷启动各录一条 3 步 flow（含一次点击 + 一次文本输入），两次都通过回放；录制期间不出现 `INCOMPLETE_TREE` / `STALE_CAPTURE` 中止；报告里能看出"预热耗时"与"逐事件快照耗时"（不进 schema，用 stderr 或 CLI 输出）。
 
