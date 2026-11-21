@@ -24,7 +24,7 @@ const element = object({
 });
 const locator = T.Union([element, object({ kind: T.Literal('point'), point })]);
 
-export const targetSchema = object({ app: label, window: label });
+export const targetSchema = object({ app: label, window: label, appPath: T.Optional(T.String({ minLength: 1, maxLength: 4096 })) });
 
 const comparator = T.Union([T.Literal('equals'), T.Literal('contains'), T.Literal('matches')]);
 

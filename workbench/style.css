@@ -39,7 +39,7 @@ button, input, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: default; opacity: .38; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-input:not([type="checkbox"]), select {
+input:not([type="checkbox"]):not([type="radio"]), select {
   display: block;
   min-width: 0;
   width: 100%;
@@ -51,6 +51,7 @@ input:not([type="checkbox"]), select {
   color: var(--ink);
 }
 input[type="checkbox"] { width: 13px; height: 13px; accent-color: var(--ink); margin: 0; }
+input[type="radio"] { width: 14px; height: 14px; flex: none; accent-color: var(--ink); margin: 2px 0 0; }
 input::placeholder { color: #a5a199; }
 .topbar, .pane-header, .draft-header, .button-group, .tabs {
   display: flex;
@@ -123,12 +124,27 @@ input::placeholder { color: #a5a199; }
 }
 .app-filter:hover { background: #f1efe8; }
 .app-filter[aria-pressed="true"] { background: var(--surface); color: var(--ink); font-weight: 500; }
-.app-filter[aria-pressed="true"]::before {
-  content: ""; width: 5px; height: 5px; flex: none; background: var(--accent);
+.app-glyph { position: relative; width: 18px; height: 18px; flex: none; display: grid; place-items: center; }
+.app-glyph img { width: 18px; height: 18px; display: block; border-radius: 3px; }
+.app-glyph-fallback {
+  display: grid; place-items: center; width: 18px; height: 18px;
+  border: 1px solid var(--line); border-radius: 3px; color: var(--muted);
 }
-.app-filter:not([aria-pressed="true"])::before {
-  content: ""; width: 5px; height: 5px; flex: none; border: 1px solid #c9c5ba;
+.app-glyph-all { color: var(--muted); }
+.dup-badge {
+  position: absolute; top: -5px; right: -5px; min-width: 12px; height: 12px; padding: 0 2px;
+  border: 1px solid var(--surface); border-radius: 2px; background: var(--accent); color: #fff;
+  font: 8px/10px var(--mono); text-align: center;
 }
+.dup-badge.resolved { background: var(--ok); }
+.path-list { display: grid; gap: 6px; max-height: 260px; overflow: auto; }
+.path-option {
+  display: flex; gap: 8px; align-items: flex-start; padding: 8px 9px;
+  border: 1px solid var(--line); border-radius: 4px;
+  font: 11.5px/1.5 var(--mono); overflow-wrap: anywhere; cursor: pointer;
+}
+.path-option:has(input:checked) { border-color: var(--ink); background: #f7f5ef; }
+.path-option input[type="radio"] { margin: 2px 0 0; accent-color: var(--ink); }
 .app-name { min-width: 0; overflow-wrap: anywhere; }
 .timeline, .inspector { display: flex; flex-direction: column; }
 .timeline { background: var(--surface); }
@@ -247,7 +263,7 @@ input::placeholder { color: #a5a199; }
   background: var(--surface); border-top: 1px solid var(--line);
 }
 .draft-header { min-height: 52px; padding: 8px 20px; border-bottom: 1px solid var(--line-soft); }
-input.test-name { width: min(28vw, 280px); }
+.draft-header input.test-name { width: min(28vw, 280px); }
 .draft-body {
   flex: 1;
   overflow: auto; padding: 0 20px 10px; list-style: none;
@@ -323,6 +339,6 @@ dialog::backdrop { background: rgba(17, 17, 16, .32); }
   .summary, .inspector { border: 0; border-top: 1px solid var(--line); }
   .timeline-body, .inspector-body { max-height: 55vh; }
   .draft-header { flex-wrap: wrap; }
-  input.test-name { width: min(240px, 62vw); }
+  .draft-header input.test-name { width: min(240px, 62vw); }
   .status { min-height: 32px; }
 }

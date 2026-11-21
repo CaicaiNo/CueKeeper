@@ -26,7 +26,7 @@ export function makeBehavior(rows, name, bindings, target) {
   };
 }
 
-export function compileDraft(session, name, entries) {
+export function compileDraft(session, name, entries, appPaths = {}) {
   const behaviors = new Map();
   const secrets = [];
   const steps = entries.map(entry => {
@@ -39,8 +39,10 @@ export function compileDraft(session, name, entries) {
     return { id: entry.id, kind: 'behavior', behavior: behavior.id, args: entry.args };
   });
   const setup = confirmedSetup(session.setup);
+  const appPath = appPaths[session.target.app];
+  const target = appPath ? { ...session.target, appPath } : session.target;
   const flow = {
-    version: 1, id: id('test'), name, target: session.target, steps,
+    version: 1, id: id('test'), name, target, steps,
     ...(setup.length ? { setup } : {}),
     ...(behaviors.size ? { behaviors: [...behaviors.values()] } : {}),
   };

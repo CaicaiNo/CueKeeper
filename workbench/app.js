@@ -7,7 +7,7 @@ const $ = name => document.getElementById(name);
 const dialog = $('dialog');
 const state = {
   session: null, library: [], allowLive: false, app: '', selected: new Set(), ignored: new Set(),
-  expanded: new Set(), showIgnored: false, focused: null, draft: [], tab: 'actions', saving: false, setup: null,
+  expanded: new Set(), showIgnored: false, focused: null, draft: [], tab: 'actions', saving: false, setup: null, appPaths: {},
 };
 
 function el(tag, attributes = {}, ...children) {
@@ -42,6 +42,7 @@ const ICONS = {
   x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
   layers: '<path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 12.18-9.17 4.16a2 2 0 0 1-1.66 0L2 12.18"/><path d="m22 17.18-9.17 4.16a2 2 0 0 1-1.66 0L2 17.18"/>',
   list: '<path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/>',
+  appWindow: '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="M10 4v4"/><path d="M2 8h20"/><path d="M6 4v4"/>',
   pointer: '<path d="M4 4l7.07 17 2.51-7.39L21 11.07z"/>',
   text: '<path d="M17 22h-1a4 4 0 0 1-4-4V6a4 4 0 0 1 4-4h1"/><path d="M7 2h1a4 4 0 0 1 4 4v12a4 4 0 0 1-4 4H7"/>',
   keyboard: '<rect width="20" height="16" x="2" y="4" rx="2"/><path d="M6 8h.01"/><path d="M10 8h.01"/><path d="M14 8h.01"/><path d="M18 8h.01"/><path d="M6 12h.01"/><path d="M10 12h.01"/><path d="M14 12h.01"/><path d="M18 12h.01"/><path d="M7 16h10"/>',
@@ -90,8 +91,42 @@ const appInfo = id => state.session?.apps?.[id];
 const appLabel = id => appInfo(id)?.label ?? id;
 const appTitle = id => {
   const info = appInfo(id);
-  return info ? [info.bundleId, ...info.paths].join('\n') : id;
+  if (!info) return id;
+  const chosen = state.appPaths[id];
+  return [info.bundleId, ...(chosen ? [`已选：${chosen}`] : []), ...info.paths].join('\n');
 };
+
+function appGlyph(app) {
+  const info = appInfo(app);
+  const badge = info && info.paths.length > 1 ? el('button', {
+    type: 'button', className: `dup-badge${state.appPaths[app] ? ' resolved' : ''}`,
+    title: `${info.paths.length} 份副本，点击选择路径`,
+    onclick: event => { event.stopPropagation(); appPathDialog(app); },
+  }, String(info.paths.length)) : undefined;
+  return el('span', { className: 'app-glyph' },
+    info?.icon ? el('img', { src: info.icon, alt: '', width: 18, height: 18 })
+      : el('span', { className: 'app-glyph-fallback' }, icon('appWindow', 12)),
+    badge);
+}
+
+function appPathDialog(bundleId) {
+  const info = appInfo(bundleId);
+  if (!info) return;
+  const current = state.appPaths[bundleId];
+  const options = info.paths.map((path, index) => el('label', { className: 'path-option' },
+    el('input', { type: 'radio', name: 'app-path', value: path, checked: current ? current === path : index === 0 }),
+    el('span', {}, path)));
+  openDialog('选择应用副本', [
+    muted(`「${info.name}」有 ${info.paths.length} 份副本。保存测试项时会写入这条路径；回放按路径锁定在下一步接入。`),
+    el('div', { className: 'path-list' }, ...options),
+  ], '使用此副本', () => {
+    const checked = dialog.querySelector('input[name="app-path"]:checked');
+    if (!checked) throw new Error('请选择一个副本');
+    state.appPaths[bundleId] = checked.value;
+    status(`已指定「${info.name}」：${checked.value}`);
+    render();
+  });
+}
 
 function locatorLabel(target) {
   if (!target) return '目标窗口';
@@ -139,6 +174,7 @@ function setSession(session) {
     session, app: '', focused: null, draft: [], tab: 'actions', showIgnored: false,
     selected: new Set(), ignored: new Set(), expanded: new Set(),
     setup: session ? setupDraft(session.setup ?? []) : null,
+    appPaths: session?.target?.appPath ? { [session.target.app]: session.target.appPath } : {},
   });
   $('show-ignored').checked = false;
   $('test-name').value = session ? `${session.name.slice(0, 248)} 测试` : '';
@@ -177,7 +213,8 @@ function renderSummary() {
       state.focused = null;
       render();
     },
-  }, el('span', { className: 'app-name' }, app ? appLabel(app) : '全部应用'), el('span', { className: 'time trailing' }, count))));
+  }, app ? appGlyph(app) : el('span', { className: 'app-glyph app-glyph-all' }, icon('appWindow', 12)),
+  el('span', { className: 'app-name' }, app ? appLabel(app) : '全部应用'), el('span', { className: 'time trailing' }, count))));
 }
 
 const setupStates = {
@@ -631,7 +668,7 @@ function currentTest() {
   const name = $('test-name').value.trim();
   if (!name) throw new Error('填写测试项名称。');
   const session = { ...state.session, setup: state.setup?.conditions ?? state.session.setup };
-  return { session: state.session.id, test: compileDraft(session, name, state.draft) };
+  return { session: state.session.id, test: compileDraft(session, name, state.draft, state.appPaths) };
 }
 
 async function saveTest() {

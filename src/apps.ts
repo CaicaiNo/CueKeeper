@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process';
-import { basename } from 'node:path';
+import { readFile, rm, mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
 
 const run = promisify(execFile);
@@ -9,9 +11,11 @@ export type AppIdentity = {
   name: string;
   paths: string[];
   label: string;
+  icon?: string;
 };
 
 const cache = new Map<string, Omit<AppIdentity, 'label'>>();
+const iconCache = new Map<string, string | undefined>();
 
 async function installedPaths(bundleId: string) {
   try {
@@ -40,6 +44,33 @@ async function displayName(path: string) {
   return basename(path).replace(/\.app$/i, '');
 }
 
+async function appIcon(path: string) {
+  if (iconCache.has(path)) return iconCache.get(path);
+  let icon: string | undefined;
+  try {
+    const { stdout } = await run('plutil', ['-convert', 'json', '-o', '-', join(path, 'Contents', 'Info.plist')], {
+      timeout: 3000, maxBuffer: 256 * 1024,
+    });
+    const info = JSON.parse(stdout) as { CFBundleIconFile?: string; CFBundleIconName?: string };
+    const name = info.CFBundleIconFile ?? info.CFBundleIconName;
+    if (name) {
+      const file = join(path, 'Contents', 'Resources', name.endsWith('.icns') ? name : `${name}.icns`);
+      const directory = await mkdtemp(join(tmpdir(), 'cuekeeper-icon-'));
+      const output = join(directory, 'icon.png');
+      try {
+        await run('sips', ['-s', 'format', 'png', file, '--out', output, '-Z', '64'], { timeout: 4000 });
+        icon = `data:image/png;base64,${(await readFile(output)).toString('base64')}`;
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+  } catch {
+    icon = undefined;
+  }
+  iconCache.set(path, icon);
+  return icon;
+}
+
 export async function describeApps(bundleIds: string[], hints: Record<string, string> = {}) {
   const unique = [...new Set(bundleIds.filter(Boolean))];
   const entries = await Promise.all(unique.map(async bundleId => {
@@ -49,7 +80,7 @@ export async function describeApps(bundleIds: string[], hints: Record<string, st
     const name = paths.length
       ? await displayName(paths[0])
       : hints[bundleId] ?? bundleId;
-    const identity = { bundleId, name, paths };
+    const identity = { bundleId, name, paths, icon: paths.length ? await appIcon(paths[0]) : undefined };
     cache.set(bundleId, identity);
     return identity;
   }));

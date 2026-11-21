@@ -30,6 +30,11 @@
           "minLength": 1,
           "maxLength": 256,
           "type": "string"
+        },
+        "appPath": {
+          "minLength": 1,
+          "maxLength": 4096,
+          "type": "string"
         }
       },
       "required": [
