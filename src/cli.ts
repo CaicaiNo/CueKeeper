@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { dirname, resolve } from 'node:path';
+import { realpath } from 'node:fs/promises';
 import { discoverAssets } from './assets.js';
+import { capturePreflight, diagnose, formatDoctor, preflightFault } from './doctor.js';
+import { buildInfo, versionLine } from './version.js';
 import { BatchError, batchExitCode, bindRows, readData, resolveBatchSecrets, runBatch } from './batch.js';
 import { captureTargetCheck } from './contracts.js';
 import { offlineDesktop, withDesktop } from './desktop.js';
@@ -13,15 +16,19 @@ import { pickCandidates, selectCandidate } from './pick.js';
 import type { PickCandidate } from './pick.js';
 import { record } from './record.js';
 import { packReport } from './report.js';
-import { runFlow } from './run.js';
+import { blockedShellReport, runFlow } from './run.js';
+import type { ShellRunOptions } from './run.js';
+import { flowHasShellDefinitions, reachableShells, shellGate } from './shell.js';
 import { parseTestItem, resolveSecrets } from './test-item.js';
 import { startWorkbench } from './workbench.js';
 
-const help = `Cuekeeper
+const help = `Cuekeeper ${buildInfo().version}
 
+  cuekeeper --version
+  cuekeeper doctor [--json]
   cuekeeper flow validate <flow.json|test.json> [--json]
-  cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--report <report.json>] [--json]
-  cuekeeper workbench [run-directory] [--port <port>] [--library <directory>] [--allow-live-replay]
+  cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--report <report.json>] [--allow-shell] [--allow-sudo] [--capture-shell-output] [--json]
+  cuekeeper workbench [run-directory] [--port <port>] [--library <directory>] [--allow-live-replay] [--allow-shell] [--allow-sudo]
   cuekeeper pick --app <bundle-id> --window <title> [--select <ref>] [--snapshot <snapshot.json>] [--json]
   cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--seconds 25] [--no-indicator] [--sound] [--trace-clicks] [--json]
   cuekeeper report pack <report.json> --flow <flow.json> --out <report.zip> [--assets <dir>] [--json]
@@ -77,7 +84,19 @@ async function main() {
     success({ usage: help }, help);
     return;
   }
+  if (argv[0] === '--version' || argv[0] === '-v' || argv[0] === 'version') {
+    const info = buildInfo();
+    success({ ...info }, versionLine(info));
+    return;
+  }
   const [command, ...rest] = argv;
+  if (command === 'doctor') {
+    const { positionals } = parseArgs({ args: rest, options: common, allowPositionals: true });
+    checkPositionals(positionals, 0);
+    const report = await diagnose();
+    success(report, formatDoctor(report), report.ok ? 0 : 1);
+    return;
+  }
   if (command === 'flow' && rest[0] === 'validate') {
     const { positionals } = parseArgs({ args: rest.slice(1), options: common, allowPositionals: true });
     checkPositionals(positionals, 1);
@@ -141,6 +160,8 @@ async function main() {
       args: rest, allowPositionals: true, options: {
         ...common, 'dry-run': { type: 'boolean' }, headed: { type: 'boolean' },
         report: { type: 'string' }, snapshot: { type: 'string' }, data: { type: 'string' },
+        'allow-shell': { type: 'boolean' }, 'allow-sudo': { type: 'boolean' },
+        'capture-shell-output': { type: 'boolean' },
       },
     });
     checkPositionals(positionals, 1);
@@ -149,9 +170,23 @@ async function main() {
     if (values.headed && dryRun) throw new Error('--headed is only for replay');
     if (values.report) await ensureNew(values.report);
     const { flow, secrets } = parseTestItem(await readJson(positionals[0]));
-    const baselineDir = resolve(dirname(resolve(positionals[0])), 'baselines');
+    const planned = plan(flow);
+    const input = await realpath(resolve(positionals[0]));
+    const shell: ShellRunOptions = {
+      allowShell: values['allow-shell'] ?? false,
+      allowSudo: values['allow-sudo'] ?? false,
+      baseDir: dirname(input),
+      captureOutput: values['capture-shell-output'] ?? false,
+    };
+    const gate = dryRun ? undefined : shellGate(flow, planned, shell);
+    const baselineDir = resolve(dirname(input), 'baselines');
 
     if (values.data) {
+      // Batch rows replay one flow repeatedly. Shell steps need the single-flow
+      // confirmation path, so a table with shell definitions is refused here.
+      if (flowHasShellDefinitions(flow)) {
+        throw new Error('Batch runs do not accept flows with shell steps yet');
+      }
       // Preflight the whole table, then resolve secrets, before any desktop
       // driver call or report artifact is created.
       const table = await readData(values.data);
@@ -195,21 +230,37 @@ async function main() {
       dryRun, signal,
       secretTexts: dryRun ? undefined : resolveSecrets(secrets, process.env),
       baselineDir,
+      shell,
       ...(values.report ? { evidenceDir: `${resolve(values.report)}.assets` } : {}),
     };
     let report;
-    if (values.snapshot) {
-      report = await runFlow(flow, offlineDesktop(await readJson(values.snapshot), flow.target), options);
+    if (gate) {
+      // No desktop adapter and no shell process is created for a blocked run.
+      report = blockedShellReport(flow, planned, gate);
     } else {
-      macOnly();
-      report = await withDesktop({ headed: values.headed ?? false, signal },
-        desktop => runFlow(flow, desktop, options));
+      const needsDesktop = (flow.setup?.length ?? 0) > 0 ||
+        planned.some(step => step.action.kind !== 'shell' || (step.action.setup?.length ?? 0) > 0);
+      if (!needsDesktop) {
+        report = await runFlow(flow, undefined, options);
+      } else if (values.snapshot) {
+        report = await runFlow(flow, offlineDesktop(await readJson(values.snapshot), flow.target), options);
+      } else {
+        macOnly();
+        report = await withDesktop({ headed: values.headed ?? false, signal },
+          desktop => runFlow(flow, desktop, options));
+      }
     }
     if (values.report) await writeNew(values.report, JSON.stringify(report, null, 2) + '\n');
     const details = report.entries
-      .map(entry => `${entry.id} ${entry.kind} ${entry.status}${entry.message ? ` — ${entry.message}` : ''}`)
+      .map(entry => {
+        const shellDetail = entry.kind === 'shell'
+          ? ` ${entry.shell.mode}/${entry.shell.privilege} ${entry.shell.execution}` : '';
+        return `${entry.id} ${entry.kind}${shellDetail} ${entry.status}` +
+          (entry.message ? ` — ${entry.message}` : '');
+      })
       .join('\n');
-    success(report, `${report.mode} ${report.status}\n${details}`, report.status === 'passed' ? 0 : 1);
+    success(report, `${report.mode} ${report.status}\n${details}`,
+      signal.aborted ? 130 : report.status === 'passed' ? 0 : 1);
     return;
   }
 
@@ -217,14 +268,19 @@ async function main() {
     const { positionals, values } = parseArgs({
       args: rest, allowPositionals: true, options: {
         ...common, port: { type: 'string', default: '0' }, library: { type: 'string' },
-        'allow-live-replay': { type: 'boolean' },
+        'allow-live-replay': { type: 'boolean' }, 'allow-shell': { type: 'boolean' },
+        'allow-sudo': { type: 'boolean' },
       },
     });
     if (positionals.length > 1) throw new Error('Specify at most one run directory');
     const port = Number(values.port);
     if (!/^\d+$/.test(values.port) || !Number.isInteger(port) || port > 65535) throw new Error('Invalid port');
     const workbench = await startWorkbench({
-      directory: positionals[0], port, library: values.library, allowLive: values['allow-live-replay'] ?? false, signal,
+      directory: positionals[0], port, library: values.library,
+      allowLive: values['allow-live-replay'] ?? false,
+      allowShell: values['allow-shell'] ?? false,
+      allowSudo: values['allow-sudo'] ?? false,
+      signal,
     });
     success({ url: workbench.url }, workbench.url);
     await workbench.closed;
@@ -248,6 +304,8 @@ async function main() {
     const seconds = Number(values.seconds);
     if (!Number.isInteger(seconds) || seconds < 1 || seconds > 90) throw new Error('--seconds must be an integer from 1 to 90');
     macOnly();
+    const preflight = preflightFault(await capturePreflight());
+    if (preflight) throw preflight;
     await ensureNew(output);
     const options = { seconds, indicator: !values['no-indicator'], sound: values.sound ?? false,
       traceClicks: values['trace-clicks'] ?? false };

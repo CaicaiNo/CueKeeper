@@ -105,6 +105,10 @@ console.log(JSON.stringify({ version: '2.6', command, ok: true, data }));
   writeFileSync(join(dist, 'cuekeeper-capture'), `#!/usr/bin/env node
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
+if (process.argv[2] === '--permissions') {
+  console.log(JSON.stringify({ accessibility: true, inputMonitoring: true }));
+  process.exit(0);
+}
 assert.deepEqual(process.argv.slice(2), ${JSON.stringify([fixture.target.app, '1234', String(seconds), ...flags])});
 const seen = Date.now();
 const messages = ${JSON.stringify(messages)};

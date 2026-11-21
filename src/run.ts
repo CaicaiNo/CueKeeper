@@ -4,19 +4,32 @@ import { join } from 'node:path';
 import { evaluateAssertion, resolveAssertion } from './assertion.js';
 import type { AssertionObservation } from './assertion.js';
 import { defaultEnsureTimeoutMs } from './contracts.js';
-import type { AssertCheck, Check, Ensure, Entry, Flow, Report, ScreenshotActual, Setup, Target } from './contracts.js';
+import type {
+  AssertCheck, Check, Delivery, Ensure, Entry, Flow, Report, ScreenshotActual, Setup, Target,
+} from './contracts.js';
 import { DesktopFault, isMissingWindow } from './desktop.js';
 import type { Desktop } from './desktop.js';
 import { hashFlow, plan } from './flow.js';
+import type { PlannedStep } from './flow.js';
 import { Fault, contains, resolve } from './locator.js';
 import type { Located, Snapshot } from './locator.js';
+import {
+  ShellFault, hasShellSecrets, planShellStep, previewShell, privateShellDirectory,
+  removeShellDirectory, reachableShells, runShell, shellBudget, shellEntry, shellGate,
+  shellPrivilege, shellMode,
+} from './shell.js';
+import type { ShellBudget, ShellGate, ShellInput, ShellOutcome } from './shell.js';
+import type { PrivilegeRunner } from './shell-privilege.js';
 
 type AssertionRecord = {
   expected: AssertCheck['expect'];
   actual?: boolean | string | ScreenshotActual;
   screenshots?: { baseline: string; actual: string };
 };
-type Outcome = Pick<Entry, 'status' | 'message' | 'code' | 'delivery'> & { assertion?: AssertionRecord };
+type Outcome = {
+  status: Entry['status']; message?: string; code?: string; delivery?: Delivery;
+  assertion?: AssertionRecord;
+};
 type SetupOutcome = Outcome & Pick<Extract<Entry, { kind: 'setup' }>, 'repair'>;
 
 function locateCheck(snapshot: Snapshot, check: Check): Located | undefined {
@@ -65,17 +78,78 @@ async function saveAssertionEvidence(directory: string, stepId: string, observat
   }
 }
 
+export interface ShellRunOptions {
+  allowShell: boolean;
+  allowSudo: boolean;
+  /** Input flow or test file directory; shell steps resolve cwd from here. */
+  baseDir: string;
+  captureOutput?: boolean;
+  hostEnv?: NodeJS.ProcessEnv;
+  privilege?: PrivilegeRunner;
+}
+
+/**
+ * The gate report is produced before any desktop adapter or shell process is
+ * created, so a missing permission never has side effects.
+ */
+export function blockedShellReport(flow: Flow, planned: PlannedStep[], gate: ShellGate): Report {
+  const reason = gate.code === 'SHELL_NOT_ALLOWED'
+    ? 'Shell steps require --allow-shell'
+    : 'Privileged shell steps require --allow-sudo';
+  return {
+    version: 1,
+    flowId: flow.id,
+    flowSha256: hashFlow(flow),
+    startedAt: new Date().toISOString(),
+    mode: 'replay',
+    status: 'blocked',
+    entries: planned.map(({ id, action }) => {
+      const shell = action as ShellInput;
+      const shellResult = action.kind === 'shell'
+        ? { shell: { mode: shellMode(shell), privilege: shellPrivilege(shell), execution: 'not-run' as const } }
+        : {};
+      if (id !== gate.stepId) {
+        return {
+          id, kind: action.kind, status: 'skipped', atMs: 0, durationMs: 0,
+          message: 'Not run: a shell permission is missing', ...shellResult,
+        } as Entry;
+      }
+      return shellEntry(id, {
+        status: 'blocked', code: gate.code, message: reason,
+        shell: { mode: shellMode(shell), privilege: shellPrivilege(shell), execution: 'not-run' },
+      }, 0, 0);
+    }),
+  };
+}
+
 export async function runFlow(
-  flow: Flow, desktop: Desktop, options: {
+  flow: Flow, desktop: Desktop | undefined, options: {
     dryRun: boolean; signal: AbortSignal; secretTexts?: ReadonlyMap<string, string>;
     /** Directory holding `baselines/<sha256>.png` next to the flow file. */
     baselineDir?: string;
     /** Directory receiving assertion evidence, one subdirectory per step. */
     evidenceDir?: string;
+    /** Enables shell steps. Omit for flows that contain none. */
+    shell?: ShellRunOptions;
   },
 ): Promise<Report> {
   const planned = plan(flow);
   const { dryRun, signal } = options;
+  const shellSteps = reachableShells(planned);
+  const gate = dryRun || !shellSteps.length ? undefined : shellGate(flow, planned, {
+    allowShell: options.shell?.allowShell ?? false,
+    allowSudo: options.shell?.allowSudo ?? false,
+  });
+  if (gate) return blockedShellReport(flow, planned, gate);
+  function requireDesktop(): Desktop {
+    if (!desktop) throw new Fault('DESKTOP_DEPENDENCY', 'This flow needs the desktop adapter', true);
+    return desktop;
+  }
+  const shellBudgetState: ShellBudget = shellBudget();
+  const canCapture = Boolean(options.shell?.captureOutput) && !(options.secretTexts?.size) &&
+    !shellSteps.some(step => hasShellSecrets(step.action)) &&
+    !shellSteps.some(step => shellPrivilege(step.action) === 'sudo');
+  let shellTemp: string | undefined;
   const report: Report = {
     version: 1,
     flowId: flow.id,
@@ -94,7 +168,7 @@ export async function runFlow(
       get id() { return windowId; },
       async read(timeoutMs?: number, exactWindow = false, repairedWindowId?: string) {
         const selected = selectedWindowId ?? (exactWindow ? windowId ?? repairedWindowId : undefined);
-        const current = await desktop.snapshot(target, timeoutMs, selected, exactWindow);
+        const current = await requireDesktop().snapshot(target, timeoutMs, selected, exactWindow);
         const expectedId = windowId ?? selected;
         if (expectedId !== undefined && current.windowId !== expectedId) {
           throw new Fault('WINDOW_CHANGED', 'The original target window changed during the run');
@@ -132,7 +206,7 @@ export async function runFlow(
     try {
       const budget = deadline === undefined ? undefined : Math.ceil(deadline - performance.now());
       if (budget !== undefined && budget <= 0) throw new Fault('COMMAND_TIMEOUT', 'The setup repair deadline expired');
-      return await evaluate(desktop, current, check, budget);
+      return await evaluate(requireDesktop(), current, check, budget);
     } catch (error) {
       if (error instanceof Fault && error.code === 'NOT_FOUND') return false;
       throw error;
@@ -150,7 +224,7 @@ export async function runFlow(
     const deadline = performance.now() + timeoutMs;
     try {
       signal.throwIfAborted();
-      const repairedWindowId = await desktop.ensure(action, timeoutMs, window.id);
+      const repairedWindowId = await requireDesktop().ensure(action, timeoutMs, window.id);
       let current: Snapshot;
       for (;;) {
         signal.throwIfAborted();
@@ -202,7 +276,7 @@ export async function runFlow(
           return { status: 'resolved' };
         }
         if (ensure) return ensureThenCheck(condition.check, ensure, window);
-        if (!await evaluate(desktop, await snapshot(), condition.check)) {
+        if (!await evaluate(requireDesktop(), await snapshot(), condition.check)) {
           throw new Fault('PRECONDITION_FALSE', 'Confirmed precondition did not match');
         }
         return { status: 'passed' };
@@ -212,105 +286,169 @@ export async function runFlow(
     return true;
   }
 
+  async function runShellStep(id: string, step: ShellInput) {
+    const atMs = elapsed();
+    let outcome: ShellOutcome;
+    if (dryRun) {
+      outcome = previewShell(step);
+    } else {
+      try {
+        if (!shellTemp) shellTemp = await privateShellDirectory();
+        const plan = await planShellStep(step, {
+          baseDir: options.shell?.baseDir ?? process.cwd(),
+          hostEnv: options.shell?.hostEnv ?? process.env,
+          tempDir: shellTemp,
+          privilege: options.shell?.privilege,
+        });
+        outcome = await runShell(plan, {
+          signal, budget: shellBudgetState, canCapture, privilege: options.shell?.privilege,
+        });
+      } catch (error) {
+        if (!(error instanceof ShellFault)) throw error;
+        outcome = {
+          status: error.code === 'SHELL_PRIVILEGE_REQUIRED' ? 'blocked' : 'failed',
+          code: error.code,
+          message: error.message,
+          shell: { mode: shellMode(step), privilege: shellPrivilege(step), execution: 'not-run' },
+        };
+      }
+    }
+    report.entries.push(shellEntry(id, outcome, atMs, elapsed() - atMs));
+    if (outcome.status === 'blocked') {
+      report.status = 'blocked';
+      return true;
+    }
+    if (outcome.status === 'failed') {
+      report.status = 'failed';
+      return true;
+    }
+    return false;
+  }
+
   const globalReady = await checkConditions(flow.setup, 'global');
   let halted = !globalReady;
   if (halted) report.status = 'blocked';
-  for (const { id, action } of planned) {
-    if (halted) {
-      await log(id, action.kind, async () =>
-        ({ status: globalReady ? 'skipped' : 'blocked', message: 'Stopped by an earlier result' }));
-      continue;
-    }
-    if (!await checkConditions(action.setup, id)) {
-      await log(id, action.kind, async () =>
-        ({ status: 'blocked', code: 'LOCAL_SETUP', message: 'Local precondition blocked this action' }));
-      report.status = 'blocked';
-      continue;
-    }
-
-    const status = await log(id, action.kind, async () => {
-      if (action.kind === 'assert') {
-        const context = {
-          desktop,
-          snapshot: () => snapshot(),
-          baselineDir: options.baselineDir,
-          secretTexts: options.secretTexts,
-        };
-        if (dryRun) {
-          await resolveAssertion(action.check, context);
-          return { status: 'resolved' };
-        }
-        let observation: AssertionObservation;
-        try {
-          observation = await evaluateAssertion(action.check, context);
-        } catch (error) {
-          if (signal.aborted || (error instanceof Fault && error.dependency)) throw error;
-          const outcome = errorOutcome(error, 'failed');
-          return { ...outcome, assertion: { expected: action.check.expect } };
-        }
-        const saved = observation.evidence && options.evidenceDir
-          ? await saveAssertionEvidence(options.evidenceDir, id, observation)
-          : undefined;
-        const screenshots = saved && 'screenshots' in saved ? saved.screenshots : undefined;
-        const assertion: AssertionRecord = {
-          expected: action.check.expect,
-          ...(observation.actual !== undefined ? { actual: observation.actual } : {}),
-          ...(screenshots ? { screenshots } : {}),
-        };
-        let message = observation.message;
-        if (saved && 'message' in saved) message = [message, saved.message].filter(Boolean).join('；') || saved.message;
-        if (observation.passed) return { status: 'passed', ...(message ? { message } : {}), assertion };
-        return {
-          status: 'failed',
-          code: observation.code ?? 'ASSERTION_FALSE',
-          message: message ?? `Expected ${action.check.expect.property} did not match`,
-          assertion,
-        };
+  try {
+    for (const { id, action } of planned) {
+      if (halted) {
+        const status = globalReady ? 'skipped' : 'blocked';
+        report.entries.push(action.kind === 'shell'
+          ? shellEntry(id, {
+            status,
+            message: 'Stopped by an earlier result',
+            shell: { mode: shellMode(action), privilege: shellPrivilege(action), execution: 'not-run' },
+          }, elapsed(), 0)
+          : {
+            id, kind: action.kind, status, atMs: elapsed(), durationMs: 0,
+            message: 'Stopped by an earlier result',
+          } as Entry);
+        continue;
       }
-      if (action.kind === 'wait') {
-        if (dryRun) {
-          locateCheck(await snapshot(), action.check);
-          return { status: 'resolved' };
+      if (!await checkConditions(action.setup, id)) {
+        if (action.kind === 'shell') {
+          report.entries.push(shellEntry(id, {
+            status: 'blocked', code: 'LOCAL_SETUP', message: 'Local precondition blocked this action',
+            shell: { mode: shellMode(action), privilege: shellPrivilege(action), execution: 'not-run' },
+          }, elapsed(), 0));
+        } else {
+          await log(id, action.kind, async () =>
+            ({ status: 'blocked', code: 'LOCAL_SETUP', message: 'Local precondition blocked this action' }));
         }
-        const deadline = performance.now() + action.timeoutMs;
-        for (;;) {
-          const remaining = Math.max(0, Math.ceil(deadline - performance.now()));
-          try {
-            if (await evaluate(desktop, await snapshot(Math.min(3000, remaining)), action.check)) break;
-          } catch (error) {
-            if (!(error instanceof Fault && ['NOT_FOUND', 'INCOMPLETE_TREE'].includes(error.code))) throw error;
+        report.status = 'blocked';
+        continue;
+      }
+      if (action.kind === 'shell') {
+        halted = await runShellStep(id, action);
+        continue;
+      }
+
+      const status = await log(id, action.kind, async () => {
+        if (action.kind === 'assert') {
+          const context = {
+            desktop: requireDesktop(),
+            snapshot: () => snapshot(),
+            baselineDir: options.baselineDir,
+            secretTexts: options.secretTexts,
+          };
+          if (dryRun) {
+            await resolveAssertion(action.check, context);
+            return { status: 'resolved' };
           }
-          if (performance.now() >= deadline) throw new Fault('WAIT_TIMEOUT', 'Wait condition did not match');
-          await sleep(Math.min(100, Math.max(0, deadline - performance.now())), undefined, { signal });
+          let observation: AssertionObservation;
+          try {
+            observation = await evaluateAssertion(action.check, context);
+          } catch (error) {
+            if (signal.aborted || (error instanceof Fault && error.dependency)) throw error;
+            const outcome = errorOutcome(error, 'failed');
+            return { ...outcome, assertion: { expected: action.check.expect } };
+          }
+          const saved = observation.evidence && options.evidenceDir
+            ? await saveAssertionEvidence(options.evidenceDir, id, observation)
+            : undefined;
+          const screenshots = saved && 'screenshots' in saved ? saved.screenshots : undefined;
+          const assertion: AssertionRecord = {
+            expected: action.check.expect,
+            ...(observation.actual !== undefined ? { actual: observation.actual } : {}),
+            ...(screenshots ? { screenshots } : {}),
+          };
+          let message = observation.message;
+          if (saved && 'message' in saved) message = [message, saved.message].filter(Boolean).join('；') || saved.message;
+          if (observation.passed) return { status: 'passed', ...(message ? { message } : {}), assertion };
+          return {
+            status: 'failed',
+            code: observation.code ?? 'ASSERTION_FALSE',
+            message: message ?? `Expected ${action.check.expect.property} did not match`,
+            assertion,
+          };
         }
-        return { status: 'passed' };
-      }
-
-      const current = await snapshot();
-      if (action.kind === 'key') {
-        if (dryRun) return { status: 'resolved', message: 'Window resolved for shortcut' };
-        return { status: 'passed', delivery: await desktop.press(
-          [...(action.modifiers ?? []), action.key].join('+'), current,
-        ) };
-      }
-      if (action.target.kind === 'point') {
-        if (!contains(current.tree.bounds, action.target.point)) {
-          throw new Fault('UNSAFE_POINT', 'Coordinate is outside the selected window');
+        if (action.kind === 'wait') {
+          if (dryRun) {
+            locateCheck(await snapshot(), action.check);
+            return { status: 'resolved' };
+          }
+          const deadline = performance.now() + action.timeoutMs;
+          for (;;) {
+            const remaining = Math.max(0, Math.ceil(deadline - performance.now()));
+            try {
+              if (await evaluate(requireDesktop(), await snapshot(Math.min(3000, remaining)), action.check)) break;
+            } catch (error) {
+              if (!(error instanceof Fault && ['NOT_FOUND', 'INCOMPLETE_TREE'].includes(error.code))) throw error;
+            }
+            if (performance.now() >= deadline) throw new Fault('WAIT_TIMEOUT', 'Wait condition did not match');
+            await sleep(Math.min(100, Math.max(0, deadline - performance.now())), undefined, { signal });
+          }
+          return { status: 'passed' };
         }
-        if (dryRun) return { status: 'resolved', message: 'Coordinate is within the selected window' };
-        return { status: 'passed', delivery: await desktop.clickPoint(current, flow.target, action.target.point) };
-      }
 
-      const { node } = resolve(current, action.target);
-      if (!node.ref || node.secure) throw new Fault('UNSAFE_TARGET', 'Control is secure or has no action reference');
-      if (dryRun) return { status: 'resolved', message: `Resolved ${node.role}` };
-      const delivery = action.kind === 'click' ? await desktop.click(node.ref) : await desktop.type(node.ref, options.secretTexts?.get(id) ?? action.text);
-      return { status: 'passed', delivery };
-    });
-    if (status === 'failed') {
-      report.status = 'failed';
-      halted = true;
+        const current = await snapshot();
+        const client = requireDesktop();
+        if (action.kind === 'key') {
+          if (dryRun) return { status: 'resolved', message: 'Window resolved for shortcut' };
+          return { status: 'passed', delivery: await client.press(
+            [...(action.modifiers ?? []), action.key].join('+'), current,
+          ) };
+        }
+        if (action.target.kind === 'point') {
+          if (!contains(current.tree.bounds, action.target.point)) {
+            throw new Fault('UNSAFE_POINT', 'Coordinate is outside the selected window');
+          }
+          if (dryRun) return { status: 'resolved', message: 'Coordinate is within the selected window' };
+          return { status: 'passed', delivery: await client.clickPoint(current, flow.target, action.target.point) };
+        }
+
+        const { node } = resolve(current, action.target);
+        if (!node.ref || node.secure) throw new Fault('UNSAFE_TARGET', 'Control is secure or has no action reference');
+        if (dryRun) return { status: 'resolved', message: `Resolved ${node.role}` };
+        const delivery = action.kind === 'click' ? await client.click(node.ref) : await client.type(node.ref, options.secretTexts?.get(id) ?? action.text);
+        return { status: 'passed', delivery };
+      });
+      if (status === 'failed') {
+        report.status = 'failed';
+        halted = true;
+      }
     }
+  } finally {
+    if (shellTemp) await removeShellDirectory(shellTemp);
   }
   return report;
 }
