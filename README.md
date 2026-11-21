@@ -105,6 +105,22 @@ node dist/cli.js run /path/to/test.flow.json --dry-run --snapshot /path/to/snaps
 
 工作台在本机监听。离线模式只读快照。实时回放需要 macOS、`--allow-live-replay` 启动选项和界面中的目标窗口确认。含坐标点击的测试项由 CLI 使用 `--headed` 回放。
 
+### Shell 步骤
+
+`kind: "shell"` 的步骤在用户态串行执行命令，可与 UI 动作混排。默认形态 `argv` 把数组逐项交给 `spawn`，不经过 shell；`shell: true` 时必须用 `command`，固定通过 `/bin/sh -c` 启动非登录 shell。契约见 [Shell 步骤设计](docs/shell-steps.md)，命令与参数不写入报告。
+
+```sh
+node dist/cli.js run /path/to/shell.flow.json --allow-shell --json
+node dist/cli.js run /path/to/shell.flow.json --dry-run --json
+node dist/cli.js run /path/to/test.json --allow-shell --allow-sudo --capture-shell-output --report out/run.json
+```
+
+- 实时执行必须显式给 `--allow-shell`；`privilege: "sudo"` 的固定任务另需 `--allow-sudo`，首版仍按禁用处理，真实提权留给 HAOC-76 真机验收。
+- `--dry-run` 只输出静态计划（步骤 ID、模式、权限），不解析秘密、不启动 shell 或 sudo；纯 Shell 流程无需 `--snapshot`。
+- 输出文本默认不采集；`--capture-shell-output` 单次开启。存在秘密引用或提权步骤时只保留元数据。
+- 含 Shell 定义的 flow 不能 `report pack`，仍可 `--report` 写 JSON 并在工作台查看。
+- 工作台启动加 `--allow-shell`（提权再要 `--allow-sudo`），运行前展示展开计划并用一次性令牌确认；「停止」取消当前运行与剩余步骤。
+
 ### 从快照拾取元素
 
 不录制也能把动作绑定到目标控件。`pick` 只读取窗口快照，不点击、不抢焦点，也不改变前台窗口。
@@ -125,7 +141,8 @@ node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --selec
 | `flow validate <flow.json>` | 检查 v1 结构、ID、行为引用和参数绑定 |
 | `record --app <bundle-id> --window <精确标题> --out <flow.json>` | 录制目标窗口，显示计时 HUD，支持 `--no-indicator` 和 `--sound` |
 | `pick --app <bundle-id> --window <精确标题> [--select <ref>] [--snapshot <snapshot.json>]` | 只读快照，按可交互元素优先列出候选，或输出可写入 flow 的定位器 |
-| `run <flow.json> --dry-run` | 用当前窗口解析定位器 |
+| `run <flow.json> --dry-run` | 用当前窗口解析定位器；纯 Shell 流程无需快照 |
+| `run <flow.json> --allow-shell [--allow-sudo] [--capture-shell-output]` | 执行 Shell 步骤（提权首版禁用） |
 | `run <flow.json> --headed --report <report.json>` | 允许物理点击，回放并记录逐步结果 |
 | `report pack <report.json> --flow <flow.json> --out <report.zip>` | 验证报告与流程配对，生成可离线打开的 ZIP；`--assets <dir>` 带入截图、日志和 AX 快照 |
 

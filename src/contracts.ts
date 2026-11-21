@@ -110,6 +110,47 @@ const conditions = T.Array(setup, { maxItems: 100 });
 const inputText = T.Union([T.String({ minLength: 1, maxLength: 4000 }), object({ param: parameterName })]);
 const step = { id, setup: T.Optional(conditions) };
 
+// Shell steps are one closed object per execution shape so that argv and
+// command cannot be combined and sudo cannot carry a caller-supplied cwd, env
+// or timeout. The published schema keeps the same constraints even though the
+// generated form inlines the three variants instead of using $ref.
+const shellString = (minLength: number, maxLength: number) =>
+  T.String({ minLength, maxLength, pattern: '^[^\\u0000]*$' });
+const shellArgv = T.Array(shellString(0, 4096), { minItems: 1, maxItems: 65 });
+const shellCommand = shellString(1, 16_384);
+const shellCwd = shellString(1, 4096);
+const shellEnvKey = T.String({
+  pattern: '^(?!(?:HOME|USER|LOGNAME|TMPDIR|LANG|PATH|NODE_OPTIONS)$|(?:SUDO_|DYLD_|LD_|CUEKEEPER_))[A-Za-z_][A-Za-z0-9_]{0,63}$',
+});
+const shellEnv = T.Record(shellEnvKey, T.Union([
+  shellString(0, 4000),
+  object({ secretEnv: T.String({ pattern: '^CUEKEEPER_SECRET_[A-Z0-9_]{1,64}$' }) }),
+]), { additionalProperties: false, maxProperties: 32 });
+const shellTimeout = T.Optional(T.Integer({ minimum: 1, maximum: 120_000, default: 30_000 }));
+const shellExpectedExit = T.Optional(T.Integer({ minimum: 0, maximum: 255, default: 0 }));
+const shellFields = {
+  ...step, kind: T.Literal('shell'),
+  shell: T.Optional(T.Literal(false)),
+  cwd: T.Optional(shellCwd),
+  env: T.Optional(shellEnv),
+  expectedExitCode: shellExpectedExit,
+};
+const shellSteps = [
+  object({ ...shellFields, argv: shellArgv, timeoutMs: shellTimeout, privilege: T.Optional(T.Literal('user')) }),
+  object({
+    ...step, kind: T.Literal('shell'), shell: T.Literal(true), command: shellCommand,
+    cwd: T.Optional(shellCwd), env: T.Optional(shellEnv),
+    timeoutMs: shellTimeout, expectedExitCode: shellExpectedExit,
+    privilege: T.Optional(T.Literal('user')),
+  }),
+  object({
+    ...step, kind: T.Literal('shell'), shell: T.Optional(T.Literal(false)),
+    argv: T.Array(T.String({ pattern: '^/Library/CueKeeper/privileged/[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$' }),
+      { minItems: 1, maxItems: 1 }),
+    privilege: T.Literal('sudo'), expectedExitCode: shellExpectedExit,
+  }),
+] as const;
+const shellStep = T.Union([...shellSteps]);
 const action = T.Union([
   object({ ...step, kind: T.Literal('click'), target: locator }),
   object({ ...step, kind: T.Literal('type'), target: element, text: inputText }),
@@ -123,6 +164,7 @@ const action = T.Union([
   }),
   object({ ...step, kind: T.Literal('wait'), check, timeoutMs: time }),
   object({ ...step, kind: T.Literal('assert'), check: assertCheck }),
+  ...shellSteps,
 ]);
 const call = object({
   id, kind: T.Literal('behavior'), behavior: id,
@@ -145,6 +187,10 @@ const resultStatus = T.Union([
   T.Literal('passed'), T.Literal('failed'), T.Literal('blocked'),
   T.Literal('skipped'), T.Literal('resolved'),
 ]);
+const deliveryState = T.Union([
+  T.Literal('delivered_verified'), T.Literal('delivered_unverified'),
+  T.Literal('delivery_uncertain'), T.Literal('not_delivered'), T.Literal('unknown'),
+]);
 const entryFields = {
   id: T.String({ minLength: 1, maxLength: 196 }),
   status: resultStatus,
@@ -152,10 +198,7 @@ const entryFields = {
   durationMs: T.Integer({ minimum: 0 }),
   message: T.Optional(T.String()),
   code: T.Optional(T.String()),
-  delivery: T.Optional(T.Union([
-    T.Literal('delivered_verified'), T.Literal('delivered_unverified'),
-    T.Literal('delivery_uncertain'), T.Literal('not_delivered'), T.Literal('unknown'),
-  ])),
+  delivery: T.Optional(deliveryState),
 };
 const evidencePath = T.String({
   pattern: '^assets/[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}(/[a-zA-Z0-9][a-zA-Z0-9_-]{0,63})?/assertion-(?:baseline|actual)\\.png$',
@@ -166,6 +209,44 @@ const screenshotActual = object({
   differentPixels: T.Optional(T.Integer({ minimum: 0, maximum: 16_777_216 })),
   diffRatio: T.Optional(ratio),
 });
+const shellBytes = T.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
+const shellOutput = T.Union([
+  object({
+    kind: T.Literal('text'), bytes: shellBytes, truncated: T.Boolean(),
+    text: shellString(0, 16_384),
+  }),
+  object({
+    kind: T.Union([T.Literal('binary'), T.Literal('omitted')]),
+    bytes: shellBytes, truncated: T.Boolean(),
+  }),
+]);
+const shellExecution = T.Union([
+  T.Literal('finished'), T.Literal('terminated'), T.Literal('unknown'),
+]);
+const shellResultFields = {
+  mode: T.Union([T.Literal('argv'), T.Literal('shell')]),
+  privilege: T.Union([T.Literal('user'), T.Literal('sudo')]),
+  cleanup: T.Optional(T.Union([T.Literal('complete'), T.Literal('unknown')])),
+  stdout: T.Optional(shellOutput),
+  stderr: T.Optional(shellOutput),
+  warnings: T.Optional(T.Array(T.Literal('SHELL_OUTPUT_TRUNCATED'), { maxItems: 1 })),
+};
+const shellResult = T.Union([
+  object({
+    mode: shellResultFields.mode,
+    privilege: shellResultFields.privilege,
+    execution: T.Union([T.Literal('preview'), T.Literal('not-run')]),
+  }),
+  object({
+    ...shellResultFields, execution: shellExecution,
+    exitCode: T.Integer({ minimum: 0, maximum: 255 }),
+  }),
+  object({
+    ...shellResultFields, execution: shellExecution,
+    signal: T.String({ pattern: '^SIG[A-Z0-9]+$' }),
+  }),
+  object({ ...shellResultFields, execution: shellExecution }),
+]);
 const assertionResult = T.Union([
   object({ expected: booleanExpectation, actual: T.Optional(T.Boolean()) }),
   object({
@@ -200,6 +281,16 @@ const entry = T.Union([
     ...entryFields,
     kind: T.Literal('assert'),
     assertion: T.Optional(assertionResult),
+  }),
+  object({
+    id: entryFields.id,
+    status: resultStatus,
+    atMs: entryFields.atMs,
+    durationMs: entryFields.durationMs,
+    message: entryFields.message,
+    code: entryFields.code,
+    kind: T.Literal('shell'),
+    shell: shellResult,
   }),
 ]);
 export const reportSchema = object({
@@ -241,3 +332,9 @@ export type ScreenshotExpectation = Static<typeof screenshotExpectation>;
 export type AssertionResult = Static<typeof assertionResult>;
 export type ScreenshotActual = Static<typeof screenshotActual>;
 export type Normalize = Static<typeof normalize>;
+export type ShellStep = Static<typeof shellStep>;
+export type ShellEnv = NonNullable<Static<typeof shellEnv>>;
+export type ShellOutput = Static<typeof shellOutput>;
+export type ShellResult = Static<typeof shellResult>;
+export type ShellEntry = Extract<Entry, { kind: 'shell' }>;
+export type Delivery = Static<typeof deliveryState>;
