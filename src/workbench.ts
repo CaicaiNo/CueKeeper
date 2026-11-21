@@ -9,6 +9,7 @@ import { readJson, writeNew } from './files.js';
 import { plan } from './flow.js';
 import { object } from './locator.js';
 import { runFlow } from './run.js';
+import { keepConfirmedSetup } from './setup.js';
 import { parseLibraryItem, parseTestItem, resolveSecrets } from './test-item.js';
 import { loadSession, sameTarget } from './workbench-session.js';
 
@@ -102,14 +103,19 @@ export async function startWorkbench(options: {
       return send(response, 201, item);
     }
     if (path !== '/api/save' && path !== '/api/run') return send(response, 404, { error: 'Unknown workbench endpoint' });
-    const { flow, secrets } = parseTestItem(data.test);
-    if (!sameTarget(flow.target, current.flow.target)) throw new Error('Test target must match the session');
     if (path === '/api/save') {
+      // Only confirmed conditions belong in a saved test item; the runner already
+      // skips the rest, but a saved file should not carry unapproved setup.
+      const test = keepConfirmedSetup(data.test);
+      const { flow, secrets } = parseTestItem(test);
+      if (!sameTarget(flow.target, current.flow.target)) throw new Error('Test target must match the session');
       const extension = secrets.size ? 'test' : 'flow';
       const output = join(current.directory, `test-${randomUUID()}.${extension}.json`);
-      await writeNew(output, JSON.stringify(data.test, null, 2) + '\n');
+      await writeNew(output, JSON.stringify(test, null, 2) + '\n');
       return send(response, 201, { output });
     }
+    const { flow, secrets } = parseTestItem(data.test);
+    if (!sameTarget(flow.target, current.flow.target)) throw new Error('Test target must match the session');
     if (data.mode !== 'offline' && data.mode !== 'live') throw new Error('Choose a replay mode');
     if (running) throw new Error('A test is already running');
     const dryRun = data.mode === 'offline';

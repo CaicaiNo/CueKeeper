@@ -38,11 +38,81 @@ export function compileDraft(session, name, entries) {
     }
     return { id: entry.id, kind: 'behavior', behavior: behavior.id, args: entry.args };
   });
+  const setup = confirmedSetup(session.setup);
   const flow = {
-    version: 1, id: id('test'), name, target: session.target, setup: session.setup, steps,
+    version: 1, id: id('test'), name, target: session.target, steps,
+    ...(setup.length ? { setup } : {}),
     ...(behaviors.size ? { behaviors: [...behaviors.values()] } : {}),
   };
   return secrets.length ? { format: 'cuekeeper-test', version: 1, flow, secrets } : flow;
+}
+
+export function confirmedSetup(conditions = []) {
+  return conditions.filter(condition => condition.state === 'confirmed');
+}
+
+export function setupDraft(conditions = []) {
+  return { conditions: structuredClone(conditions), history: new Map() };
+}
+
+function conditionIndex(draft, id) {
+  const index = draft.conditions.findIndex(condition => condition.id === id);
+  if (index < 0) throw new Error('前置条件不存在。');
+  return index;
+}
+
+function edit(draft, id, change) {
+  const index = conditionIndex(draft, id);
+  const previous = draft.conditions[index];
+  const next = change(structuredClone(previous));
+  const history = draft.history.get(id) ?? [];
+  history.push(previous);
+  draft.history.set(id, history);
+  draft.conditions[index] = next;
+  return next;
+}
+
+export function confirmCondition(draft, id) {
+  return edit(draft, id, condition => ({ ...condition, state: 'confirmed' }));
+}
+
+export function deleteCondition(draft, id) {
+  return edit(draft, id, condition => ({ ...condition, state: 'deleted' }));
+}
+
+export function retargetCondition(draft, id, { app, window }) {
+  const nextApp = typeof app === 'string' ? app.trim() : '';
+  const nextWindow = typeof window === 'string' ? window.trim() : '';
+  if (!nextApp || !nextWindow || nextApp.length > 256 || nextWindow.length > 256) {
+    throw new Error('填写应用标识和窗口标题，均不超过 256 个字符。');
+  }
+  return edit(draft, id, condition => {
+    const kind = condition.ensure?.kind;
+    const ensure = kind === 'window_ready'
+      ? { ...condition.ensure, app: nextApp, window: nextWindow }
+      : kind === 'app_running' ? { ...condition.ensure, app: nextApp } : undefined;
+    const name = kind === 'window_ready'
+      ? `窗口已就绪 · ${nextWindow}`
+      : kind === 'app_running' ? `应用已启动 · ${nextApp}` : condition.name;
+    const target = condition.check.target.role === 'window'
+      ? { ...condition.check.target, name: nextWindow } : condition.check.target;
+    return {
+      ...condition, name: name.slice(0, 256), state: 'inferred',
+      check: { ...condition.check, target }, ...(ensure ? { ensure } : {}),
+    };
+  });
+}
+
+export function canUndo(draft, id) {
+  return (draft.history.get(id)?.length ?? 0) > 0;
+}
+
+export function undoCondition(draft, id) {
+  const history = draft.history.get(id);
+  const previous = history?.pop();
+  if (!previous) return undefined;
+  draft.conditions[conditionIndex(draft, id)] = previous;
+  return previous;
 }
 
 export function visibleRows(rows, app, ignored, showIgnored) {
