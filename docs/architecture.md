@@ -47,3 +47,5 @@ flowchart LR
 | M3 · Windows 兼容与报告上传 | Windows 原生采集桥、同一 v1 流程格式、报告查看及可选幂等上传。本机保留上传失败的 ZIP |
 
 `design/` 保存六份既有原型，供 M2 复用。执行协议以 [agent-desktop v1.3.1](https://github.com/vercel-labs/agent-desktop/tree/v1.3.1) 为准。
+
+M3 的 Windows 可行性、与 macOS 的差异、驱动接口改动清单和实机待确认项见 [Windows 适配](windows.md)。
