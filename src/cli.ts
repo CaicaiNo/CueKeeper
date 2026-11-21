@@ -9,11 +9,14 @@ import { Fault } from './locator.js';
 import { record } from './record.js';
 import { packReport } from './report.js';
 import { runFlow } from './run.js';
+import { parseTestItem, resolveSecrets } from './test-item.js';
+import { startWorkbench } from './workbench.js';
 
 const help = `Cuekeeper
 
-  cuekeeper flow validate <flow.json> [--json]
-  cuekeeper run <flow.json> [--dry-run [--snapshot <snapshot.json>]] [--headed] [--report <report.json>] [--json]
+  cuekeeper flow validate <flow.json|test.json> [--json]
+  cuekeeper run <flow.json|test.json> [--dry-run [--snapshot <snapshot.json>]] [--headed] [--report <report.json>] [--json]
+  cuekeeper workbench [run-directory] [--port <port>] [--library <directory>] [--allow-live-replay]
   cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--seconds 25] [--no-indicator] [--sound] [--trace-clicks] [--json]
   cuekeeper report pack <report.json> --flow <flow.json> --out <report.zip> [--assets <dir>] [--json]
 
@@ -64,7 +67,7 @@ async function main() {
   if (command === 'flow' && rest[0] === 'validate') {
     const { positionals } = parseArgs({ args: rest.slice(1), options: common, allowPositionals: true });
     checkPositionals(positionals, 1);
-    const flow = parseFlow(await readJson(positionals[0]));
+    const { flow } = parseTestItem(await readJson(positionals[0]));
     const actions = plan(flow).length;
     success({ flowId: flow.id, actions }, `Valid flow ${flow.id} with ${actions} actions`);
     return;
@@ -82,8 +85,8 @@ async function main() {
     if (values.snapshot && !dryRun) throw new Error('--snapshot requires --dry-run');
     if (values.headed && dryRun) throw new Error('--headed is only for replay');
     if (values.report) await ensureNew(values.report);
-    const flow = parseFlow(await readJson(positionals[0]));
-    const options = { dryRun, signal };
+    const { flow, secrets } = parseTestItem(await readJson(positionals[0]));
+    const options = { dryRun, signal, secretTexts: dryRun ? undefined : resolveSecrets(secrets, process.env) };
     let report;
     if (values.snapshot) {
       report = await runFlow(flow, offlineDesktop(await readJson(values.snapshot), flow.target), options);
@@ -97,6 +100,24 @@ async function main() {
       .map(entry => `${entry.id} ${entry.kind} ${entry.status}${entry.message ? ` — ${entry.message}` : ''}`)
       .join('\n');
     success(report, `${report.mode} ${report.status}\n${details}`, report.status === 'passed' ? 0 : 1);
+    return;
+  }
+
+  if (command === 'workbench') {
+    const { positionals, values } = parseArgs({
+      args: rest, allowPositionals: true, options: {
+        ...common, port: { type: 'string', default: '0' }, library: { type: 'string' },
+        'allow-live-replay': { type: 'boolean' },
+      },
+    });
+    if (positionals.length > 1) throw new Error('Specify at most one run directory');
+    const port = Number(values.port);
+    if (!/^\d+$/.test(values.port) || !Number.isInteger(port) || port > 65535) throw new Error('Invalid port');
+    const workbench = await startWorkbench({
+      directory: positionals[0], port, library: values.library, allowLive: values['allow-live-replay'] ?? false, signal,
+    });
+    success({ url: workbench.url }, workbench.url);
+    await workbench.closed;
     return;
   }
 

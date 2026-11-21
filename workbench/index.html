@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CueKeeper 工作台</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="mark" aria-hidden="true"></span>CueKeeper</div>
+    <span class="divider" aria-hidden="true"></span>
+    <h1>工作台</h1>
+    <span id="session-name" class="session-name"></span>
+    <button id="import-button" class="button trailing" type="button">导入运行目录</button>
+  </header>
+
+  <main class="workspace">
+    <aside class="summary pane" aria-labelledby="session-title">
+      <h2 id="session-title">录制会话</h2>
+      <div id="summary"></div>
+      <h3>应用筛选</h3>
+      <div id="apps" class="app-list"></div>
+    </aside>
+
+    <section class="timeline pane" aria-labelledby="timeline-title">
+      <div class="pane-header">
+        <h2 id="timeline-title">动作时间线</h2>
+        <span id="timeline-count" class="muted"></span>
+        <label id="ignored-control" class="checkbox trailing" hidden><input type="checkbox" id="show-ignored">显示已忽略</label>
+      </div>
+      <div id="selection"></div>
+      <div id="timeline" class="timeline-body" aria-label="会话动作"></div>
+    </section>
+
+    <aside class="inspector pane" aria-label="动作整理与行为库">
+      <div class="tabs" aria-label="右侧面板">
+        <button id="actions-tab" type="button" aria-pressed="true">动作整理</button>
+        <button id="library-tab" type="button" aria-pressed="false">行为库</button>
+      </div>
+      <div id="inspector" class="inspector-body"></div>
+    </aside>
+  </main>
+
+  <section class="draft" aria-labelledby="draft-title">
+    <div class="draft-header">
+      <h2 id="draft-title">测试项草稿</h2>
+      <input id="test-name" class="test-name" aria-label="测试项名称" placeholder="测试项名称" maxlength="256" required>
+      <span id="draft-count" class="muted"></span>
+      <div class="button-group trailing">
+        <button id="save-button" class="button" type="button" disabled>保存</button>
+        <button id="run-button" class="button primary" type="button" disabled>运行测试项</button>
+      </div>
+    </div>
+    <ol id="draft" class="draft-body"></ol>
+  </section>
+
+  <footer id="status" class="status" role="status" aria-live="polite">正在读取本地会话…</footer>
+  <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
+</body>
+</html>

@@ -64,7 +64,7 @@ export async function withDesktop<T>(
 ): Promise<T> {
   const state = await mkdtemp(join(tmpdir(), 'cuekeeper-'));
   try {
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('AGENT_DESKTOP_')));
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('AGENT_DESKTOP_') && !key.startsWith('CUEKEEPER_SECRET_')));
     env.AGENT_DESKTOP_HOME = state;
     const call = commandRunner(env, options.signal);
     const version = object(await call('version', []));

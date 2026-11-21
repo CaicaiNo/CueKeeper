@@ -38,7 +38,7 @@ function errorOutcome(error: unknown, status: 'failed' | 'blocked'): Outcome {
 }
 
 export async function runFlow(
-  flow: Flow, desktop: Desktop, options: { dryRun: boolean; signal: AbortSignal },
+  flow: Flow, desktop: Desktop, options: { dryRun: boolean; signal: AbortSignal; secretTexts?: ReadonlyMap<string, string> },
 ): Promise<Report> {
   const planned = plan(flow);
   const { dryRun, signal } = options;
@@ -163,7 +163,7 @@ export async function runFlow(
       const { node } = resolve(current, action.target);
       if (!node.ref || node.secure) throw new Fault('UNSAFE_TARGET', 'Control is secure or has no action reference');
       if (dryRun) return { status: 'resolved', message: `Resolved ${node.role}` };
-      const delivery = action.kind === 'click' ? await desktop.click(node.ref) : await desktop.type(node.ref, action.text);
+      const delivery = action.kind === 'click' ? await desktop.click(node.ref) : await desktop.type(node.ref, options.secretTexts?.get(id) ?? action.text);
       return { status: 'passed', delivery };
     });
     if (status === 'failed') {

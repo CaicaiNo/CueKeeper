@@ -22,6 +22,36 @@ unzip -t out/textedit-dry.zip
 
 解压 ZIP 后打开 `index.html` 可查看运行摘要、动作时间线和每一步的详情。查看器完全离线，失败步骤会自动展开，断流态可预览，选中的步骤会在下次打开时恢复。截图、日志和 AX 快照可按步骤放进 `assets/` 一并打包，格式见 [离线报告包](docs/report.md)。归档中的 `flow.json` 包含录制的文本。M1 将报告保存在本地。输出目录需事先存在，每次写入使用新文件名。
 
+## 本地工作台
+
+在终端运行以下命令，然后手动打开打印的本机地址。用 `Ctrl+C` 关闭工作台。
+
+```sh
+pnpm build
+node dist/cli.js workbench /path/to/run-directory
+```
+
+也可以省略目录，进入工作台后用「导入运行目录」选择。目录必须有 `flow.json` 或 `recorded.flow.json`。可同时放入以下文件。
+
+| 文件 | 工作台用途 |
+| --- | --- |
+| `report.json` | 校验与 flow 配对，显示回放或离线运行时间 |
+| `actions.json` | 提供录制时间、应用、窗口和缩略图索引 |
+| `snapshot.json` | 提供同一目标窗口的 agent-desktop 2.6 快照，支持重新拾取和离线运行 |
+
+`actions.json` 使用 `{"version":1,"flowId":"…","durationMs":1800,"actions":[{"id":"step-1","atMs":240,"durationMs":35,"thumbnail":"images/step-1.png"}]}`。动作 ID 使用流程的展开 ID。可选的 `app` 和 `window` 默认取自 flow。旧录制缺少时间或图片时，工作台会显示现有的数据。v1 测试项仍绑定一个目标窗口，其他应用或窗口的动作可筛选和复盘。
+
+在时间线勾选动作并「合并为行为」。可将输入提取为 `string` 或 `secret` 参数。行为库保存在 `~/.cuekeeper/behaviors`，可用 `--library <directory>` 切换。引用在草稿中保留行为标识，复制会为草稿生成独立定义。也可直接加入动作、添加断言或修改定位器，然后在草稿中调整顺序。
+
+保存会在运行目录生成可由 CLI 读取的文件。普通测试项输出 `test-*.flow.json`。含 secret 的项输出版本化的 `test-*.test.json`，CLI `flow validate` 和 `run` 都接受。为 secret 参数填写 `CUEKEEPER_SECRET_*` 环境变量名，在实时回放前通过当前终端环境提供值。文件中只保存绑定和变量名。带 `--snapshot` 的离线解析无须注入文本。
+
+```sh
+node dist/cli.js flow validate /path/to/test.flow.json --json
+node dist/cli.js run /path/to/test.flow.json --dry-run --snapshot /path/to/snapshot.json --json
+```
+
+工作台在本机监听。离线模式只读快照。实时回放需要 macOS、`--allow-live-replay` 启动选项和界面中的目标窗口确认。含坐标点击的测试项由 CLI 使用 `--headed` 回放。
+
 ## 在 macOS 录制和回放
 
 现场步骤和权限清单见 [TextEdit 验收](docs/textedit.md)。录制器单独构建。普通 `pnpm build` 只编译 TypeScript 并核对发布的 JSON Schema。实时 `--dry-run` 读取桌面可访问性树。带 `--snapshot` 的离线运行只读样本文件。
