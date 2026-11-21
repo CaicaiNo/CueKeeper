@@ -147,6 +147,32 @@ test('record CLI stops without a flow when the primary indicator is missing',
     assert.equal(stderr, '');
   });
 
+test('record CLI traces mouse events before readiness and maps accepted clicks to the flow',
+  { skip: process.platform !== 'darwin' }, t => {
+    const { code, response, recorded, stderr } = recordFixture(t, [
+      { kind: 'click_trace', stage: 'native', event: 'down', id: '100:1', decision: 'filtered', reason: 'before_ready' },
+      { kind: 'ready', indicator: false, hotkeysFiltered: true },
+      { kind: 'click_trace', stage: 'native', event: 'down', id: '200:2', decision: 'accepted', scope: 'activation' },
+      { ...captureClick, traceId: '200:2' },
+      { kind: 'click_trace', stage: 'native', event: 'up', id: '250:2', reason: 'mouse_up_only' },
+      { kind: 'click_trace', stage: 'native', event: 'down', id: '300:3', decision: 'filtered', reason: 'overlay' },
+      { kind: 'click_trace', stage: 'native', event: 'down', id: '400:4', decision: 'accepted', scope: 'content' },
+      { kind: 'click', point: [1, 1], traceId: '400:4' },
+      { kind: 'text', chars: 'Cuekeeper M1' }, captureSave,
+    ], { ready: false, flags: ['--no-indicator', '--trace-clicks'] });
+    const lines = stderr.trimEnd().split('\n');
+    assert.match(lines[0], /before_ready/);
+    assert.match(lines[1], /^Recording for up to/);
+    const trace = lines.filter(line => line.startsWith('CLICK_TRACE ')).map(line => JSON.parse(line.slice(12)));
+    assert.deepEqual(trace.filter(row => row.stage === 'flow'), [
+      { stage: 'flow', id: '200:2', decision: 'collected', windowId: fixture.data.window.id },
+      { stage: 'flow', id: '400:4', decision: 'filtered', reason: 'OUTSIDE_WINDOW' },
+    ]);
+    assert.equal(code, 1);
+    assert.deepEqual(response.data.warnings.map(warning => warning.code), ['OUTSIDE_WINDOW']);
+    assert.deepEqual(recorded.steps.map(step => step.kind), ['click', 'type', 'key']);
+  });
+
 test('record CLI rejects a helper that announces ready without indicator verification',
   { skip: process.platform !== 'darwin' }, t => {
     const { code, response, recorded, stderr } = recordFixture(t, [

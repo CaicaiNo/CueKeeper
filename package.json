@@ -13,6 +13,7 @@
     "schemas:write": "tsc && node scripts/schemas.mjs --write",
     "test": "node --test test/*.test.mjs",
     "test:hotkeys": "sh scripts/test-recording-hotkeys.sh",
+    "test:pointer": "sh scripts/test-recording-pointer.sh",
     "build:recorder": "sh scripts/build-recorder.sh"
   },
   "dependencies": {
