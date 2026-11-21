@@ -31,6 +31,7 @@ flowchart LR
 - Flow 必须声明应用标识和精确窗口标题。动作包括 `click`、`type`、`key`、`wait` 与 `assert`。元素定位器用 `role`、可选 `name`、从窗口根开始的角色 `path` 和显式零基 `index` 组成。匹配采用精确比较，`name: ""` 表示无名称。多个命中且未指定序号时，回放会返回歧义错误。`point` 只用于点击，需要 `--headed`。
 - `behavior` 是命名动作组。流程内可以把动作组放入 `behaviors`，用 `kind: "behavior"` 引用并提供 `args`。v1 支持在 `type.text` 中绑定字符串参数。独立 behavior 文件的 `version` 属于文件封装，嵌入流程时保留其余字段。编排者可在 JSON 中复制动作组或展开其动作。
 - `setup` 可放在 flow 或 action 上。只有 `confirmed` 会参与回放，其他三态 `inferred`、`invalid` 和 `deleted` 在报告中记为跳过。独立 setup 文件嵌入时同样移除文件的 `version`。撤销属于工作台编辑功能。
+- `src/setup.ts` 从流程目标与每个动作的应用/窗口推断建议：首次出现的应用生成 `app_running`，首次出现的窗口生成 `window_ready`，状态为 `inferred`，检查目标是窗口根元素的 `exists`。检查使用窗口根时，回放会按该元素名称绑定窗口，因此另一个应用的条件读取自己的窗口。已存在同应用/同窗口的条件（含失效与删除）不会重复推断。录制、导入工作台和保存测试项都复用这一模块：录制结果直接带推断条件，保存时只保留 `confirmed`。
 - 给 setup 加上 `"ensure": { "kind": "app_running", "app": "com.apple.TextEdit", "timeout_ms": 15000 }` 可在检查未通过时启动应用。应用已经运行时复用该实例。
 - `"ensure": { "kind": "window_ready", "app": "com.apple.TextEdit", "window": "Cuekeeper-M1.txt" }` 要求显式填写应用和精确窗口标题。setup 在该窗口上检查和复查，必要时先激活应用请求打开窗口，再按窗口 ID 聚焦。后续回放动作使用 `flow.target`。带 `--snapshot` 的离线 dry-run 加载主窗口的单窗口样本，遇到其他 setup 窗口时返回 `WINDOW_MISMATCH`。
 - `timeout_ms` 可省略，默认为 15000，整数范围为 1000–120000。修复和复查共用时限。每轮修复只发出一次启动和一次聚焦请求，随后读取新快照并再次检查。回放始终核对已绑定的窗口 ID。dry-run 只解析定位器。实时修复可能将应用切到前台或触发系统授权提示。
@@ -46,3 +47,5 @@ flowchart LR
 | M3 · Windows 兼容与报告上传 | Windows 原生采集桥、同一 v1 流程格式、报告查看及可选幂等上传。本机保留上传失败的 ZIP |
 
 `design/` 保存六份既有原型，供 M2 复用。执行协议以 [agent-desktop v1.3.1](https://github.com/vercel-labs/agent-desktop/tree/v1.3.1) 为准。
+
+M3 的 Windows 可行性、与 macOS 的差异、驱动接口改动清单和实机待确认项见 [Windows 适配](windows.md)。

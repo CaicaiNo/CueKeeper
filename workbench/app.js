@@ -1,10 +1,13 @@
-import { changeTarget, compileDraft, id, makeBehavior, sameTarget, visibleRows } from './model.js';
+import {
+  canUndo, changeTarget, compileDraft, confirmCondition, confirmedSetup, deleteCondition, id, makeBehavior,
+  retargetCondition, sameTarget, setupDraft, undoCondition, visibleRows,
+} from './model.js';
 
 const $ = name => document.getElementById(name);
 const dialog = $('dialog');
 const state = {
   session: null, library: [], allowLive: false, app: '', selected: new Set(), ignored: new Set(),
-  expanded: new Set(), showIgnored: false, focused: null, draft: [], tab: 'actions', saving: false,
+  expanded: new Set(), showIgnored: false, focused: null, draft: [], tab: 'actions', saving: false, setup: null,
 };
 
 function el(tag, attributes = {}, ...children) {
@@ -77,6 +80,7 @@ function setSession(session) {
   Object.assign(state, {
     session, app: '', focused: null, draft: [], tab: 'actions', showIgnored: false,
     selected: new Set(), ignored: new Set(), expanded: new Set(),
+    setup: session ? setupDraft(session.setup ?? []) : null,
   });
   $('show-ignored').checked = false;
   $('test-name').value = session ? `${session.name.slice(0, 248)} 测试` : '';
@@ -115,6 +119,77 @@ function renderSummary() {
       render();
     },
   }, el('span', { className: 'app-name' }, app || '全部应用'), el('span', { className: 'time trailing' }, count))));
+}
+
+const setupStates = {
+  inferred: '待确认', confirmed: '已确认', invalid: '已失效', deleted: '已删除',
+};
+
+function conditionDetail(condition) {
+  const ensure = condition.ensure;
+  if (ensure?.kind === 'window_ready') return `${ensure.app} · ${ensure.window}`;
+  if (ensure?.kind === 'app_running') return ensure.app;
+  return locatorLabel(condition.check.target);
+}
+
+function conditionDialog(condition) {
+  const ensure = condition.ensure;
+  const app = input({ required: true, maxLength: 256, value: ensure?.app ?? state.session.target.app });
+  const title = input({
+    required: true, maxLength: 256,
+    value: ensure?.kind === 'window_ready' ? ensure.window : condition.check.target.name ?? state.session.target.window,
+  });
+  openDialog('更换前置条件', [
+    field('应用标识', app), field('窗口标题', title),
+    muted('更换后条件回到待确认状态；确认后才会保存进测试项并参与回放。'),
+  ], '更换', () => {
+    const next = retargetCondition(state.setup, condition.id, { app: app.value, window: title.value });
+    render();
+    status(`已更换「${next.name}」，待重新确认`, 'success');
+  });
+}
+
+function renderSetup() {
+  const { session, setup } = state;
+  const panel = $('setup');
+  if (!session || !setup) {
+    panel.replaceChildren(muted('导入运行目录后显示推断的前置条件。'));
+    return;
+  }
+  const conditions = setup.conditions;
+  const confirmed = confirmedSetup(conditions).length;
+  const summary = muted(conditions.length
+    ? `${confirmed} / ${conditions.length} 个已确认条件会随测试项保存并参与回放`
+    : '没有前置条件。');
+  if (!conditions.length) {
+    panel.replaceChildren(summary);
+    return;
+  }
+  panel.replaceChildren(summary, ...conditions.map(condition => {
+    const deleted = condition.state === 'deleted';
+    return el('article', { className: `condition${deleted ? ' removed' : ''}`, id: `condition-${condition.id}` },
+      el('div', { className: 'condition-head' },
+        el('span', { className: `state-chip ${condition.state}` }, setupStates[condition.state] ?? condition.state),
+        el('strong', {}, condition.name)),
+      el('p', { className: 'muted' }, conditionDetail(condition)),
+      el('div', { className: 'actions' },
+        button('确认', () => {
+          confirmCondition(setup, condition.id);
+          render();
+          status(`已确认「${condition.name}」，保存时一并写入`, 'success');
+        }, { style: 'small', disabled: deleted || condition.state === 'confirmed' }),
+        button('更换', () => conditionDialog(condition), { style: 'small', disabled: deleted }),
+        button('删除', () => {
+          deleteCondition(setup, condition.id);
+          render();
+          status(`已删除「${condition.name}」，可用撤销恢复`, 'success');
+        }, { style: 'small danger', disabled: deleted }),
+        button('撤销', () => {
+          undoCondition(setup, condition.id);
+          render();
+          status('已撤销前置条件的上一次修改');
+        }, { style: 'small', disabled: !canUndo(setup, condition.id) })));
+  }));
 }
 
 function renderTimeline() {
@@ -249,6 +324,7 @@ function renderDraft() {
 function render() {
   const focus = document.activeElement?.id;
   renderSummary();
+  renderSetup();
   renderTimeline();
   renderInspector();
   renderDraft();
@@ -458,7 +534,8 @@ function assertionDialog(row) {
 function currentTest() {
   const name = $('test-name').value.trim();
   if (!name) throw new Error('填写测试项名称。');
-  return { session: state.session.id, test: compileDraft(state.session, name, state.draft) };
+  const session = { ...state.session, setup: state.setup?.conditions ?? state.session.setup };
+  return { session: state.session.id, test: compileDraft(session, name, state.draft) };
 }
 
 async function saveTest() {

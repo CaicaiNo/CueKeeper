@@ -154,9 +154,16 @@ export async function runFlow(
           return { status: 'skipped', message: `Setup state is ${condition.state}` };
         }
         const { ensure } = condition;
-        const window = ensure?.kind === 'window_ready' &&
-          (ensure.app !== flow.target.app || ensure.window !== flow.target.window)
-          ? bindWindow({ app: ensure.app, window: ensure.window }) : replayWindow;
+        // A window-root check names the window it validates; bind that window so
+        // an inferred app/window suggestion for a secondary app reads its own tree.
+        const locator = condition.check.target;
+        const bound = ensure?.kind === 'window_ready'
+          ? { app: ensure.app, window: ensure.window }
+          : locator.role === 'window' && locator.name
+            ? { app: ensure?.app ?? flow.target.app, window: locator.name }
+            : undefined;
+        const window = bound && (bound.app !== flow.target.app || bound.window !== flow.target.window)
+          ? bindWindow(bound) : replayWindow;
         if (dryRun) {
           const current = await (window === replayWindow ? snapshot() : window.read(undefined, true));
           locateCheck(current, condition.check);

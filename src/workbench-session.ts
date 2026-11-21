@@ -8,6 +8,7 @@ import { hashFlow, parseFlow, plan } from './flow.js';
 import { object, parseSnapshot } from './locator.js';
 import { pickCandidates } from './pick.js';
 import type { PickCandidate } from './pick.js';
+import { inferSetup } from './setup.js';
 
 export const sameTarget = (a: { app: string; window: string }, b: { app: string; window: string }) =>
   a.app === b.app && a.window === b.window;
@@ -143,10 +144,14 @@ export async function loadSession(path: string) {
   const durationMs = fromCapture
     ? captureDuration ?? (completeTimings ? Math.max(...timeline.map(row => row.atMs! + row.durationMs!)) : undefined)
     : report ? Math.max(...report.entries.map(entry => entry.atMs + entry.durationMs)) : undefined;
+  const existingSetup = flow.setup ?? [];
+  const setup = [...existingSetup, ...inferSetup(flow.target, timeline.map(row => ({
+    id: row.id, app: row.app, window: row.window,
+  })), existingSetup)];
   return {
     directory, flow, images, snapshot,
     view: {
-      id, directory, name: flow.name, target: flow.target, setup: flow.setup, timeline, candidates,
+      id, directory, name: flow.name, target: flow.target, setup, timeline, candidates,
       durationMs, timingSource: fromCapture ? 'capture' : report?.mode,
       startedAt: fromCapture ? undefined : report?.startedAt,
       hasSnapshot: snapshot !== undefined,

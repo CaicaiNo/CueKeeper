@@ -8,6 +8,7 @@ import type { Desktop } from './desktop.js';
 import { parseFlow } from './flow.js';
 import { Fault, contains, flatten, hitTest, object, resolve, toLocator } from './locator.js';
 import type { Point, Snapshot } from './locator.js';
+import { inferSetup } from './setup.js';
 
 type RawEvent =
   | { kind: 'click'; t: number; point: Point }
@@ -96,8 +97,11 @@ export class Recording {
   finish(): Flow {
     this.endTextBurst();
     if (!this.steps.length) throw new Fault('EMPTY_RECORDING', 'No supported actions were captured');
+    // Capture stays on one window, so every recorded action belongs to the target.
+    const setup = inferSetup(this.target);
     return parseFlow({
       version: 1, id: randomUUID(), name: this.target.window, target: this.target,
+      ...(setup.length ? { setup } : {}),
       steps: this.steps.slice(0, stepLimit),
     });
   }
