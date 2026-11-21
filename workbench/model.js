@@ -166,7 +166,7 @@ const privilegedTask = /^\/Library\/CueKeeper\/privileged\/[a-zA-Z0-9][a-zA-Z0-9
  */
 export function shellDraft(input = {}) {
   const mode = input.mode === 'script' ? 'script' : 'argv';
-  const privilege = input.privilege === 'sudo' ? 'sudo' : 'user';
+  const privilege = input.privilege === 'sudo' ? 'sudo' : input.privilege === 'root' ? 'root' : 'user';
   const cwd = typeof input.cwd === 'string' ? input.cwd.trim() : '';
   const timeoutMs = input.timeoutMs === undefined || input.timeoutMs === '' ? 30000 : Number(input.timeoutMs);
   const expectedExitCode = input.expectedExitCode === undefined || input.expectedExitCode === ''
@@ -186,6 +186,27 @@ export function shellDraft(input = {}) {
     if (cwd || mode === 'script') throw new Error('管理员任务不能使用工作目录或脚本模式。');
     return {
       kind: 'shell', argv: [path], privilege: 'sudo',
+      ...(expectedExitCode ? { expectedExitCode } : {}),
+    };
+  }
+  if (privilege === 'root') {
+    // Root steps run exact argv only: no shell string, no caller environment.
+    if (mode === 'script' || (typeof input.command === 'string' && input.command.trim())) {
+      throw new Error('Root 步骤只能逐项填写参数，不能使用 Shell 脚本。');
+    }
+    if ((input.env ?? []).some(row => String(row?.[0] ?? '').trim())) {
+      throw new Error('Root 步骤不接受环境变量，避免把调用方环境带进特权进程。');
+    }
+    const argv = (input.argv ?? []).map(part => String(part ?? ''));
+    if (!argv.length || !argv[0]) throw new Error('填写要执行的程序。');
+    if (argv.length > 65) throw new Error('参数最多 65 项。');
+    if (argv.some(part => part.length > 4096 || part.includes('\u0000'))) throw new Error('参数过长或包含无效字符。');
+    const privilegeMode = input.privilegeMode === 'sudoers' ? 'sudoers' : 'prompt';
+    return {
+      kind: 'shell', argv, privilege: 'root',
+      ...(privilegeMode === 'sudoers' ? { privilegeMode } : {}),
+      ...(cwd ? { cwd } : {}),
+      ...(timeoutMs === 30000 ? {} : { timeoutMs }),
       ...(expectedExitCode ? { expectedExitCode } : {}),
     };
   }
@@ -229,7 +250,11 @@ export function shellDraft(input = {}) {
 
 export function shellSummary(action) {
   if (action.kind !== 'shell') throw new Error('不是 Shell 步骤。');
-  const privilege = action.privilege === 'sudo' ? '需管理员预配置' : '用户态';
+  const privilege = action.privilege === 'sudo'
+    ? '需管理员预配置'
+    : action.privilege === 'root'
+      ? (action.privilegeMode === 'sudoers' ? 'Root · sudoers 免密' : 'Root · 密码授权')
+      : '用户态';
   const command = action.shell === true
     ? `/bin/sh -c ${action.command}`
     : action.argv.map(part => /\s/.test(part) ? JSON.stringify(part) : part).join(' ');

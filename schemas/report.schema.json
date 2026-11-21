@@ -997,6 +997,22 @@
                           {
                             "const": "sudo",
                             "type": "string"
+                          },
+                          {
+                            "const": "root",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "privilegeMode": {
+                        "anyOf": [
+                          {
+                            "const": "prompt",
+                            "type": "string"
+                          },
+                          {
+                            "const": "sudoers",
+                            "type": "string"
                           }
                         ]
                       },
@@ -1043,6 +1059,22 @@
                           },
                           {
                             "const": "sudo",
+                            "type": "string"
+                          },
+                          {
+                            "const": "root",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "privilegeMode": {
+                        "anyOf": [
+                          {
+                            "const": "prompt",
+                            "type": "string"
+                          },
+                          {
+                            "const": "sudoers",
                             "type": "string"
                           }
                         ]
@@ -1251,6 +1283,22 @@
                           {
                             "const": "sudo",
                             "type": "string"
+                          },
+                          {
+                            "const": "root",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "privilegeMode": {
+                        "anyOf": [
+                          {
+                            "const": "prompt",
+                            "type": "string"
+                          },
+                          {
+                            "const": "sudoers",
+                            "type": "string"
                           }
                         ]
                       },
@@ -1456,6 +1504,22 @@
                           },
                           {
                             "const": "sudo",
+                            "type": "string"
+                          },
+                          {
+                            "const": "root",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "privilegeMode": {
+                        "anyOf": [
+                          {
+                            "const": "prompt",
+                            "type": "string"
+                          },
+                          {
+                            "const": "sudoers",
                             "type": "string"
                           }
                         ]

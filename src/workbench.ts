@@ -14,7 +14,7 @@ import { object } from './locator.js';
 import { crop, decodePng, encodePng } from './png.js';
 import { runFlow } from './run.js';
 import type { ShellRunOptions } from './run.js';
-import { disabledPrivilegeRunner } from './shell-privilege.js';
+import { createRootPrivilegeRunner } from './shell-privilege.js';
 import {
   describeShellStep, hasShellSecrets, reachableShells, shellGate, shellPrivilege,
 } from './shell.js';
@@ -123,7 +123,7 @@ export async function startWorkbench(options: {
       ...item,
       shell: {
         steps: shells.length,
-        privileged: shells.filter(step => step.kind === 'shell' && step.privilege === 'sudo').length,
+        privileged: shells.filter(step => step.kind === 'shell' && shellPrivilege(step) !== 'user').length,
       },
     };
   }
@@ -219,7 +219,7 @@ export async function startWorkbench(options: {
       const captureOutput = data.captureOutput === true;
       const captureAllowed = secrets.size === 0 &&
         !shells.some(step => hasShellSecrets(step.action)) &&
-        !shells.some(step => shellPrivilege(step.action) === 'sudo');
+        !shells.some(step => shellPrivilege(step.action) !== 'user');
       const steps = planned.map(({ id, action }) => action.kind === 'shell'
         ? { kind: 'shell', ...describeShellStep(action, { baseDir: current.directory }) }
         : { id, kind: action.kind });
@@ -232,7 +232,7 @@ export async function startWorkbench(options: {
         sessionId: current.view.id, flowSha256, planHash: hash, expiresAt: now + confirmationTtlMs,
       });
       return send(response, 200, {
-        steps, shell: { reachable: shells.length, privileged: shells.filter(step => shellPrivilege(step.action) === 'sudo').length },
+        steps, shell: { reachable: shells.length, privileged: shells.filter(step => shellPrivilege(step.action) !== 'user').length },
         captureOutput, captureAllowed, allowShell, allowSudo,
         needsDesktop: (flow.setup?.length ?? 0) > 0 ||
           planned.some(step => step.action.kind !== 'shell' || (step.action.setup?.length ?? 0) > 0),
@@ -265,11 +265,12 @@ export async function startWorkbench(options: {
     const dryRun = data.mode === 'offline';
     const planned = plan(flow);
     const shells = reachableShells(planned);
-    const gate = dryRun ? undefined : shellGate(flow, planned, { allowShell, allowSudo });
+    const interactive = !dryRun && data.confirm === true;
+    const gate = dryRun ? undefined : shellGate(flow, planned, { allowShell, allowSudo, interactive });
     if (gate) {
-      throw new Error(gate.code === 'SHELL_NOT_ALLOWED'
+      throw new Error(gate.message ?? (gate.code === 'SHELL_NOT_ALLOWED'
         ? 'Shell steps require the workbench to start with --allow-shell'
-        : 'Privileged shell steps require --allow-sudo');
+        : 'Privileged shell steps require --allow-sudo'));
     }
     if (!dryRun && (!allowLive || data.confirm !== true)) {
       throw new Error('Live replay requires explicit opt-in and confirmation');
@@ -288,7 +289,7 @@ export async function startWorkbench(options: {
         throw new Error('Run confirmation no longer matches this test or session');
       }
       if (captureOutput && (secrets.size || shells.some(step => hasShellSecrets(step.action)) ||
-          shells.some(step => shellPrivilege(step.action) === 'sudo'))) {
+          shells.some(step => shellPrivilege(step.action) !== 'user'))) {
         throw new Error('Shell output stays metadata-only while secrets or privileged steps are present');
       }
       // Consume only a valid token, immediately before the plan starts.
@@ -307,9 +308,9 @@ export async function startWorkbench(options: {
         throw new Error('Save and run coordinate clicks explicitly with the CLI --headed option');
       }
       const shell: ShellRunOptions = {
-        allowShell, allowSudo, baseDir: current.directory,
+        allowShell, allowSudo, interactive, baseDir: current.directory,
         captureOutput: data.captureOutput === true,
-        privilege: disabledPrivilegeRunner,
+        privilege: createRootPrivilegeRunner(),
       };
       const secretTexts = dryRun ? undefined : resolveSecrets(secrets, process.env);
       const baselineDir = join(current.directory, 'baselines');

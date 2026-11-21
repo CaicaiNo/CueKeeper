@@ -128,6 +128,10 @@ const shellEnv = T.Record(shellEnvKey, T.Union([
 ]), { additionalProperties: false, maxProperties: 32 });
 const shellTimeout = T.Optional(T.Integer({ minimum: 1, maximum: 120_000, default: 30_000 }));
 const shellExpectedExit = T.Optional(T.Integer({ minimum: 0, maximum: 255, default: 0 }));
+// Interactive authorization for root steps. `prompt` shows the native password
+// dialog through sudo -A and SUDO_ASKPASS; `sudoers` relies on a pre-installed
+// NOPASSWD policy and never prompts.
+const shellPrivilegeMode = T.Optional(T.Union([T.Literal('prompt'), T.Literal('sudoers')]));
 const shellFields = {
   ...step, kind: T.Literal('shell'),
   shell: T.Optional(T.Literal(false)),
@@ -148,6 +152,15 @@ const shellSteps = [
     argv: T.Array(T.String({ pattern: '^/Library/CueKeeper/privileged/[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$' }),
       { minItems: 1, maxItems: 1 }),
     privilege: T.Literal('sudo'), expectedExitCode: shellExpectedExit,
+  }),
+  // Root steps run caller-supplied argv as root. They never accept a command
+  // string or caller environment: the whole point of the password gate is that
+  // the operator can read the exact program and arguments before approving.
+  object({
+    ...step, kind: T.Literal('shell'), shell: T.Optional(T.Literal(false)),
+    argv: shellArgv, cwd: T.Optional(shellCwd),
+    timeoutMs: shellTimeout, expectedExitCode: shellExpectedExit,
+    privilege: T.Literal('root'), privilegeMode: shellPrivilegeMode,
   }),
 ] as const;
 const shellStep = T.Union([...shellSteps]);
@@ -225,7 +238,8 @@ const shellExecution = T.Union([
 ]);
 const shellResultFields = {
   mode: T.Union([T.Literal('argv'), T.Literal('shell')]),
-  privilege: T.Union([T.Literal('user'), T.Literal('sudo')]),
+  privilege: T.Union([T.Literal('user'), T.Literal('sudo'), T.Literal('root')]),
+  privilegeMode: shellPrivilegeMode,
   cleanup: T.Optional(T.Union([T.Literal('complete'), T.Literal('unknown')])),
   stdout: T.Optional(shellOutput),
   stderr: T.Optional(shellOutput),
@@ -235,6 +249,7 @@ const shellResult = T.Union([
   object({
     mode: shellResultFields.mode,
     privilege: shellResultFields.privilege,
+    privilegeMode: shellPrivilegeMode,
     execution: T.Union([T.Literal('preview'), T.Literal('not-run')]),
   }),
   object({

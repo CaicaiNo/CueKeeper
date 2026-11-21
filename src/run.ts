@@ -16,7 +16,7 @@ import type { Located, Snapshot } from './locator.js';
 import {
   ShellFault, hasShellSecrets, planShellStep, previewShell, privateShellDirectory,
   removeShellDirectory, reachableShells, runShell, shellBudget, shellEntry, shellGate,
-  shellPrivilege, shellMode,
+  shellContext, shellPrivilege,
 } from './shell.js';
 import type { ShellBudget, ShellGate, ShellInput, ShellOutcome } from './shell.js';
 import type { PrivilegeRunner } from './shell-privilege.js';
@@ -81,11 +81,15 @@ async function saveAssertionEvidence(directory: string, stepId: string, observat
 export interface ShellRunOptions {
   allowShell: boolean;
   allowSudo: boolean;
+  /** Human-in-the-loop consent for password-dialog root steps. */
+  interactive?: boolean;
   /** Input flow or test file directory; shell steps resolve cwd from here. */
   baseDir: string;
   captureOutput?: boolean;
   hostEnv?: NodeJS.ProcessEnv;
   privilege?: PrivilegeRunner;
+  /** Receives the resolved command of every root step right before it runs. */
+  announceRoot?: (step: { id: string; program: string; args: string[]; cwd: string; mode: string }) => void;
 }
 
 /**
@@ -93,9 +97,9 @@ export interface ShellRunOptions {
  * created, so a missing permission never has side effects.
  */
 export function blockedShellReport(flow: Flow, planned: PlannedStep[], gate: ShellGate): Report {
-  const reason = gate.code === 'SHELL_NOT_ALLOWED'
+  const reason = gate.message ?? (gate.code === 'SHELL_NOT_ALLOWED'
     ? 'Shell steps require --allow-shell'
-    : 'Privileged shell steps require --allow-sudo';
+    : 'Privileged shell steps require --allow-sudo');
   return {
     version: 1,
     flowId: flow.id,
@@ -106,7 +110,7 @@ export function blockedShellReport(flow: Flow, planned: PlannedStep[], gate: She
     entries: planned.map(({ id, action }) => {
       const shell = action as ShellInput;
       const shellResult = action.kind === 'shell'
-        ? { shell: { mode: shellMode(shell), privilege: shellPrivilege(shell), execution: 'not-run' as const } }
+        ? { shell: { ...shellContext(shell), execution: 'not-run' as const } }
         : {};
       if (id !== gate.stepId) {
         return {
@@ -116,7 +120,7 @@ export function blockedShellReport(flow: Flow, planned: PlannedStep[], gate: She
       }
       return shellEntry(id, {
         status: 'blocked', code: gate.code, message: reason,
-        shell: { mode: shellMode(shell), privilege: shellPrivilege(shell), execution: 'not-run' },
+        shell: { ...shellContext(shell), execution: 'not-run' },
       }, 0, 0);
     }),
   };
@@ -139,6 +143,7 @@ export async function runFlow(
   const gate = dryRun || !shellSteps.length ? undefined : shellGate(flow, planned, {
     allowShell: options.shell?.allowShell ?? false,
     allowSudo: options.shell?.allowSudo ?? false,
+    interactive: options.shell?.interactive ?? false,
   });
   if (gate) return blockedShellReport(flow, planned, gate);
   function requireDesktop(): Desktop {
@@ -148,7 +153,7 @@ export async function runFlow(
   const shellBudgetState: ShellBudget = shellBudget();
   const canCapture = Boolean(options.shell?.captureOutput) && !(options.secretTexts?.size) &&
     !shellSteps.some(step => hasShellSecrets(step.action)) &&
-    !shellSteps.some(step => shellPrivilege(step.action) === 'sudo');
+    !shellSteps.some(step => shellPrivilege(step.action) !== 'user');
   let shellTemp: string | undefined;
   const report: Report = {
     version: 1,
@@ -300,16 +305,25 @@ export async function runFlow(
           tempDir: shellTemp,
           privilege: options.shell?.privilege,
         });
+        if (plan.privilege === 'root' && options.shell?.announceRoot) {
+          // Show the exact program, arguments and directory before the dialog.
+          options.shell.announceRoot({
+            id, program: plan.program, args: plan.args, cwd: plan.cwd,
+            mode: plan.privilegeMode ?? 'prompt',
+          });
+        }
         outcome = await runShell(plan, {
           signal, budget: shellBudgetState, canCapture, privilege: options.shell?.privilege,
+          directory: shellTemp,
         });
       } catch (error) {
         if (!(error instanceof ShellFault)) throw error;
+        const privilegeCode = error.code.startsWith('SHELL_PRIVILEGE_');
         outcome = {
-          status: error.code === 'SHELL_PRIVILEGE_REQUIRED' ? 'blocked' : 'failed',
+          status: privilegeCode ? 'blocked' : 'failed',
           code: error.code,
           message: error.message,
-          shell: { mode: shellMode(step), privilege: shellPrivilege(step), execution: 'not-run' },
+          shell: { ...shellContext(step), execution: 'not-run' },
         };
       }
     }
@@ -336,7 +350,7 @@ export async function runFlow(
           ? shellEntry(id, {
             status,
             message: 'Stopped by an earlier result',
-            shell: { mode: shellMode(action), privilege: shellPrivilege(action), execution: 'not-run' },
+            shell: { ...shellContext(action), execution: 'not-run' },
           }, elapsed(), 0)
           : {
             id, kind: action.kind, status, atMs: elapsed(), durationMs: 0,
@@ -348,7 +362,7 @@ export async function runFlow(
         if (action.kind === 'shell') {
           report.entries.push(shellEntry(id, {
             status: 'blocked', code: 'LOCAL_SETUP', message: 'Local precondition blocked this action',
-            shell: { mode: shellMode(action), privilege: shellPrivilege(action), execution: 'not-run' },
+            shell: { ...shellContext(action), execution: 'not-run' },
           }, elapsed(), 0));
         } else {
           await log(id, action.kind, async () =>

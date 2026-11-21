@@ -1,5 +1,6 @@
 import { spawn as nodeSpawn } from 'node:child_process';
-import { lstat, readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { chmod, lstat, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { ShellFault, shellPath } from './shell.js';
@@ -25,13 +26,54 @@ export interface PrivilegeExecution {
   cleanup?: 'complete' | 'unknown';
 }
 
+/** How a root step proves it may run: a password dialog or a sudoers policy. */
+export type RootMode = 'prompt' | 'sudoers';
+
+export interface RootPreflight {
+  program: string;
+  args: string[];
+  cwd: string;
+  mode: RootMode;
+}
+
+export interface RootRequest extends RootPreflight {
+  timeoutMs: number;
+  /** Private directory that holds the askpass helper and its outcome files. */
+  directory: string;
+}
+
 /**
- * Injected seam for the fixed admin tasks. The default runner never runs sudo
- * until HAOC-76 machine verification passes; offline tests supply a mock.
+ * The authentication verdict of a root step. `provided` means the dialog
+ * returned a password; the command result is reported separately.
+ */
+export type RootAuthentication =
+  'provided' | 'rejected' | 'cancelled' | 'timeout' | 'unavailable' | 'refused';
+
+export interface RootExecution {
+  started: boolean;
+  state: 'finished' | 'terminated' | 'failed';
+  exitCode?: number;
+  timedOut?: boolean;
+  cancelled?: boolean;
+  startFailed?: boolean;
+  cleanup?: 'complete' | 'unknown';
+  authentication?: RootAuthentication;
+  /** Human-readable explanation for `unavailable` and `refused`. */
+  reason?: string;
+}
+
+/**
+ * Injected seam for the fixed admin tasks and for root steps. The default
+ * runner never runs sudo until HAOC-76 machine verification passes; offline
+ * tests supply a mock.
  */
 export interface PrivilegeRunner {
   preflight(taskPath: string): Promise<{ taskId: string }>;
   run(request: PrivilegeRequest, signal: AbortSignal): Promise<PrivilegeExecution>;
+  /** Static checks before a root step resolves. */
+  preflightRoot?(request: RootPreflight): Promise<void>;
+  /** Runs caller argv as root through the password dialog or a sudoers policy. */
+  runRoot?(request: RootRequest, signal: AbortSignal): Promise<RootExecution>;
 }
 
 export interface PrivilegeRegistry {
@@ -340,3 +382,322 @@ export const disabledPrivilegeRunner: PrivilegeRunner = {
     return { started: false, state: 'failed' };
   },
 };
+
+function shQuote(value: string) {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * The native password dialog. `hidden answer` keeps the characters off screen,
+ * `giving up after` bounds an unattended dialog, and the -128 branch reports a
+ * Cancel click instead of relying on osascript's exit status.
+ */
+function askpassDialog(seconds: number) {
+  return `try
+set d to display dialog "CueKeeper 需要管理员密码，以便将一个 Shell 步骤作为 root 运行。" with title "CueKeeper 管理员授权" default answer "" with hidden answer buttons {"取消", "继续"} default button "继续" giving up after ${seconds}
+if gave up of d then
+return "timeout"
+end if
+return "ok:" & (text returned of d)
+on error number -128
+return "cancelled"
+end try`;
+}
+
+/**
+ * SUDO_ASKPASS helper. sudo reads the password from this program's stdout, so
+ * the password only ever travels through a pipe. The helper records the
+ * outcome (never the password) in its status file: sudo may re-ask after a
+ * rejected password, and the `retry` line lets the parent tell "wrong
+ * password" from "the command exited non-zero".
+ */
+function askpassSource(statusPath: string, promptCommand: string) {
+  return `#!/bin/sh
+umask 077
+status=${shQuote(statusPath)}
+if [ -e "$status" ]; then
+  printf 'retry\\n' >> "$status"
+  exit 1
+fi
+out=$(${promptCommand} 2>/dev/null)
+case "$out" in
+  ok:*)
+    printf 'provided\\n' > "$status"
+    printf '%s\\n' "\${out#ok:}"
+    exit 0
+    ;;
+  cancelled) printf 'cancelled\\n' > "$status"; exit 1 ;;
+  timeout) printf 'timeout\\n' > "$status"; exit 1 ;;
+  *) printf 'unavailable\\n' > "$status"; exit 1 ;;
+esac
+`;
+}
+
+function sudoEnvironment(askpass?: string) {
+  return {
+    PATH: shellPath,
+    LANG: 'C',
+    ...(askpass ? { SUDO_ASKPASS: askpass, SUDO_ASKPASS_REQUIRE: 'force' } : {}),
+  };
+}
+
+function readPromptStatus(path: string) {
+  return readFile(path, 'utf8')
+    .then(text => text.split('\n').map(line => line.trim()).filter(Boolean))
+    .catch(() => [] as string[]);
+}
+
+async function writeAskpass(path: string, statusPath: string, promptCommand: string) {
+  await writeFile(path, askpassSource(statusPath, promptCommand), { mode: 0o700 });
+  await chmod(path, 0o700);
+}
+
+async function assertExecutable(path: string, message: string) {
+  let info;
+  try {
+    info = await lstat(path);
+  } catch {
+    throw new ShellFault('SHELL_PRIVILEGE_UNAVAILABLE', message);
+  }
+  if (!info.isFile() || (info.mode & 0o111) === 0) throw new ShellFault('SHELL_PRIVILEGE_UNAVAILABLE', message);
+}
+
+interface SupervisedResult {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  timedOut: boolean;
+  cancelled: boolean;
+  startFailed: boolean;
+  cleanup?: 'complete' | 'unknown';
+}
+
+/**
+ * Runs one sudo front-end in its own session with bounded cleanup. Output is
+ * discarded: a privileged command's stdout never reaches the report, and the
+ * askpass channel must stay a single pipe into sudo.
+ */
+async function runSupervised(
+  launch: typeof nodeSpawn, program: string, args: string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; signal: AbortSignal },
+): Promise<SupervisedResult> {
+  if (options.signal.aborted) {
+    return { code: null, signal: null, timedOut: false, cancelled: true, startFailed: false, cleanup: 'complete' };
+  }
+  return await new Promise<SupervisedResult>(resolvePromise => {
+    let child;
+    try {
+      child = launch(program, args, {
+        cwd: options.cwd, env: options.env, detached: true,
+        stdio: ['ignore', 'ignore', 'ignore'],
+      });
+    } catch {
+      return resolvePromise({
+        code: null, signal: null, timedOut: false, cancelled: false, startFailed: true,
+      });
+    }
+    const pid = child.pid;
+    let timedOut = false;
+    let cancelled = false;
+    let spawnError = false;
+    let settled = false;
+    let forceTimer: NodeJS.Timeout | undefined;
+    let deadline: NodeJS.Timeout | undefined;
+    const terminate = (reason: 'timeout' | 'cancel') => {
+      if (settled) return;
+      if (reason === 'timeout') timedOut = true;
+      else cancelled = true;
+      if (pid) {
+        killGroup(pid, 'SIGTERM');
+        forceTimer = setTimeout(() => { if (pid) killGroup(pid, 'SIGKILL'); }, cleanupGraceMs);
+        forceTimer.unref?.();
+      }
+    };
+    const onAbort = () => terminate('cancel');
+    if (options.timeoutMs > 0) {
+      deadline = setTimeout(() => terminate('timeout'), options.timeoutMs);
+      deadline.unref?.();
+    }
+    options.signal.addEventListener('abort', onAbort, { once: true });
+    child.once('error', () => { spawnError = true; });
+    child.once('exit', () => {
+      if (!timedOut && !cancelled && pid && groupAlive(pid)) {
+        killGroup(pid, 'SIGTERM');
+        forceTimer = setTimeout(() => { if (pid) killGroup(pid, 'SIGKILL'); }, cleanupGraceMs);
+        forceTimer.unref?.();
+      }
+    });
+    child.once('close', (code, signal) => {
+      void (async () => {
+        if (settled) return;
+        settled = true;
+        if (deadline) clearTimeout(deadline);
+        if (forceTimer) clearTimeout(forceTimer);
+        options.signal.removeEventListener('abort', onAbort);
+        let cleaned: 'complete' | 'unknown' = 'complete';
+        if (pid && groupAlive(pid)) {
+          const until = performance.now() + cleanupGraceMs + 500;
+          while (groupAlive(pid) && performance.now() < until) await sleep(20);
+          if (groupAlive(pid)) {
+            killGroup(pid, 'SIGKILL');
+            await sleep(50);
+          }
+          cleaned = groupAlive(pid) ? 'unknown' : 'complete';
+        }
+        resolvePromise({
+          code, signal, timedOut, cancelled, startFailed: spawnError, cleanup: cleaned,
+        });
+      })();
+    });
+  });
+}
+
+function commandExecution(result: SupervisedResult): RootExecution {
+  if (result.startFailed) return { started: false, state: 'failed', startFailed: true };
+  if (result.cancelled) {
+    return { started: true, state: 'terminated', cancelled: true, cleanup: result.cleanup };
+  }
+  if (result.timedOut) {
+    return { started: true, state: 'terminated', timedOut: true, cleanup: result.cleanup };
+  }
+  if (result.code === null) return { started: true, state: 'failed', cleanup: result.cleanup };
+  return { started: true, state: 'finished', exitCode: result.code, cleanup: result.cleanup };
+}
+
+function authenticationFailure(
+  verdict: RootAuthentication, extra: Partial<RootExecution> = {},
+): RootExecution {
+  return { started: false, state: 'failed', authentication: verdict, ...extra };
+}
+
+export interface RootRunnerOptions {
+  spawn?: typeof nodeSpawn;
+  platform?: NodeJS.Platform;
+  sudoPath?: string;
+  osascriptPath?: string;
+  /** Program that answers the prompt. Tests inject a fake; defaults to osascript. */
+  prompt?: string;
+  /** How long the password dialog waits before it reports a timeout. */
+  promptTimeoutMs?: number;
+  /** Hard cap on the `sudo -A -k -v` authentication probe. */
+  probeTimeoutMs?: number;
+  /** Unattended sudoers execution stays off until HAOC-76 verifies it. */
+  allowSudoers?: boolean;
+}
+
+/**
+ * Root steps use either one interactive password dialog per step (sudo -A with
+ * our askpass helper) or a pre-installed sudoers policy (`sudo -n`). Fixed
+ * administrator tasks stay disabled on the same runner.
+ */
+export function createRootPrivilegeRunner(options: RootRunnerOptions = {}): PrivilegeRunner {
+  const launch = options.spawn ?? nodeSpawn;
+  const platform = options.platform ?? process.platform;
+  const sudoPath = options.sudoPath ?? '/usr/bin/sudo';
+  const osascriptPath = options.osascriptPath ?? '/usr/bin/osascript';
+  const promptTimeoutMs = options.promptTimeoutMs ?? 60_000;
+  const probeTimeoutMs = options.probeTimeoutMs ?? promptTimeoutMs + 15_000;
+  const allowSudoers = options.allowSudoers ?? false;
+  const promptCommand = options.prompt
+    ? shQuote(options.prompt)
+    : `${shQuote(osascriptPath)} -e ${shQuote(askpassDialog(Math.ceil(promptTimeoutMs / 1000)))}`;
+
+  return {
+    preflight: disabledPrivilegeRunner.preflight,
+    run: disabledPrivilegeRunner.run,
+    async preflightRoot(request) {
+      if (request.mode === 'sudoers') {
+        if (!allowSudoers) {
+          throw new ShellFault(
+            'SHELL_PRIVILEGE_REQUIRED',
+            'Non-interactive root steps stay disabled until machine verification (HAOC-76)',
+          );
+        }
+        await assertExecutable(sudoPath, 'The system sudo binary is missing');
+        const probe = await runSupervised(launch, sudoPath,
+          ['-n', '-l', '--', request.program, ...request.args],
+          { cwd: request.cwd, env: sudoEnvironment(), timeoutMs: 10_000, signal: new AbortController().signal });
+        if (probe.startFailed) throw new ShellFault('SHELL_PRIVILEGE_UNAVAILABLE', 'The system sudo binary could not be started');
+        if (probe.timedOut || probe.cancelled) {
+          throw new ShellFault('SHELL_PRIVILEGE_REQUIRED', 'The sudoers policy check did not finish');
+        }
+        if (probe.code !== 0) {
+          throw new ShellFault(
+            'SHELL_PRIVILEGE_REQUIRED',
+            'The sudoers policy does not authorize this command without a password',
+          );
+        }
+        return;
+      }
+      if (platform !== 'darwin') {
+        throw new ShellFault('SHELL_PRIVILEGE_UNAVAILABLE', 'The administrator password dialog is only available on macOS');
+      }
+      await assertExecutable(sudoPath, 'The system sudo binary is missing');
+      await assertExecutable(
+        options.prompt ?? osascriptPath, 'The administrator password dialog helper is missing',
+      );
+    },
+    async runRoot(request, signal) {
+      if (signal.aborted) {
+        return { started: false, state: 'terminated', cancelled: true, cleanup: 'complete' };
+      }
+      if (request.mode === 'sudoers') {
+        const result = await runSupervised(launch, sudoPath,
+          ['-n', '-k', '-u', 'root', '--', request.program, ...request.args],
+          { cwd: request.cwd, env: sudoEnvironment(), timeoutMs: request.timeoutMs, signal });
+        return commandExecution(result);
+      }
+      const nonce = randomUUID();
+      const authPath = join(request.directory, `askpass-${nonce}-auth.sh`);
+      const runPath = join(request.directory, `askpass-${nonce}-run.sh`);
+      const authStatus = join(request.directory, `askpass-${nonce}-auth.status`);
+      const runStatus = join(request.directory, `askpass-${nonce}-run.status`);
+      try {
+        await writeAskpass(authPath, authStatus, promptCommand);
+        await writeAskpass(runPath, runStatus, promptCommand);
+      } catch {
+        return { started: false, state: 'failed', startFailed: true };
+      }
+
+      // One dialog per root step: -k ignores any cached ticket, -v validates the
+      // credential without running a command, so sudoers command restrictions
+      // never turn the probe into a denial.
+      const auth = await runSupervised(launch, sudoPath, ['-A', '-k', '-v'],
+        { cwd: request.cwd, env: sudoEnvironment(authPath), timeoutMs: probeTimeoutMs, signal });
+      if (auth.cancelled) {
+        return { started: false, state: 'terminated', cancelled: true, cleanup: auth.cleanup };
+      }
+      if (auth.startFailed) return { started: false, state: 'failed', startFailed: true };
+      const authLines = await readPromptStatus(authStatus);
+      if (authLines.includes('cancelled')) return authenticationFailure('cancelled');
+      if (authLines.includes('timeout') || auth.timedOut) return authenticationFailure('timeout');
+      if (authLines.includes('unavailable')) return authenticationFailure('unavailable');
+      if (auth.code !== 0) {
+        return authenticationFailure(
+          authLines.includes('provided') || authLines.includes('retry') ? 'rejected' : 'refused',
+        );
+      }
+
+      const run = await runSupervised(launch, sudoPath,
+        ['-A', '-u', 'root', '--', request.program, ...request.args],
+        { cwd: request.cwd, env: sudoEnvironment(runPath), timeoutMs: request.timeoutMs, signal });
+      if (run.cancelled) {
+        return { started: true, state: 'terminated', cancelled: true, cleanup: run.cleanup };
+      }
+      if (run.timedOut) {
+        return { started: true, state: 'terminated', timedOut: true, cleanup: run.cleanup };
+      }
+      if (run.startFailed) return { started: false, state: 'failed', startFailed: true };
+      const runLines = await readPromptStatus(runStatus);
+      if (runLines.includes('cancelled')) return authenticationFailure('cancelled');
+      if (runLines.includes('timeout')) return authenticationFailure('timeout');
+      if (runLines.includes('unavailable')) return authenticationFailure('unavailable');
+      // A second prompt happened because the cached ticket no longer covered
+      // this command. `retry` means sudo asked again after rejecting the
+      // password; otherwise the command itself ran and its exit code stands.
+      if (runLines.includes('retry') && run.code !== 0) {
+        return authenticationFailure('rejected');
+      }
+      return commandExecution(run);
+    },
+  };
+}

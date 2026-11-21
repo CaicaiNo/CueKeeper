@@ -18,6 +18,7 @@ import { record } from './record.js';
 import { packReport } from './report.js';
 import { blockedShellReport, runFlow } from './run.js';
 import type { ShellRunOptions } from './run.js';
+import { createRootPrivilegeRunner } from './shell-privilege.js';
 import { flowHasShellDefinitions, reachableShells, shellGate } from './shell.js';
 import { parseTestItem, resolveSecrets } from './test-item.js';
 import { startWorkbench } from './workbench.js';
@@ -27,7 +28,7 @@ const help = `Cuekeeper ${buildInfo().version}
   cuekeeper --version
   cuekeeper doctor [--json]
   cuekeeper flow validate <flow.json|test.json> [--json]
-  cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--report <report.json>] [--allow-shell] [--allow-sudo] [--capture-shell-output] [--json]
+  cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--interactive] [--report <report.json>] [--allow-shell] [--allow-sudo] [--capture-shell-output] [--json]
   cuekeeper workbench [run-directory] [--port <port>] [--library <directory>] [--allow-live-replay] [--allow-shell] [--allow-sudo]
   cuekeeper pick --app <bundle-id> --window <title> [--select <ref>] [--snapshot <snapshot.json>] [--json]
   cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--seconds 25] [--no-indicator] [--sound] [--trace-clicks] [--json]
@@ -77,6 +78,13 @@ function describeCandidate(candidate: PickCandidate) {
     : 'no bounds';
   return `${candidate.ref} · ${candidate.role}${candidate.name ? ` "${candidate.name}"` : ''} · ` +
     `${candidate.path.join(' › ')} · ${bounds}${candidate.point ? ` · point ${candidate.point.join(',')}` : ''}`;
+}
+
+/** Human-readable form of a root command; never written to reports or logs. */
+function formatCommand(program: string, args: string[]) {
+  return [program, ...args]
+    .map(part => (!part || /[\s"'\\$`;&|*?<>()]/.test(part) ? JSON.stringify(part) : part))
+    .join(' ');
 }
 
 async function main() {
@@ -161,11 +169,18 @@ async function main() {
         ...common, 'dry-run': { type: 'boolean' }, headed: { type: 'boolean' },
         report: { type: 'string' }, snapshot: { type: 'string' }, data: { type: 'string' },
         'allow-shell': { type: 'boolean' }, 'allow-sudo': { type: 'boolean' },
-        'capture-shell-output': { type: 'boolean' },
+        'capture-shell-output': { type: 'boolean' }, interactive: { type: 'boolean' },
       },
     });
     checkPositionals(positionals, 1);
     const dryRun = values['dry-run'] ?? false;
+    const interactive = values.interactive ?? false;
+    // Machine mode has no human to answer a password dialog; refuse instead of
+    // silently downgrading an interactive root step. A dry run never prompts,
+    // so it stays allowed under --json.
+    if (interactive && machine && !dryRun) {
+      throw new Error('--interactive cannot be combined with --json');
+    }
     if (values.snapshot && !dryRun) throw new Error('--snapshot requires --dry-run');
     if (values.headed && dryRun) throw new Error('--headed is only for replay');
     if (values.report) await ensureNew(values.report);
@@ -175,8 +190,16 @@ async function main() {
     const shell: ShellRunOptions = {
       allowShell: values['allow-shell'] ?? false,
       allowSudo: values['allow-sudo'] ?? false,
+      interactive,
       baseDir: dirname(input),
       captureOutput: values['capture-shell-output'] ?? false,
+      privilege: createRootPrivilegeRunner(),
+      ...(interactive ? {
+        announceRoot: (step: { id: string; program: string; args: string[]; cwd: string; mode: string }) => {
+          console.error(`root ${step.id} · ${step.mode} · cwd ${step.cwd}`);
+          console.error(`  ${formatCommand(step.program, step.args)}`);
+        },
+      } : {}),
     };
     const gate = dryRun ? undefined : shellGate(flow, planned, shell);
     const baselineDir = resolve(dirname(input), 'baselines');

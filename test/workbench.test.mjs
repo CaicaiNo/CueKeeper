@@ -483,6 +483,17 @@ test('the shell editor builds closed steps and refuses reserved or mixed input',
   const sudo = shellDraft({ privilege: 'sudo', argv: ['/Library/CueKeeper/privileged/reset-fixture'] });
   assert.deepEqual(sudo, { kind: 'shell', argv: ['/Library/CueKeeper/privileged/reset-fixture'], privilege: 'sudo' });
   assert.equal(shellSummary(sudo).privilege, '需管理员预配置');
+  const root = shellDraft({ privilege: 'root', argv: ['/usr/bin/whoami'] });
+  assert.deepEqual(root, { kind: 'shell', argv: ['/usr/bin/whoami'], privilege: 'root' });
+  assert.equal(shellSummary(root).privilege, 'Root · 密码授权');
+  const sudoers = shellDraft({
+    privilege: 'root', privilegeMode: 'sudoers', argv: ['/usr/bin/whoami'], cwd: './fixtures', timeoutMs: '4000',
+  });
+  assert.deepEqual(sudoers, {
+    kind: 'shell', argv: ['/usr/bin/whoami'], privilege: 'root', privilegeMode: 'sudoers',
+    cwd: './fixtures', timeoutMs: 4000,
+  });
+  assert.equal(shellSummary(sudoers).privilege, 'Root · sudoers 免密');
 
   const invalid = [
     { argv: [] },
@@ -499,6 +510,9 @@ test('the shell editor builds closed steps and refuses reserved or mixed input',
     { privilege: 'sudo', argv: ['/Library/CueKeeper/privileged/task'], mode: 'script' },
     { privilege: 'sudo', argv: ['Library/CueKeeper/privileged/task'] },
     { privilege: 'sudo', argv: ['/Library/CueKeeper/privileged/first', '/second'] },
+    { privilege: 'root', argv: ['/bin/sh'], mode: 'script', command: 'true' },
+    { privilege: 'root', argv: ['/bin/echo'], env: [['FIXTURE', 'x', false]] },
+    { privilege: 'root', argv: ['/bin/echo'], timeoutMs: '0' },
     { argv: Array.from({ length: 66 }, (_, i) => `arg-${i}`) },
   ];
   for (const [index, input] of invalid.entries()) {

@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { Flow, ShellEntry, ShellOutput, ShellResult, ShellStep } from './contracts.js';
 import { Fault } from './locator.js';
-import type { PrivilegeRunner } from './shell-privilege.js';
+import type { PrivilegeRunner, RootMode } from './shell-privilege.js';
 
 /** Fixed search path for every user-mode step. No login shell, no shell rc files. */
 export const shellPath = '/usr/bin:/bin:/usr/sbin:/sbin';
@@ -29,7 +29,10 @@ export type ShellInput = ShellStep & {
   readonly cwd?: string;
   readonly env?: Record<string, string | { secretEnv: string }>;
   readonly timeoutMs?: number;
+  readonly privilegeMode?: 'prompt' | 'sudoers';
 };
+
+export type ShellPrivilege = 'user' | 'sudo' | 'root';
 
 export interface ShellBudget {
   remaining: number;
@@ -49,7 +52,8 @@ export interface ShellOutcome {
 export interface ShellPlan {
   id: string;
   mode: 'argv' | 'shell';
-  privilege: 'user' | 'sudo';
+  privilege: ShellPrivilege;
+  privilegeMode?: RootMode;
   program: string;
   args: string[];
   cwd: string;
@@ -63,7 +67,8 @@ export interface ShellPlan {
 export interface ShellDescription {
   id: string;
   mode: 'argv' | 'shell';
-  privilege: 'user' | 'sudo';
+  privilege: ShellPrivilege;
+  privilegeMode?: RootMode;
   program: string;
   args: string[];
   cwd: string;
@@ -75,14 +80,29 @@ export interface ShellDescription {
 export interface ShellGate {
   code: 'SHELL_NOT_ALLOWED' | 'SHELL_PRIVILEGE_REQUIRED';
   stepId: string;
+  message?: string;
 }
 
 export function shellMode(step: ShellInput): 'argv' | 'shell' {
   return step.shell === true ? 'shell' : 'argv';
 }
 
-export function shellPrivilege(step: ShellInput): 'user' | 'sudo' {
-  return step.privilege === 'sudo' ? 'sudo' : 'user';
+export function shellPrivilege(step: ShellInput): ShellPrivilege {
+  return step.privilege === 'sudo' ? 'sudo' : step.privilege === 'root' ? 'root' : 'user';
+}
+
+/** Root steps default to the interactive password dialog. */
+export function shellPrivilegeMode(step: ShellInput): RootMode {
+  return step.privilegeMode === 'sudoers' ? 'sudoers' : 'prompt';
+}
+
+/** The `shell` report fields that do not depend on how execution ended. */
+export function shellContext(step: ShellInput) {
+  const privilege = shellPrivilege(step);
+  return {
+    mode: shellMode(step), privilege,
+    ...(privilege === 'root' ? { privilegeMode: shellPrivilegeMode(step) } : {}),
+  };
 }
 
 /** Shell steps reachable from the expanded plan. */
@@ -106,7 +126,7 @@ export function summarizeShellUsage(flow: Flow, planned: { id: string; action: {
   return {
     reachable: reachable.length,
     definitions: defined.length,
-    privileged: [...reachable, ...defined].filter(step => shellPrivilege(step) === 'sudo').length,
+    privileged: [...reachable, ...defined].filter(step => shellPrivilege(step) !== 'user').length,
   };
 }
 
@@ -117,15 +137,27 @@ export function hasShellSecrets(step: ShellInput) {
 /** Gate checked before the desktop adapter is initialized. */
 export function shellGate(
   flow: Flow, planned: { id: string; action: { kind: string } }[],
-  options: { allowShell: boolean; allowSudo: boolean },
+  options: { allowShell: boolean; allowSudo: boolean; interactive?: boolean },
 ): ShellGate | undefined {
   const steps = reachableShells(planned);
   if (steps.length && !options.allowShell) {
     return { code: 'SHELL_NOT_ALLOWED', stepId: steps[0].id };
   }
   for (const step of steps) {
-    if (shellPrivilege(step.action) === 'sudo' && !options.allowSudo) {
-      return { code: 'SHELL_PRIVILEGE_REQUIRED', stepId: step.id };
+    const privilege = shellPrivilege(step.action);
+    if (privilege !== 'user' && !options.allowSudo) {
+      return {
+        code: 'SHELL_PRIVILEGE_REQUIRED', stepId: step.id,
+        message: 'Privileged shell steps require --allow-sudo',
+      };
+    }
+    if (privilege === 'root' && shellPrivilegeMode(step.action) === 'prompt' && !options.interactive) {
+      // Never fall back to the non-interactive form: a root step either shows
+      // the password dialog on purpose or it does not run at all.
+      return {
+        code: 'SHELL_PRIVILEGE_REQUIRED', stepId: step.id,
+        message: 'Interactive root steps require --interactive',
+      };
     }
   }
   return undefined;
@@ -157,6 +189,7 @@ export function describeShellStep(
   const args = privilege === 'sudo' ? [] : mode === 'shell' ? ['-c', step.command!] : step.argv!.slice(1);
   return {
     id: step.id, mode, privilege, program, args, cwd,
+    ...(privilege === 'root' ? { privilegeMode: shellPrivilegeMode(step) } : {}),
     envKeys: Object.keys(step.env ?? {}).sort(),
     timeoutMs: step.timeoutMs ?? 30_000,
     expectedExitCode: step.expectedExitCode ?? 0,
@@ -193,6 +226,36 @@ export async function planShellStep(
     return {
       id: step.id, mode: 'argv', privilege, program: path, args: [],
       cwd: '/', env: {}, timeoutMs: 30_000, expectedExitCode, secretValues, taskId,
+    };
+  }
+
+  if (privilege === 'root') {
+    const runner = context.privilege;
+    if (!runner?.preflightRoot) {
+      throw new ShellFault('SHELL_PRIVILEGE_REQUIRED', 'Root steps are disabled on this host');
+    }
+    if (mode !== 'argv') {
+      throw new ShellFault('SHELL_START_FAILED', 'Root steps must use an explicit argv');
+    }
+    let rootCwdInfo;
+    try {
+      rootCwdInfo = await stat(cwd);
+    } catch {
+      throw new ShellFault('SHELL_START_FAILED', 'The shell working directory does not exist');
+    }
+    if (!rootCwdInfo.isDirectory()) {
+      throw new ShellFault('SHELL_START_FAILED', 'The shell working directory is not a directory');
+    }
+    const program = step.argv![0];
+    const args = step.argv!.slice(1);
+    if (textBytes([program, ...args]) > shellInputLimit) {
+      throw new ShellFault('SHELL_START_FAILED', 'Shell arguments exceed 64 KiB');
+    }
+    const privilegeMode = shellPrivilegeMode(step);
+    await runner.preflightRoot({ program, args, cwd, mode: privilegeMode });
+    return {
+      id: step.id, mode: 'argv', privilege, privilegeMode, program, args, cwd,
+      env: {}, timeoutMs, expectedExitCode, secretValues,
     };
   }
 
@@ -245,10 +308,7 @@ export async function removeShellDirectory(directory: string) {
 }
 
 export function previewShell(step: ShellInput): ShellOutcome {
-  return {
-    status: 'resolved',
-    shell: { mode: shellMode(step), privilege: shellPrivilege(step), execution: 'preview' },
-  };
+  return { status: 'resolved', shell: { ...shellContext(step), execution: 'preview' } };
 }
 
 class StreamCapture {
@@ -348,6 +408,8 @@ export interface ShellRunContext {
   budget: ShellBudget;
   canCapture: boolean;
   privilege?: PrivilegeRunner;
+  /** Private directory for privilege helpers; required by root steps. */
+  directory?: string;
 }
 
 /**
@@ -357,6 +419,7 @@ export interface ShellRunContext {
  */
 export async function runShell(plan: ShellPlan, context: ShellRunContext): Promise<ShellOutcome> {
   if (plan.privilege === 'sudo') return runPrivileged(plan, context);
+  if (plan.privilege === 'root') return runRootStep(plan, context);
   if (context.signal.aborted) {
     return {
       status: 'failed', code: 'SHELL_CANCELLED',
@@ -550,6 +613,121 @@ async function runPrivileged(plan: ShellPlan, context: ShellRunContext): Promise
   return {
     status: 'failed', code: 'SHELL_EXIT',
     message: `The privileged task exited with ${result.exitCode} instead of ${plan.expectedExitCode}`,
+    shell,
+  };
+}
+
+/**
+ * Root steps report metadata only: the command's own output is never captured,
+ * and authentication outcomes block the step instead of degrading to a
+ * non-interactive attempt.
+ */
+async function runRootStep(plan: ShellPlan, context: ShellRunContext): Promise<ShellOutcome> {
+  const base = {
+    mode: 'argv' as const, privilege: 'root' as const,
+    privilegeMode: plan.privilegeMode ?? 'prompt' as const,
+  };
+  if (context.signal.aborted) {
+    return {
+      status: 'failed', code: 'SHELL_CANCELLED',
+      message: 'The root step was cancelled before it started',
+      shell: { ...base, execution: 'terminated', cleanup: 'complete' },
+    };
+  }
+  const runner = context.privilege;
+  if (!runner?.runRoot || !context.directory) {
+    return {
+      status: 'blocked', code: 'SHELL_PRIVILEGE_REQUIRED',
+      message: 'Root steps are disabled on this host',
+      shell: { ...base, execution: 'not-run' },
+    };
+  }
+  let result;
+  try {
+    result = await runner.runRoot({
+      program: plan.program, args: plan.args, cwd: plan.cwd,
+      mode: plan.privilegeMode ?? 'prompt', timeoutMs: plan.timeoutMs,
+      directory: context.directory,
+    }, context.signal);
+  } catch (error) {
+    if (error instanceof ShellFault) {
+      return {
+        status: 'blocked', code: error.code, message: error.message,
+        shell: { ...base, execution: 'not-run' },
+      };
+    }
+    return {
+      status: 'failed', code: 'SHELL_START_FAILED', message: 'The root step could not be started',
+      shell: { ...base, execution: 'unknown', cleanup: 'unknown' },
+    };
+  }
+  if (result.startFailed) {
+    return {
+      status: 'failed', code: 'SHELL_START_FAILED', message: 'The root step could not be started',
+      shell: { ...base, execution: 'not-run' },
+    };
+  }
+  if (result.cancelled) {
+    return {
+      status: 'failed', code: 'SHELL_CANCELLED', message: 'The root step was cancelled',
+      shell: { ...base, execution: 'terminated', cleanup: result.cleanup ?? 'unknown' },
+    };
+  }
+  if (result.timedOut) {
+    return {
+      status: 'failed', code: 'SHELL_TIMEOUT',
+      message: `The root step exceeded ${plan.timeoutMs} ms`,
+      shell: { ...base, execution: 'terminated', cleanup: result.cleanup ?? 'unknown' },
+    };
+  }
+  switch (result.authentication) {
+    case 'cancelled':
+      return {
+        status: 'blocked', code: 'SHELL_PRIVILEGE_CANCELLED',
+        message: 'The administrator cancelled the password dialog',
+        shell: { ...base, execution: 'not-run' },
+      };
+    case 'timeout':
+      return {
+        status: 'blocked', code: 'SHELL_PRIVILEGE_CANCELLED',
+        message: 'The administrator password dialog timed out',
+        shell: { ...base, execution: 'not-run' },
+      };
+    case 'unavailable':
+      return {
+        status: 'blocked', code: 'SHELL_PRIVILEGE_UNAVAILABLE',
+        message: 'The password dialog could not be shown (no graphical session or permission denied)',
+        shell: { ...base, execution: 'not-run' },
+      };
+    case 'refused':
+      return {
+        status: 'blocked', code: 'SHELL_PRIVILEGE_REQUIRED',
+        message: 'This account may not run sudo',
+        shell: { ...base, execution: 'not-run' },
+      };
+    case 'rejected':
+      return {
+        status: 'blocked', code: 'SHELL_PRIVILEGE_REQUIRED',
+        message: 'The administrator password was rejected',
+        shell: { ...base, execution: 'not-run' },
+      };
+    default:
+      break;
+  }
+  if (result.state !== 'finished' || result.exitCode === undefined) {
+    return {
+      status: 'failed', code: 'SHELL_START_FAILED', message: 'The root step did not report a result',
+      shell: { ...base, execution: 'unknown', cleanup: result.cleanup ?? 'unknown' },
+    };
+  }
+  const shell: ShellResult = {
+    ...base, execution: 'finished', exitCode: result.exitCode,
+    ...(result.cleanup ? { cleanup: result.cleanup } : {}),
+  };
+  if (result.exitCode === plan.expectedExitCode) return { status: 'passed', shell };
+  return {
+    status: 'failed', code: 'SHELL_EXIT',
+    message: `The root step exited with ${result.exitCode} instead of ${plan.expectedExitCode}`,
     shell,
   };
 }

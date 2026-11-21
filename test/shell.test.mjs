@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -9,7 +9,7 @@ import { flowCheck, reportCheck } from '../dist/contracts.js';
 import { packReport } from '../dist/report.js';
 import { blockedShellReport, runFlow } from '../dist/run.js';
 import {
-  createFileRegistry, createSudoPrivilegeRunner, disabledPrivilegeRunner,
+  createFileRegistry, createRootPrivilegeRunner, createSudoPrivilegeRunner, disabledPrivilegeRunner,
   interpretPrivilegeOutput, sudoInvocation,
 } from '../dist/shell-privilege.js';
 import { ShellFault } from '../dist/shell.js';
@@ -813,4 +813,333 @@ test('SIGINT cancels a running shell step, writes the report, and exits 130', as
   assert.equal(report.entries[1].status, 'skipped');
   assert.equal(report.status, 'failed');
   assert.equal(existsSync(after), false);
+});
+
+// --- Interactive root steps -------------------------------------------------
+
+/**
+ * A stand-in for the sudo front-end. It implements only the shapes CueKeeper
+ * uses: `-A -k -v` (authenticate), `-A -u root -- cmd` (prompted command),
+ * `-n -l -- cmd` (sudoers policy check) and `-n -k -u root -- cmd`. The
+ * password lives in the test fixture config so the `ask` log can record only
+ * whether it was accepted, never the value.
+ */
+function fakeSudo(configPath) {
+  return `
+import { appendFileSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+const config = JSON.parse(readFileSync(${JSON.stringify(configPath)}, 'utf8'));
+const args = process.argv.slice(2);
+appendFileSync(config.log, JSON.stringify({
+  args, cwd: process.cwd(), env: Object.keys(process.env).sort(),
+  askpass: process.env.SUDO_ASKPASS ?? null,
+}) + '\\n');
+function ask() {
+  const child = spawnSync(process.env.SUDO_ASKPASS ?? '/usr/bin/false', [], { encoding: 'utf8' });
+  const answer = (child.stdout ?? '').replace(/\\n$/, '');
+  appendFileSync(config.log, JSON.stringify({
+    ask: true, exit: child.status, accepted: answer === config.password,
+  }) + '\\n');
+  return { exit: child.status, answer };
+}
+if (args.includes('-l')) process.exit(config.sudoersAllows ? 0 : 1);
+if (args.includes('-v')) {
+  if (ask().answer === config.password) process.exit(0);
+  ask();
+  process.exit(1);
+}
+const dashdash = args.indexOf('--');
+const command = args.slice(dashdash + 1);
+if (args.includes('-n')) {
+  if (!config.sudoersAllows) process.exit(1);
+} else if (config.askOnCommand) {
+  if (ask().answer !== config.password) { ask(); process.exit(1); }
+}
+const result = spawnSync(command[0], command.slice(1), { stdio: 'inherit' });
+process.exit(result.status ?? (result.signal ? 128 : 1));
+`;
+}
+
+async function rootFixture(t, options = {}) {
+  const root = await scratch(t);
+  const directory = join(root, 'private');
+  await mkdir(directory, { mode: 0o700 });
+  const configPath = join(root, 'config.json');
+  await writeFile(configPath, JSON.stringify({
+    log: join(root, 'sudo.log'),
+    password: options.password ?? 'test-password-42',
+    sudoersAllows: options.sudoersAllows ?? true,
+    askOnCommand: options.askOnCommand ?? false,
+  }));
+  const sudo = join(root, 'fake-sudo.mjs');
+  await writeFile(sudo, `#!${process.execPath}\n${fakeSudo(configPath)}`, { mode: 0o700 });
+  await chmod(sudo, 0o700);
+  const prompt = join(root, 'prompt.sh');
+  const answer = options.answer ?? 'ok:test-password-42';
+  await writeFile(prompt, answer === '' ? '#!/bin/sh\nexit 1\n' : `#!/bin/sh\nprintf '%s\\n' '${answer}'\n`,
+    { mode: 0o700 });
+  await chmod(prompt, 0o700);
+  const runner = createRootPrivilegeRunner({
+    sudoPath: sudo, prompt, platform: options.platform ?? 'darwin',
+    allowSudoers: options.allowSudoers ?? true, promptTimeoutMs: 5000,
+  });
+  const log = join(root, 'sudo.log');
+  const calls = async () => {
+    try {
+      return (await readFile(log, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+    } catch {
+      return [];
+    }
+  };
+  return { root, directory, runner, calls, sudo, prompt };
+}
+
+const rootRequest = (root, directory, extra = {}) => ({
+  program: process.execPath, args: ['-e', 'process.exit(0)'], cwd: root,
+  mode: 'prompt', timeoutMs: 5000, directory, ...extra,
+});
+
+test('the askpass dialog authenticates once, runs exact argv, and never stores the password', async t => {
+  const { root, directory, runner, calls } = await rootFixture(t);
+  const marker = join(root, 'root-ran.json');
+  const script = await nodeScript(root, 'root.mjs',
+    `import { writeFileSync } from 'node:fs';
+writeFileSync(process.env.ROOT_MARKER ?? ${JSON.stringify(marker)}, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd() }));`);
+  const result = await runner.runRoot(rootRequest(root, directory, {
+    program: process.execPath, args: [script, 'a b', '--flag'], timeoutMs: 10_000,
+  }), signal);
+  assert.equal(result.state, 'finished', JSON.stringify(result));
+  assert.equal(result.exitCode, 0);
+  const written = JSON.parse(await readFile(marker, 'utf8'));
+  assert.deepEqual(written.argv, ['a b', '--flag']);
+  assert.equal(written.cwd, await realpath(root));
+
+  const all = await calls();
+  const entries = all.filter(entry => !entry.ask);
+  assert.deepEqual(entries[0].args, ['-A', '-k', '-v']);
+  assert.deepEqual(entries[1].args, ['-A', '-u', 'root', '--', process.execPath, script, 'a b', '--flag']);
+  assert.equal(entries[1].cwd, await realpath(root));
+  assert.equal(entries[1].askpass.endsWith('-run.sh'), true);
+  assert.deepEqual(all.filter(entry => entry.ask).map(entry => entry.accepted), [true]);
+
+  // The password never reaches argv, the environment, the status files or the
+  // report: the askpass pipe is its only path.
+  const password = 'test-password-42';
+  assert.doesNotMatch(JSON.stringify(entries), new RegExp(password));
+  assert.doesNotMatch(JSON.stringify(result), new RegExp(password));
+  for (const name of await readdir(directory)) {
+    const content = await readFile(join(directory, name), 'utf8');
+    assert.doesNotMatch(content, new RegExp(password), `${name} leaked the password`);
+  }
+  // The cached ticket covers the command, so only the auth prompt ran.
+  const statuses = (await readdir(directory)).filter(name => name.endsWith('.status'));
+  assert.deepEqual(statuses.map(name => name.endsWith('-auth.status')), [true]);
+  assert.equal((await readFile(join(directory, statuses[0]), 'utf8')).trim(), 'provided');
+  // The generated askpass helpers are valid POSIX sh and contain no password.
+  const helpers = (await readdir(directory)).filter(name => name.endsWith('.sh'));
+  assert.equal(helpers.length, 2);
+  for (const name of helpers) {
+    const check = spawnSync('/bin/sh', ['-n', join(directory, name)], { encoding: 'utf8' });
+    assert.equal(check.status, 0, `${name}: ${check.stderr}`);
+    const source = await readFile(join(directory, name), 'utf8');
+    assert.match(source, /printf '%s\\n' "\$\{out#ok:\}"/);
+    assert.doesNotMatch(source, /test-password-42/);
+  }
+});
+
+test('a cancelled or timed-out dialog blocks the root step before any command runs', async t => {
+  for (const [answer, outcome] of [['cancelled', 'cancelled'], ['timeout', 'timeout']]) {
+    const { root, directory, runner, calls } = await rootFixture(t, { answer });
+    const marker = join(root, `marker-${outcome}`);
+    const result = await runner.runRoot(rootRequest(root, directory, {
+      program: '/usr/bin/touch', args: [marker],
+    }), signal);
+    assert.equal(result.state, 'failed', JSON.stringify(result));
+    assert.equal(result.authentication, outcome);
+    assert.equal(existsSync(marker), false);
+    assert.deepEqual((await calls()).filter(entry => !entry.ask).map(entry => entry.args), [['-A', '-k', '-v']]);
+  }
+});
+
+test('a rejected password is reported as SHELL_PRIVILEGE_REQUIRED and never retried into a command', async t => {
+  const { root, directory, runner, calls } = await rootFixture(t, { answer: 'ok:wrong-password' });
+  const marker = join(root, 'never');
+  const result = await runner.runRoot(rootRequest(root, directory, {
+    program: '/usr/bin/touch', args: [marker],
+  }), signal);
+  assert.equal(result.authentication, 'rejected');
+  assert.equal(existsSync(marker), false);
+  const entries = await calls();
+  assert.deepEqual(entries.filter(entry => entry.ask).map(entry => entry.accepted), [false, false]);
+  assert.equal((await readFile(join(directory, (await readdir(directory)).find(n => n.endsWith('-auth.status'))), 'utf8'))
+    .trim().split('\n').join(','), 'provided,retry');
+});
+
+test('a missing graphical session and a non-macOS host fail with a clear privilege error', async t => {
+  const { root, directory, runner } = await rootFixture(t, { answer: '' });
+  const missing = await runner.runRoot(rootRequest(root, directory), signal);
+  assert.equal(missing.authentication, 'unavailable');
+
+  const linux = createRootPrivilegeRunner({ platform: 'linux', sudoPath: '/usr/bin/sudo', prompt: '/bin/echo' });
+  await assert.rejects(linux.preflightRoot({ program: '/usr/bin/true', args: [], cwd: root, mode: 'prompt' }),
+    error => error.code === 'SHELL_PRIVILEGE_UNAVAILABLE' && /only available on macOS/.test(error.message));
+});
+
+test('a second password prompt keeps the command exit code instead of reporting a rejection', async t => {
+  const { root, directory, runner, calls } = await rootFixture(t, { askOnCommand: true });
+  const result = await runner.runRoot(rootRequest(root, directory, {
+    program: process.execPath, args: ['-e', 'process.exit(5)'], timeoutMs: 10_000,
+  }), signal);
+  assert.equal(result.state, 'finished', JSON.stringify(result));
+  assert.equal(result.exitCode, 5);
+  assert.equal(result.authentication, undefined);
+  assert.deepEqual((await calls()).filter(entry => entry.ask).map(entry => entry.accepted), [true, true]);
+});
+
+test('sudoers mode runs without a dialog and refuses an unauthorized command', async t => {
+  const { root, directory, runner, calls } = await rootFixture(t);
+  const ok = await runner.runRoot(rootRequest(root, directory, {
+    program: process.execPath, args: ['-e', 'process.exit(3)'], mode: 'sudoers',
+  }), signal);
+  assert.equal(ok.state, 'finished');
+  assert.equal(ok.exitCode, 3);
+  assert.deepEqual((await calls()).map(entry => entry.args),
+    [['-n', '-k', '-u', 'root', '--', process.execPath, '-e', 'process.exit(3)']]);
+
+  const denied = await rootFixture(t, { sudoersAllows: false });
+  await assert.rejects(denied.runner.preflightRoot({
+    program: '/usr/bin/true', args: [], cwd: denied.root, mode: 'sudoers',
+  }), error => error.code === 'SHELL_PRIVILEGE_REQUIRED' && /sudoers policy/.test(error.message));
+
+  // Production keeps unattended sudoers execution off until machine verification.
+  const production = createRootPrivilegeRunner({ platform: 'darwin', sudoPath: denied.sudo });
+  await assert.rejects(production.preflightRoot({
+    program: '/usr/bin/true', args: [], cwd: denied.root, mode: 'sudoers',
+  }), error => error.code === 'SHELL_PRIVILEGE_REQUIRED' && /HAOC-76/.test(error.message));
+});
+
+test('a root command timeout reclaims the process group and skips the rest of the flow', async t => {
+  const { root, directory, runner } = await rootFixture(t);
+  const after = join(root, 'after.txt');
+  const flow = flowOf([
+    { id: 'slow-root', kind: 'shell', argv: ['/bin/sh', '-c', 'sleep 30'], privilege: 'root', timeoutMs: 300 },
+    { id: 'later', kind: 'shell', argv: ['/usr/bin/touch', after] },
+  ]);
+  const report = await runFlow(flow, undefined, {
+    dryRun: false, signal,
+    shell: {
+      allowShell: true, allowSudo: true, interactive: true, baseDir: root,
+      captureOutput: false, privilege: runner,
+    },
+  });
+  assert.equal(report.status, 'failed', JSON.stringify(report.entries));
+  assert.equal(report.entries[0].code, 'SHELL_TIMEOUT');
+  assert.equal(report.entries[0].shell.execution, 'terminated');
+  assert.equal(report.entries[0].shell.cleanup, 'complete');
+  assert.equal(report.entries[1].status, 'skipped');
+  assert.equal(existsSync(after), false);
+  assert.equal(directory.length > 0, true);
+});
+
+test('root steps appear as argv-only contract, report fields, and gate on --interactive', async t => {
+  const rootStep = { id: 'root', kind: 'shell', argv: ['/usr/bin/whoami'], privilege: 'root' };
+  const flow = flowOf([rootStep]);
+  assert.equal(flowCheck.Check({
+    version: 1, id: 'root-flow', name: 'Root', target, steps: [rootStep],
+  }), true);
+  assert.equal(flowCheck.Check({
+    version: 1, id: 'root-flow', name: 'Root', target,
+    steps: [{ ...rootStep, privilegeMode: 'sudoers' }],
+  }), true);
+  const invalid = [
+    { ...rootStep, shell: true, command: 'true' },
+    { ...rootStep, env: { FIXTURE: 'x' } },
+    { ...rootStep, command: 'true' },
+    { ...rootStep, privilegeMode: 'askpass' },
+    { ...rootStep, privilege: 'root', cwd: '/tmp', env: { A: 'b' } },
+  ];
+  for (const [index, step] of invalid.entries()) {
+    assert.equal(flowCheck.Check({
+      version: 1, id: 'root-flow', name: 'Root', target, steps: [step],
+    }), false, `invalid root step ${index} was accepted`);
+  }
+
+  // Without --interactive the gate blocks before any runner or process exists.
+  const { root, runner, calls } = await rootFixture(t);
+  const blocked = await runFlow(flow, undefined, {
+    dryRun: false, signal,
+    shell: { allowShell: true, allowSudo: true, baseDir: root, interactive: false, privilege: runner },
+  });
+  assert.equal(blocked.status, 'blocked');
+  assert.equal(blocked.entries[0].code, 'SHELL_PRIVILEGE_REQUIRED');
+  assert.match(blocked.entries[0].message, /--interactive/);
+  assert.deepEqual(await calls(), []);
+
+  // Without --allow-sudo the same step is refused earlier.
+  const noSudo = await runFlow(flow, undefined, {
+    dryRun: false, signal,
+    shell: { allowShell: true, allowSudo: false, baseDir: root, interactive: true, privilege: runner },
+  });
+  assert.equal(noSudo.entries[0].code, 'SHELL_PRIVILEGE_REQUIRED');
+  assert.match(noSudo.entries[0].message, /--allow-sudo/);
+});
+
+test('an interactive root step reports metadata only and announces its command before running', async t => {
+  const { root, runner } = await rootFixture(t);
+  const marker = join(root, 'announced.txt');
+  const flow = flowOf([{
+    id: 'root-step', kind: 'shell', argv: ['/usr/bin/touch', marker],
+    privilege: 'root', cwd: '.',
+  }, { id: 'after', kind: 'shell', shell: true, command: 'true' }]);
+  const announced = [];
+  const report = await runFlow(flow, undefined, {
+    dryRun: false, signal,
+    shell: {
+      allowShell: true, allowSudo: true, interactive: true, baseDir: root,
+      captureOutput: true, privilege: runner,
+      announceRoot: step => announced.push(step),
+    },
+  });
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.equal(existsSync(marker), true);
+  assert.deepEqual(announced, [{
+    id: 'root-step', program: '/usr/bin/touch', args: [marker], cwd: root, mode: 'prompt',
+  }]);
+  const entry = report.entries[0];
+  assert.deepEqual(entry.shell, {
+    mode: 'argv', privilege: 'root', privilegeMode: 'prompt', execution: 'finished',
+    exitCode: 0, cleanup: 'complete',
+  });
+  // Privileged output is never captured even when --capture-shell-output is on.
+  assert.equal('stdout' in entry.shell, false);
+  assert.doesNotMatch(JSON.stringify(report), /test-password-42/);
+  assert.equal(reportCheck.Check(report), true);
+});
+
+test('the CLI refuses interactive JSON runs and blocks root steps without --interactive', async t => {
+  const root = await scratch(t);
+  const flowPath = join(root, 'root.json');
+  await writeFile(flowPath, JSON.stringify({
+    version: 1, id: 'root-cli', name: 'Root CLI', target,
+    steps: [{ id: 'root', kind: 'shell', argv: ['/usr/bin/true'], privilege: 'root' }],
+  }));
+  const run = (...args) => spawnSync(process.execPath, [cliPath, 'run', flowPath, ...args, '--json'],
+    { encoding: 'utf8', env: { ...process.env, SUDO_ASKPASS: join(root, 'never-askpass') } });
+
+  const machine = run('--allow-shell', '--allow-sudo', '--interactive');
+  assert.equal(machine.status, 2, machine.stdout + machine.stderr);
+  assert.match(JSON.parse(machine.stdout).error.message, /--interactive cannot be combined with --json/);
+
+  const blocked = run('--allow-shell', '--allow-sudo');
+  assert.equal(blocked.status, 1, blocked.stdout + blocked.stderr);
+  const report = JSON.parse(blocked.stdout).data;
+  assert.equal(report.status, 'blocked');
+  assert.equal(report.entries[0].code, 'SHELL_PRIVILEGE_REQUIRED');
+  assert.match(report.entries[0].message, /--interactive/);
+
+  const preview = run('--allow-shell', '--allow-sudo', '--interactive', '--dry-run');
+  assert.equal(preview.status, 0, preview.stdout + preview.stderr);
+  const previewReport = JSON.parse(preview.stdout).data;
+  assert.equal(previewReport.entries[0].shell.execution, 'preview');
+  assert.equal(previewReport.entries[0].shell.privilege, 'root');
 });

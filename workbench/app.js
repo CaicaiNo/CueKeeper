@@ -342,7 +342,7 @@ function renderInspector() {
       return el('article', { className: 'library-item stack' },
         el('h3', {}, behavior.name),
         muted(`${behavior.steps.length} 步 · ${item.target.app} · ${item.target.window}`),
-        shell.steps ? muted(`含 ${shell.steps} 个 Shell 步骤${shell.privileged ? ` · ${shell.privileged} 个需管理员预配置` : ''}`) : undefined,
+        shell.steps ? muted(`含 ${shell.steps} 个 Shell 步骤${shell.privileged ? ` · ${shell.privileged} 个提权步骤` : ''}`) : undefined,
         behavior.parameters.length ? muted(behavior.parameters.map(param => `${param} · ${parameterTypes[param]}`).join(' / ')) : undefined,
         el('div', { className: 'actions' },
           button('引用', () => behaviorDialog(item, false), { style: 'small', icon: 'plus', disabled: !compatible }),
@@ -474,7 +474,7 @@ function importDialog() {
         el('h3', {}, `Shell 定义 ${shell.reachable + shell.definitions} 个`),
         muted(`可执行 ${shell.reachable} 个 · 行为定义内 ${shell.definitions} 个（含尚未调用的行为）`),
         shell.privileged
-          ? muted(`其中 ${shell.privileged} 个标记「需管理员预配置」，实时运行还需 --allow-sudo。`)
+          ? muted(`其中 ${shell.privileged} 个是提权步骤，实时运行还需 --allow-sudo；密码授权型 Root 步骤还会在运行确认后弹框。`)
           : muted('全部是用户态步骤。'),
         muted('保存、校验和离线预览都不会执行；实时运行需要启动参数 --allow-shell。'),
       ]), 0);
@@ -664,33 +664,47 @@ function shellDialog() {
   const cwd = input({ placeholder: '默认输入文件目录', maxLength: 4096 });
   const timeout = el('input', { type: 'number', min: '1', max: '120000', value: '30000' });
   const expected = el('input', { type: 'number', min: '0', max: '255', value: '0' });
-  const privilege = select([['user', '用户态'], ['sudo', '需管理员预配置']]);
+  const privilege = select([['user', '用户态'], ['root', 'Root · 需管理员密码'], ['sudo', '需管理员预配置']]);
+  const rootMode = select([['prompt', '每次弹框输入管理员密码'], ['sudoers', 'sudoers 免密（无人值守）']]);
   const task = input({ placeholder: '/Library/CueKeeper/privileged/<任务 ID>', maxLength: 4096 });
   const envRows = el('div', { className: 'stack' });
-  const userBox = el('div', { className: 'stack' },
-    field('工作目录', cwd), field('超时（毫秒）', timeout), field('预期退出码', expected),
+  const envBlock = el('div', { className: 'stack' },
     el('h3', {}, '环境变量'), muted('保留键与 SUDO_ / DYLD_ / LD_ / CUEKEEPER_ 前缀不可覆盖。'),
     envRows, button('添加环境变量', () => addEnvRow(envRows), { style: 'small', icon: 'plus' }));
+  const userBox = el('div', { className: 'stack' },
+    field('工作目录', cwd), field('超时（毫秒）', timeout), field('预期退出码', expected), envBlock);
+  const rootBox = el('div', { className: 'stack' },
+    field('授权方式', rootMode),
+    muted('Root 步骤只接受逐项参数，不接受 Shell 脚本或环境变量。运行前会展示完整命令与工作目录，密码只通过弹框交给 sudo。'));
   const sudoBox = el('div', { className: 'stack' },
     field('固定任务路径', task),
     muted('固定任务由管理员预配置，不接受工作目录、环境变量、超时或脚本。'));
+  rootBox.hidden = true;
   sudoBox.hidden = true;
   mode.onchange = () => {
     commandBox.hidden = mode.value !== 'script';
     argvBox.hidden = mode.value === 'script';
   };
   privilege.onchange = () => {
-    const sudo = privilege.value === 'sudo';
+    const selected = privilege.value;
+    const sudo = selected === 'sudo';
+    const root = selected === 'root';
     sudoBox.hidden = !sudo;
+    rootBox.hidden = !root;
     userBox.hidden = sudo;
-    commandBox.hidden = sudo || mode.value !== 'script';
+    envBlock.hidden = root;
+    if (root && mode.value === 'script') mode.value = 'argv';
+    mode.disabled = sudo || root;
+    commandBox.hidden = sudo || root || mode.value !== 'script';
     argvBox.hidden = sudo || mode.value === 'script';
   };
   openDialog('插入 Shell 步骤', [
-    field('形态', mode), argvBox, commandBox, field('权限', privilege), userBox, sudoBox,
+    field('形态', mode), argvBox, commandBox, field('权限', privilege), userBox, rootBox, sudoBox,
     muted('保存与预览都不会执行。含 Shell 的测试项不能打包为离线报告。'),
   ], '加入草稿', () => {
-    const sudo = privilege.value === 'sudo';
+    const selected = privilege.value;
+    const sudo = selected === 'sudo';
+    const root = selected === 'root';
     const argv = sudo
       ? [task.value.trim()]
       : [...argvRows.querySelectorAll('input')].map(node => node.value);
@@ -699,10 +713,10 @@ function shellDialog() {
       return [key.value, value.value, secret.checked];
     });
     const action = shellDraft({
-      mode: sudo ? 'argv' : mode.value, argv, command: sudo ? '' : command.value,
+      mode: sudo || root ? 'argv' : mode.value, argv, command: sudo || root ? '' : command.value,
       cwd: sudo ? '' : cwd.value,
       timeoutMs: timeout.value, expectedExitCode: expected.value,
-      privilege: privilege.value, env: sudo ? [] : env,
+      privilege: selected, privilegeMode: rootMode.value, env: sudo || root ? [] : env,
     });
     state.draft.push({ id: id('action'), action });
     renderDraft();
@@ -737,7 +751,11 @@ function planText(step) {
   if (step.kind !== 'shell') return step.kind;
   const command = [step.program, ...step.args]
     .map(part => /\s/.test(part) ? JSON.stringify(part) : part).join(' ');
-  const privilege = step.privilege === 'sudo' ? '需管理员预配置' : '用户态';
+  const privilege = step.privilege === 'sudo'
+    ? '需管理员预配置'
+    : step.privilege === 'root'
+      ? (step.privilegeMode === 'sudoers' ? 'Root · sudoers 免密' : 'Root · 密码授权')
+      : '用户态';
   return `${privilege} · ${step.mode} · ${step.timeoutMs} ms · 目录 ${step.cwd}\n${command}`;
 }
 
@@ -749,7 +767,8 @@ function showResult(mode, report) {
     report.stopped ? muted('本次运行已在停止请求后结束。') : undefined,
     el('ol', { className: 'stack' }, ...report.entries.map(entry => {
       const shell = entry.kind === 'shell'
-        ? ` · ${entry.shell.privilege}/${entry.shell.mode} · ${entry.shell.execution}` +
+        ? ` · ${entry.shell.privilege}${entry.shell.privilegeMode ? `(${entry.shell.privilegeMode})` : ''}` +
+          `/${entry.shell.mode} · ${entry.shell.execution}` +
           (entry.shell.exitCode === undefined ? '' : ` · 退出码 ${entry.shell.exitCode}`)
         : '';
       return el('li', {}, `${entry.id} · ${entry.kind}${shell} · ${resultStatus[entry.status]} · ${entry.durationMs} ms`,

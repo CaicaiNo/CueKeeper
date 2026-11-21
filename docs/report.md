@@ -60,7 +60,8 @@ out/assets/logs/runner.log
 | 字段 | 内容 |
 | --- | --- |
 | `mode` | `argv`（默认）或 `shell`（显式脚本） |
-| `privilege` | `user` 或 `sudo` |
+| `privilege` | `user`、`sudo` 或 `root` |
+| `privilegeMode` | 仅 root 步骤：`prompt`（管理员密码框）或 `sudoers`（无人值守白名单） |
 | `execution` | `preview`、`not-run`、`finished`、`terminated` 或 `unknown` |
 | `exitCode` / `signal` | 二者互斥；只记录真实退出码或被终止的信号 |
 | `cleanup` | 终止后按进程组回收的结果：`complete` 或 `unknown` |
@@ -71,7 +72,8 @@ out/assets/logs/runner.log
 - 存在 Shell 秘密引用、测试秘密绑定或任一提权步骤时，只保留输出元数据（`kind: "omitted"`），不写文本。
 - 报告和错误信息不记录原始 `argv`、脚本、环境变量值或工作目录。命令只在本机的源 flow 编辑与运行确认界面上显示。
 - 含 NUL 或无效 UTF-8 的流标记为 `binary`，只记录字节数与截断状态。
-- 缺少实时运行许可时，报告状态为 `blocked`，对应步骤带 `SHELL_NOT_ALLOWED` 或 `SHELL_PRIVILEGE_REQUIRED`，其余步骤为 `skipped`。
+- 缺少实时运行许可时，报告状态为 `blocked`，对应步骤带 `SHELL_NOT_ALLOWED` 或 `SHELL_PRIVILEGE_REQUIRED`，其余步骤为 `skipped`。管理员取消或密码框超时用 `SHELL_PRIVILEGE_CANCELLED`，无法弹出密码框用 `SHELL_PRIVILEGE_UNAVAILABLE`。
+- root 步骤只记录 `privilege`、`privilegeMode`、`execution` 与退出码；特权命令的 stdout/stderr 永不进入报告。说明见 [Root 步骤与管理员授权](shell-security.md)。
 
 含 Shell 定义的流程（包括尚未调用的行为）不能使用 `report pack`。打包会把原始 flow 写进 ZIP，而首版不允许发布命令与秘密引用；这类运行仍可用 `--report` 写 JSON，并在工作台查看。
 
