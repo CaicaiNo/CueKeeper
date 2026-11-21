@@ -82,12 +82,24 @@ function locatorLabel(target) {
     .filter(Boolean).join(' · ');
 }
 
+const modifierOrder = ['ctrl', 'alt', 'shift', 'meta'];
+const modifierLabels = { ctrl: 'Ctrl', alt: 'Opt', shift: 'Shift', meta: 'Cmd' };
+const keyLabels = {
+  space: 'Space', return: 'Return', tab: 'Tab', escape: 'Esc', delete: 'Delete',
+  backspace: 'Backspace', forwarddelete: 'Forward Delete', up: '↑', down: '↓',
+  left: '←', right: '→', home: 'Home', end: 'End', pageup: 'Page Up', pagedown: 'Page Down',
+};
+const shortcutLabel = action => [
+  ...modifierOrder.filter(key => (action.modifiers ?? []).includes(key)).map(key => modifierLabels[key]),
+  keyLabels[action.key] ?? action.key.toUpperCase(),
+].join('+');
+
 function actionLabel(action) {
   const label = locatorLabel(actionTarget(action));
   switch (action.kind) {
     case 'click': return label;
     case 'type': return typeof action.text === 'string' ? `输入 “${short(action.text)}”` : `输入参数 ${action.text.param}`;
-    case 'key': return [...(action.modifiers ?? []), action.key].join(' + ');
+    case 'key': return shortcutLabel(action);
     case 'assert':
     case 'wait': return `${label} · ${action.check.expect.property} = ${short(String(action.check.expect.equals))}`;
     case 'shell': return `Shell · ${short(shellSummary(action).command)}`;

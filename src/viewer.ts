@@ -193,13 +193,28 @@ function planIndex(flow: Flow, steps: PlannedStep[]) {
   return { actions, setups };
 }
 
+
+const modifierOrder = ['ctrl', 'alt', 'shift', 'meta'];
+const modifierLabels: Record<string, string> = { ctrl: 'Ctrl', alt: 'Opt', shift: 'Shift', meta: 'Cmd' };
+const keyLabels: Record<string, string> = {
+  space: 'Space', return: 'Return', tab: 'Tab', escape: 'Esc', delete: 'Delete',
+  backspace: 'Backspace', forwarddelete: 'Forward Delete', up: '↑', down: '↓',
+  left: '←', right: '→', home: 'Home', end: 'End', pageup: 'Page Up', pagedown: 'Page Down',
+};
+function shortcutLabel(action: { modifiers?: string[]; key: string }) {
+  return [
+    ...modifierOrder.filter(key => (action.modifiers ?? []).includes(key)).map(key => modifierLabels[key]),
+    keyLabels[action.key] ?? action.key.toUpperCase(),
+  ].join('+');
+}
+
 function summaryFor(entry: Entry, action: ExecutableAction | undefined, setup: Setup | undefined) {
   if (entry.kind === 'setup') return `前置条件 · ${setup?.name ?? entry.id.split('/').pop() ?? entry.id}`;
   if (!action) return `${kindLabels[entry.kind] ?? entry.kind}`;
   switch (action.kind) {
     case 'click': return `点击 ${locatorShort(action.target)}`;
     case 'type': return `输入 ${short(JSON.stringify(action.text), 40)}`;
-    case 'key': return `快捷键 ${[...(action.modifiers ?? []), action.key].join('+')}`;
+    case 'key': return `快捷键 ${shortcutLabel(action)}`;
     case 'wait': return `等待 ${expectationText(action.check.expect)}`;
     case 'assert': return `断言 ${expectationText(action.check.expect, action.check.target.kind)}`;
     case 'shell': return `Shell · ${'argv' in action ? action.argv[0] : action.command}`;
@@ -360,7 +375,7 @@ function targetSection(view: StepView, flow: Flow) {
       rows.push(`<div class="target wide"><p class="k">定位器</p><div class="v">${escapeHtml(locatorText(action.target))}</div></div>`);
       rows.push(`<div class="target wide"><p class="k">文本</p><div class="v">${escapeHtml(action.text)}</div></div>`);
     } else if (action.kind === 'key') {
-      rows.push(`<div class="target wide"><p class="k">快捷键</p><div class="v">${escapeHtml([...(action.modifiers ?? []), action.key].join('+'))}</div></div>`);
+      rows.push(`<div class="target wide"><p class="k">快捷键</p><div class="v">${escapeHtml(shortcutLabel(action))}</div></div>`);
     } else if (action.kind === 'wait' || action.kind === 'assert') {
       rows.push(`<div class="target wide"><p class="k">定位器</p><div class="v">${escapeHtml(locatorText(action.check.target))}</div></div>`);
     }
