@@ -21,7 +21,9 @@ const staticFiles = new Map([
   ['/', ['index.html', 'text/html']],
   ['/style.css', ['style.css', 'text/css']],
   ['/app.js', ['app.js', 'text/javascript']],
+  ['/dom.js', ['dom.js', 'text/javascript']],
   ['/model.js', ['model.js', 'text/javascript']],
+  ['/picker.js', ['picker.js', 'text/javascript']],
 ]);
 
 async function readBody(request: IncomingMessage) {

@@ -68,6 +68,8 @@ test('workbench imports timeline metadata, reuses the library, and runs a saved 
   }
 
   assert.match(await (await fetch(url)).text(), /动作时间线/);
+  assert.match(await (await fetch(`${url}/dom.js`)).text(), /export function createDom/);
+  assert.match(await (await fetch(`${url}/picker.js`)).text(), /export function createAppPicker/);
   assert.equal((await request('import', { directory }, 'https://another-origin.invalid')).status, 403);
   const session = await post('import', { directory });
   assert.deepEqual(session.timeline.map(row => row.action.kind), planned.map(step => step.action.kind));
