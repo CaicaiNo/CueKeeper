@@ -96,6 +96,7 @@ async function capture(t, options = {}) {
     helper: options.helper ?? helper,
     env,
     ...(options.platform ? { platform: options.platform } : {}),
+    ...(options.masks ? { masks: options.masks } : {}),
     stopTimeoutMs: 5000,
   });
   const artifact = await session.stop();
@@ -157,6 +158,12 @@ test('a finalized capture becomes a playable artifact with merged idle gaps', as
   assert.ok(existsSync(join(result.media, videoFile)));
   assert.equal(existsSync(join(result.media, 'session.partial.mp4')), false);
   assert.equal(readFileSync(join(result.media, videoFile)).length, 4096);
+});
+
+test('configured mask rectangles are recorded with the artifact', async t => {
+  const masks = [{ x: 40, y: 60, width: 200, height: 24 }];
+  const result = await capture(t, { masks });
+  assert.deepEqual(result.artifact.maskedRegions, masks);
 });
 
 test('a truncated capture keeps the movie and records where it stopped', async t => {
@@ -316,6 +323,11 @@ test('CLI keeps session video opt-in, report-bound and out of dry runs', () => {
   const unattached = run(['run', 'examples/textedit.flow.json', '--video']);
   assert.equal(unattached.status, 2);
   assert.match(JSON.parse(unattached.stdout).error.message, /--video requires --report/);
+
+  const badMask = run(['run', 'examples/textedit.flow.json', '--video',
+    '--report', join(tmpdir(), 'never-written.json'), '--video-mask', '10,20,30']);
+  assert.equal(badMask.status, 2);
+  assert.match(JSON.parse(badMask.stdout).error.message, /--video-mask expects/);
 });
 
 

@@ -28,14 +28,14 @@ import { defaultQueueDir, resolveUploadConfig } from './upload.js';
 import { startWorkbench } from './workbench.js';
 import { loadVideoArtifact, startVideoCapture, videoSidecarFile } from './video-capture.js';
 import type { VideoCaptureSession } from './video-capture.js';
-import type { VideoArtifact } from './video.js';
+import type { MaskedRegion, VideoArtifact } from './video.js';
 
 const help = `Cuekeeper ${buildInfo().version}
 
   cuekeeper --version
   cuekeeper doctor [--json]
   cuekeeper flow validate <flow.json|test.json> [--json]
-  cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--interactive] [--report <report.json>] [--video] [--allow-shell] [--allow-sudo] [--capture-shell-output] [--json]
+  cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--interactive] [--report <report.json>] [--video [--video-mask x,y,w,h]] [--allow-shell] [--allow-sudo] [--capture-shell-output] [--json]
   cuekeeper workbench [run-directory] [--port <port>] [--library <directory>] [--allow-live-replay] [--allow-shell] [--allow-sudo]
   cuekeeper pick --app <bundle-id> --window <title> [--app-path <path>] [--select <ref>] [--snapshot <snapshot.json>] [--json]
   cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--app-path <path>] [--seconds 25] [--no-indicator] [--sound] [--trace-clicks] [--json]
@@ -100,6 +100,22 @@ function formatCommand(program: string, args: string[]) {
  * (v1 is frozen and additionalProperties: false). `report pack` reads it from
  * `<report dir>/media/video.json`.
  */
+function parseMasks(values: string[] | undefined): MaskedRegion[] {
+  const masks = (values ?? []).map(value => {
+    const parts = value.split(',').map(part => part.trim());
+    if (parts.length !== 4 || parts.some(part => !/^\d+$/.test(part))) {
+      throw new Error('--video-mask expects x,y,width,height in captured pixels');
+    }
+    const [x, y, width, height] = parts.map(Number);
+    if (x > 8191 || y > 8191 || width < 1 || height < 1 || width > 8192 || height > 8192) {
+      throw new Error('--video-mask is outside the supported pixel range');
+    }
+    return { x, y, width, height };
+  });
+  if (masks.length > 16) throw new Error('--video-mask accepts at most 16 rectangles');
+  return masks;
+}
+
 async function writeVideoSidecar(reportPath: string, artifact: VideoArtifact) {
   const directory = join(dirname(reportPath), 'media');
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -214,7 +230,7 @@ async function main() {
         report: { type: 'string' }, snapshot: { type: 'string' }, data: { type: 'string' },
         'allow-shell': { type: 'boolean' }, 'allow-sudo': { type: 'boolean' },
         'capture-shell-output': { type: 'boolean' }, interactive: { type: 'boolean' },
-        video: { type: 'boolean' },
+        video: { type: 'boolean' }, 'video-mask': { type: 'string', multiple: true },
       },
     });
     checkPositionals(positionals, 1);
@@ -223,6 +239,7 @@ async function main() {
     if (values.video && dryRun) throw new Error('--video requires a real replay, not --dry-run');
     if (values.video && values.data) throw new Error('--video is not available for batch runs');
     if (values.video && !values.report) throw new Error('--video requires --report so the movie has a run directory');
+    const videoMasks = parseMasks(values['video-mask']);
     // Machine mode has no human to answer a password dialog; refuse instead of
     // silently downgrading an interactive root step. A dry run never prompts,
     // so it stays allowed under --json.
@@ -319,6 +336,7 @@ async function main() {
     const video = values.video && reportPath ? {
       start: (windowId: string, reportStartedAt: string) => startVideoCapture({
         windowId, reportStartedAt, signal, mediaDir: join(dirname(reportPath), 'media'),
+        ...(videoMasks.length ? { masks: videoMasks } : {}),
       }),
       onStart: (session: VideoCaptureSession) => { videoSession = session; },
       onArtifact: (artifact: VideoArtifact) => { videoArtifact = artifact; },

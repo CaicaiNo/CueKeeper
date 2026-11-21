@@ -79,7 +79,7 @@ out/assets/logs/runner.log
 
 ## 会话视频（可选）
 
-运行可以用 `--video --report <run.json>` 额外录一段目标窗口的会话视频。采集器把电影写到报告旁的 `media/session.mp4`，元数据写到 `media/video.json`；`report pack` 会把它带进归档的 `media/`，并在 `manifest.json` 的 `video` 里记录编码、时长、track 时间刻度、与报告的锚点（`atMs` → PTS）和采样阈值。设计、体积实测与实现落点见 [会话视频：帧差采样 + VFR + 时间线对齐](session-video.md)。
+运行可以用 `--video --report <run.json>` 额外录一段目标窗口的会话视频；`--video-mask x,y,w,h`（可重复，最多 16 个）把固定出现的敏感区域在编码前涂黑。采集器把电影写到报告旁的 `media/session.mp4`，元数据写到 `media/video.json`；`report pack` 会把它带进归档的 `media/`，并在 `manifest.json` 的 `video` 里记录编码、时长、track 时间刻度、与报告的锚点（`atMs` → PTS）和采样阈值。设计、体积实测与实现落点见 [会话视频：帧差采样 + VFR + 时间线对齐](session-video.md)。
 
 - **默认关闭**，只在显式开启的运行里存在；`report.json` 不变，视频不参与通过/失败判断。
 - 没有视频的报告照旧打开，查看器显示「本报告未录制会话视频」；`status: "skipped"` 时显示封闭枚举的原因（例如未授权屏幕录制），不显示空播放器。
