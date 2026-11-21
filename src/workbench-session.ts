@@ -8,6 +8,7 @@ import { hashFlow, parseFlow, plan } from './flow.js';
 import { object, parseSnapshot } from './locator.js';
 import { pickCandidates } from './pick.js';
 import type { PickCandidate } from './pick.js';
+import { describeApps } from './apps.js';
 import { inferSetup } from './setup.js';
 
 export const sameTarget = (a: { app: string; window: string }, b: { app: string; window: string }) =>
@@ -131,6 +132,7 @@ export async function loadSession(path: string) {
   }));
 
   let candidates: PickCandidate[] = [];
+  let snapshotApp: string | undefined;
   if (snapshot !== undefined) {
     const envelope = object(snapshot);
     const target = object(envelope.target);
@@ -138,7 +140,9 @@ export async function loadSession(path: string) {
         target.app !== flow.target.app || target.window !== flow.target.window) {
       throw new Error('snapshot.json does not match the selected flow target');
     }
-    candidates = pickCandidates(parseSnapshot(envelope.data, flow.target));
+    const data = object(envelope.data);
+    if (typeof data.app === 'string' && data.app) snapshotApp = data.app;
+    candidates = pickCandidates(parseSnapshot(data, flow.target));
   }
   const completeTimings = timeline.every(action => action.atMs !== undefined && action.durationMs !== undefined);
   const durationMs = fromCapture
@@ -148,10 +152,15 @@ export async function loadSession(path: string) {
   const setup = [...existingSetup, ...inferSetup(flow.target, timeline.map(row => ({
     id: row.id, app: row.app, window: row.window,
   })), existingSetup)];
+  const apps = await describeApps([
+    flow.target.app,
+    ...timeline.map(row => row.app),
+    ...setup.flatMap(condition => condition.ensure ? [condition.ensure.app] : []),
+  ], snapshotApp ? { [flow.target.app]: snapshotApp } : {});
   return {
     directory, flow, images, snapshot,
     view: {
-      id, directory, name: flow.name, target: flow.target, setup, timeline, candidates,
+      id, directory, name: flow.name, target: flow.target, setup, apps, timeline, candidates,
       durationMs, timingSource: fromCapture ? 'capture' : report?.mode,
       startedAt: fromCapture ? undefined : report?.startedAt,
       hasSnapshot: snapshot !== undefined,

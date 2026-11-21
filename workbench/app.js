@@ -86,6 +86,12 @@ const isCompatible = row => sameTarget(row, state.session.target);
 const getRows = () => state.session?.timeline ?? [];
 const selectedRows = () => visibleRows(getRows(), state.app, state.ignored, false).filter(row => state.selected.has(row.id));
 const short = (text, length = 82) => text.length > length ? text.slice(0, length) + '…' : text;
+const appInfo = id => state.session?.apps?.[id];
+const appLabel = id => appInfo(id)?.label ?? id;
+const appTitle = id => {
+  const info = appInfo(id);
+  return info ? [info.bundleId, ...info.paths].join('\n') : id;
+};
 
 function locatorLabel(target) {
   if (!target) return '目标窗口';
@@ -163,24 +169,32 @@ function renderSummary() {
       session.startedAt.slice(0, 19).replace('T', ' ') + ' UTC') : undefined,
   );
   $('apps').replaceChildren(...[['', session.timeline.length], ...apps].map(([app, count], index) => el('button', {
-    type: 'button', className: 'app-filter', id: `app-${index}`, 'aria-pressed': String(state.app === app),
+    type: 'button', className: 'app-filter', id: `app-${index}`, title: app ? appTitle(app) : undefined,
+    'aria-pressed': String(state.app === app),
     onclick: () => {
       state.app = app;
       state.selected.clear();
       state.focused = null;
       render();
     },
-  }, el('span', { className: 'app-name' }, app || '全部应用'), el('span', { className: 'time trailing' }, count))));
+  }, el('span', { className: 'app-name' }, app ? appLabel(app) : '全部应用'), el('span', { className: 'time trailing' }, count))));
 }
 
 const setupStates = {
   inferred: '待确认', confirmed: '已确认', invalid: '已失效', deleted: '已删除',
 };
 
+function conditionTitle(condition) {
+  const ensure = condition.ensure;
+  if (ensure?.kind === 'app_running') return '应用已启动';
+  if (ensure?.kind === 'window_ready') return `窗口已就绪 · ${ensure.window}`;
+  return condition.name;
+}
+
 function conditionDetail(condition) {
   const ensure = condition.ensure;
-  if (ensure?.kind === 'window_ready') return `${ensure.app} · ${ensure.window}`;
-  if (ensure?.kind === 'app_running') return ensure.app;
+  if (ensure?.kind === 'window_ready') return `${appLabel(ensure.app)} · ${ensure.window}`;
+  if (ensure?.kind === 'app_running') return appLabel(ensure.app);
   return locatorLabel(condition.check.target);
 }
 
@@ -222,13 +236,13 @@ function renderSetup() {
     return el('article', { className: `condition${deleted ? ' removed' : ''}`, id: `condition-${condition.id}` },
       el('div', { className: 'condition-head' },
         el('span', { className: `state-chip ${condition.state}` }, setupStates[condition.state] ?? condition.state),
-        el('strong', {}, condition.name)),
+        el('strong', {}, conditionTitle(condition))),
       el('p', { className: 'muted' }, conditionDetail(condition)),
       el('div', { className: 'actions' },
         button('确认', () => {
           confirmCondition(setup, condition.id);
           render();
-          status(`已确认「${condition.name}」，保存时一并写入`, 'success');
+          status(`已确认「${conditionTitle(condition)}」，保存时一并写入`, 'success');
         }, { style: 'small', icon: 'check', disabled: deleted || condition.state === 'confirmed' }),
         button('更换', () => conditionDialog(condition), {
           style: 'small', icon: 'refresh', disabled: deleted,
@@ -241,7 +255,7 @@ function renderSetup() {
         button('删除', () => {
           deleteCondition(setup, condition.id);
           render();
-          status(`已删除「${condition.name}」，可用撤销恢复`, 'success');
+          status(`已删除「${conditionTitle(condition)}」，可用撤销恢复`, 'success');
         }, { style: 'small danger', icon: 'trash', disabled: deleted })));
   }));
 }
@@ -283,7 +297,7 @@ function renderTimeline() {
     el('span', { className: 'time' }, timestamp(row.atMs)),
     kindChip(row.action.kind),
     el('span', { className: 'row-description' }, el('strong', {}, actionLabel(row.action)),
-      el('small', {}, `${row.app} · ${row.window}${ignored ? ' · 已忽略' : ''}`)),
+      el('small', {}, `${appLabel(row.app)} · ${row.window}${ignored ? ' · 已忽略' : ''}`)),
     el('span', { className: 'time row-duration', title: '动作耗时' }, duration(row.durationMs)));
     const thumbnail = row.thumbnail && el('details', {
       className: 'thumbnail', open: state.expanded.has(row.id),
@@ -324,7 +338,7 @@ function renderOverview() {
       el('span', { className: 'legend-kind' }, kind),
       el('span', { className: 'legend-count' }, String(count))))),
     infoList([
-      ['目标', `${state.session.target.app} · ${state.session.target.window}`],
+      ['目标', `${appLabel(state.session.target.app)} · ${state.session.target.window}`],
       ['来源', short(state.session.directory.split('/').at(-1), 44)],
     ], 'meta-grid'),
     muted('选择时间线中的动作查看定位器与整理操作。'));
@@ -358,7 +372,7 @@ function renderInspector() {
   const editable = !ignored && isCompatible(row);
   panel.replaceChildren(el('div', { className: 'stack' },
     el('h3', {}, actionLabel(row.action)),
-    infoList([['动作', row.action.kind], ['应用', row.app], ['窗口', row.window],
+    infoList([['动作', row.action.kind], ['应用', appLabel(row.app)], ['窗口', row.window],
       ['定位器', locatorLabel(actionTarget(row.action))], ['时间', timestamp(row.atMs)], ['耗时', duration(row.durationMs)]], 'meta-grid'),
     isCompatible(row) ? undefined : muted('该动作属于另一窗口，只能在时间线复盘。'),
     el('div', { className: 'actions' },
