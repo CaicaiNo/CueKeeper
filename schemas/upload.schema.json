@@ -1,0 +1,564 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Cuekeeper upload v1",
+  "description": "JSON bodies for the report upload API. Select the named definition for a particular endpoint or decoded HTTP header and query fields.",
+  "oneOf": [
+    {
+      "$ref": "#/definitions/CreateRunRequest"
+    },
+    {
+      "$ref": "#/definitions/CreateRunResponse"
+    },
+    {
+      "$ref": "#/definitions/RunSummary"
+    },
+    {
+      "$ref": "#/definitions/ListRunsResponse"
+    },
+    {
+      "$ref": "#/definitions/ErrorResponse"
+    }
+  ],
+  "definitions": {
+    "Id": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
+    },
+    "Sha256": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "Timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "minLength": 24,
+      "maxLength": 24,
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    },
+    "BundleBytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1073741824
+    },
+    "ChunkIndex": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 127
+    },
+    "Cursor": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "ResultStatus": {
+      "type": "string",
+      "enum": [
+        "passed",
+        "failed",
+        "blocked"
+      ]
+    },
+    "CreateRunHeaders": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "idempotency-key": {
+          "$ref": "#/definitions/Sha256"
+        }
+      },
+      "required": [
+        "idempotency-key"
+      ]
+    },
+    "CreateRunRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bundleBytes": {
+          "$ref": "#/definitions/BundleBytes"
+        }
+      },
+      "required": [
+        "bundleBytes"
+      ]
+    },
+    "UploadProgress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "uploadId": {
+          "$ref": "#/definitions/Id"
+        },
+        "chunkBytes": {
+          "const": 8388608
+        },
+        "committedBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1073741824
+        },
+        "expiresAt": {
+          "$ref": "#/definitions/Timestamp"
+        }
+      },
+      "required": [
+        "uploadId",
+        "chunkBytes",
+        "committedBytes",
+        "expiresAt"
+      ]
+    },
+    "CreateRunResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "runId": {
+              "$ref": "#/definitions/Id"
+            },
+            "state": {
+              "const": "pending"
+            },
+            "upload": {
+              "$ref": "#/definitions/UploadProgress"
+            }
+          },
+          "required": [
+            "runId",
+            "state",
+            "upload"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "runId": {
+              "$ref": "#/definitions/Id"
+            },
+            "state": {
+              "const": "ready"
+            }
+          },
+          "required": [
+            "runId",
+            "state"
+          ]
+        }
+      ]
+    },
+    "ChunkHeaders": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "content-type": {
+          "const": "application/octet-stream"
+        },
+        "content-length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8388608
+        },
+        "x-chunk-sha256": {
+          "$ref": "#/definitions/Sha256"
+        }
+      },
+      "required": [
+        "content-type",
+        "content-length",
+        "x-chunk-sha256"
+      ]
+    },
+    "ListRunsQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "flowId": {
+          "$ref": "#/definitions/Id"
+        },
+        "status": {
+          "$ref": "#/definitions/ResultStatus"
+        },
+        "from": {
+          "$ref": "#/definitions/Timestamp"
+        },
+        "to": {
+          "$ref": "#/definitions/Timestamp"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "cursor": {
+          "$ref": "#/definitions/Cursor"
+        }
+      }
+    },
+    "EntryCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "passed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "blocked": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "skipped": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "resolved": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "passed",
+        "failed",
+        "blocked",
+        "skipped",
+        "resolved"
+      ]
+    },
+    "ArtifactSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "artifactId": {
+          "$ref": "#/definitions/Id"
+        },
+        "bundleSha256": {
+          "$ref": "#/definitions/Sha256"
+        },
+        "bundleBytes": {
+          "$ref": "#/definitions/BundleBytes"
+        },
+        "expiresAt": {
+          "$ref": "#/definitions/Timestamp"
+        },
+        "state": {
+          "enum": [
+            "available",
+            "expired"
+          ]
+        }
+      },
+      "required": [
+        "artifactId",
+        "bundleSha256",
+        "bundleBytes",
+        "expiresAt",
+        "state"
+      ]
+    },
+    "RunSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "projectId": {
+          "$ref": "#/definitions/Id"
+        },
+        "runId": {
+          "$ref": "#/definitions/Id"
+        },
+        "flowId": {
+          "$ref": "#/definitions/Id"
+        },
+        "flowSha256": {
+          "$ref": "#/definitions/Sha256"
+        },
+        "startedAt": {
+          "$ref": "#/definitions/Timestamp"
+        },
+        "completedAt": {
+          "$ref": "#/definitions/Timestamp"
+        },
+        "mode": {
+          "enum": [
+            "replay",
+            "dry-run"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/ResultStatus"
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "entryCounts": {
+          "$ref": "#/definitions/EntryCounts"
+        },
+        "artifact": {
+          "$ref": "#/definitions/ArtifactSummary"
+        }
+      },
+      "required": [
+        "projectId",
+        "runId",
+        "flowId",
+        "flowSha256",
+        "startedAt",
+        "completedAt",
+        "mode",
+        "status",
+        "durationMs",
+        "entryCounts",
+        "artifact"
+      ]
+    },
+    "ListRunsResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/definitions/RunSummary"
+          }
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/Cursor"
+            }
+          ]
+        }
+      },
+      "required": [
+        "items",
+        "nextCursor"
+      ]
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/Id"
+        },
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "type": "integer",
+              "minimum": 400,
+              "maximum": 599
+            },
+            "code": {
+              "type": "string"
+            },
+            "retryable": {
+              "type": "boolean"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          },
+          "required": [
+            "status",
+            "code",
+            "retryable",
+            "message"
+          ],
+          "oneOf": [
+            {
+              "properties": {
+                "status": {
+                  "const": 400
+                },
+                "code": {
+                  "const": "BAD_REQUEST"
+                },
+                "retryable": {
+                  "const": false
+                }
+              }
+            },
+            {
+              "properties": {
+                "status": {
+                  "const": 401
+                },
+                "code": {
+                  "const": "UNAUTHENTICATED"
+                },
+                "retryable": {
+                  "const": false
+                }
+              }
+            },
+            {
+              "properties": {
+                "status": {
+                  "const": 403
+                },
+                "code": {
+                  "const": "FORBIDDEN"
+                },
+                "retryable": {
+                  "const": false
+                }
+              }
+            },
+            {
+              "properties": {
+                "status": {
+                  "const": 404
+                },
+                "code": {
+                  "const": "NOT_FOUND"
+                },
+                "retryable": {
+                  "const": false
+                }
+              }
+            },
+            {
+              "properties": {
+                "status": {
+                  "const": 409
+                },
+                "code": {
+                  "enum": [
+                    "IDEMPOTENCY_CONFLICT",
+                    "CHUNK_CONFLICT"
+                  ]
+                },
+                "retryable": {
+                  "const": false
+                }
+              }
+            },
+            {
+              "properties": {
+                "status": {
+                  "const": 409
+                },
+                "code": {
+                  "enum": [
+                    "CHUNK_OUT_OF_ORDER",
+                    "UPLOAD_INCOMPLETE",
+                    "UPLOAD_EXPIRED",
+                    "UPLOAD_FINALIZED",
+                    "UPLOAD_VERIFYING"
+                  ]
+                },
+                "retryable": {
+                  "const": true
+                }
+              }
+            },
+            {
+              "properties": {
+                "status": {
+                  "const": 410
+                },
+                "code": {
+                  "const": "ARTIFACT_EXPIRED"
+                },
+                "retryable": {
+                  "const": false
+                }
+              }
+            },
+            {
+              "properties": {
+                "status": {
+                  "const": 413
+                },
+                "code": {
+                  "const": "PAYLOAD_TOO_LARGE"
+                },
+                "retryable": {
+                  "const": false
+                }
+              }
+            },
+            {
+              "properties": {
+                "status": {
+                  "const": 415
+                },
+                "code": {
+                  "const": "UNSUPPORTED_MEDIA_TYPE"
+                },
+                "retryable": {
+                  "const": false
+                }
+              }
+            },
+            {
+              "properties": {
+                "status": {
+                  "const": 422
+                },
+                "code": {
+                  "enum": [
+                    "CHUNK_DIGEST_MISMATCH",
+                    "BUNDLE_DIGEST_MISMATCH",
+                    "BUNDLE_INVALID"
+                  ]
+                },
+                "retryable": {
+                  "const": false
+                }
+              }
+            },
+            {
+              "properties": {
+                "status": {
+                  "const": 429
+                },
+                "code": {
+                  "const": "RATE_LIMITED"
+                },
+                "retryable": {
+                  "const": true
+                }
+              }
+            },
+            {
+              "properties": {
+                "status": {
+                  "type": "integer",
+                  "minimum": 500,
+                  "maximum": 599
+                },
+                "code": {
+                  "const": "SERVER_ERROR"
+                },
+                "retryable": {
+                  "const": true
+                }
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "requestId",
+        "error"
+      ]
+    }
+  }
+}
