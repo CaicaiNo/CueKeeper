@@ -185,11 +185,16 @@ export async function record(
       const data = object(JSON.parse(line));
       if (data.kind === 'error') {
         const code = captureCode(data.code);
-        const dependency = code === 'INPUT_MONITORING_REQUIRED' || (!ready && code === 'TAP_UNAVAILABLE');
+        const dependency = !ready && ['INPUT_MONITORING_REQUIRED', 'ACCESSIBILITY_REQUIRED',
+          'TAP_UNAVAILABLE', 'HOTKEY_TAP_UNAVAILABLE'].includes(code);
         const detail = typeof data.detail === 'string' && /^[ -~]{1,240}$/.test(data.detail) ? ` (${data.detail})` : '';
         throw new Fault(code, `Capture helper stopped: ${code}${detail}`, dependency);
       }
       if (data.kind === 'ready' && !ready) {
+        if (data.hotkeysFiltered !== true) {
+          throw new Fault('HOTKEY_FILTER_UNCONFIRMED',
+            'Capture helper did not confirm hotkey filtering. Rebuild it with pnpm build:recorder', true);
+        }
         announceIndicator(data.indicator, indicator);
         ready = true;
         clearTimeout(startupTimeout);

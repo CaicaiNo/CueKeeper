@@ -1,9 +1,10 @@
 import AppKit
+import ApplicationServices
 import Carbon
 import CoreGraphics
 import Foundation
 
-// The listener is opt-in and never modifies or suppresses an input event.
+// Recording observes input downstream of a separate filter for its two session controls.
 @MainActor
 final class Capture {
     private let app: String
@@ -12,6 +13,10 @@ final class Capture {
     private let sound: Bool
     private let ownPID = Int64(ProcessInfo.processInfo.processIdentifier)
     private var tap: CFMachPort?
+    private var hotkeyTap: CFMachPort?
+    private var hotkeys = RecordingHotkeys()
+    private var stopReleaseDeadline: TimeInterval?
+    private var pauseBoundaryPending = false
     private var seconds: TimeInterval = 0
     private var indicatorDeadline: TimeInterval = 0
     private var recordingDeadline: Timer?
@@ -63,8 +68,9 @@ final class Capture {
         }
     }
 
-    func prepare(tap: CFMachPort, seconds: TimeInterval) {
+    func prepare(tap: CFMachPort, hotkeyTap: CFMachPort, seconds: TimeInterval) {
         self.tap = tap
+        self.hotkeyTap = hotkeyTap
         self.seconds = seconds
         if let indicator {
             if let detail = indicator.show() {
@@ -78,7 +84,12 @@ final class Capture {
     }
 
     private func begin(indicatorEvidence: Any) {
-        guard !stopped, let tap else { return }
+        guard !stopped, let tap, let hotkeyTap else { return }
+        CGEvent.tapEnable(tap: hotkeyTap, enable: true)
+        guard CGEvent.tapIsEnabled(tap: hotkeyTap) else {
+            stop("HOTKEY_TAP_UNAVAILABLE", detail: "The recording hotkey filter did not enable")
+            return
+        }
         CGEvent.tapEnable(tap: tap, enable: true)
         guard CGEvent.tapIsEnabled(tap: tap) else {
             stop("TAP_UNAVAILABLE", detail: "The input event tap did not enable")
@@ -86,13 +97,16 @@ final class Capture {
         }
         started = ProcessInfo.processInfo.systemUptime
         let deadline = Timer(timeInterval: seconds, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated { self?.stop() }
+            MainActor.assumeIsolated {
+                guard let self, self.stopReleaseDeadline == nil else { return }
+                self.stop()
+            }
         }
         recordingDeadline = deadline
         RunLoop.main.add(deadline, forMode: .common)
         updateIndicator()
         playCue()
-        emit(["kind": "ready", "indicator": indicatorEvidence])
+        emit(["kind": "ready", "indicator": indicatorEvidence, "hotkeysFiltered": true])
         refreshFocus()
     }
 
@@ -129,7 +143,7 @@ final class Capture {
 
     @discardableResult
     func refreshFocus() -> NSRunningApplication? {
-        guard started != nil, !stopped else { return nil }
+        guard started != nil, !stopped, stopReleaseDeadline == nil else { return nil }
         let frontmost = NSWorkspace.shared.frontmostApplication
         let target = frontmost?.bundleIdentifier == app ? frontmost : nil
         let active = target != nil
@@ -144,7 +158,7 @@ final class Capture {
     }
 
     func checkSession() {
-        guard !stopped, let tap else { return }
+        guard !stopped, let tap, let hotkeyTap else { return }
         if started == nil, let indicator {
             switch indicator.visibility() {
             case .confirmed(let evidence): begin(indicatorEvidence: evidence)
@@ -155,12 +169,22 @@ final class Capture {
             }
             return
         }
+        if let deadline = stopReleaseDeadline, ProcessInfo.processInfo.systemUptime >= deadline {
+            stop()
+            return
+        }
         guard CGPreflightListenEventAccess() else { stop("INPUT_MONITORING_LOST"); return }
+        guard AXIsProcessTrusted() else { stop("ACCESSIBILITY_LOST"); return }
+        guard CFMachPortIsValid(hotkeyTap), CGEvent.tapIsEnabled(tap: hotkeyTap) else {
+            stop("HOTKEY_TAP_UNAVAILABLE", detail: "The recording hotkey filter became unavailable")
+            return
+        }
         guard CFMachPortIsValid(tap) else { stop("TAP_UNAVAILABLE"); return }
         if !CGEvent.tapIsEnabled(tap: tap) {
             warn("TAP_INTERRUPTED")
             CGEvent.tapEnable(tap: tap, enable: true)
         }
+        flushPauseBoundary()
         refreshFocus()
         if targetIsFrontmost && pausedAt == nil { checkSecureInput() }
         updateIndicator()
@@ -186,24 +210,45 @@ final class Capture {
         } else {
             pausedAt = now
         }
+        pauseBoundaryPending = true
+    }
+
+    private func flushPauseBoundary() {
+        guard pauseBoundaryPending else { return }
+        pauseBoundaryPending = false
         emit(["kind": "boundary"])
-        updateIndicator()
+    }
+
+    func consumeHotkey(_ type: CGEventType, _ event: CGEvent) -> Bool {
+        guard started != nil, !stopped, type == .keyDown || type == .keyUp else { return false }
+        let flags = event.flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift])
+        let action = hotkeys.route(
+            code: Int(event.getIntegerValueField(.keyboardEventKeycode)),
+            down: type == .keyDown, matchesChord: flags == [.maskControl, .maskAlternate],
+            repeating: event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+        )
+        switch action {
+        case .togglePause:
+            if stopReleaseDeadline == nil { togglePause() }
+        case .requestStop:
+            // Stop accepting actions immediately. Keep filtering until key-up, with a bounded fallback.
+            if stopReleaseDeadline == nil { stopReleaseDeadline = ProcessInfo.processInfo.systemUptime + 0.75 }
+        case .releaseStop:
+            stopReleaseDeadline = ProcessInfo.processInfo.systemUptime
+        case .forward, .consume:
+            break
+        }
+        return action.consumesEvent
     }
 
     func receive(_ type: CGEventType, _ event: CGEvent) {
-        guard let started, !stopped else { return }
+        guard let started, !stopped, stopReleaseDeadline == nil else { return }
         // The session timer repairs a disabled tap while permission is still valid.
         guard type != .tapDisabledByTimeout && type != .tapDisabledByUserInput else { return }
+        flushPauseBoundary()
         let hotkeyFlags = event.flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift])
         let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
         let repeating = type == .keyDown && event.getIntegerValueField(.keyboardEventAutorepeat) != 0
-        if type == .keyDown && hotkeyFlags == [.maskControl, .maskAlternate] && (code == 7 || code == 35) {
-            if !repeating {
-                if code == 7 { stop() }  // Ctrl+Option+X
-                else { togglePause() }   // Ctrl+Option+P
-            }
-            return
-        }
         // Cmd+Tab (including reverse app cycling) belongs to the system app switcher.
         if type == .keyDown && code == 48 && hotkeyFlags.subtracting(.maskShift) == .maskCommand {
             emit(["kind": "boundary"])
@@ -302,12 +347,34 @@ struct RecorderCommand {
             capture.emit(["kind": "error", "code": "INPUT_MONITORING_REQUIRED"])
             exit(2)
         }
+        guard AXIsProcessTrusted() else {
+            capture.emit(["kind": "error", "code": "ACCESSIBILITY_REQUIRED",
+                          "detail": "Recording hotkeys require Accessibility access for this helper"])
+            exit(2)
+        }
         let observedTypes: [CGEventType] = [.leftMouseDown, .rightMouseDown, .otherMouseDown,
                                             .leftMouseDragged, .keyDown, .scrollWheel]
         let mask = observedTypes.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
         let context = Unmanaged.passUnretained(capture).toOpaque()
+        let hotkeyMask = (CGEventMask(1) << CGEventType.keyDown.rawValue) |
+                         (CGEventMask(1) << CGEventType.keyUp.rawValue)
+        guard let hotkeyTap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
+            eventsOfInterest: hotkeyMask, callback: { _, type, event, context in
+                guard let context else { return Unmanaged.passUnretained(event) }
+                let consumed = MainActor.assumeIsolated {
+                    Unmanaged<Capture>.fromOpaque(context).takeUnretainedValue().consumeHotkey(type, event)
+                }
+                return consumed ? nil : Unmanaged.passUnretained(event)
+            }, userInfo: context
+        ), let hotkeySource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, hotkeyTap, 0) else {
+            capture.emit(["kind": "error", "code": "HOTKEY_TAP_UNAVAILABLE",
+                          "detail": "Could not create the recording hotkey filter"])
+            exit(2)
+        }
+        CGEvent.tapEnable(tap: hotkeyTap, enable: false)
         guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap, place: .headInsertEventTap, options: .listenOnly,
+            tap: .cgSessionEventTap, place: .tailAppendEventTap, options: .listenOnly,
             eventsOfInterest: mask, callback: { _, type, event, context in
                 if let context {
                     MainActor.assumeIsolated {
@@ -318,6 +385,7 @@ struct RecorderCommand {
             }, userInfo: context
         ), let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
             capture.emit(["kind": "error", "code": "TAP_UNAVAILABLE"])
+            CFMachPortInvalidate(hotkeyTap)
             exit(2)
         }
         CGEvent.tapEnable(tap: tap, enable: false)
@@ -325,6 +393,7 @@ struct RecorderCommand {
         guard application.setActivationPolicy(.accessory) else {
             capture.emit(["kind": "error", "code": "CAPTURE_APPKIT_SETUP", "detail": "Could not set accessory activation policy"])
             CFMachPortInvalidate(tap)
+            CFMachPortInvalidate(hotkeyTap)
             exit(2)
         }
         NSWindow.allowsAutomaticWindowTabbing = false
@@ -343,8 +412,9 @@ struct RecorderCommand {
             MainActor.assumeIsolated { capture.checkSession() }
         }
         DispatchQueue.main.async {
+            CFRunLoopAddSource(loop, hotkeySource, .commonModes)
             CFRunLoopAddSource(loop, source, .commonModes)
-            capture.prepare(tap: tap, seconds: seconds)
+            capture.prepare(tap: tap, hotkeyTap: hotkeyTap, seconds: seconds)
             RunLoop.main.add(tick, forMode: .common)
         }
         application.run()
@@ -352,8 +422,11 @@ struct RecorderCommand {
         workspace.removeObserver(focusObserver)
         screens.removeObserver(screenObserver)
         CGEvent.tapEnable(tap: tap, enable: false)
+        CGEvent.tapEnable(tap: hotkeyTap, enable: false)
         CFRunLoopRemoveSource(loop, source, .commonModes)
+        CFRunLoopRemoveSource(loop, hotkeySource, .commonModes)
         CFMachPortInvalidate(tap)
+        CFMachPortInvalidate(hotkeyTap)
         capture.closeIndicator()
         exit(capture.failed ? 1 : 0)
     }

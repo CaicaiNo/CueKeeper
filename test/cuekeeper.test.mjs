@@ -84,7 +84,7 @@ console.log(JSON.stringify({ version: '2.6', command, ok: true, data }));
   const indicator = flags.includes('--no-indicator') ? false : {
     window: 4321, display: 1, level: 25, bounds: [0, 0, 1470, 956],
   };
-  const messages = ready ? [{ kind: 'ready', indicator }, ...events] : events;
+  const messages = ready ? [{ kind: 'ready', indicator, hotkeysFiltered: true }, ...events] : events;
   writeFileSync(join(dist, 'cuekeeper-capture'), `#!/usr/bin/env node
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
@@ -140,10 +140,22 @@ test('record CLI stops without a flow when the primary indicator is missing',
 test('record CLI rejects a helper that announces ready without indicator verification',
   { skip: process.platform !== 'darwin' }, t => {
     const { code, response, recorded, stderr } = recordFixture(t, [
-      { kind: 'ready' }, captureClick,
+      { kind: 'ready', hotkeysFiltered: true }, captureClick,
     ], { ready: false });
     assert.equal(code, 2);
     assert.equal(response.error.code, 'INDICATOR_UNCONFIRMED');
+    assert.equal(recorded, undefined);
+    assert.equal(stderr, '');
+  });
+
+test('record CLI rejects readiness from a helper missing hotkey filtering',
+  { skip: process.platform !== 'darwin' }, t => {
+    const { code, response, recorded, stderr } = recordFixture(t, [
+      { kind: 'ready', indicator: { window: 4321, display: 1, level: 25, bounds: [0, 0, 1470, 956] } },
+      captureClick,
+    ], { ready: false });
+    assert.equal(code, 2);
+    assert.equal(response.error.code, 'HOTKEY_FILTER_UNCONFIRMED');
     assert.equal(recorded, undefined);
     assert.equal(stderr, '');
   });
