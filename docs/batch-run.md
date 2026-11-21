@@ -114,3 +114,23 @@ cuekeeper run login.test.json --data accounts.json --dry-run --snapshot target.s
 | 前置条件阻塞 | 第一行全局前置条件阻塞，第二行前置条件满足并实际执行。汇总为 `blocked`，保留阻塞行和相关步骤，退出 `1`。 |
 | 中断与文件错误 | 第一行完成后中断第二行（`130`），或模拟写入第二行失败（`2`）。第一行仍可打包，汇总只索引已发布的行，`notCompleted` 包含第二行及后续行。 |
 | v1 回归 | 省略 `--data` 时，同一离线夹具仍产出原 v1 报告和 CLI `data`，已有 v1 报告可照常打包。使用 `--data` 时，某行报告可用本行 flow 打包，用绑定值不同的另一行 flow 打包会因摘要不匹配而失败。 |
+
+## 实现错误码（runner）
+
+整表预检在调用桌面驱动或创建报告产物之前完成，以下错误经 `error.code` 返回，退出码 `2`，不产生逐行报告：
+
+| 错误码 | 触发条件 |
+| --- | --- |
+| `DATA_INVALID` | BOM、非法 JSON、顶层字段、版本、列集合或行集合结构不合法 |
+| `DATA_DUPLICATE_KEY` | 同一 JSON 对象内重复键（JSON Schema 无法覆盖） |
+| `DATA_TOO_LARGE` | 数据文件超过 16 MiB |
+| `DATA_UNKNOWN_COLUMN` | 列名找不到对应的调用参数 |
+| `DATA_AMBIGUOUS_COLUMN` | 无前缀列名匹配多个调用，需写成 `<调用步骤 ID>.<参数名>` |
+| `DATA_DUPLICATE_MAPPING` | 两列写入同一个调用参数 |
+| `DATA_SECRET_COLUMN` | 列指向 secret 绑定参数 |
+| `DATA_MISSING_COLUMN` | 行缺少 `columns` 声明的列 |
+| `DATA_EXTRA_COLUMN` | 行包含 `columns` 之外的键 |
+| `DATA_INVALID_VALUE` | 单元格不是 1–4000 个 UTF-16 代码单元的非空字符串 |
+| `SECRET_UNAVAILABLE` | replay 缺少、为空或超长 secret 环境变量 |
+
+批次执行阶段的批次级错误（驱动不可用、逐行产物写入失败）沿用驱动错误码或 `REPORT_WRITE_FAILED`，汇总 `status` 为 `error`；汇总本身写入失败时同样报 `REPORT_WRITE_FAILED`，CLI 仍输出已知计数与已完成行。错误消息只回显合法列名，不回显单元格值或非法键原文。
