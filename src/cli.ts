@@ -28,6 +28,7 @@ import { record } from './record.js';
 import { recordGlobal } from './record-v2.js';
 import { displayRecordingsDirectory, recordingFileName, recordingsDirectory, writeRecording } from './recording-output.js';
 import { packReport } from './report.js';
+import { nativeSecureInputProbe, terminalCheckpointChannel } from './manual-checkpoint.js';
 import { blockedShellReport, runFlow } from './run.js';
 import type { ShellRunOptions } from './run.js';
 import { runFlowV2 } from './run-v2.js';
@@ -453,6 +454,12 @@ async function main() {
         throw new UsageFault('FOREGROUND_REQUIRED',
           'Live replay of a version 2 flow drives the mouse and keyboard across apps; pass --foreground to confirm');
       }
+      // A checkpoint needs an operator in the same session. Machine output has
+      // no independent confirmation channel, so refuse before any desktop call.
+      if (machine && flow.steps.some(step => step.kind === 'manual_checkpoint')) {
+        throw new UsageFault('MANUAL_CHECKPOINT_REQUIRED',
+          'A flow with manual checkpoints needs an interactive terminal; --json has no operator confirmation channel');
+      }
       macOnly();
       const inputs = values.inputs ? await readInputs(values.inputs) : undefined;
       const baselineDir = resolve(dirname(resolve(positionals[0])), 'baselines');
@@ -460,10 +467,13 @@ async function main() {
         runFlowV2(flow, {
           desktop, signal, baselineDir,
           ...(inputs ? { inputs } : {}),
+          checkpoints: terminalCheckpointChannel(),
+          secureInputActive: nativeSecureInputProbe(),
         }));
       if (values.report) await writeNew(values.report, JSON.stringify(report, null, 2) + '\n');
       const details = report.entries.map(entry =>
         `${entry.id} ${entry.kind}${entry.delivery ? ` ${entry.delivery}` : ''} ${entry.status}` +
+        (entry.checkpoint ? ` · manual_checkpoint ${entry.checkpoint.reason} trigger ${entry.checkpoint.triggerStepId}` : '') +
         (entry.code ? ` ${entry.code}` : '') + (entry.message ? ` — ${entry.message}` : ''),
       ).join('\n');
       success(report, `${report.mode} ${report.status}\n${details}`, signal.aborted ? 130 :

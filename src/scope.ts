@@ -196,9 +196,17 @@ export class ScopeResolver {
     await this.focus(binding);
   }
 
+  /**
+   * After an operator hand-off the desktop focus belongs to the operator, not to
+   * an earlier step. The next step may bring its own window forward without that
+   * counting as an unexpected focus steal.
+   */
+  acceptHandoff(): void {
+    this.expectedForeground = undefined;
+  }
+
   /** Focuses a bound window and proves its owner after the driver call. */
-  private async focus(binding: WindowBinding): Promise<void> {
-    const identity = this.identityFor(binding.app);
+  private async focus(binding: WindowBinding): Promise<void> {    const identity = this.identityFor(binding.app);
     await identity.focusOwnedWindow(this.desktop, binding.windowId, this.focusTimeoutMs);
     binding.pid = identity.pid ?? binding.pid;
     binding.processInstance = identity.processInstance ?? binding.processInstance;

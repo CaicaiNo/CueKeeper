@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
-import { flowV2Check } from './contracts-v2.js';
+import { defaultCheckpointTimeoutMs, flowV2Check } from './contracts-v2.js';
 import type { FlowV2, StepV2, WindowScope } from './contracts-v2.js';
 import { parseCaptureEvent } from './capture-protocol.js';
 import type { CaptureEvent, CaptureGapCode } from './capture-protocol.js';
@@ -114,6 +114,7 @@ export class GlobalRecording {
   private lastGeneration = 0;
   private generationWindow = new Map<number, string>();
   private secureOpen = false;
+  private securityAgentWarned = false;
   private textBurst?: { at: number; scope: string; locator: string; snapshot: Snapshot };
   private scrollBurst?: {
     at: number; startedAt: number; scope: string; locator: string;
@@ -161,11 +162,19 @@ export class GlobalRecording {
 
   /**
    * Consumes one validated capture event. A text burst is merged by scope and
-   * control, never across windows; a secure interval is collapsed into one gap
-   * and every piece of content inside it is discarded.
+   * control, never across windows; a continuous secure interval becomes one
+   * manual checkpoint and every piece of content inside it is discarded.
    */
   async add(event: CaptureEvent): Promise<void> {
+    // The system authorization UI is evidence of a secure boundary even when the
+    // system-wide flag has not caught up yet; its own window never becomes a scope.
+    const secureBoundary = event.secure || event.owner?.securityAgent === true;
     if (event.kind === 'gap') {
+      if (secureBoundary) {
+        this.openSecure(event);
+        return;
+      }
+      if (this.secureOpen) this.closeSecure();
       this.endBursts();
       this.pushGap(event.gapCode);
       return;
@@ -173,18 +182,11 @@ export class GlobalRecording {
     // An excluded app produces no step at all, not even a privacy marker.
     const app = event.owner?.app;
     if (app && this.exclude.has(app)) return;
-    if (event.secure) {
-      if (!this.secureOpen) {
-        this.secureOpen = true;
-        this.endBursts();
-        this.pushGap('SECURE_INPUT');
-      }
+    if (secureBoundary) {
+      this.openSecure(event);
       return;
     }
-    if (this.secureOpen) {
-      this.secureOpen = false;
-      this.endBursts();
-    }
+    if (this.secureOpen) this.closeSecure();
     switch (event.kind) {
       case 'focus':
         this.onFocus(event);
@@ -524,10 +526,58 @@ export class GlobalRecording {
   }
 
   private enterSecure() {
+    this.openSecure();
+  }
+
+  /**
+   * Opens a secure interval without reading anything. The helper's evidence only
+   * explains why the interval was secure; the checkpoint carries no content.
+   */
+  private openSecure(event?: CaptureEvent) {
+    if (event?.owner?.securityAgent && !this.securityAgentWarned) {
+      this.securityAgentWarned = true;
+      this.warn('SECURE_AUTHORIZATION',
+        'A system authorization surface was handled as a manual checkpoint; no content was read');
+    }
     if (this.secureOpen) return;
     this.secureOpen = true;
     this.endBursts();
-    this.pushGap('SECURE_INPUT');
+  }
+
+  /** Closes a secure interval and emits the one checkpoint it becomes. */
+  private closeSecure() {
+    this.secureOpen = false;
+    this.endBursts();
+    this.pushCheckpoint();
+  }
+
+  /**
+   * A checkpoint must sit immediately after the step that opened the secure
+   * interval and share its window. Without such a trigger the interval cannot be
+   * replayed safely, so it stays an explicit `SECURE_INPUT` gap.
+   */
+  private pushCheckpoint() {
+    const trigger = this.steps.at(-1);
+    if (!trigger) {
+      this.pushGap('SECURE_INPUT');
+      return;
+    }
+    // Consecutive secure intervals merge: the previous checkpoint already ends
+    // the run at this window, and no step was recorded in between.
+    if (trigger.kind === 'manual_checkpoint') return;
+    if (trigger.kind === 'gap' || !('scope' in trigger) || trigger.scope.kind !== 'window') {
+      this.pushGap('SECURE_INPUT');
+      return;
+    }
+    const scope = trigger.scope;
+    this.push({
+      kind: 'manual_checkpoint',
+      scope,
+      triggerStepId: trigger.id,
+      reason: 'secure_input',
+      resume: { scope, check: { kind: 'window_exists', equals: true } },
+      timeoutMs: defaultCheckpointTimeoutMs,
+    });
   }
 
   private bindingFor(event: CaptureEvent): WindowBinding | undefined {
@@ -667,6 +717,7 @@ export class GlobalRecording {
    */
   finish(): FlowV2 {
     this.endBursts();
+    if (this.secureOpen) this.closeSecure();
     if (!this.steps.length) throw new Fault('EMPTY_RECORDING', 'No supported actions were captured');
     if (this.truncated) this.warn('STEP_LIMIT', `The flow retains the first ${this.stepLimit} steps`);
     const id = randomUUID();

@@ -106,20 +106,71 @@ console.log(JSON.stringify({ version: '1', command, ok: true, data }));
   const valuesPath = join(dir, 'values.json');
   writeFileSync(valuesPath, JSON.stringify({ note: 'hello from cli' }));
 
+  const checkpointFlowPath = join(dir, 'flow-checkpoint.json');
+  writeFileSync(checkpointFlowPath, JSON.stringify({
+    version: 2,
+    id: 'cli-checkpoint',
+    name: 'CLI checkpoint',
+    appPaths: { [app]: appPath },
+    inputs: ['note'],
+    steps: [
+      {
+        id: 'launch', kind: 'launch_app', scope: { kind: 'app', app },
+        focusAfter: { kind: 'window', app, windowKey: 'notes', windowTitle },
+      },
+      {
+        id: 'type-note', kind: 'type',
+        scope: { kind: 'window', app, windowKey: 'notes', windowTitle },
+        target: { kind: 'element', role: 'textfield', name: 'notes' }, input: 'note',
+      },
+      {
+        id: 'auth', kind: 'manual_checkpoint',
+        scope: { kind: 'window', app, windowKey: 'notes', windowTitle },
+        triggerStepId: 'type-note', reason: 'secure_input',
+        resume: {
+          scope: { kind: 'window', app, windowKey: 'notes', windowTitle },
+          check: { kind: 'window_exists', equals: true },
+        },
+        timeoutMs: 120_000,
+      },
+      {
+        id: 'type-after', kind: 'type',
+        scope: { kind: 'window', app, windowKey: 'notes', windowTitle },
+        target: { kind: 'element', role: 'textfield', name: 'notes' }, input: 'note',
+      },
+    ],
+  }));
+
+  // The secure state probe is a stub helper: no tap, AX read or TCC prompt.
+  const probeLog = join(dir, 'secure-probe.log');
+  writeFileSync(probeLog, '');
+  const recorder = join(dir, 'cuekeeper-capture');
+  writeFileSync(recorder, `#!/usr/bin/env node
+const fs = require('node:fs');
+fs.appendFileSync(${JSON.stringify(probeLog)}, process.argv.slice(2).join(' ') + '\\n');
+console.log(JSON.stringify({ secure: false }));
+`, { mode: 0o700 });
+
   const env = {
     ...process.env,
     CUEKEEPER_AGENT_DESKTOP: driver,
     CUEKEEPER_APP_IDENTITY: identity,
+    CUEKEEPER_RECORDER: recorder,
     CUEKEEPER_STATE_DIR: join(dir, 'state'),
   };
-  const run = args => {
-    const result = spawnSync(process.execPath, [cliPath, ...args], { env, encoding: 'utf8', timeout: 30_000 });
+  const run = (args, input) => {
+    const result = spawnSync(process.execPath, [cliPath, ...args], {
+      env, encoding: 'utf8', timeout: 30_000, ...(input === undefined ? {} : { input }),
+    });
     return { code: result.status, stdout: result.stdout, stderr: result.stderr };
   };
   const calls = () => existsSync(driverLog)
     ? readFileSync(driverLog, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
     : [];
-  return { dir, flowPath, valuesPath, run, calls };
+  const probes = () => existsSync(probeLog)
+    ? readFileSync(probeLog, 'utf8').trim().split('\n').filter(Boolean)
+    : [];
+  return { dir, flowPath, checkpointFlowPath, valuesPath, run, calls, probes };
 }
 
 test('CLI: a v2 flow replays through the window-bound driver and writes a v2 report',
@@ -163,4 +214,43 @@ test('CLI: a v2 live run refuses to start without --foreground',
     assert.equal(result.code, 2);
     assert.equal(JSON.parse(result.stdout).error.code, 'FOREGROUND_REQUIRED');
     assert.deepEqual(cli.calls(), []);
+  });
+
+test('CLI: a checkpoint flow refuses --json before any desktop call',
+  { skip: process.platform !== 'darwin' }, t => {
+    const cli = fixture(t);
+    const result = cli.run([
+      'run', cli.checkpointFlowPath, '--foreground', '--inputs', cli.valuesPath, '--json',
+    ]);
+    assert.equal(result.code, 2);
+    assert.equal(JSON.parse(result.stdout).error.code, 'MANUAL_CHECKPOINT_REQUIRED');
+    assert.deepEqual(cli.calls(), []);
+    assert.deepEqual(cli.probes(), []);
+  });
+
+test('CLI: a checkpoint resumes after the operator types continue and reports metadata',
+  { skip: process.platform !== 'darwin' }, t => {
+    const cli = fixture(t);
+    const reportPath = join(cli.dir, 'checkpoint-report.json');
+    const result = cli.run([
+      'run', cli.checkpointFlowPath, '--foreground', '--inputs', cli.valuesPath, '--report', reportPath,
+    ], 'continue\n');
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stderr, /人工检查点 auth/);
+    assert.match(result.stderr, /continue/);
+
+    const report = JSON.parse(readFileSync(reportPath, 'utf8'));
+    assert.ok(reportV2Check.Check(report), JSON.stringify(report, null, 2));
+    assert.equal(report.status, 'passed');
+    assert.deepEqual(report.entries.map(entry => [entry.id, entry.status]), [
+      ['launch', 'passed'], ['type-note', 'passed'], ['auth', 'passed'], ['type-after', 'passed'],
+    ]);
+    assert.deepEqual(report.entries[2].checkpoint, {
+      reason: 'secure_input', triggerStepId: 'type-note', timeoutMs: 120_000, confirmedBy: 'operator',
+    });
+    assert.equal('input' in report.entries[2], false);
+    // The secure probe ran before every automatic input step and at the hand-off.
+    assert.ok(cli.probes().length >= 3);
+    assert.ok(cli.probes().every(line => line === '--secure-state'));
+    assert.equal(cli.calls().filter(call => call.command === 'type').length, 2);
   });

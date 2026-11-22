@@ -248,6 +248,7 @@ final class Capture {
         }
         var axPid: Int32?
         var role: String?
+        var subrole: String?
         var name: String?
         var windowTitle = stackTitle
         var pressable = false
@@ -260,6 +261,7 @@ final class Capture {
                 AXUIElementGetPid(hit, &elementPid)
                 axPid = elementPid
                 role = axString(hit, kAXRoleAttribute as String)
+                subrole = axString(hit, kAXSubroleAttribute as String)
                 name = axString(hit, kAXTitleAttribute as String) ?? axString(hit, kAXDescriptionAttribute as String)
                 if let axWindow = axElement(hit, kAXWindowAttribute as String) {
                     windowTitle = axString(axWindow, kAXTitleAttribute as String) ?? windowTitle
@@ -276,8 +278,14 @@ final class Capture {
         if let role { owner["role"] = role }
         if let name { owner["name"] = name }
         owner["pressable"] = pressable
+        if isSecurityAgent(stackApp) { owner["securityAgent"] = true }
 
-        let secure = checkSecureInput()
+        var secureEvidence: [String] = []
+        if IsSecureEventInputEnabled() { secureEvidence.append("system_secure_input") }
+        // A protected control can receive input before the system-wide flag is
+        // set; both are evidence, and neither reads the control's value.
+        if secureControl(role: role, subrole: subrole) { secureEvidence.append("secure_control") }
+        let secure = !secureEvidence.isEmpty
         var decision = "record"
         var gapCode: String?
         if secure {
@@ -301,8 +309,20 @@ final class Capture {
             "focusGeneration": focusGeneration, "secure": secure, "owner": owner,
             "decision": decision,
         ]
+        if !secureEvidence.isEmpty { evidence["secureEvidence"] = secureEvidence }
         if let gapCode { evidence["gapCode"] = gapCode }
         return evidence
+    }
+
+    /** The system authorization UI is not the app that asked for the password. */
+    private func isSecurityAgent(_ app: String?) -> Bool {
+        guard let app else { return false }
+        return app == "com.apple.SecurityAgent"
+    }
+
+    /** AX protects a control when its role or subrole names a secure input. */
+    private func secureControl(role: String?, subrole: String?) -> Bool {
+        (role ?? "").contains("Secure") || (subrole ?? "").contains("Secure")
     }
 
     private func emitGap(_ code: String, detail: String? = nil) {
@@ -320,7 +340,7 @@ final class Capture {
         guard let element = axElement(axApp, kAXFocusedUIElementAttribute as String) else { return false }
         let role = axString(element, kAXRoleAttribute as String) ?? ""
         let subrole = axString(element, kAXSubroleAttribute as String) ?? ""
-        return role.contains("Secure") || subrole.contains("Secure")
+        return secureControl(role: role, subrole: subrole)
     }
 
     /** The bound instance, or nil when no path identity was requested. */
@@ -690,14 +710,26 @@ final class Capture {
             (.maskCommand, "meta"), (.maskControl, "ctrl"), (.maskAlternate, "alt"), (.maskShift, "shift")
         ]
         let modifiers = flags.compactMap { flag, name in event.flags.contains(flag) ? name : nil }
-        // Secure content is never read. One secure event opens the interval;
-        // the TypeScript engine drops everything inside it and leaves a gap.
-        if global, let frontmost,
-           secureInput || focusedElementIsSecure(frontmost) {
-            var payload: [String: Any] = ["kind": "text", "secure": true, "t": t, "seen": seen]
-            addFocusEvidence(&payload)
-            emit(payload)
-            return
+        // Secure content is never read. One secure event opens the interval; the
+        // helper reports why it was secure and the TypeScript engine folds the
+        // interval into one manual checkpoint without keeping any content.
+        if global, let frontmost {
+            let secureControl = focusedElementIsSecure(frontmost)
+            if secureInput || secureControl {
+                var evidence: [String] = []
+                if secureInput { evidence.append("system_secure_input") }
+                if secureControl { evidence.append("secure_control") }
+                var payload: [String: Any] = [
+                    "kind": "text", "secure": true, "secureEvidence": evidence,
+                    "t": t, "seen": seen,
+                ]
+                addFocusEvidence(&payload)
+                // addFocusEvidence copies only the system-wide flag; a protected
+                // control stays secure even when that flag is false.
+                payload["secure"] = true
+                emit(payload)
+                return
+            }
         }
         let special = namedKeys[code]
         if special == nil || special == "space" {
@@ -751,6 +783,7 @@ final class Capture {
         if let focusInstance { owner["processInstance"] = focusInstance }
         if let focusWindowNumber { owner["windowNumber"] = focusWindowNumber }
         if let focusTitle { owner["windowTitle"] = focusTitle }
+        if isSecurityAgent(focusApp) { owner["securityAgent"] = true }
         return owner
     }
 
@@ -1108,6 +1141,12 @@ struct RecorderCommand {
             let accessibility = AXIsProcessTrusted()
             let inputMonitoring = CGPreflightListenEventAccess()
             print("{\"accessibility\":\(accessibility),\"inputMonitoring\":\(inputMonitoring)}")
+            exit(0)
+        }
+        // Read-only secure input probe for replay hand-off verification. It
+        // starts no tap, reads no accessibility tree and needs no TCC grant.
+        if args.count == 2, args[1] == "--secure-state" {
+            print("{\"secure\":\(IsSecureEventInputEnabled())}")
             exit(0)
         }
         let global = args.count >= 2 && args[1] == "--global"

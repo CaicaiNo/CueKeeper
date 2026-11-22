@@ -270,10 +270,11 @@ function harness(t, options = {}) {
     inputs: overrides.inputs ?? inputs,
     ...((overrides.launchTimeoutMs ?? options.launchTimeoutMs) === undefined
       ? {} : { launchTimeoutMs: overrides.launchTimeoutMs ?? options.launchTimeoutMs }),
+    ...(overrides.checkpoints === undefined ? {} : { checkpoints: overrides.checkpoints }),
+    ...(overrides.secureInputActive === undefined ? {} : { secureInputActive: overrides.secureInputActive }),
   });
   return { dir, world, controller, run };
 }
-
 const callsOf = (world, name) => world.state.calls.filter(call => call[0] === name);
 const entry = (report, id) => report.entries.find(item => item.id === id);
 
@@ -726,4 +727,108 @@ test('P2 refuses raw coordinates, undeclared stages and missing input values', a
   assert.equal(entry(missingReport, 'type-note').code, 'INPUT_MISSING');
   assert.deepEqual(callsOf(missing.world, 'type'), []);
   assert.deepEqual(callsOf(missing.world, 'focusWindow'), []);
+});
+
+/** A window step, a secure input checkpoint, then a later window step. */
+function checkpointFlow(timeoutMs = 120_000) {
+  return parseFlowV2({
+    version: 2,
+    id: 'secure-install',
+    name: 'Secure install',
+    appPaths: { [textedit]: appPaths[textedit] },
+    inputs: ['note'],
+    steps: [
+      { id: 'launch', kind: 'launch_app', scope: { kind: 'app', app: textedit }, focusAfter: notesScope },
+      {
+        id: 'install', kind: 'click', scope: notesScope,
+        target: { kind: 'element', role: 'button', name: 'Continue' },
+      },
+      {
+        id: 'auth', kind: 'manual_checkpoint', scope: notesScope, triggerStepId: 'install',
+        reason: 'secure_input',
+        resume: { scope: notesScope, check: { kind: 'window_exists', equals: true } },
+        timeoutMs,
+      },
+      {
+        id: 'type-note', kind: 'type', scope: notesScope,
+        target: { kind: 'element', role: 'textfield', name: 'notes' }, input: 'note',
+      },
+    ],
+  });
+}
+
+/** A channel and probe pair that models the operator finishing the auth dialog. */
+function operator() {
+  const state = { secure: false, announced: 0, confirmed: 0, cancelled: 0 };
+  const channel = {
+    async announce() { state.announced += 1; state.secure = true; },
+    async confirm() { state.confirmed += 1; state.secure = false; return 'continue'; },
+  };
+  return { state, channel, secureInputActive: async () => state.secure };
+}
+
+test('a checkpoint pauses, the operator confirms, and later steps run', async t => {
+  const world = harness(t);
+  const person = operator();
+  const report = await world.run(checkpointFlow(), {
+    checkpoints: person.channel,
+    secureInputActive: person.secureInputActive,
+  });
+  assert.equal(report.status, 'passed');
+  assert.deepEqual(report.entries.map(item => [item.id, item.status]), [
+    ['launch', 'passed'], ['install', 'passed'], ['auth', 'passed'], ['type-note', 'passed'],
+  ]);
+  assert.deepEqual(entry(report, 'auth').checkpoint, {
+    reason: 'secure_input', triggerStepId: 'install', timeoutMs: 120_000, confirmedBy: 'operator',
+  });
+  assert.equal(person.state.announced, 1);
+  assert.equal(person.state.confirmed, 1);
+  // The operator's work never becomes a recorded input: only the flow's own
+  // parameter is typed after the hand-off.
+  assert.deepEqual(callsOf(world.world, 'type'), [['type', '@w21:e1', 'draft text']]);
+  assert.ok(reportV2Check.Check(report));
+});
+
+test('a cancelled checkpoint blocks and sends no later step', async t => {
+  const world = harness(t);
+  let secure = false;
+  const report = await world.run(checkpointFlow(), {
+    checkpoints: {
+      async announce() { secure = true; },
+      async confirm() { return 'cancel'; },
+    },
+    secureInputActive: async () => secure,
+  });
+  assert.equal(report.status, 'blocked');
+  assert.equal(entry(report, 'auth').status, 'blocked');
+  assert.equal(entry(report, 'auth').code, 'MANUAL_CHECKPOINT_CANCELLED');
+  assert.deepEqual(entry(report, 'auth').checkpoint, {
+    reason: 'secure_input', triggerStepId: 'install', timeoutMs: 120_000,
+  });
+  assert.equal(entry(report, 'type-note').status, 'skipped');
+  assert.deepEqual(callsOf(world.world, 'type'), []);
+});
+
+test('a checkpoint without an operator channel blocks before the hand-off', async t => {
+  const world = harness(t);
+  const report = await world.run(checkpointFlow(), { secureInputActive: async () => false });
+  assert.equal(report.status, 'blocked');
+  assert.equal(entry(report, 'auth').code, 'MANUAL_CHECKPOINT_REQUIRED');
+  assert.equal(entry(report, 'type-note').status, 'skipped');
+});
+
+test('an unplanned secure input stops an automatic step before it types', async t => {
+  const world = harness(t);
+  const flow = parseFlowV2({
+    version: 2, id: 'secure-auto', name: 'Secure automatic step',
+    appPaths: { [textedit]: appPaths[textedit] }, inputs: ['note'],
+    steps: [{
+      id: 'type-note', kind: 'type', scope: notesScope,
+      target: { kind: 'element', role: 'textfield', name: 'notes' }, input: 'note',
+    }],
+  });
+  const report = await world.run(flow, { secureInputActive: async () => true });
+  assert.equal(report.status, 'blocked');
+  assert.equal(entry(report, 'type-note').code, 'SECURE_INPUT');
+  assert.deepEqual(callsOf(world.world, 'type'), []);
 });
