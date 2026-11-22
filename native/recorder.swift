@@ -354,6 +354,8 @@ final class Capture {
      * named by its value; the field under the pointer is often anonymous.
      */
     private func pointerIdentity(_ hit: AXUIElement) -> PointerIdentity? {
+        // A file item is named by its file, not by the columns its row shows.
+        if let identity = fileItemIdentity(hit) { return identity }
         let role = axString(hit, kAXRoleAttribute as String)
         let element = PointerElement(role: role, name: pointerName(hit, role: role))
         // The common case is a named hit; do not touch its ancestry then.
@@ -377,6 +379,77 @@ final class Capture {
             depth += 1
         }
         return PointerIdentityResolver.resolve(hit: element, ancestors: ancestors)
+    }
+
+    /**
+     * The file item a click landed on, named by the file itself.
+     *
+     * A list view row's own name joins the columns it shows ("今天 21:36 616
+     * 字节 JSON"), and the field under the pointer is anonymous. The file's
+     * display name comes from AXFilename, then its file URL, then the text
+     * field in the row's first (name) column. Nothing else names the item: a
+     * row without a file keeps whatever proof the generic path has.
+     */
+    private func fileItemIdentity(_ hit: AXUIElement) -> PointerIdentity? {
+        var node: AXUIElement? = hit
+        var row: AXUIElement?
+        var filename: String?
+        var urlName: String?
+        var depth = 0
+        while let current = node, depth < 6 {
+            let role = axString(current, kAXRoleAttribute as String)
+            // A window or application title is a scope, never a target.
+            if role == "AXWindow" || role == "AXApplication" { break }
+            if filename == nil { filename = nonEmpty(axString(current, kAXFilenameAttribute as String)) }
+            if urlName == nil {
+                urlName = axString(current, kAXURLAttribute as String).flatMap(fileURLName)
+            }
+            if row == nil, role == "AXOutlineRow" || role == "AXRow" { row = current }
+            node = axElement(current, kAXParentAttribute as String)
+            depth += 1
+        }
+        let column = row.flatMap(nameColumnValue)
+        guard let name = PointerFileItem.name(filename: filename, url: urlName, column: column) else { return nil }
+        // The row is the item a replay clicks; without one the hit is all we have.
+        let carrier = row ?? hit
+        guard let role = axString(carrier, kAXRoleAttribute as String), !role.isEmpty else { return nil }
+        return PointerIdentity(role: PointerIdentityResolver.snapshotRole(role), name: name)
+    }
+
+    /** The text a row's first (name) column shows; later columns are descriptions. */
+    private func nameColumnValue(_ row: AXUIElement) -> String? {
+        let cells = axElements(row, kAXChildrenAttribute as String).filter {
+            axString($0, kAXRoleAttribute as String) == "AXCell"
+        }
+        // A single cell is an icon or a sidebar row, whose own name already holds
+        // the item. A list row has one cell per column and names nothing itself.
+        guard cells.count >= 2, let cell = cells.first else { return nil }
+        if let value = nonEmpty(axString(cell, kAXValueAttribute as String)) { return value }
+        for child in axElements(cell, kAXChildrenAttribute as String) {
+            let role = axString(child, kAXRoleAttribute as String)
+            guard role == "AXTextField" || role == "AXStaticText" || role == "AXText" else { continue }
+            if let label = pointerName(child, role: role) { return label }
+            if let value = nonEmpty(axString(child, kAXValueAttribute as String)) { return value }
+        }
+        return nil
+    }
+
+    /** The display name in a file URL, or nil when it names no local file. */
+    private func fileURLName(_ raw: String) -> String? {
+        guard let url = URL(string: raw), url.isFileURL else { return nil }
+        let name = url.lastPathComponent
+        return name.isEmpty ? nil : name
+    }
+
+    private func nonEmpty(_ value: String?) -> String? {
+        guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return value
+    }
+
+    private func axElements(_ element: AXUIElement, _ name: String) -> [AXUIElement] {
+        guard let value = axAttribute(element, name), CFGetTypeID(value) == CFArrayGetTypeID(),
+              let array = value as? [AXUIElement] else { return [] }
+        return array
     }
 
     /** What an element names itself by; a static text label uses its value. */

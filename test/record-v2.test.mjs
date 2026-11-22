@@ -379,6 +379,46 @@ test('an item label that carries its name in its value still names the click', a
   assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'statictext', name: 'manifest.json' });
 });
 
+test('a Finder list view click names the file, not its date, size or kind column', async () => {
+  const flow = (await recordFixture('finder-list-view-file-click')).finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
+  // The row's own name joins every column; the click must record the file the
+  // name column shows, or replay would click at a coordinate instead.
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'treeitem', name: 'manifest.json' });
+  assert.equal(flow.steps[0].count, 2);
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+test('a click on a Finder list view date column still names the file', async () => {
+  const data = fixture('finder-list-view-file-click');
+  for (const event of data.events) {
+    if (event.kind === 'click') event.point = [360, 50];
+  }
+  const recording = new GlobalRecording(readerFor(data), { now: () => NOW });
+  for (const event of data.events) await recording.add(parseCaptureEvent(event));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'treeitem', name: 'manifest.json' });
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_FILE_CLICK'), false);
+});
+
+test('an icon view item keeps the name its single-cell row carries', async () => {
+  const data = fixture('finder-folder-file-click');
+  const row = data.snapshots['11'].tree.children[0].children[0];
+  // Icon view: the row names the file, and its one cell only wraps the icon.
+  row.children = [{
+    role: 'cell', ref: '@w11:e4', bounds: { x: 20, y: 42, width: 60, height: 16 },
+    states: [], secure: false,
+    children: [{
+      role: 'image', ref: '@w11:e7', bounds: { x: 20, y: 42, width: 16, height: 16 },
+      states: [], secure: false, children: [],
+    }],
+  }];
+  const recording = new GlobalRecording(readerFor(data), { now: () => NOW });
+  for (const event of data.events) await recording.add(parseCaptureEvent(event));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'row', name: 'manifest.json' });
+});
+
 test('a Finder click on an item with no name anywhere keeps its point and warns', async () => {
   const data = fixture('finder-folder-file-click');
   const outline = data.snapshots['11'].tree.children[0];

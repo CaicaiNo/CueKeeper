@@ -17,12 +17,41 @@ struct PointerIdentity: Equatable {
     var name: String?
 }
 
+/// The file a click landed on, as the accessibility attributes describe it.
+///
+/// Finder's list view names a whole row by joining its columns ("今天 21:36 616
+/// 字节 JSON"), so the row's own name is a description, never a file. The file
+/// name comes from the filesystem attributes first and from the text field in
+/// the row's first (name) column second.
+enum PointerFileItem {
+    static let maxNameLength = 256
+
+    /// The display name of the file: AXFilename, then the file URL's last path
+    /// component, then the name column's text. Nil when the item names no file,
+    /// so the caller records a point instead of the column description.
+    static func name(filename: String?, url: String?, column: String?) -> String? {
+        for candidate in [filename, url, column] {
+            guard let candidate else { continue }
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty && trimmed.count <= maxNameLength { return trimmed }
+        }
+        return nil
+    }
+}
+
 enum PointerIdentityResolver {
     /// Roles that stand for the clicked item rather than for a wrapper.
     static let itemRoles: Set<String> = [
         "AXCell", "AXRow", "AXListItem", "AXOutlineRow", "AXTreeItem",
         "AXStaticText", "AXText", "AXImage", "AXLink",
     ]
+
+    /// The driver's spelling for an item role. A window tree calls an outline
+    /// row `treeitem`, so a target the helper named must use that spelling to
+    /// be found again at replay.
+    static func snapshotRole(_ role: String) -> String {
+        role == "AXOutlineRow" ? "treeitem" : role
+    }
 
     /// The hit names itself when it can. Otherwise the nearest named item above
     /// it does; a wrapper such as AXToolbar, AXGroup or AXWindow never does. A

@@ -1,0 +1,271 @@
+{
+  "events": [
+    {
+      "kind": "focus",
+      "t": 50,
+      "seen": 1700000000000,
+      "focusGeneration": 1,
+      "secure": false,
+      "owner": {
+        "app": "com.apple.finder",
+        "pid": 100,
+        "processInstance": 1700000000000,
+        "windowNumber": 11,
+        "windowTitle": "cuekeeper-demo"
+      }
+    },
+    {
+      "kind": "click",
+      "t": 100,
+      "seen": 1700000000000,
+      "point": [60, 50],
+      "count": 1,
+      "focusGeneration": 1,
+      "secure": false,
+      "decision": "record",
+      "owner": {
+        "app": "com.apple.finder",
+        "pid": 100,
+        "processInstance": 1700000000000,
+        "windowNumber": 11,
+        "windowTitle": "cuekeeper-demo",
+        "pressable": false
+      }
+    },
+    {
+      "kind": "click",
+      "t": 250,
+      "seen": 1700000000000,
+      "point": [61, 51],
+      "count": 2,
+      "focusGeneration": 1,
+      "secure": false,
+      "decision": "record",
+      "owner": {
+        "app": "com.apple.finder",
+        "pid": 100,
+        "processInstance": 1700000000000,
+        "windowNumber": 11,
+        "windowTitle": "cuekeeper-demo",
+        "pressable": false
+      }
+    }
+  ],
+  "snapshots": {
+    "11": {
+      "windowId": "w-11",
+      "tree": {
+        "role": "window",
+        "name": "cuekeeper-demo",
+        "ref": "@w11:e1",
+        "bounds": { "x": 0, "y": 0, "width": 800, "height": 600 },
+        "states": [],
+        "secure": false,
+        "children": [
+          {
+            "role": "outline",
+            "name": "列表视图",
+            "ref": "@w11:e2",
+            "bounds": { "x": 0, "y": 30, "width": 780, "height": 500 },
+            "states": [],
+            "secure": false,
+            "children": [
+              {
+                "role": "treeitem",
+                "name": "今天 21:36 616 字节 JSON",
+                "ref": "@w11:e3",
+                "bounds": { "x": 0, "y": 40, "width": 780, "height": 20 },
+                "states": [],
+                "secure": false,
+                "children": [
+                  {
+                    "role": "cell",
+                    "ref": "@w11:e4",
+                    "bounds": { "x": 26, "y": 40, "width": 262, "height": 20 },
+                    "states": [],
+                    "secure": false,
+                    "children": [
+                      {
+                        "role": "image",
+                        "ref": "@w11:e5",
+                        "bounds": { "x": 26, "y": 42, "width": 16, "height": 16 },
+                        "states": [],
+                        "secure": false,
+                        "children": []
+                      },
+                      {
+                        "role": "textfield",
+                        "value": "manifest.json",
+                        "ref": "@w11:e6",
+                        "bounds": { "x": 46, "y": 41, "width": 87, "height": 18 },
+                        "states": [],
+                        "secure": false,
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "role": "cell",
+                    "name": "今天 21:36",
+                    "ref": "@w11:e7",
+                    "bounds": { "x": 288, "y": 40, "width": 161, "height": 20 },
+                    "states": [],
+                    "secure": false,
+                    "children": [
+                      {
+                        "role": "statictext",
+                        "name": "今天 21:36",
+                        "value": "今天 21:36",
+                        "ref": "@w11:e8",
+                        "bounds": { "x": 294, "y": 41, "width": 149, "height": 18 },
+                        "states": [],
+                        "secure": false,
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "role": "cell",
+                    "name": "616 字节",
+                    "ref": "@w11:e9",
+                    "bounds": { "x": 449, "y": 40, "width": 97, "height": 20 },
+                    "states": [],
+                    "secure": false,
+                    "children": [
+                      {
+                        "role": "statictext",
+                        "name": "616 字节",
+                        "value": "616 字节",
+                        "ref": "@w11:e10",
+                        "bounds": { "x": 484, "y": 41, "width": 56, "height": 18 },
+                        "states": [],
+                        "secure": false,
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "role": "cell",
+                    "name": "JSON",
+                    "ref": "@w11:e11",
+                    "bounds": { "x": 546, "y": 40, "width": 121, "height": 20 },
+                    "states": [],
+                    "secure": false,
+                    "children": [
+                      {
+                        "role": "statictext",
+                        "name": "JSON",
+                        "value": "JSON",
+                        "ref": "@w11:e12",
+                        "bounds": { "x": 552, "y": 41, "width": 37, "height": 18 },
+                        "states": [],
+                        "secure": false,
+                        "children": []
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "role": "treeitem",
+                "name": "1980年1月1日 00:00 32 KB HTML文本",
+                "ref": "@w11:e13",
+                "bounds": { "x": 0, "y": 60, "width": 780, "height": 20 },
+                "states": [],
+                "secure": false,
+                "children": [
+                  {
+                    "role": "cell",
+                    "ref": "@w11:e14",
+                    "bounds": { "x": 26, "y": 60, "width": 262, "height": 20 },
+                    "states": [],
+                    "secure": false,
+                    "children": [
+                      {
+                        "role": "image",
+                        "ref": "@w11:e15",
+                        "bounds": { "x": 26, "y": 62, "width": 16, "height": 16 },
+                        "states": [],
+                        "secure": false,
+                        "children": []
+                      },
+                      {
+                        "role": "textfield",
+                        "value": "index.html",
+                        "ref": "@w11:e16",
+                        "bounds": { "x": 46, "y": 61, "width": 69, "height": 18 },
+                        "states": [],
+                        "secure": false,
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "role": "cell",
+                    "name": "1980年1月1日 00:00",
+                    "ref": "@w11:e17",
+                    "bounds": { "x": 288, "y": 60, "width": 161, "height": 20 },
+                    "states": [],
+                    "secure": false,
+                    "children": [
+                      {
+                        "role": "statictext",
+                        "name": "1980年1月1日 00:00",
+                        "value": "1980年1月1日 00:00",
+                        "ref": "@w11:e18",
+                        "bounds": { "x": 294, "y": 61, "width": 149, "height": 18 },
+                        "states": [],
+                        "secure": false,
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "role": "cell",
+                    "name": "32 KB",
+                    "ref": "@w11:e19",
+                    "bounds": { "x": 449, "y": 60, "width": 97, "height": 20 },
+                    "states": [],
+                    "secure": false,
+                    "children": [
+                      {
+                        "role": "statictext",
+                        "name": "32 KB",
+                        "value": "32 KB",
+                        "ref": "@w11:e20",
+                        "bounds": { "x": 484, "y": 61, "width": 39, "height": 18 },
+                        "states": [],
+                        "secure": false,
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "role": "cell",
+                    "name": "HTML文本",
+                    "ref": "@w11:e21",
+                    "bounds": { "x": 546, "y": 60, "width": 121, "height": 20 },
+                    "states": [],
+                    "secure": false,
+                    "children": [
+                      {
+                        "role": "statictext",
+                        "name": "HTML文本",
+                        "value": "HTML文本",
+                        "ref": "@w11:e22",
+                        "bounds": { "x": 552, "y": 61, "width": 66, "height": 18 },
+                        "states": [],
+                        "secure": false,
+                        "children": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

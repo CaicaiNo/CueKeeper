@@ -42,7 +42,7 @@ struct RecordingPointerTests {
             }
         }
         let count = cases.count + (try testSequences(emitTrace: emitTrace)) + testHover() + testGlobalClickEvidence()
-            + testPointerIdentity()
+            + testPointerIdentity() + testFileItemIdentity()
         if !emitTrace { print("Recording pointer: \(count)/\(count) passed") }
     }
 
@@ -282,6 +282,29 @@ struct RecordingPointerTests {
             == PointerIdentity(role: "AXTextField", name: nil))
         precondition(PointerIdentityResolver.resolve(hit: PointerElement(role: nil, name: nil), ancestors: []) == nil)
         return 5
+    }
+
+    /// A list view row's own name joins its columns; only the file itself names
+    /// the item, so the date/size/kind description never becomes a target.
+    private static func testFileItemIdentity() -> Int {
+        // AXFilename is the file's display name and wins over everything else.
+        precondition(PointerFileItem.name(filename: "manifest.json", url: "index.html", column: "今天 21:36")
+            == "manifest.json")
+        // Without it, the file URL's last path component is the same name.
+        precondition(PointerFileItem.name(filename: nil, url: "manifest.json", column: "今天 21:36")
+            == "manifest.json")
+        // The name column's text field is the remaining source.
+        precondition(PointerFileItem.name(filename: nil, url: nil, column: "manifest.json") == "manifest.json")
+        // A row that names no file stays unnamed instead of taking its columns.
+        precondition(PointerFileItem.name(filename: nil, url: nil, column: nil) == nil)
+        precondition(PointerFileItem.name(filename: "  ", url: "", column: "\n") == nil)
+        // A value is a display name, never a document.
+        precondition(PointerFileItem.name(filename: nil, url: nil, column: String(repeating: "a", count: 257)) == nil)
+        // Outline rows are treeitems in every window tree, so replay finds them.
+        precondition(PointerIdentityResolver.snapshotRole("AXOutlineRow") == "treeitem")
+        precondition(PointerIdentityResolver.snapshotRole("AXRow") == "AXRow")
+        precondition(PointerIdentityResolver.snapshotRole("AXCell") == "AXCell")
+        return 9
     }
 
     /// Drag sampling, endpoints and duration are asserted directly: a wrong

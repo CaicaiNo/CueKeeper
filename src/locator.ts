@@ -116,9 +116,15 @@ const itemRoles = new Set([
 
 /**
  * Item roles whose value is the visible label, not typed content. An editable
- * field's value is content and never becomes a target name.
+ * field's value is content and never becomes a target name on its own.
  */
 const labelValueRoles = new Set(['statictext', 'text']);
+
+/** Roles that stand for a whole row: in a list view, one file per row. */
+const rowRoles = new Set(['row', 'outlinerow', 'treeitem', 'outlineitem']);
+
+/** Roles that carry a visible label inside a row's name column. */
+const columnLabelRoles = new Set(['statictext', 'text', 'textfield']);
 
 /**
  * The name an element can be re-addressed by. An item label carries its name in
@@ -134,6 +140,36 @@ function nameOf(node: Node, item: boolean): string {
   return value === '' || value.length > 256 ? '' : value;
 }
 
+/** The file name a row's first cell shows; an editable field holds it in its value. */
+function columnLabel(cell: Node): string {
+  const own = (cell.name ?? '').trim();
+  if (own !== '') return own;
+  const pending = [...cell.children];
+  while (pending.length) {
+    const node = pending.shift()!;
+    if (columnLabelRoles.has(node.role)) {
+      const name = (node.name ?? '').trim();
+      if (name !== '') return name;
+      const value = (node.value ?? node.text ?? '').trim();
+      if (value !== '' && value.length <= 256) return value;
+    }
+    pending.push(...node.children);
+  }
+  return '';
+}
+
+/**
+ * The name a list row addresses, taken from its first cell only. A list view
+ * gives every row one cell per column, and the row's own name is the columns
+ * joined together ("今天 21:36 616 字节 JSON"). A row with one cell (icon view,
+ * sidebar) already names itself and is left alone.
+ */
+function listRowColumn(row: Node): { cells: Node[]; label: string } | undefined {
+  const cells = row.children.filter(child => child.role === 'cell');
+  if (cells.length < 2) return undefined;
+  return { cells, label: columnLabel(cells[0]) };
+}
+
 /**
  * The name every node in one tree is addressed by. Recording a target and
  * matching it at replay share this single rule, so an item label named by its
@@ -141,12 +177,18 @@ function nameOf(node: Node, item: boolean): string {
  */
 export function elementNames(tree: Node): Map<Node, string> {
   const names = new Map<Node, string>();
-  function visit(node: Node, item: boolean) {
+  function visit(node: Node, item: boolean, described: boolean) {
     const withinItem = item || itemContainers.has(node.role);
-    names.set(node, nameOf(node, withinItem));
-    for (const child of node.children) visit(child, withinItem);
+    const columns = rowRoles.has(node.role) ? listRowColumn(node) : undefined;
+    // A list row is named by its file column, never by its date, size or kind.
+    const name = described ? '' : columns ? columns.label : nameOf(node, withinItem);
+    names.set(node, name);
+    for (const child of node.children) {
+      // Every other column describes the file; its text is not its name.
+      visit(child, withinItem, described || (!!columns && child.role === 'cell' && child !== columns.cells[0]));
+    }
   }
-  visit(tree, false);
+  visit(tree, false, false);
   return names;
 }
 

@@ -12,7 +12,7 @@ HAOC-108 · 设计评审稿 · 基线 `3ada404`
 | --- | --- | --- |
 | 键盘 | 事件时刻的前台 PID、AX focused window 和 focused element。事件提供目标 PID 时要求一致 | 只接受可证明落到对应窗口的输入。Cmd+Tab 等切换在最终 App 和窗口得到确认后形成导航步骤，候选经过的 App 无步骤 |
 | 点击、悬停、滚动 | 从事件点进行原生命中测试，核对 AX owner PID、窗口号、层级与上层遮挡 | 鼠标按下冻结作用域。已证明只激活窗口的点击生成导航。有证据交付给控件的点击保留为点击。无法区分时记缺口，避免回放时预聚焦改变第一次点击的含义 |
-| 点击目标身份 | 命中元素自身有名字就用它；否则沿 item 角色（cell/row/statictext/image）向上找有名字的项，文件项标签的名字也可以来自其 value | 只有角色没有名字的点击不是目标：记坐标并告警 `UNTARGETED_FILE_CLICK` / `UNTARGETED_ELEMENT_CLICK`，回放前必须改成有名字的元素；回放遇到无名元素目标按 `AMBIGUOUS` 拒绝，不会静默点同角色的其他元素 |
+| 点击目标身份 | 命中元素自身有名字就用它；否则沿 item 角色（cell/row/statictext/image）向上找有名字的项，文件项标签的名字也可以来自其 value。清单视图的文件项只由文件本身命名：`AXFilename`（树的等价物是名称列）优先，其次文件 URL，最后名称列里的文本；日期/大小/种类列以及拼接各列的 row 名称都不是文件身份 | 只有角色没有名字的点击不是目标：记坐标并告警 `UNTARGETED_FILE_CLICK` / `UNTARGETED_ELEMENT_CLICK`，回放前必须改成有名字的元素；回放遇到无名元素目标按 `AMBIGUOUS` 拒绝，不会静默点同角色的其他元素 |
 | 拖拽 | 记录按下和抬起的 owner / window，拖拽期间绑定原窗口 | v2 先支持单窗口内拖拽。跨窗口、跨 App 拖放记 `CROSS_SCOPE_GESTURE` |
 | 焦点变化 | `NSWorkspace` 激活通知、AX focused window 变化和原生窗口清单 | 同 App 切窗也推进焦点世代。由上一步引发且可验证的切换用 `focusAfter`，有明确用户切换证据的生成独立步骤。仅有迟到通知时记缺口 |
 
