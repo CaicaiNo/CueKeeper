@@ -30,9 +30,27 @@ const KIND_ICONS = {
   open_system_surface: 'layers', surface_press: 'pointer', manual_checkpoint: 'checkCircle', gap: 'list',
 };
 
+/** The color a kind is read as: primary action, secondary text, accent key. */
+const KIND_TONES = {
+  click: 'primary', doubleClick: 'primary', tripleClick: 'primary', rightClick: 'primary', hover: 'primary',
+  surface_press: 'primary', scroll: 'info', drag: 'info', paste: 'secondary', type: 'secondary',
+  key: 'accent', wait: 'info', assert: 'success', behavior: 'secondary', shell: 'neutral',
+  launch_app: 'ghost', activate_app: 'ghost', focus_window: 'ghost', open_system_surface: 'ghost',
+  manual_checkpoint: 'warning', gap: 'warning',
+};
+
+const STATUS_TONES = { resolved: 'info', passed: 'success', failed: 'error', blocked: 'warning', skipped: 'ghost' };
+const statusBadge = status =>
+  `run-status badge badge-soft badge-sm badge-${STATUS_TONES[status] ?? 'ghost'} ${status}`;
+
+const STATE_TONES = { inferred: 'warning', confirmed: 'success', invalid: 'ghost', deleted: 'ghost' };
+const stateChip = (state, text) => el('span', {
+  className: `state-chip badge badge-soft badge-sm badge-${STATE_TONES[state] ?? 'ghost'} ${state}`,
+}, text);
+
 function kindChip(action) {
   const kind = typeof action === 'string' ? action : actionKind(action);
-  return el('span', { className: 'kind', title: kind },
+  return el('span', { className: `kind badge badge-soft badge-sm badge-${KIND_TONES[kind] ?? 'ghost'}`, title: kind },
     icon(KIND_ICONS[kind] ?? 'list', 14), el('span', {}, KIND_LABELS[kind] ?? kind));
 }
 
@@ -161,12 +179,12 @@ function actionLabel(action) {
 function infoList(entries, className) {
   return el('dl', { className }, ...entries.map(([label, value]) => {
     const pair = [el('dt', {}, label), el('dd', {}, String(value))];
-    return className === 'stats' ? el('div', {}, ...pair) : pair;
+    return className === 'session-stats' ? el('div', {}, ...pair) : pair;
   }).flat());
 }
 
 function status(message, type = '') {
-  $('status').className = `status ${type}`;
+  $('status').className = `status-bar ${type}`;
   $('status').textContent = message;
 }
 
@@ -214,15 +232,15 @@ function renderSummary() {
     windows.add(JSON.stringify([row.app, row.window]));
   }
   const timing = { capture: '录制时间', replay: '回放时间', 'dry-run': '离线验证时间' }[session.timingSource];
-  $('summary').replaceChildren(
+  $('summary').replaceChildren(...[
     muted(short(session.directory.split('/').at(-1), 48)),
     infoList([['时长', duration(session.durationMs)], ['动作', session.timeline.length],
       ['应用', apps.size], [session.version === 2 ? '作用域' : '窗口',
-        session.version === 2 ? groups.size : windows.size]], 'stats'),
+        session.version === 2 ? groups.size : windows.size]], 'session-stats'),
     muted(timing ?? '原始录制缺少时间数据'),
     session.startedAt ? el('time', { className: 'muted', dateTime: session.startedAt },
       session.startedAt.slice(0, 19).replace('T', ' ') + ' UTC') : undefined,
-  );
+  ].filter(Boolean));
   const picker = $('app-picker');
   picker.disabled = false;
   const missing = Boolean(state.app && appMissing(state.app));
@@ -285,7 +303,7 @@ function renderWaitCandidates(session) {
     '确认后写入新的 flow 副本，不会修改当前 flow.json，也不会启动桌面。');
   return [summary, ...candidates.map(candidate => el('article', { className: 'condition' },
     el('div', { className: 'condition-head' },
-      el('span', { className: 'state-chip inferred' }, candidate.ready ? '待确认' : '需补充条件'),
+      stateChip('inferred', candidate.ready ? '待确认' : '需补充条件'),
       el('strong', {}, waitEventLabels[candidate.eventKind] ?? candidate.eventKind)),
     el('p', { className: 'muted' }, `接在 ${candidate.afterStepId} 之后 · ${candidate.reason}`),
     el('p', { className: 'muted' }, candidate.step ? actionLabel(candidate.step) : '还没有可写入的等待条件。'),
@@ -324,7 +342,7 @@ function renderSetup() {
     const deleted = condition.state === 'deleted';
     return el('article', { className: `condition${deleted ? ' removed' : ''}`, id: `condition-${condition.id}` },
       el('div', { className: 'condition-head' },
-        el('span', { className: `state-chip ${condition.state}` }, setupStates[condition.state] ?? condition.state),
+        stateChip(condition.state, setupStates[condition.state] ?? condition.state),
         el('strong', {}, conditionTitle(condition))),
       el('p', { className: 'muted' }, conditionDetail(condition)),
       el('div', { className: 'actions' },
@@ -355,7 +373,7 @@ function renderTimeline() {
   $('ignored-control').hidden = !state.session;
   $('timeline-count').textContent = state.session ? `${rows.length} 个动作` : '';
   $('selection').replaceChildren(...(selected.length ? [
-    el('div', { className: 'selection-bar' },
+    el('div', { className: 'selection-bar alert alert-soft alert-primary' },
       el('span', {}, `已选 ${selected.length} 个动作`),
       el('span', { className: 'trailing' }),
       button('合并为行为', () => mergeDialog(selected), {
@@ -377,13 +395,14 @@ function renderTimeline() {
     if (state.session?.version === 2 && row.scopeGroup !== lastGroup) {
       nodes.push(el('article', { className: 'scope-head' },
         el('strong', {}, scopeText(row.scope)),
-        el('small', { className: 'muted' }, `${groupSteps.get(row.scopeGroup) ?? 1} 步`)));
+        el('small', { className: 'muted badge badge-ghost badge-sm' }, `${groupSteps.get(row.scopeGroup) ?? 1} 步`)));
       lastGroup = row.scopeGroup;
     }
     const ignored = state.ignored.has(row.id);
     const runEntry = state.session?.version === 2 ? v2Statuses.get(row.id) : undefined;
     const selector = el('input', {
-      id: `select-${row.id}`, type: 'checkbox', checked: state.selected.has(row.id), disabled: ignored,
+      id: `select-${row.id}`, type: 'checkbox', className: 'checkbox checkbox-sm',
+      checked: state.selected.has(row.id), disabled: ignored,
       'aria-label': `选择 ${row.action.kind} ${row.id}`,
       onchange: event => {
         if (event.target.checked) state.selected.add(row.id);
@@ -403,7 +422,7 @@ function renderTimeline() {
     el('span', { className: 'row-description' }, el('strong', {}, actionLabel(row.action)),
       el('small', {}, `${row.scope ? scopeText(row.scope) : `${appLabel(row.app)} · ${row.window}`}${ignored ? ' · 已忽略' : ''}`),
       runEntry ? el('span', {
-        className: `run-status ${runEntry.status}`, title: [runEntry.code, runEntry.message].filter(Boolean).join(' · '),
+        className: statusBadge(runEntry.status), title: [runEntry.code, runEntry.message].filter(Boolean).join(' · '),
       }, resultStatus[runEntry.status] ?? runEntry.status) : undefined),
     el('span', { className: 'time row-duration', title: '动作耗时' }, duration(row.durationMs)));
     const thumbnail = row.thumbnail && el('details', {
@@ -414,8 +433,8 @@ function renderTimeline() {
       },
     }, el('summary', {}, '查看缩略图'), el('img', { src: row.thumbnail, alt: '动作截图', loading: 'lazy' }));
     nodes.push(el('article', {
-      className: `row${state.focused === row.id ? ' active' : ''}${ignored ? ' ignored' : ''}`,
-    }, el('div', { className: 'row-line' }, selector, focus), thumbnail || undefined));
+      className: `card card-sm bg-base-300 row${state.focused === row.id ? ' active' : ''}${ignored ? ' ignored' : ''}`,
+    }, el('div', { className: 'card-body row-line' }, selector, focus), thumbnail || undefined));
   }
   $('timeline').replaceChildren(...nodes);
 }
@@ -472,16 +491,20 @@ function renderOverview() {
 }
 
 function renderInspector() {
-  for (const tab of ['actions', 'library']) $(`${tab}-tab`).setAttribute('aria-pressed', String(state.tab === tab));
+  for (const tab of ['actions', 'library']) {
+    const node = $(`${tab}-tab`);
+    node.setAttribute('aria-pressed', String(state.tab === tab));
+    node.classList.toggle('tab-active', state.tab === tab);
+  }
   const panel = $('inspector');
   if (state.tab === 'library') {
     const items = [...state.library].sort((a, b) => a.behavior.name.localeCompare(b.behavior.name));
-    panel.replaceChildren(items.length ? el('div', { className: 'stack' }, ...items.map(item => {
+    panel.replaceChildren(items.length ? el('div', { className: 'stack-list' }, ...items.map(item => {
       const compatible = state.session?.version === 1 && sameTarget(item.target, state.session.target);
       const { behavior, parameterTypes } = item;
       const shell = item.shell ?? { steps: 0, privileged: 0 };
-      return el('article', { className: 'library-item stack' },
-        el('h3', {}, behavior.name),
+      return el('article', { className: 'library-item stack-list card bg-base-300' },
+        el('h3', { className: 'card-title' }, behavior.name),
         muted(`${behavior.steps.length} 步 · ${item.target.app} · ${item.target.window}`),
         shell.steps ? muted(`含 ${shell.steps} 个 Shell 步骤${shell.privileged ? ` · ${shell.privileged} 个提权步骤` : ''}`) : undefined,
         behavior.parameters.length ? muted(behavior.parameters.map(param => `${param} · ${parameterTypes[param]}`).join(' / ')) : undefined,
@@ -500,9 +523,9 @@ function renderInspector() {
   const ignored = state.ignored.has(row.id);
   const editable = !ignored && isCompatible(row);
   const target = actionTarget(row.action);
-  panel.replaceChildren(el('div', { className: 'stack' },
+  panel.replaceChildren(el('div', { className: 'stack-list' },
     el('h3', { className: 'inspector-heading' },
-      el('span', { className: 'step-id', title: '步骤 id' }, row.id), actionLabel(row.action)),
+      el('span', { className: 'step-id badge badge-ghost badge-sm', title: '步骤 id' }, row.id), actionLabel(row.action)),
     infoList([
       ['动作', KIND_LABELS[actionKind(row.action)] ?? row.action.kind],
       ...(row.action.kind === 'scroll' ? [['滚动', scrollLabel(row.action)]] : []),
@@ -588,7 +611,7 @@ function renderDraft() {
 // The page never edits a flow itself: every button sends one EditOp to the
 // server-side P2 engine and renders the snapshot it returns.
 
-const v2Section = el('section', { className: 'v2 pane', id: 'v2-editor', hidden: true });
+const v2Section = el('section', { className: 'v2 pane card', id: 'v2-editor', hidden: true });
 document.querySelector('main.workspace').after(v2Section);
 
 const v2Flow = () => state.v2?.flow;
@@ -767,7 +790,7 @@ function renderV2() {
       el('small', { className: 'muted' },
         `${step.kind === 'gap' ? '缺口' : v2ScopeText(step.scope)}`)),
     entry ? el('span', {
-      className: `run-status ${entry.status}`, title: [entry.code, entry.message].filter(Boolean).join(' · '),
+      className: statusBadge(entry.status), title: [entry.code, entry.message].filter(Boolean).join(' · '),
     }, resultStatus[entry.status] ?? entry.status) : undefined,
     rowActions(step));
   });
@@ -775,11 +798,11 @@ function renderV2() {
   const validation = editor.validation ?? { ok: true, errors: [] };
   v2Section.replaceChildren(
     el('div', { className: 'v2-header' },
-      el('h2', {}, el('span', { className: 'sec' }, '03'), ' v2 时间线编辑'),
-      el('span', { className: `state-chip ${dirty ? 'inferred' : 'confirmed'}` },
+      el('h2', { className: 'card-title' }, el('span', { className: 'sec' }, '03'), ' v2 时间线编辑'),
+      stateChip(dirty ? 'inferred' : 'confirmed',
         dirty ? '未保存修改' : diff.changed ? '已保存 revision' : '与录制一致'),
       state.v2Running
-        ? el('span', { className: `state-chip ${state.v2Checkpoint ? 'inferred' : 'confirmed'}` },
+        ? stateChip(state.v2Checkpoint ? 'inferred' : 'confirmed',
           state.v2Checkpoint ? '等待人工授权' : '回放中')
         : undefined,
       el('span', { className: 'trailing' }),
@@ -795,7 +818,7 @@ function renderV2() {
         style: 'small primary', icon: state.v2Running ? 'x' : 'play',
         disabled: !state.v2Running && (busy || !state.allowLive),
       })),
-    checkpointPanel(),
+    checkpointPanel() ?? '',
     rows.length ? el('div', { className: 'v2-rows' }, ...rows) : empty('当前作用域筛选下没有步骤。'),
     el('div', { className: 'v2-footer' },
       muted(diff.changed ? `与录制相比：${diff.lines.join('；')}` : '与录制一致，尚未修改。'),
@@ -821,7 +844,7 @@ function v2LiveDialog() {
   const flow = v2Flow();
   if (!flow) return;
   const saved = state.v2?.saved?.at(-1);
-  const confirmed = el('input', { type: 'checkbox' });
+  const confirmed = el('input', { type: 'checkbox', className: 'checkbox checkbox-sm' });
   const values = new Map((flow.inputs ?? []).map(name => [name, input({ maxLength: 4000, spellcheck: false, autocomplete: 'off' })]));
   const checkpoints = flow.steps.filter(step => step.kind === 'manual_checkpoint');
   openDialog('实时回放 v2 流程', [
@@ -832,7 +855,7 @@ function v2LiveDialog() {
     ...(checkpoints.length ? [muted(
       `含 ${checkpoints.length} 个人工检查点：回放会暂停在检查点，由你在真实界面完成授权，` +
       '再回到工作台点「已完成授权，继续」。工作台不接收密码；超时或取消就停在检查点。')] : []),
-    el('label', { className: 'checkbox' }, confirmed, '我确认回放会操作当前桌面的应用窗口'),
+    el('label', { className: 'check-row' }, confirmed, '我确认回放会操作当前桌面的应用窗口'),
     ...(values.size ? [
       el('h3', {}, '运行参数值'),
       muted('参数值只传给本次回放进程，不写入 flow 或报告。'),
@@ -851,18 +874,19 @@ function v2LiveDialog() {
 
 function showV2Result(report) {
   openDialog('v2 回放结果', [
-    el('h3', {}, resultStatus[report.status] ?? report.status),
+    el('h3', { className: `badge badge-soft badge-sm badge-${STATUS_TONES[report.status] ?? 'ghost'}` },
+      resultStatus[report.status] ?? report.status),
     ...(report.appIdentities ?? []).map(identity => muted(
       `${identity.app} · ${identity.status}${identity.code ? ` · ${identity.code}` : ''}` +
       (identity.reason ? ` · ${identity.reason}` : ''))),
-    el('ol', { className: 'stack' }, ...report.entries.map(entry => {
+    el('ol', { className: 'stack-list report-list' }, ...report.entries.map(entry => {
       const step = v2Step(entry.id);
-      return el('li', {},
+      return el('li', { className: 'report-row' },
         el('button', {
-          type: 'button', className: 'link-button',
+          type: 'button', className: 'btn btn-ghost btn-xs',
           onclick: () => { state.v2Selected = entry.id; dialog.close(); renderV2(); },
         }, `${entry.id} · ${step ? v2StepLabel(step, appLabel) : KIND_LABELS[entry.kind] ?? entry.kind}`),
-        el('span', { className: `run-status ${entry.status}` }, resultStatus[entry.status] ?? entry.status),
+        el('span', { className: statusBadge(entry.status) }, resultStatus[entry.status] ?? entry.status),
         entry.code ? muted(`${entry.code}${entry.message ? ` · ${entry.message}` : ''}`) : undefined);
     })),
   ]);
@@ -966,7 +990,7 @@ function v2TypeDialog(step) {
   const picker = locatorFields(step.target);
   const mode = select([['text', '文本'], ['input', '参数名']]);
   mode.value = 'input' in step ? 'input' : 'text';
-  const text = el('textarea', { rows: 3, maxLength: 4000 });
+  const text = el('textarea', { className: 'textarea', rows: 3, maxLength: 4000 });
   if ('text' in step) text.value = step.text;
   const param = input({ maxLength: 64, value: 'input' in step ? step.input : '' });
   const textBox = field('输入文本', text);
@@ -1002,12 +1026,12 @@ function v2KeyDialog(step) {
   const key = input({ value: step.key, maxLength: 20 });
   const boxes = v2Modifiers.map(name => ({
     name,
-    node: el('input', { type: 'checkbox', checked: (step.modifiers ?? []).includes(name) }),
+    node: el('input', { type: 'checkbox', className: 'checkbox checkbox-sm', checked: (step.modifiers ?? []).includes(name) }),
   }));
   openDialog(withStepId('编辑快捷键', step), [
     field('按键', key),
     el('div', { className: 'parameter-list' }, ...boxes.map(({ name, node }) =>
-      el('label', { className: 'checkbox' }, node, name))),
+      el('label', { className: 'check-row' }, node, name))),
     muted(`常用键：${v2Keys.join(' ')}；单字符键写小写字母或数字。`),
   ], '应用', () => {
     const name = key.value.trim().toLowerCase();
@@ -1033,11 +1057,11 @@ function v2WaitDialog(step) {
   const value = input({ maxLength: 4000, value: typeof step.check.expect?.equals === 'string' ? step.check.expect.equals : '' });
   const toggle = select([['true', '成立'], ['false', '不成立']]);
   toggle.value = step.check.equals === false || step.check.expect?.equals === false ? 'false' : 'true';
-  const elements = el('div', { className: 'stack' }, ...picker.controls);
+  const elements = el('div', { className: 'stack-list' }, ...picker.controls);
   const propertyBox = field('属性', property);
   const toggleBox = field('预期结果', toggle);
   const valueBox = field('预期内容', value);
-  const timeout = el('input', { type: 'number', min: '1000', max: '1800000', step: '1000', value: String(step.timeoutMs ?? 15000) });
+  const timeout = el('input', { type: 'number', className: 'input input-sm', min: '1000', max: '1800000', step: '1000', value: String(step.timeoutMs ?? 15000) });
   const sync = () => {
     const elementKind = kind.value === 'element';
     elements.hidden = !['element', 'element_enabled'].includes(kind.value);
@@ -1100,7 +1124,7 @@ function v2AssertFields(initial) {
   const equals = input({ maxLength: 4000, value: initial?.expect?.equals !== undefined && typeof initial.expect.equals === 'string' ? initial.expect.equals : '' });
   const toggle = select([['true', '成立'], ['false', '不成立']]);
   toggle.value = initial?.expect?.equals === false ? 'false' : 'true';
-  const elementBox = el('div', { className: 'stack' }, ...picker.controls);
+  const elementBox = el('div', { className: 'stack-list' }, ...picker.controls);
   const valueBox = field('预期内容', equals);
   const boolBox = field('预期结果', toggle);
   const sync = () => {
@@ -1154,7 +1178,7 @@ function v2CheckpointDialog(step) {
 function v2GapDialog(step) {
   const kind = select([['wait', '转为等待'], ['manual_checkpoint', '转为人工检查点']]);
   const fields = v2ScopeFields(step.scope);
-  const timeout = el('input', { type: 'number', min: '1000', max: '1800000', step: '1000', value: '15000' });
+  const timeout = el('input', { type: 'number', className: 'input input-sm', min: '1000', max: '1800000', step: '1000', value: '15000' });
   const trigger = v2Steps()[Math.max(0, v2Steps().findIndex(entry => entry.id === step.id) - 1)];
   openDialog(withStepId(`处理缺口 · ${step.code}`, step), [
     muted('缺口没有可回放的作用域，运行前必须转成等待或人工检查点。'),
@@ -1196,12 +1220,12 @@ function v2InsertDialog() {
   const key = input({ value: anchorScope?.kind === 'window' ? anchorScope.windowKey : '', maxLength: 64 });
   const titleBox = field('窗口标题', title);
   const keyBox = field('windowKey', key);
-  const timeout = el('input', { type: 'number', min: '1000', max: '1800000', step: '1000', value: '15000' });
+  const timeout = el('input', { type: 'number', className: 'input input-sm', min: '1000', max: '1800000', step: '1000', value: '15000' });
   const timeoutBox = field('等待超时（毫秒）', timeout);
   const picker = locatorFields(anchor?.target);
-  const targetBox = el('div', { className: 'stack' }, ...picker.controls);
+  const targetBox = el('div', { className: 'stack-list' }, ...picker.controls);
   const assertFields = v2AssertFields(undefined);
-  const assertBox = el('div', { className: 'stack' }, ...assertFields.controls);
+  const assertBox = el('div', { className: 'stack-list' }, ...assertFields.controls);
   const sync = () => {
     const appScope = kind.value === 'launch_app' || kind.value === 'activate_app';
     titleBox.hidden = appScope;
@@ -1254,7 +1278,7 @@ function checkpointPanel() {
   return el('article', { className: 'v2-checkpoint' },
     el('div', { className: 'v2-checkpoint-head' },
       el('strong', {}, '等待人工授权'),
-      el('span', { className: 'state-chip inferred' }, '回放已暂停')),
+      stateChip('inferred', '回放已暂停')),
     infoList(checkpointWaitFacts(checkpoint, appLabel), 'meta-grid'),
     muted('请在真实界面由操作者完成授权或输入密码；工作台只发确认，不接收密码。' +
       '完成后点「已完成授权，继续」，CLI 会重新核对安全输入与恢复条件。'),
@@ -1376,12 +1400,12 @@ function render() {
 
 function openDialog(title, content, submitLabel, submit) {
   let busy = false;
-  const error = el('p', { className: 'form-error', role: 'alert' });
+  const error = el('p', { className: 'form-error alert alert-soft alert-error', role: 'alert' });
   const dismiss = button('关闭', () => dialog.close(), { icon: 'x', iconOnly: true, title: '关闭' });
-  const confirm = submit && el('button', { className: 'button primary', type: 'submit' },
+  const confirm = submit && el('button', { className: 'btn btn-primary', type: 'submit' },
     icon('check'), el('span', {}, submitLabel));
   const form = el('form', {
-    className: 'stack',
+    className: 'modal-box stack-list',
     onsubmit: async event => {
       event.preventDefault();
       if (!submit || busy) return;
@@ -1440,16 +1464,16 @@ function mergeDialog(rows) {
     row, param: input({ placeholder: index ? `text${index + 1}` : 'text', maxLength: 64 }),
     type: select([['string', 'string'], ['secret', 'secret']]),
   }));
-  const add = el('input', { type: 'checkbox', checked: true });
+  const add = el('input', { type: 'checkbox', className: 'checkbox checkbox-sm', checked: true });
   openDialog('合并为行为', [
     field('行为名称', name),
     muted(rows.map(row => row.action.kind).join(' → ')),
-    fields.length ? el('div', { className: 'parameter-list stack' },
+    fields.length ? el('div', { className: 'parameter-list stack-list' },
       el('h3', {}, '提取输入文本为参数'),
       muted('参数名留空时保留原文本。secret 使用环境变量名，草稿和行为库只保存变量名或参数名。'),
       ...fields.map(({ row, param, type }, index) => el('div', { className: 'parameter-row' },
         field(`参数名 · ${short(actionLabel(row.action), 32)}`, param), field(`类型 ${index + 1}`, type)))) : undefined,
-    el('label', { className: 'checkbox' }, add, '同时加入测试项草稿'),
+    el('label', { className: 'check-row' }, add, '同时加入测试项草稿'),
   ], '保存行为', async () => {
     if (!name.value.trim()) throw new Error('填写行为名称。');
     const bindings = new Map(fields.filter(({ param }) => param.value.trim()).map(({ row, param, type }) =>
@@ -1516,9 +1540,9 @@ function locatorFields(original) {
   const initial = original?.kind === 'element' ? original : undefined;
   const role = input({ required: true, maxLength: 256, value: initial?.role ?? '' });
   const name = input({ maxLength: 256, value: initial?.name ?? '' });
-  const exactName = el('input', { type: 'checkbox', checked: initial?.name !== undefined });
+  const exactName = el('input', { type: 'checkbox', className: 'checkbox checkbox-sm', checked: initial?.name !== undefined });
   const path = input({ value: initial?.path?.join(' / ') ?? '', placeholder: 'window / scrollarea / textfield' });
-  const index = el('input', { type: 'number', min: '0', step: '1', value: initial?.index ?? '' });
+  const index = el('input', { type: 'number', className: 'input input-sm', min: '0', step: '1', value: initial?.index ?? '' });
   const candidates = state.session.candidates;
   const detail = el('p', { className: 'muted' });
   const picker = select([['', '手动填写'], ...candidates.map((candidate, i) => [String(i), candidateLabel(candidate)])],
@@ -1540,7 +1564,7 @@ function locatorFields(original) {
     controls: [
       candidates.length ? field('从快照拾取控件', picker) : muted('此目录没有可拾取的控件快照。可手动填写 AX 定位器。'),
       candidates.length ? detail : undefined,
-      field('角色', role), field('名称', name), el('label', { className: 'checkbox' }, exactName, '匹配名称（可匹配空名称）'),
+      field('角色', role), field('名称', name), el('label', { className: 'check-row' }, exactName, '匹配名称（可匹配空名称）'),
       field('角色路径，可选', path), field('匹配索引，从 0 开始，可选', index),
     ],
     value() {
@@ -1579,7 +1603,7 @@ function dragEndpointFields(title, original) {
   });
   const picker = locatorFields(original?.kind === 'element' ? original : undefined);
   const coordBox = field('坐标（屏幕逻辑点）', coord);
-  const elementBox = el('div', { className: 'stack' }, ...picker.controls);
+  const elementBox = el('div', { className: 'stack-list' }, ...picker.controls);
   const sync = () => {
     coordBox.hidden = mode.value !== 'point';
     elementBox.hidden = mode.value !== 'element';
@@ -1601,7 +1625,7 @@ function dragDialog(row) {
   const from = dragEndpointFields('起点', row.action.from);
   const to = dragEndpointFields('终点', row.action.to);
   const durationMs = el('input', {
-    type: 'number', min: '0', max: '60000', step: '10', value: String(row.action.durationMs),
+    className: 'input input-sm', type: 'number', min: '0', max: '60000', step: '10', value: String(row.action.durationMs),
   });
   openDialog('重新拾取拖拽', [
     ...from.controls, ...to.controls, field('时长（毫秒）', durationMs),
@@ -1643,16 +1667,16 @@ function assertionDialog(row) {
 function addEnvRow(container) {
   const key = input({ placeholder: 'FIXTURE_TOKEN', maxLength: 64 });
   const value = input({ placeholder: '值或 CUEKEEPER_SECRET_ 变量名', maxLength: 4000 });
-  const secret = el('input', { type: 'checkbox' });
+  const secret = el('input', { type: 'checkbox', className: 'checkbox checkbox-sm' });
   const row = el('div', { className: 'parameter-row' },
-    key, value, el('label', { className: 'checkbox' }, secret, '引用环境变量'),
+    key, value, el('label', { className: 'check-row' }, secret, '引用环境变量'),
     button('删除', () => row.remove(), { style: 'small danger', icon: 'trash', iconOnly: true }));
   container.append(row);
 }
 
 function shellDialog() {
   const mode = select([['argv', '逐项参数'], ['script', 'Shell 脚本']]);
-  const argvRows = el('div', { className: 'stack' });
+  const argvRows = el('div', { className: 'stack-list' });
   const addArg = (value = '') => {
     const arg = input({ value, placeholder: '/usr/bin/tool 或参数', maxLength: 4096 });
     const row = el('div', { className: 'parameter-row' }, arg,
@@ -1660,14 +1684,14 @@ function shellDialog() {
     argvRows.append(row);
   };
   addArg('');
-  const argvBox = el('div', { className: 'stack' }, argvRows,
+  const argvBox = el('div', { className: 'stack-list' }, argvRows,
     button('添加参数', () => addArg(), { style: 'small', icon: 'plus' }));
-  const command = el('textarea', { rows: 4, maxLength: 16384, placeholder: 'echo hello | tr a-z A-Z' });
+  const command = el('textarea', { className: 'textarea', rows: 4, maxLength: 16384, placeholder: 'echo hello | tr a-z A-Z' });
   const commandBox = field('Shell 脚本', command);
   commandBox.hidden = true;
   const cwd = input({ placeholder: '默认输入文件目录', maxLength: 4096 });
-  const timeout = el('input', { type: 'number', min: '1', max: '120000', value: '30000' });
-  const expected = el('input', { type: 'number', min: '0', max: '255', value: '0' });
+  const timeout = el('input', { type: 'number', className: 'input input-sm', min: '1', max: '120000', value: '30000' });
+  const expected = el('input', { type: 'number', className: 'input input-sm', min: '0', max: '255', value: '0' });
   const privilege = select([['user', '用户态'], ['root', 'Root · 需管理员密码'], ['sudo', '需管理员预配置']]);
   const rootMode = select([
     ['prompt', '每次弹框输入管理员密码'],
@@ -1675,16 +1699,16 @@ function shellDialog() {
     ['sudoers', 'sudoers 免密（无人值守）'],
   ]);
   const task = input({ placeholder: '/Library/CueKeeper/privileged/<任务 ID>', maxLength: 4096 });
-  const envRows = el('div', { className: 'stack' });
-  const envBlock = el('div', { className: 'stack' },
+  const envRows = el('div', { className: 'stack-list' });
+  const envBlock = el('div', { className: 'stack-list' },
     el('h3', {}, '环境变量'), muted('保留键与 SUDO_ / DYLD_ / LD_ / CUEKEEPER_ 前缀不可覆盖。'),
     envRows, button('添加环境变量', () => addEnvRow(envRows), { style: 'small', icon: 'plus' }));
-  const userBox = el('div', { className: 'stack' },
+  const userBox = el('div', { className: 'stack-list' },
     field('工作目录', cwd), field('超时（毫秒）', timeout), field('预期退出码', expected), envBlock);
-  const rootBox = el('div', { className: 'stack' },
+  const rootBox = el('div', { className: 'stack-list' },
     field('授权方式', rootMode),
     muted('Root 步骤只接受逐项参数，不接受 Shell 脚本或环境变量。运行前会展示完整命令与工作目录，密码只通过弹框交给 sudo。'));
-  const sudoBox = el('div', { className: 'stack' },
+  const sudoBox = el('div', { className: 'stack-list' },
     field('固定任务路径', task),
     muted('固定任务由管理员预配置，不接受工作目录、环境变量、超时或脚本。'));
   rootBox.hidden = true;
@@ -1794,10 +1818,11 @@ function showResult(mode, report) {
   status(`${mode === 'offline' ? '离线运行' : '实时回放'}${resultStatus[report.status]} · ${report.entries.length} 条结果`,
     report.status === 'passed' ? 'success' : 'error');
   setTimeout(() => openDialog('运行结果', [
-    el('h3', {}, resultStatus[report.status]),
+    el('h3', { className: `badge badge-soft badge-sm badge-${STATUS_TONES[report.status] ?? 'ghost'}` },
+      resultStatus[report.status]),
     identityNotice(report),
     report.stopped ? muted('本次运行已在停止请求后结束。') : undefined,
-    el('ol', { className: 'stack' }, ...report.entries.map(entry => {
+    el('ol', { className: 'stack-list report-list' }, ...report.entries.map(entry => {
       const row = state.session?.timeline.find(item => item.id === entry.id);
       const name = row ? actionLabel(row.action) : KIND_LABELS[entry.kind] ?? entry.kind;
       const shell = entry.kind === 'shell'
@@ -1805,7 +1830,8 @@ function showResult(mode, report) {
           `/${entry.shell.mode} · ${entry.shell.execution}` +
           (entry.shell.exitCode === undefined ? '' : ` · 退出码 ${entry.shell.exitCode}`)
         : '';
-      return el('li', {}, `${entry.id} · ${name}${shell} · ${resultStatus[entry.status]} · ${entry.durationMs} ms`,
+      return el('li', { className: 'report-row' },
+        `${entry.id} · ${name}${shell} · ${resultStatus[entry.status]} · ${entry.durationMs} ms`,
         entry.message ? muted(entry.message) : undefined);
     })),
   ]), 0);
@@ -1839,12 +1865,12 @@ function runDialog() {
   const modes = [];
   if (session.hasSnapshot) modes.push(['offline', '离线解析定位器']);
   if (allowLive) modes.push(['live', '回放到当前目标窗口']);
-  const confirmed = el('input', { type: 'checkbox' });
-  const confirmation = el('label', { className: 'checkbox', hidden: session.hasSnapshot },
+  const confirmed = el('input', { type: 'checkbox', className: 'checkbox checkbox-sm' });
+  const confirmation = el('label', { className: 'check-row', hidden: session.hasSnapshot },
     confirmed, `我确认向 ${session.target.window} 执行动作`);
   const mode = select(modes, () => { confirmation.hidden = mode.value !== 'live'; });
-  const capture = el('input', { type: 'checkbox' });
-  const planBox = el('div', { className: 'plan stack' }, muted('正在生成执行计划…'));
+  const capture = el('input', { type: 'checkbox', className: 'checkbox checkbox-sm' });
+  const planBox = el('div', { className: 'plan stack-list' }, muted('正在生成执行计划…'));
   let plan;
   let loading = false;
   const refresh = async () => {
@@ -1873,7 +1899,7 @@ function runDialog() {
     field('运行方式', mode), confirmation,
     muted('离线运行读取快照。实时回放向目标窗口写入并可能触发 macOS 权限提示。'),
     muted('前置条件修复可能启动应用或将窗口切到前台；命令引用的磁盘文件仍需你自己信任。'),
-    el('label', { className: 'checkbox' }, capture,
+    el('label', { className: 'check-row' }, capture,
       '采集 Shell 输出文本（存在秘密引用或提权步骤时只保留元数据）'),
     planBox,
   ], '开始运行', async () => {

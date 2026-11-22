@@ -15,7 +15,7 @@ bar.id = 'record-bar';
 
 const countdown = document.createElement('select');
 countdown.id = 'record-countdown';
-countdown.className = 'record-countdown';
+countdown.className = 'select select-sm record-countdown';
 countdown.setAttribute('aria-label', '开始前倒计时');
 for (const seconds of COUNTDOWN_CHOICES) {
   const option = document.createElement('option');
@@ -28,13 +28,13 @@ for (const seconds of COUNTDOWN_CHOICES) {
 const startButton = document.createElement('button');
 startButton.type = 'button';
 startButton.id = 'record-start';
-startButton.className = 'button';
+startButton.className = 'btn btn-primary btn-sm';
 startButton.textContent = '开始录制';
 
 const stopButton = document.createElement('button');
 stopButton.type = 'button';
 stopButton.id = 'record-stop';
-stopButton.className = 'button danger';
+stopButton.className = 'btn btn-error btn-sm';
 stopButton.textContent = '停止录制';
 stopButton.hidden = true;
 

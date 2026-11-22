@@ -16,7 +16,7 @@ export function createAppPicker({
       style: 'small', icon: 'refresh', iconOnly: true, title: '刷新目录', key: 'refresh-apps',
     });
     const searchWrap = el('div', { className: 'app-search' }, icon('search', 14), search);
-    const body = el('div', { className: 'stack' },
+    const body = el('div', { className: 'stack-list' },
       el('div', { className: 'app-search-bar' }, searchWrap, refresh), list);
     let catalog = [];
     let activeIndex = -1;
@@ -50,7 +50,7 @@ export function createAppPicker({
     const showPaths = app => {
       const current = state.appPaths[app.bundleId];
       const options = app.paths.map((path, index) => el('label', { className: 'path-option' },
-        el('input', { type: 'radio', name: 'app-path', value: path, checked: current ? current === path : index === 0 }),
+        el('input', { type: 'radio', className: 'radio radio-sm', name: 'app-path', value: path, checked: current ? current === path : index === 0 }),
         el('span', {}, path)));
       const back = button('返回', () => {
         body.replaceChildren(el('div', { className: 'app-search-bar' }, searchWrap, refresh), list);
@@ -58,7 +58,7 @@ export function createAppPicker({
         search.focus();
       }, { style: 'small', icon: 'undo' });
       const apply = el('button', {
-        type: 'button', className: 'button primary',
+        type: 'button', className: 'btn btn-primary btn-sm',
         onclick: () => {
           const checked = body.querySelector('input[name="app-path"]:checked');
           if (checked) choose(app.bundleId, checked.value, app);
@@ -69,7 +69,7 @@ export function createAppPicker({
         muted(`「${app.name}」有 ${app.paths.length} 份副本。保存测试项时会写入这条路径，实时回放只向该副本的窗口发送输入；路径不符或同标识多实例会以 APP_AMBIGUOUS 阻塞。`),
         staleAppPath(app, state.appPaths)
           ? el('p', { className: 'path-stale' }, `已选路径不在当前目录中：${current}`)
-          : undefined,
+          : '',
         el('div', { className: 'path-list' }, ...options),
         el('div', { className: 'actions' }, apply));
     };

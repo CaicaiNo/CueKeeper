@@ -56,12 +56,21 @@ export function createDom(document) {
     return svg;
   };
 
+  // Every button in the page is a daisyUI `btn`; the workbench keeps its own
+  // `style` words (primary / danger / small) and they map to daisyUI variants.
+  const buttonStyles = { primary: 'btn-primary', danger: 'btn-soft btn-error', small: 'btn-xs' };
   const button = (label, onclick, { style = '', disabled = false, key, title, icon: iconName, iconOnly = false } = {}) => {
     const children = [];
     if (iconName) children.push(icon(iconName));
     if (!iconOnly && label) children.push(el('span', {}, label));
+    const styles = style.split(/\s+/).filter(Boolean).map(word => buttonStyles[word] ?? word);
+    // One size class only: btn-sm and btn-xs both set --size, and the later
+    // rule in daisyui.css wins regardless of class order.
+    const size = styles.includes('btn-xs') ? 'btn-xs' : 'btn-sm';
+    const classes = ['btn', size, ...styles.filter(word => word !== 'btn-xs')];
+    if (iconOnly) classes.push('btn-square');
     return el('button', {
-      type: 'button', className: `button ${style}${iconOnly ? ' icon' : ''}`, onclick, disabled, id: key,
+      type: 'button', className: classes.join(' '), onclick, disabled, id: key,
       title: title ?? (iconOnly ? label : undefined),
       'aria-label': iconOnly ? (title ?? label) : undefined,
     }, ...children);
@@ -69,9 +78,9 @@ export function createDom(document) {
 
   const empty = text => el('p', { className: 'empty' }, text);
   const muted = text => el('p', { className: 'muted' }, text);
-  const input = (options = {}) => el('input', { type: 'text', ...options });
+  const input = (options = {}) => el('input', { type: 'text', className: 'input input-sm', ...options });
   const field = (label, control) => el('label', { className: 'field' }, label, control);
-  const select = (items, onchange) => el('select', { onchange },
+  const select = (items, onchange) => el('select', { className: 'select select-sm', onchange },
     ...items.map(([value, label]) => el('option', { value }, label)));
 
   return { el, icon, button, empty, muted, input, field, select };

@@ -1,27 +1,28 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="cuekeeper">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CueKeeper 工作台</title>
+  <link rel="stylesheet" href="/vendor/daisyui.css">
   <link rel="stylesheet" href="/style.css">
   <script type="module" src="/app.js"></script>
   <script type="module" src="/record.js"></script>
 </head>
 <body>
-  <header class="topbar">
+  <header class="topbar navbar">
     <div class="brand"><span class="mark" aria-hidden="true"></span>CueKeeper</div>
-    <span class="divider" aria-hidden="true"></span>
+    <span class="topbar-divider" aria-hidden="true"></span>
     <h1>工作台</h1>
     <span id="session-name" class="session-name"></span>
-    <button id="import-button" class="button trailing" type="button">导入运行目录</button>
+    <button id="import-button" class="btn btn-primary btn-sm trailing" type="button">导入运行目录</button>
   </header>
 
   <main class="workspace">
-    <aside class="summary pane" aria-labelledby="session-title">
-      <h2 id="session-title" class="section-title"><span class="sec">01</span>录制会话</h2>
+    <aside class="summary pane card" aria-labelledby="session-title">
+      <h2 id="session-title" class="section-title card-title"><span class="sec">01</span>录制会话</h2>
       <div id="summary"></div>
-      <button id="app-picker" class="app-picker" type="button" aria-haspopup="dialog" title="选择应用">
+      <button id="app-picker" class="app-picker btn btn-sm" type="button" aria-haspopup="dialog" title="选择应用">
         <span id="app-picker-icon" class="app-picker-icon" aria-hidden="true"></span>
         <span id="app-picker-label" class="app-picker-label">全部应用</span>
         <span class="app-picker-chevron" aria-hidden="true">
@@ -32,11 +33,11 @@
       <div id="setup" class="setup-list"></div>
     </aside>
 
-    <section class="timeline pane" aria-labelledby="timeline-title">
+    <section class="timeline-panel pane card" aria-labelledby="timeline-title">
       <div class="pane-header">
-        <h2 id="timeline-title">动作时间线</h2>
+        <h2 id="timeline-title" class="card-title">动作时间线</h2>
         <span id="timeline-count" class="muted"></span>
-        <label id="ignored-control" class="checkbox trailing" hidden><input type="checkbox" id="show-ignored">显示已忽略</label>
+        <label id="ignored-control" class="check-row trailing" hidden><input type="checkbox" id="show-ignored" class="checkbox checkbox-sm">显示已忽略</label>
       </div>
       <div class="timeline-columns" aria-hidden="true">
         <span></span><span>时间</span><span>类型</span><span>动作</span><span>耗时</span>
@@ -45,30 +46,30 @@
       <div id="timeline" class="timeline-body" aria-label="会话动作"></div>
     </section>
 
-    <aside class="inspector pane" aria-label="动作整理与行为库">
-      <div class="tabs" aria-label="右侧面板">
-        <button id="actions-tab" type="button" aria-pressed="true">动作整理</button>
-        <button id="library-tab" type="button" aria-pressed="false">行为库</button>
+    <aside class="inspector pane card" aria-label="动作整理与行为库">
+      <div class="tabs tabs-box" aria-label="右侧面板">
+        <button id="actions-tab" class="tab tab-active" type="button" aria-pressed="true">动作整理</button>
+        <button id="library-tab" class="tab" type="button" aria-pressed="false">行为库</button>
       </div>
       <div id="inspector" class="inspector-body"></div>
     </aside>
   </main>
 
-  <section class="draft" aria-labelledby="draft-title">
+  <section class="draft card" aria-labelledby="draft-title">
     <div class="draft-header">
-      <h2 id="draft-title">测试项草稿</h2>
-      <input id="test-name" class="test-name" aria-label="测试项名称" placeholder="测试项名称" maxlength="256" required>
+      <h2 id="draft-title" class="card-title">测试项草稿</h2>
+      <input id="test-name" class="test-name input input-sm" aria-label="测试项名称" placeholder="测试项名称" maxlength="256" required>
       <span id="draft-count" class="muted"></span>
       <div class="button-group trailing">
-        <button id="shell-button" class="button" type="button">插入 Shell</button>
-        <button id="save-button" class="button" type="button" disabled>保存</button>
-        <button id="run-button" class="button primary" type="button" disabled>运行测试项</button>
+        <button id="shell-button" class="btn btn-sm" type="button">插入 Shell</button>
+        <button id="save-button" class="btn btn-sm" type="button" disabled>保存</button>
+        <button id="run-button" class="btn btn-primary btn-sm" type="button" disabled>运行测试项</button>
       </div>
     </div>
     <ol id="draft" class="draft-body"></ol>
   </section>
 
   <footer id="status" class="status" role="status" aria-live="polite">正在读取本地会话…</footer>
-  <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
+  <dialog id="dialog" class="modal" aria-labelledby="dialog-title"></dialog>
 </body>
 </html>
