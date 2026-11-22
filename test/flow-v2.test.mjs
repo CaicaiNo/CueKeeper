@@ -65,6 +65,44 @@ test('v2 schemas are published as closed objects', () => {
   assert.equal(report.title, 'Cuekeeper report-v2 v2');
   assert.equal(report.additionalProperties, false);
   assert.equal(report.properties.version.const, 2);
+  assert.ok(report.properties.entries.items.properties.textMode);
+  assert.ok(report.properties.entries.items.properties.input);
+  assert.ok(report.properties.entries.items.properties.checkpoint);
+});
+
+test('report v2 describes text mode and checkpoints without carrying text', () => {
+  const base = {
+    version: 2,
+    flowId: 'metadata-smoke',
+    flowSha256: 'a'.repeat(64),
+    startedAt: '2026-11-22T04:30:00.000Z',
+    mode: 'replay',
+    status: 'passed',
+  };
+  const inputEntry = {
+    id: 's1', kind: 'type', status: 'passed', atMs: 0, durationMs: 10,
+    textMode: 'input', input: 'login_url',
+  };
+  const literalEntry = {
+    id: 's2', kind: 'type', status: 'passed', atMs: 10, durationMs: 10,
+    textMode: 'literal',
+  };
+  const checkpointEntry = {
+    id: 's3', kind: 'manual_checkpoint', status: 'passed', atMs: 20, durationMs: 30,
+    checkpoint: {
+      reason: 'secure_input', triggerStepId: 's2', confirmedBy: 'operator', timeoutMs: 120_000,
+    },
+  };
+  assert.ok(reportV2Check.Check({ ...base, entries: [inputEntry, literalEntry, checkpointEntry] }));
+
+  // The report never accepts the typed characters; only safe metadata.
+  assert.equal(reportV2Check.Check({
+    ...base, entries: [{ ...inputEntry, text: 'secret' }],
+  }), false);
+  assert.equal(reportV2Check.Check({
+    ...base, entries: [{ id: 's3', kind: 'manual_checkpoint', status: 'passed',
+      atMs: 0, durationMs: 1, checkpoint: { reason: 'secure_input' } }],
+  }), false);
 });
 
 test('the v2 example validates and reports its scopes', () => {

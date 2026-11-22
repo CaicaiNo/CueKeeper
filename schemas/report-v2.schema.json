@@ -414,6 +414,49 @@
               }
             ]
           },
+          "textMode": {
+            "anyOf": [
+              {
+                "const": "literal",
+                "type": "string"
+              },
+              {
+                "const": "input",
+                "type": "string"
+              }
+            ]
+          },
+          "input": {
+            "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
+            "type": "string"
+          },
+          "checkpoint": {
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "reason": {
+                "const": "secure_input",
+                "type": "string"
+              },
+              "triggerStepId": {
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
+                "type": "string"
+              },
+              "confirmedBy": {
+                "const": "operator",
+                "type": "string"
+              },
+              "timeoutMs": {
+                "minimum": 1000,
+                "maximum": 1800000,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "reason",
+              "triggerStepId"
+            ]
+          },
           "intent": {
             "additionalProperties": false,
             "type": "object",

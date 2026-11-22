@@ -301,6 +301,16 @@ const fallbackResult = object({
   reason: label,
   candidateIntentId: T.Optional(id),
 });
+// Report entries never carry the typed text or a password. They may carry
+// safe metadata that explains whether a text step used a literal or a runtime
+// parameter, and how a manual checkpoint was resolved.
+const textMode = T.Union([T.Literal('literal'), T.Literal('input')]);
+const checkpointResult = object({
+  reason: T.Literal('secure_input'),
+  triggerStepId: id,
+  confirmedBy: T.Optional(T.Literal('operator')),
+  timeoutMs: T.Optional(T.Integer({ minimum: 1_000, maximum: maxWaitTimeoutMs })),
+});
 const entry = object({
   id: entryId, kind: entryKind,
   scope: T.Optional(scopeSchema),
@@ -311,6 +321,9 @@ const entry = object({
   code: T.Optional(T.String()),
   phase: T.Optional(phase),
   delivery: T.Optional(deliveryState),
+  textMode: T.Optional(textMode),
+  input: T.Optional(parameterName),
+  checkpoint: T.Optional(checkpointResult),
   intent: T.Optional(intentResult),
   fallback: T.Optional(fallbackResult),
 });
