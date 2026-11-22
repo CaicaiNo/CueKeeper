@@ -224,7 +224,9 @@ test('a system dialog after a package double-click is captured once without requ
     timeoutMs: 120_000,
   });
   assert.equal(flow.steps[2].scope.windowKey, flow.steps[0].scope.windowKey);
-  assert.deepEqual(readWindows, [11, 11]);
+  // Both clicks share the one tree this window was read as; the dialog never
+  // makes the recording read the package window again.
+  assert.deepEqual(readWindows, [11]);
   assert.doesNotMatch(JSON.stringify(flow), /CoreServicesUIAgent|Popup title|popup-text/);
 });
 
@@ -350,8 +352,8 @@ test('a click without element evidence still reads the tree for its target', asy
   assert.equal(flow.steps[0].target.role, 'image');
   assert.equal(flow.steps[0].target.name, 'Install Test.pkg');
   assert.equal(flow.steps[0].count, 2);
-  // One read per click: the double-click is two clicks, and neither is retried.
-  assert.equal(reads, 2);
+  // One read for the window: the two clicks of the double-click share it.
+  assert.equal(reads, 1);
 });
 
 test('a Finder file click records the file item, not the unnamed field under it', async () => {
@@ -766,6 +768,244 @@ test('a focused field elsewhere is never taken as the target of an unrelated cli
   assert.equal(flow.steps[0].kind, 'click');
   assert.equal(flow.steps[0].target.role, 'group');
   assert.notEqual(flow.steps[0].target.name, 'manifest.json');
+});
+
+// --- One read per window -------------------------------------------------------
+
+/** A reader that serves a snapshot per window and records every read. */
+function countingReader(snapshots) {
+  const reads = [];
+  const read = async window => {
+    reads.push(window.windowNumber);
+    const snapshot = snapshots[window.windowNumber];
+    if (!snapshot) throw new Error(`no fixture snapshot for window ${window.windowNumber}`);
+    return structuredClone(snapshot);
+  };
+  return { read, reads };
+}
+
+/** A window whose root box is `bounds` and whose children are `nodes`. */
+function plainWindow(windowNumber, title, bounds, nodes = []) {
+  return {
+    windowId: `w-${windowNumber}`,
+    tree: {
+      role: 'window', name: title, ref: '@plain:e1', bounds, states: [], secure: false, children: nodes,
+    },
+  };
+}
+
+test('one window is read once for twenty clicks and twenty typed characters', async () => {
+  const { read, reads } = countingReader({ 33: vscodeSnapshot() });
+  const recording = new GlobalRecording(read, { now: () => NOW });
+  for (let index = 0; index < 20; index += 1) {
+    await recording.add(parseCaptureEvent(vscodeEvent('click', 100 + index * 50, {
+      point: [320 + index * 20, 400], decision: 'record',
+    })));
+  }
+  for (let index = 0; index < 20; index += 1) {
+    await recording.add(parseCaptureEvent(vscodeEvent('text', 1200 + index * 50, { chars: 'a' })));
+  }
+  const flow = recording.finish();
+
+  assert.deepEqual(reads, [33], 'the window must be read exactly once');
+  assert.equal(flow.steps.filter(step => step.kind === 'click').length, 20);
+  // Twenty characters in one control are one parameterised type step.
+  const types = flow.steps.filter(step => step.kind === 'type');
+  assert.equal(types.length, 1);
+  assert.equal(types[0].target.name, 'manifest.json');
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+});
+
+test('a retitled window is read again exactly once', async () => {
+  const { read, reads } = countingReader({ 33: vscodeSnapshot() });
+  const recording = new GlobalRecording(read, { now: () => NOW });
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 100, { point: EDITOR_POINT, decision: 'record' })));
+  // Switching file retitles the same native window; its old tree no longer
+  // describes what the next click lands on.
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 2000, {
+    point: EDITOR_POINT, decision: 'record',
+    owner: { ...VSCODE_OWNER, windowTitle: 'settings.json — saio_副本' },
+  })));
+  const flow = recording.finish();
+  assert.deepEqual(reads, [33, 33]);
+  assert.equal(flow.steps.filter(step => step.kind === 'click').length, 2);
+  assert.equal(flow.steps[1].scope.windowTitle, 'settings.json — saio_副本');
+});
+
+test('a window that no longer covers the click is read again exactly once', async () => {
+  const small = plainWindow(33, 'Editor', { x: 0, y: 0, width: 1400, height: 900 }, [{
+    role: 'button', name: 'Save', ref: '@plain:e2',
+    bounds: { x: 320, y: 380, width: 80, height: 30 }, states: [], secure: false, children: [],
+  }]);
+  // The window was enlarged past every edge of the tree that was read first.
+  const large = plainWindow(33, 'Editor', { x: 0, y: 0, width: 1800, height: 1100 }, [{
+    role: 'button', name: 'Save', ref: '@plain:e2',
+    bounds: { x: 1500, y: 950, width: 80, height: 30 }, states: [], secure: false, children: [],
+  }]);
+  let call = 0;
+  const reads = [];
+  const recording = new GlobalRecording(async window => {
+    reads.push(window.windowNumber);
+    call += 1;
+    return structuredClone(call === 1 ? small : large);
+  }, { now: () => NOW });
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 100, { point: [360, 390], decision: 'record' })));
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 2000, { point: [1540, 960], decision: 'record' })));
+  const flow = recording.finish();
+  assert.deepEqual(reads, [33, 33]);
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'click']);
+  assert.deepEqual(flow.steps[1].target, { kind: 'element', role: 'button', name: 'Save' });
+});
+
+test('a click with element evidence completes its path from a tree already read', async () => {
+  const group = (name, y) => ({
+    role: 'group', name, ref: `@g:${name}`, bounds: { x: 0, y, width: 400, height: 100 },
+    states: [], secure: false, children: [{
+      role: 'button', name: 'Go', ref: `@g:${name}:b`,
+      bounds: { x: 20, y: y + 20, width: 80, height: 30 }, states: [], secure: false, children: [],
+    }],
+  });
+  const snapshot = plainWindow(33, 'Editor', { x: 0, y: 0, width: 800, height: 600 }, [
+    group('top', 0), group('bottom', 200),
+  ]);
+  const { read, reads } = countingReader({ 33: snapshot });
+  const recording = new GlobalRecording(read, { now: () => NOW });
+  // A click with no element evidence reads the window once.
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 100, { point: [60, 35], decision: 'record' })));
+  // The helper's own evidence names the second Go button; the cached tree adds
+  // the index that tells the two look-alikes apart, with no second read.
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 2000, {
+    point: [60, 235], decision: 'record',
+    owner: { ...VSCODE_OWNER, role: 'AXButton', name: 'Go' },
+  })));
+  const flow = recording.finish();
+  assert.deepEqual(reads, [33]);
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'click']);
+  assert.deepEqual(flow.steps[1].target, {
+    kind: 'element', role: 'button', name: 'Go', path: ['window', 'group', 'button'], index: 1,
+  });
+});
+
+test('a scroll names its element from the cached tree and invalidates it afterwards', async () => {
+  const { read, reads } = countingReader({ 33: vscodeSnapshot() });
+  const recording = new GlobalRecording(read, { now: () => NOW });
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 100, { point: EDITOR_POINT, decision: 'record' })));
+  // The scroll names what the pointer was over before the content moved, which
+  // is exactly what the cached tree still describes.
+  await recording.add(parseCaptureEvent(vscodeEvent('scroll', 2000, {
+    point: EDITOR_POINT, deltaX: 0, deltaY: -3, decision: 'record',
+  })));
+  // After the content moved, the same window is read before its coordinates are
+  // believed again.
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 2100, { point: [700, 420], decision: 'record' })));
+  const flow = recording.finish();
+  assert.deepEqual(reads, [33, 33]);
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'scroll', 'click']);
+});
+
+test('a click the cached tree cannot place is read again and keeps its point', async () => {
+  // One button in the top-left corner: everything else in the window is empty.
+  const snapshot = plainWindow(33, 'Editor', { x: 0, y: 0, width: 1400, height: 900 }, [{
+    role: 'button', name: 'Save', ref: '@plain:e2',
+    bounds: { x: 20, y: 20, width: 80, height: 30 }, states: [], secure: false, children: [],
+  }]);
+  const { read, reads } = countingReader({ 33: snapshot });
+  const recording = new GlobalRecording(read, { now: () => NOW });
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 100, { point: [60, 35], decision: 'record' })));
+  // Nothing is under this point but the window root, in the cached tree and in
+  // any other: blank space is a point with a warning, never a guessed element.
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 2000, { point: [700, 400], decision: 'record' })));
+  const flow = recording.finish();
+  assert.deepEqual(reads, [33, 33], 'an empty hit costs one fresh read, not a gap');
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'click']);
+  assert.deepEqual(flow.steps[1].target, { kind: 'point', point: [700, 400] });
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_ELEMENT_CLICK'));
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+test('two windows alternating are each read once and never invalidate each other', async () => {
+  const { read, reads } = countingReader({ 33: vscodeSnapshot(), 34: plainWindow(34, 'Settings', {
+    x: 0, y: 0, width: 900, height: 700,
+  }, [{
+    role: 'button', name: 'Apply', ref: '@settings:e2',
+    bounds: { x: 400, y: 300, width: 90, height: 30 }, states: [], secure: false, children: [],
+  }]) });
+  const recording = new GlobalRecording(read, { now: () => NOW });
+  const other = { ...VSCODE_OWNER, windowNumber: 34, windowTitle: 'Settings' };
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 100, { point: EDITOR_POINT, decision: 'record' })));
+  await recording.add(parseCaptureEvent({ ...vscodeEvent('focus', 150, {}), owner: other, focusGeneration: 2 }));
+  await recording.add(parseCaptureEvent({
+    ...vscodeEvent('click', 200, { point: [440, 315], decision: 'record' }), owner: other, focusGeneration: 2,
+  }));
+  await recording.add(parseCaptureEvent({ ...vscodeEvent('focus', 250, {}), focusGeneration: 3 }));
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 300, { point: EDITOR_POINT, decision: 'record' })));
+  await recording.add(parseCaptureEvent({ ...vscodeEvent('focus', 350, {}), owner: other, focusGeneration: 4 }));
+  await recording.add(parseCaptureEvent({
+    ...vscodeEvent('click', 400, { point: [450, 320], decision: 'record' }), owner: other, focusGeneration: 4,
+  }));
+  const flow = recording.finish();
+  // Two reads, one per window; switching focus never discards the other one.
+  assert.deepEqual(reads, [33, 34]);
+  const clicks = flow.steps.filter(step => step.kind === 'click');
+  assert.deepEqual(clicks.map(step => step.scope.windowTitle),
+    ['manifest.json — saio_副本', 'Settings', 'manifest.json — saio_副本', 'Settings']);
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+});
+
+test('a cached tree older than the TTL is read again', async () => {
+  const { read, reads } = countingReader({ 33: vscodeSnapshot() });
+  let clock = NOW;
+  const recording = new GlobalRecording(read, { now: () => clock });
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 100, { point: EDITOR_POINT, decision: 'record' })));
+  clock += 31_000;
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 2000, {
+    point: [700, 420], decision: 'record', seen: clock,
+  })));
+  assert.deepEqual(reads, [33, 33]);
+});
+
+test('the tree cache keeps at most eight windows and evicts the least recent', async () => {
+  const snapshots = {};
+  const events = [];
+  for (let windowNumber = 1; windowNumber <= 9; windowNumber += 1) {
+    snapshots[windowNumber] = plainWindow(windowNumber, `Window ${windowNumber}`, {
+      x: 0, y: 0, width: 900, height: 700,
+    }, [{
+      role: 'button', name: `Go ${windowNumber}`, ref: `@w${windowNumber}:e2`,
+      bounds: { x: 400, y: 300, width: 90, height: 30 }, states: [], secure: false, children: [],
+    }]);
+    const owner = { ...VSCODE_OWNER, windowNumber, windowTitle: `Window ${windowNumber}` };
+    events.push({ ...vscodeEvent('focus', 100 * windowNumber - 50, {}), owner, focusGeneration: windowNumber });
+    events.push({
+      ...vscodeEvent('click', 100 * windowNumber, { point: [440, 315], decision: 'record' }),
+      owner, focusGeneration: windowNumber,
+    });
+  }
+  const { read, reads } = countingReader(snapshots);
+  const recording = new GlobalRecording(read, { now: () => NOW });
+  for (const event of events) await recording.add(parseCaptureEvent(event));
+  assert.equal(reads.length, 9);
+  // Window 1 was evicted by window 9, so returning to it reads it once more.
+  await recording.add(parseCaptureEvent({
+    ...vscodeEvent('focus', 1000, {}),
+    owner: { ...VSCODE_OWNER, windowNumber: 1, windowTitle: 'Window 1' }, focusGeneration: 10,
+  }));
+  await recording.add(parseCaptureEvent({
+    ...vscodeEvent('click', 1050, { point: [440, 315], decision: 'record' }),
+    owner: { ...VSCODE_OWNER, windowNumber: 1, windowTitle: 'Window 1' }, focusGeneration: 10,
+  }));
+  assert.equal(reads.length, 10);
+  // Window 8 is still cached: the eviction took the oldest, not the newest.
+  await recording.add(parseCaptureEvent({
+    ...vscodeEvent('focus', 1100, {}),
+    owner: { ...VSCODE_OWNER, windowNumber: 8, windowTitle: 'Window 8' }, focusGeneration: 11,
+  }));
+  await recording.add(parseCaptureEvent({
+    ...vscodeEvent('click', 1150, { point: [440, 315], decision: 'record' }),
+    owner: { ...VSCODE_OWNER, windowNumber: 8, windowTitle: 'Window 8' }, focusGeneration: 11,
+  }));
+  assert.equal(reads.length, 10);
 });
 
 test('text with neither focus evidence nor a provable control is dropped, not a gap', async () => {

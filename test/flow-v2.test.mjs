@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { reportV2Check } from '../dist/contracts-v2.js';
 import { hashFlow } from '../dist/flow.js';
 import {
-  dryRunFlowV2, hashFlowV2, parseFlowV2, planFlowV2, scopeLabel,
+  dryRunFlowV2, hashFlowV2, parseFlowV2, planFlowV2, pointTargetSteps, scopeLabel,
 } from '../dist/flow-v2.js';
 import { loadSession } from '../dist/workbench-session.js';
 import { startWorkbench } from '../dist/workbench.js';
@@ -179,6 +179,32 @@ console.log(JSON.stringify({ version: '2.6', command: process.argv[2], ok: true,
   assert.equal(gapValidate.error.code, 'CAPTURE_GAP');
 
   assert.equal(existsSync(marker), false, 'no desktop driver may run for validate, dry-run or a gap');
+});
+
+test('a flow that kept a recorded screen point is refused by the dry run', t => {
+  const flow = {
+    version: 2, id: 'point-flow', name: '坐标点击',
+    steps: [{
+      id: 'click-1', kind: 'click',
+      scope: { kind: 'window', app: 'com.apple.finder', windowKey: 'files', windowTitle: 'Downloads' },
+      target: { kind: 'point', point: [420, 300] },
+    }],
+  };
+  const parsed = parseFlowV2(flow);
+  // The point is a legal v2 click target: it is recorded, and the timeline says
+  // it needs confirmation. It is not a legal dry-run step.
+  assert.deepEqual(pointTargetSteps(parsed).map(step => step.id), ['click-1']);
+  assert.throws(() => dryRunFlowV2(parsed), error =>
+    error.code === 'UNSAFE_POINT' && /click-1/.test(error.message));
+
+  const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-point-dry-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, 'flow.json');
+  writeFileSync(path, JSON.stringify(flow));
+  const run = cli(['run', path, '--dry-run']);
+  assert.equal(run.code, 1);
+  assert.equal(run.error.code, 'UNSAFE_POINT');
+  assert.match(run.error.message, /click-1/);
 });
 
 test('v2 rejects missing scope, bound window keys, app paths, surfaces, IDs and references', () => {

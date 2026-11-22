@@ -17,7 +17,7 @@ import type { ElementLocator } from './contracts.js';
 import { defaultLifecyclePollMs, LifecycleWatcher } from './lifecycle.js';
 import type { LifecycleObservation, LifecycleWatchOptions } from './lifecycle.js';
 import {
-  clickIdentity, contains, Fault, flatten, hitTest, object, resolve, toLocator,
+  clickIdentity, contains, elementNames, Fault, flatten, hitTest, object, resolve, toLocator,
 } from './locator.js';
 import type { Located, Point, Snapshot } from './locator.js';
 import type { LifecycleEvent } from './wait-candidates.js';
@@ -58,6 +58,14 @@ const dragPathLimit = 64;
 const clickTextFallbackMs = 5000;
 const maxWindowBindings = 64;
 const maxFocusEntries = 64;
+/**
+ * How long one window's tree may be reused. A pointer event inside the same
+ * window reuses the tree it already read; past this age the window is read
+ * again, because nothing else can prove the tree still describes the screen.
+ */
+const defaultSnapshotTtlMs = 30_000;
+/** How many window trees may stay cached at once; the least recently used goes. */
+const defaultCachedWindows = 8;
 
 const editable = new Set(['textfield', 'textbox', 'textarea', 'searchfield', 'combobox']);
 /** Keys that can move accessibility focus away from the control a click selected. */
@@ -87,6 +95,10 @@ export interface GlobalRecordingOptions {
   /** Injectable wall clock, used to detect snapshots that arrive too late. */
   now?: () => number;
   stepLimit?: number;
+  /** How long a window tree may be reused; defaults to 30 s. */
+  snapshotTtlMs?: number;
+  /** How many window trees may be cached at once; defaults to 8. */
+  maxCachedWindows?: number;
 }
 
 type WindowBinding = {
@@ -96,6 +108,20 @@ type WindowBinding = {
   pid: number;
   processInstance?: number;
   windowNumber: number;
+  /** The tree this window was last read as, while it still describes it. */
+  cache?: WindowTreeCache;
+};
+
+/**
+ * One window's tree and the facts that were true when it was read. A cached
+ * tree is reused only while those facts still hold; the bounds are the tree
+ * root's own box, so a window that shrank or moved is read again.
+ */
+type WindowTreeCache = {
+  snapshot: Snapshot;
+  at: number;
+  title: string;
+  bounds: Snapshot['tree']['bounds'];
 };
 
 type StepDraft = Record<string, unknown> & { kind: StepV2['kind'] };
@@ -104,6 +130,13 @@ type ClickTarget = ElementLocator | { kind: 'point'; point: Point };
 
 function nearPoint(a: Point, b: Point) {
   return Math.abs(a[0] - b[0]) <= multiClickDistance && Math.abs(a[1] - b[1]) <= multiClickDistance;
+}
+
+/** Every screen point an event names; a cached tree must still cover all of them. */
+function eventPoints(event: CaptureEvent): Point[] {
+  if (event.kind === 'click' || event.kind === 'scroll' || event.kind === 'hover') return [event.point];
+  if (event.kind === 'drag') return [event.from, event.to];
+  return [];
 }
 
 function locatorKey(locator: ClickTarget) {
@@ -239,6 +272,10 @@ export class GlobalRecording {
   private exclude: Set<string>;
   private now: () => number;
   private stepLimit: number;
+  private snapshotTtlMs: number;
+  private maxCachedWindows: number;
+  /** Window ids in least-recently-used order, so the cache stays bounded. */
+  private cacheOrder: string[] = [];
   private truncated = false;
   private inputCount = 0;
 
@@ -246,6 +283,8 @@ export class GlobalRecording {
     this.exclude = new Set(options.exclude ?? []);
     this.now = options.now ?? Date.now;
     this.stepLimit = options.stepLimit ?? defaultStepLimit;
+    this.snapshotTtlMs = options.snapshotTtlMs ?? defaultSnapshotTtlMs;
+    this.maxCachedWindows = options.maxCachedWindows ?? defaultCachedWindows;
   }
 
   get captureWarnings(): CaptureWarning[] {
@@ -457,45 +496,56 @@ export class GlobalRecording {
         // replaces it with the editable control it proves.
         target = this.untargetedClick(event);
       }
+      // A window tree already read for this window may add the path or index a
+      // repeated control needs; it is never read for this.
+      if (target.kind === 'element') {
+        target = this.completeFromCache(binding, event, target) ?? target;
+      }
     }
     if (!target) {
       // Evidence that cannot name the element is the only case that still needs
       // the tree: a failed read keeps whatever the helper proved on its own.
-      const snapshot = await this.snapshot(binding, { gapOnFailure: false });
+      const read = await this.snapshot(binding, {
+        gapOnFailure: false, event,
+        validate: tree => this.contentHit(tree, event.point) !== undefined,
+      });
+      const snapshot = read?.snapshot;
       if (snapshot) {
-        const hit = this.hit(snapshot, event.point);
+        const hit = this.contentHit(snapshot, event.point);
         if (!hit) {
-          this.pushGap('CAPTURE_SCOPE_UNVERIFIED');
-          return;
-        }
-        if (hit.node.secure) {
+          // Blank space: the window root answers every point inside the window,
+          // and a click on it names nothing a replay could address.
+          target = this.blankClick(event);
+        } else if (hit.node.secure) {
           this.enterSecure();
           return;
-        }
-        // Electron editors expose their text surface as a group above the
-        // editable control. When the click lands inside the focused editable
-        // but the deepest hit is a container, the control is the replay target.
-        const treeField = editableRole(hit.node.role) ? undefined : this.focusedField(snapshot, event.point);
-        if (treeField?.node.secure) {
-          this.enterSecure();
-          return;
-        }
-        const identity = treeField ? undefined : clickIdentity(snapshot.tree, hit);
-        const chosen = identity ?? treeField;
-        if (treeField) {
-          this.warn('FOCUSED_EDITABLE_TARGET',
-            'A click landed inside the focused editable control and was bound to it, not to the container under the pointer');
-        }
-        if (chosen) {
-          target = toLocator(snapshot, chosen);
-          if (button === 'left' && chosen.node.ref && editableRole(target.role)) {
-            this.rememberFocus(this.focusKey(binding, event.focusGeneration), target);
-          }
         } else {
-          // The tree cannot name what the pointer hit. The helper's own element
-          // evidence is the remaining proof of identity; without it the click
-          // keeps its point and says so.
-          target = this.evidenceTarget(event) ?? this.untargetedClick(event);
+          // Electron editors expose their text surface as a group above the
+          // editable control. When the click lands inside the focused editable
+          // but the deepest hit is a container, the control is the replay target.
+          const treeField = editableRole(hit.node.role) ? undefined : this.focusedField(snapshot, event.point);
+          if (treeField?.node.secure) {
+            this.enterSecure();
+            return;
+          }
+          const identity = treeField ? undefined : clickIdentity(snapshot.tree, hit);
+          const chosen = identity ?? treeField;
+          if (treeField) {
+            this.warn('FOCUSED_EDITABLE_TARGET',
+              'A click landed inside the focused editable control and was bound to it, not to the container under the pointer');
+          }
+          if (chosen) {
+            target = toLocator(snapshot, chosen);
+            if (read?.reused) this.dropTreeIfFocusMoved(binding, snapshot, target as ElementLocator);
+            if (button === 'left' && chosen.node.ref && editableRole(target.role)) {
+              this.rememberFocus(this.focusKey(binding, event.focusGeneration), target);
+            }
+          } else {
+            // The tree cannot name what the pointer hit. The helper's own
+            // element evidence is the remaining proof of identity; without it
+            // the click keeps its point and says so.
+            target = this.evidenceTarget(event) ?? this.untargetedClick(event);
+          }
         }
       } else {
         target = this.nativeTarget(event);
@@ -558,6 +608,17 @@ export class GlobalRecording {
   }
 
   /**
+   * A click on blank space. The window root answers every point inside the
+   * window but names nothing a replay could click, so the point stays and the
+   * warning says why the step still needs a target.
+   */
+  private blankClick(event: Extract<CaptureEvent, { kind: 'click' }>): ClickTarget {
+    this.warn('UNTARGETED_ELEMENT_CLICK',
+      'A click landed on empty space and named no element; it is kept at its screen point and must be edited into an element before replay');
+    return { kind: 'point', point: event.point };
+  }
+
+  /**
    * A click with no proven element identity. Keeping the role alone would make
    * the step click whichever same-role element happens to be there, so the point
    * stays and the warning says the step still needs a target.
@@ -601,8 +662,15 @@ export class GlobalRecording {
         return;
       }
     }
-    const snapshot = await this.snapshot(binding);
-    if (!snapshot) return;
+    // The scroll names the element under the pointer before the content moved,
+    // so this event may use the tree this window already read; the moved
+    // content is not reused by anything after it.
+    const read = await this.snapshot(binding, {
+      event, keep: false,
+      validate: tree => this.hit(tree, event.point) !== undefined,
+    });
+    if (!read) return;
+    const snapshot = read.snapshot;
     const hit = this.hit(snapshot, event.point);
     if (!hit) {
       this.pushGap('CAPTURE_SCOPE_UNVERIFIED');
@@ -634,8 +702,11 @@ export class GlobalRecording {
     }
     if (!this.claim(event, binding)) return;
     this.ensureScope(binding);
-    const snapshot = await this.snapshot(binding);
-    if (!snapshot) return;
+    const read = await this.snapshot(binding, {
+      event, validate: tree => this.hit(tree, event.point) !== undefined,
+    });
+    if (!read) return;
+    const snapshot = read.snapshot;
     const hit = this.hit(snapshot, event.point);
     // A hover without a named element cannot be replayed: v2 has no coordinate
     // hover. It is noise, not a missing step, so it is skipped with a warning.
@@ -670,8 +741,12 @@ export class GlobalRecording {
     }
     if (!this.claim(event, binding)) return;
     this.ensureScope(binding);
-    const snapshot = await this.snapshot(binding);
-    if (!snapshot) return;
+    const read = await this.snapshot(binding, {
+      event,
+      validate: tree => this.hit(tree, event.from) !== undefined && this.hit(tree, event.to) !== undefined,
+    });
+    if (!read) return;
+    const snapshot = read.snapshot;
     const from = this.hit(snapshot, event.from);
     const to = this.hit(snapshot, event.to);
     // A v2 drag names two elements and replays from their centers. An endpoint
@@ -817,12 +892,14 @@ export class GlobalRecording {
    * gap, and never delays the events behind it.
    */
   private async resolvePendingText(binding: WindowBinding, key: string) {
-    let snapshot: Snapshot | undefined;
-    try {
-      snapshot = await this.read(this.windowFor(binding));
-    } catch {
-      snapshot = undefined;
-    }
+    // The tree this window already read is reused only while it still proves a
+    // focused editable control; a reused tree read before a later click would
+    // name the control the caret left.
+    const read = await this.snapshot(binding, {
+      gapOnFailure: false,
+      validate: tree => this.uniqueFocused(tree) !== undefined,
+    });
+    const snapshot = read?.snapshot;
     const pending = this.pendingText;
     this.pendingText = undefined;
     this.pendingSettle = undefined;
@@ -889,11 +966,16 @@ export class GlobalRecording {
    * hits the group; this is the only evidence that recovers the real target.
    */
   private focusedField(snapshot: Snapshot, point: Point): Located | undefined {
+    const single = this.uniqueFocused(snapshot);
+    return single && contains(single.node.bounds, point) ? single : undefined;
+  }
+
+  /** The one focused editable control a tree proves, without a point. */
+  private uniqueFocused(snapshot: Snapshot): Located | undefined {
     const focused = flatten(snapshot.tree).filter(entry =>
       entry.node.ref && entry.node.states.includes('focused') && editable.has(entry.node.role));
     const [single] = focused;
-    if (focused.length !== 1 || !single) return undefined;
-    return contains(single.node.bounds, point) ? single : undefined;
+    return focused.length === 1 ? single : undefined;
   }
 
   /**
@@ -988,8 +1070,10 @@ export class GlobalRecording {
     if (this.secureOpen) return;
     this.secureOpen = true;
     this.endBursts();
-    // A secure boundary invalidates whatever control was proven before it.
+    // A secure boundary invalidates whatever control was proven before it, and
+    // the prompt can replace what a window showed.
     this.textAnchor = undefined;
+    this.dropTrees();
   }
 
   /** Closes a secure interval and emits the one checkpoint it becomes. */
@@ -997,6 +1081,7 @@ export class GlobalRecording {
     this.secureOpen = false;
     this.endBursts();
     this.textAnchor = undefined;
+    this.dropTrees();
     this.pushCheckpoint('secure_input');
   }
 
@@ -1120,16 +1205,37 @@ export class GlobalRecording {
   }
 
   /**
-   * Reads the window tree for one pointer step. This is fallback evidence: the
+   * The window tree for one pointer step. This is fallback evidence: the
    * helper's own element evidence is preferred, and a text event never waits for
-   * this. A failed read is reported once and the caller decides; a click keeps
-   * its own evidence, every other gesture becomes a gap.
+   * this. A window is read once and every later pointer event in that window
+   * reuses the same tree while it still describes the screen. A caller can
+   * reject a reused tree that cannot answer its own question (`validate`), which
+   * costs exactly one fresh read; `keep: false` uses the tree for this event and
+   * stores nothing (a scroll moved the content it just named). A failed read is
+   * reported once and the caller decides; a click keeps its own evidence, every
+   * other gesture becomes a gap.
    */
   private async snapshot(
-    binding: WindowBinding, { gapOnFailure = true } = {},
-  ): Promise<Snapshot | undefined> {
+    binding: WindowBinding,
+    { gapOnFailure = true, event, keep = true, validate }: {
+      gapOnFailure?: boolean;
+      /** The event whose points and title a cached tree must still cover. */
+      event?: CaptureEvent;
+      /** Whether a fresh read may be stored for later events. */
+      keep?: boolean;
+      validate?: (snapshot: Snapshot) => boolean;
+    } = {},
+  ): Promise<{ snapshot: Snapshot; reused: boolean } | undefined> {
+    const cached = this.reusableTree(binding, event);
+    if (cached && (!validate || validate(cached))) {
+      // This event moved the content it named; nothing after it may reuse the tree.
+      if (!keep) this.dropTree(binding);
+      return { snapshot: cached, reused: true };
+    }
+    if (cached) this.dropTree(binding);
+    let snapshot: Snapshot;
     try {
-      return await this.read(this.windowFor(binding));
+      snapshot = await this.read(this.windowFor(binding));
     } catch (error) {
       if (gapOnFailure) {
         const reason = error instanceof Fault ? error.code : 'no answer';
@@ -1138,6 +1244,106 @@ export class GlobalRecording {
       }
       return undefined;
     }
+    if (keep) this.cacheTree(binding, snapshot);
+    else this.dropTree(binding);
+    return { snapshot, reused: false };
+  }
+
+  /**
+   * The tree this window was read as, when it still describes the event. A
+   * different title, an event point the cached bounds no longer cover, or a
+   * pause longer than the TTL make the cache unusable; the next event then
+   * reads the window again. Each window keeps its own tree, so focusing another
+   * window never discards this one.
+   */
+  private reusableTree(binding: WindowBinding, event?: CaptureEvent): Snapshot | undefined {
+    const cache = binding.cache;
+    if (!cache) return undefined;
+    if (cache.title !== binding.title || this.now() - cache.at > this.snapshotTtlMs) {
+      this.dropTree(binding);
+      return undefined;
+    }
+    const bounds = cache.bounds;
+    if (event && bounds && eventPoints(event).some(point => !contains(bounds, point))) {
+      this.dropTree(binding);
+      return undefined;
+    }
+    const id = this.bindingId(binding);
+    this.cacheOrder = this.cacheOrder.filter(entry => entry !== id);
+    this.cacheOrder.push(id);
+    return cache.snapshot;
+  }
+
+  private cacheTree(binding: WindowBinding, snapshot: Snapshot) {
+    const id = this.bindingId(binding);
+    binding.cache = { snapshot, at: this.now(), title: binding.title, bounds: snapshot.tree.bounds };
+    this.cacheOrder = this.cacheOrder.filter(entry => entry !== id);
+    this.cacheOrder.push(id);
+    while (this.cacheOrder.length > this.maxCachedWindows) {
+      const evicted = this.cacheOrder.shift();
+      const other = evicted === undefined ? undefined : this.bindings.get(evicted);
+      if (other) other.cache = undefined;
+    }
+  }
+
+  private dropTree(binding: WindowBinding) {
+    const id = this.bindingId(binding);
+    binding.cache = undefined;
+    this.cacheOrder = this.cacheOrder.filter(entry => entry !== id);
+  }
+
+  /** Drops every cached tree; a secure interval leaves nothing to reuse. */
+  private dropTrees() {
+    for (const binding of this.bindings.values()) binding.cache = undefined;
+    this.cacheOrder = [];
+  }
+
+  /**
+   * The deepest element under the point that is not the window itself. Blank
+   * space inside a window always answers with the window root, which addresses
+   * nothing a click could replay.
+   */
+  private contentHit(snapshot: Snapshot, point: Point): Located | undefined {
+    const hit = this.hit(snapshot, point);
+    return hit && hit.node !== snapshot.tree ? hit : undefined;
+  }
+
+  /**
+   * Completes a target the helper already named with the path or index this
+   * window needs to address it, using a tree that is already cached. It never
+   * reads a tree: element evidence alone is a usable target.
+   */
+  private completeFromCache(
+    binding: WindowBinding, event: Extract<CaptureEvent, { kind: 'click' }>, target: ElementLocator,
+  ): ElementLocator | undefined {
+    const snapshot = this.reusableTree(binding, event);
+    if (!snapshot) return undefined;
+    const names = elementNames(snapshot.tree);
+    const candidates = flatten(snapshot.tree).filter(entry =>
+      entry.node.role === target.role && (names.get(entry.node) ?? '') === (target.name ?? ''));
+    if (!candidates.length) return undefined;
+    const chosen = candidates.length === 1
+      ? candidates[0]
+      : candidates.find(entry => contains(entry.node.bounds, event.point));
+    if (!chosen) return undefined;
+    return toLocator(snapshot, chosen);
+  }
+
+  /**
+   * Drops a reused tree that was read before the click moved focus inside this
+   * window: the text that follows has no focus evidence, and the old tree would
+   * name the control the caret just left.
+   */
+  private dropTreeIfFocusMoved(binding: WindowBinding, snapshot: Snapshot, target: ElementLocator) {
+    if (this.showsFocused(snapshot, target)) return;
+    this.dropTree(binding);
+  }
+
+  private showsFocused(snapshot: Snapshot, target: ElementLocator) {
+    const names = elementNames(snapshot.tree);
+    return flatten(snapshot.tree).some(entry =>
+      entry.node.states.includes('focused') && entry.node.role === target.role &&
+      (names.get(entry.node) ?? '') === (target.name ?? ''));
   }
 
   private pushGap(code: CaptureGapCode) {
@@ -1168,6 +1374,8 @@ export class GlobalRecording {
     }
     this.endBursts();
     if (this.secureOpen) this.closeSecure();
+    // The session is over: no window tree outlives it.
+    this.dropTrees();
     if (this.startupDropped) {
       this.warn('CAPTURE_STARTUP',
         `${this.startupDropped} unverified event(s) in the first ${startupGraceMs} ms of the recording were dropped as startup noise`);

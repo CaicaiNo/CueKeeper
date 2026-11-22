@@ -238,6 +238,50 @@ test('a capture gap can be imported, blocks running and is replaced in place', a
   assert.match(saved.output, /flow\.edited-/);
 });
 
+test('a point target is marked on the timeline and refused by the workbench dry run', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'cuekeeper-point-workbench-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const directory = join(root, 'run');
+  await mkdir(directory);
+  const flow = {
+    version: 2, id: 'point-flow', name: '坐标点击',
+    steps: [
+      {
+        id: 'click-1', kind: 'click',
+        scope: { kind: 'window', app: 'com.apple.finder', windowKey: 'files', windowTitle: 'Downloads' },
+        target: { kind: 'point', point: [420, 300] },
+      },
+      {
+        id: 'click-2', kind: 'click',
+        scope: { kind: 'window', app: 'com.apple.finder', windowKey: 'files', windowTitle: 'Downloads' },
+        target: { kind: 'element', role: 'row', name: 'manifest.json' },
+      },
+    ],
+  };
+  await writeFile(join(directory, 'flow.json'), JSON.stringify(flow));
+
+  // The timeline says a recorded coordinate is not a proven target.
+  assert.equal(v2StepLabel(flow.steps[0]), '点击 · 坐标回放 · 需确认 (420, 300)');
+  assert.equal(v2StepLabel(flow.steps[1]), '点击 · row · manifest.json');
+
+  const { post } = await server(t, { root });
+  const session = await post('import', { directory });
+  assert.equal(session.v2.flow.steps[0].target.kind, 'point');
+  // A point click is a legal flow step, but no dry run may pass with one.
+  const refused = await post('run', { session: session.id, mode: 'dry-run' }, 400);
+  assert.equal(refused.error, 'UNSAFE_POINT');
+  assert.deepEqual(refused.detail.stepIds, ['click-1']);
+
+  // Turning it into the element the recording already named unblocks the run.
+  await edit(post, session, {
+    kind: 'update', id: 'click-1',
+    patch: { target: { kind: 'element', role: 'row', name: 'manifest.json' } },
+  });
+  const dry = await post('run', { session: session.id, mode: 'dry-run' });
+  assert.equal(dry.status, 'passed');
+  assert.ok(dry.entries.every(entry => entry.status === 'resolved'));
+});
+
 test('v2 timeline helpers describe steps, scopes, diffs and build EditOp payloads', () => {
   const flow = {
     version: 2, id: 'helpers', name: 'Helpers',

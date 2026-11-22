@@ -92,7 +92,7 @@ const appPicker = createAppPicker({
 });
 function locatorLabel(target) {
   if (!target) return '目标窗口';
-  if (target.kind === 'point') return `坐标 (${target.point.join(', ')})`;
+  if (target.kind === 'point') return `坐标回放 · 需确认 (${target.point.join(', ')})`;
   return [target.role, target.name, target.path?.join(' › '), target.index === undefined ? '' : `[${target.index}]`]
     .filter(Boolean).join(' · ');
 }

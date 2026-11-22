@@ -309,13 +309,29 @@ export function planFlowV2(flow: FlowV2): PlannedStepV2[] {
 }
 
 /**
+ * Steps that a replay could only deliver as a raw screen point. A point is a
+ * last-resort target: nothing in the flow proves it still lands on the same
+ * control, so a dry run refuses it until the operator turns it into an element.
+ */
+export function pointTargetSteps(flow: FlowV2): StepV2[] {
+  return flow.steps.filter(step => step.kind === 'click' && step.target.kind === 'point');
+}
+
+/**
  * Structural dry run. It reports each step with its declared scope as
  * `resolved` and performs no launch, focus, clipboard or input operation. A
  * scope is only proven against a live window by the cross-app runner; until
  * then the report says exactly what the flow would bind, not that the window
- * exists.
+ * exists. A step that would be replayed at a recorded point is refused, because
+ * no scope can prove that point still names the same control.
  */
 export function dryRunFlowV2(flow: FlowV2): ReportV2 {
+  const points = pointTargetSteps(flow);
+  if (points.length) {
+    throw new Fault('UNSAFE_POINT',
+      `Flow ${flow.id} keeps ${points.map(step => step.id).join(', ')} at a recorded screen point; ` +
+      'turn each into an element target before a dry run can pass');
+  }
   const entries: ReportV2Entry[] = flow.steps.map(step => ({
     id: step.id,
     kind: step.kind,
