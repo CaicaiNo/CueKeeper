@@ -18,8 +18,9 @@ HAOC-108 · 设计评审稿 · 基线 `3ada404`
 `list-windows` 提供 `pid`、`id`、`is_focused` 等字段，按 `pid` 与 `list-apps` 的 `bundle_id` 关联。录制开始与窗口归属冲突时，查询清单并交叉核实原生观察，要求前台 App 下只有一个一致的 focused window。PID 与进程启动标识只在当前会话缓存，进程退出或身份发生变化时失效。清单是查询时刻的状态，不能倒推已经结束的事件。原生 AX 系统级命中可区分叠在普通窗口上的界面。[Apple AX 命中测试](https://developer.apple.com/documentation/applicationservices/1462077-axuielementcopyelementatposition) · [Apple 前台应用](https://developer.apple.com/documentation/appkit/nsworkspace/frontmostapplication) · [agent-desktop 清单字段](https://github.com/vercel-labs/agent-desktop/blob/main/skills/agent-desktop/references/commands-system.md)
 
 - Tap 回调只采集有限的事件元数据并快速返回。原生观察器为证据分配递增序号与单调时间，记录前后焦点世代、进程实例和窗口身份。队列按序提交，迟到的通知只能确认已有证据。冲突、超时、权限丢失或队列溢出都会切断合并并记缺口，禁止把后一个窗口的快照回填给前一个事件。
-- 按已确认的窗口读取 AX 快照，查询限定 `--window-id` 并核对 owner。P3 surface 通过各自的适配器读取。可在一个短文本或滚动 burst 内复用最早的有效结构快照，缓存键含进程实例、窗口、焦点世代和目标控件。切换、暂停、secure input、点击、超时或控件变化时清空缓存。刷新预算耗尽时留下 `STALE_CAPTURE`。
-- Electron 编辑器（VS Code 一类）把文本面暴露在聚焦的可编辑控件之下，同时用一层更深的 group 承接指针命中。点击落点在该可编辑控件范围内、而命中的是容器时，target 取聚焦控件（`FOCUSED_EDITABLE_TARGET`）；点击当时读树失败、后来由文本事件证明控件的，已记录的容器点击就地改成该控件（`CLICK_RETARGETED_TO_TEXT`）。文本事件只需要控件身份，所以允许到 3 秒的慢快照；快照彻底不可用时复用点击证明的控件（`TEXT_TARGET_FROM_CLICK`），只有既无快照也无点击证据才留 `STALE_CAPTURE`，有快照但没有聚焦可编辑控件留 `CAPTURE_SCOPE_UNVERIFIED` 并附 `TEXT_TARGET_UNRESOLVED` 警告。
+- 录制路径不以「每条事件读一次窗口树」为前提。原生在每条 `text` / `key`（以及 `click`）事件上用 `kAXFocusedUIElementAttribute` 附加聚焦元素的 `role` / `name` / `bounds` / `editable` / `secure`，都是常数时间的单属性读取，不遍历树、不读控件值；secure 控件不带 label。TS 侧正常路径直接用这份证据构造 element target，`read` 调用为 0，字符到步骤的延迟只有内存操作。
+- 读树只是兜底，且按窗口 + 焦点世代缓存：只有事件没带证据、也还没有 burst / 点击锚点时才读一次（快照预算 3 秒），读到或读不到的结果都缓存给后续字符，失败不级联。兜底读取不阻塞事件消费：文本先缓冲，读取在后台完成后再落成 `type` 步骤；读不到聚焦可编辑控件时按 `UNTARGETED_TEXT` 丢弃这几个字符并给警告，不产生 `STALE_CAPTURE` 缺口。队列落后 helper 超过 8 秒的文本统一按 `CAPTURE_BACKLOG` 丢弃，不生成一串缺口；录制开始 500 ms 内没有窗口证据的事件按 `CAPTURE_STARTUP` 丢弃。指针手势（滚动 / 悬停 / 拖拽）仍按 `--window-id` 读快照并核对 owner，读取失败时按缺口处理。
+- Electron 编辑器（VS Code 一类）把文本面暴露在聚焦的可编辑控件之下，同时用一层更深的 group 承接指针命中。点击落点在聚焦可编辑控件的 bounds 内、而命中的是容器时，target 直接取聚焦控件（`FOCUSED_EDITABLE_TARGET`），点击与文本都不读树；点击当时没有焦点证据、后来由文本事件证明控件的，已记录的容器点击就地改成该控件（`CLICK_RETARGETED_TO_TEXT`）。没有焦点证据时复用点击证明的控件（`TEXT_TARGET_FROM_CLICK`）；既无证据也无点击锚点才走一次兜底读树。
 - 对标题动态变化的窗口，录制会话内以原生窗口身份跟踪并复用同一 `windowKey`。窗口销毁后再开，即使标题相同，也分配新键。PID、原生窗口号、AX ref、事件坐标和未经筛选的 AX 树均不写入 v2 flow。
 
 ### 窗口以外的界面

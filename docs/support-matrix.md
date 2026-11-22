@@ -131,6 +131,13 @@ Shell 的完整约束见 [Shell 步骤设计](shell-steps.md) 与 [Root 步骤�
 | `CLIPBOARD_INVALID_TEXT` | 剪贴板文本含 NUL | 是（录制警告，保留快捷键） |
 | `CLIPBOARD_READ_FAILED` | 录制 Cmd+V 时读取剪贴板失败 | 是（录制警告，保留快捷键） |
 | `UNSAFE_CLIPBOARD_TARGET` | Cmd+V 时没有唯一聚焦的可编辑非安全控件 | 是（录制警告，保留快捷键） |
+| `FOCUSED_EDITABLE_TARGET` | 点击落在聚焦可编辑控件的范围内，target 记为该控件而不是指针命中的容器 | 是（录制警告），回放目标更准确 |
+| `CLICK_RETARGETED_TO_TEXT` | 点击先记为容器，后续文本事件的焦点证据证明控件后，原地改成该控件 | 是（录制警告） |
+| `TEXT_TARGET_FROM_CLICK` | 文本事件没有焦点元素证据，target 取自此前点击证明的可编辑控件 | 是（录制警告） |
+| `UNTARGETED_TEXT` | 文本事件没有焦点元素证据，兜底读树也没有证明唯一聚焦可编辑控件，这些字符被丢弃 | 是（录制警告，不产生缺口） |
+| `CAPTURE_BACKLOG` | 队列落后 helper 超过 8 秒，积压的文本事件被丢弃 | 是（录制警告，不产生一串缺口） |
+| `CAPTURE_STARTUP` | 录制开始 500 ms 内没有窗口证据的事件被当作启动噪音丢弃 | 是（录制警告） |
+| `SNAPSHOT_UNAVAILABLE` | 指针手势的兜底读树失败，该手势记缺口 | 是（录制警告 + 缺口） |
 | `IME_COMPOSITION_UNSUPPORTED` | 录到 IME 提交的 Unicode 文本；组合过程不重放 | 是（录制警告），文本本身会入 flow |
 | `OUTSIDE_WINDOW` | 点击或滚动落在录制开始时的目标窗口之外 | 否，录制失败 |
 | `WINDOW_CHANGED` / `WINDOW_MISMATCH` / `WINDOW_NOT_FOUND` | 回放时窗口 ID、标题或前台状态与绑定的窗口不一致 | 否，不会点错窗口 |

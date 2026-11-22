@@ -50,7 +50,8 @@
       "focusGeneration": 1, "secure": false, "decision": "record",
       "owner": {
         "app": "com.apple.finder", "pid": 100, "processInstance": 1700000000000,
-        "windowNumber": 11, "windowTitle": "Downloads", "role": "AXTextField", "pressable": true
+        "windowNumber": 11, "windowTitle": "Downloads", "role": "AXTextField",
+        "name": "Search", "pressable": true
       }
     },
     {

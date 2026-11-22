@@ -252,21 +252,19 @@ test('a drag that crosses a window boundary leaves CROSS_SCOPE_GESTURE', async (
   assert.equal(flow.steps[0].code, 'CROSS_SCOPE_GESTURE');
 });
 
-test('an event whose snapshot missed its budget leaves STALE_CAPTURE', async () => {
-  const data = fixture('queue-overflow');
-  const recording = new GlobalRecording(readerFor(data), { now: () => NOW + 5000 });
-  await recording.add(parseCaptureEvent(data.events[0]));
-  const flow = recording.finish();
-  assert.deepEqual(flow.steps.map(step => step.kind), ['gap']);
-  assert.equal(flow.steps[0].code, 'STALE_CAPTURE');
-});
-
-test('an unreadable window snapshot becomes a gap instead of a guessed step', async () => {
+test('a failed fallback tree read drops the text without adding a gap', async () => {
   const data = fixture('queue-overflow');
   const recording = new GlobalRecording(readerFor(data, { failWindow: 11 }), { now: () => NOW });
-  for (const event of data.events) await recording.add(parseCaptureEvent(event));
+  // Past the startup window: these are real user events, not opening noise.
+  for (const event of data.events) {
+    await recording.add(parseCaptureEvent({ ...event, t: event.t + 1000 }));
+  }
   const flow = recording.finish();
-  assert.ok(flow.steps.some(step => step.kind === 'gap' && step.code === 'STALE_CAPTURE'));
+  // The helper's own queue gap stays; text that could not be bound does not add one.
+  assert.deepEqual(flow.steps.map(step => step.kind), ['gap']);
+  assert.equal(flow.steps[0].code, 'CAPTURE_GAP');
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'STALE_CAPTURE'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_TEXT'));
 });
 
 // A double-click on a package in Finder's Downloads: the pointer evidence names
@@ -291,66 +289,71 @@ test('a click whose window tree cannot be read keeps its point and its count', a
   assert.equal(parsed.steps[0].target.kind, 'point');
 });
 
-test('a click the helper saw on an element keeps that element when the tree read fails', async () => {
+test('a click the helper saw on an element needs no tree read at all', async () => {
   const data = fixture('finder-downloads-pkg-click');
   const events = data.events.map(event => event.kind !== 'click' ? event : {
     ...event,
     owner: { ...event.owner, role: 'AXImage', name: 'Install Test.pkg' },
   });
-  const recording = new GlobalRecording(readerFor(data, { failWindow: 11 }), { now: () => NOW });
+  let reads = 0;
+  const recording = new GlobalRecording(async () => {
+    reads += 1;
+    throw new Error('a click with element evidence must not read the tree');
+  }, { now: () => NOW });
   for (const event of events) await recording.add(parseCaptureEvent(event));
   const flow = recording.finish();
+  assert.equal(reads, 0);
   assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
+  // The AX role is stored the way a snapshot spells it, so replay can resolve it.
   assert.deepEqual(flow.steps[0].target, {
-    kind: 'element', role: 'AXImage', name: 'Install Test.pkg',
+    kind: 'element', role: 'image', name: 'Install Test.pkg',
   });
   assert.equal(flow.steps[0].count, 2);
-  assert.ok(recording.captureWarnings.some(warning => warning.code === 'NATIVE_ELEMENT_FALLBACK'));
   assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.equal(recording.captureWarnings.some(warning => warning.code.startsWith('NATIVE_')), false);
 
-  // An element fallback without a name still records the role alone.
+  // Element evidence without a name still records the role alone.
   const anonymous = data.events.map(event => event.kind !== 'click' ? event : {
     ...event, owner: { ...event.owner, role: 'AXImage' },
   });
-  const second = new GlobalRecording(readerFor(data, { failWindow: 11 }), { now: () => NOW });
+  let anonymousReads = 0;
+  const second = new GlobalRecording(async () => {
+    anonymousReads += 1;
+    throw new Error('a click with element evidence must not read the tree');
+  }, { now: () => NOW });
   for (const event of anonymous) await second.add(parseCaptureEvent(event));
-  assert.deepEqual(second.finish().steps[0].target, { kind: 'element', role: 'AXImage' });
+  assert.deepEqual(second.finish().steps[0].target, { kind: 'element', role: 'image' });
+  assert.equal(anonymousReads, 0);
 });
 
-test('a window tree read that fails once is retried before a fallback is used', async () => {
+test('a click without element evidence still reads the tree for its target', async () => {
   const data = fixture('finder-downloads-pkg-click');
   let reads = 0;
   const recording = new GlobalRecording(async window => {
     reads += 1;
-    if (reads === 1) throw new Error('snapshot unavailable');
     return structuredClone(data.snapshots[String(window.windowNumber)]);
   }, { now: () => NOW });
   for (const event of data.events) await recording.add(parseCaptureEvent(event));
   const flow = recording.finish();
   assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
-  // The retry read the real tree, so the step names the element it hit.
   assert.equal(flow.steps[0].target.kind, 'element');
   assert.equal(flow.steps[0].target.role, 'image');
   assert.equal(flow.steps[0].target.name, 'Install Test.pkg');
   assert.equal(flow.steps[0].count, 2);
-  assert.equal(recording.captureWarnings.some(warning => warning.code.startsWith('NATIVE_')), false);
-  assert.equal(reads, 3);
+  // One read per click: the double-click is two clicks, and neither is retried.
+  assert.equal(reads, 2);
 });
 
-test('a click that already missed its budget keeps a point target, not a gap', async () => {
-  const data = fixture('finder-downloads-pkg-click');
-  const recording = new GlobalRecording(readerFor(data), { now: () => NOW + 5000 });
-  for (const event of data.events) await recording.add(parseCaptureEvent(event));
-  const flow = recording.finish();
-  assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
-  assert.equal(flow.steps[0].target.kind, 'point');
-});
-
-test('a small list view still records the clicked element rather than a fallback', async () => {
+test('a small list view records the clicked element from the helper evidence', async () => {
   const data = fixture('two-apps-three-windows');
-  const recording = new GlobalRecording(readerFor(data), { now: () => NOW });
+  let reads = 0;
+  const recording = new GlobalRecording(async () => {
+    reads += 1;
+    throw new Error('the click must use its own element evidence');
+  }, { now: () => NOW });
   await recording.add(parseCaptureEvent(data.events[0]));
   const flow = recording.finish();
+  assert.equal(reads, 0);
   assert.equal(flow.steps[0].kind, 'click');
   assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'textfield', name: 'Search' });
   assert.equal(recording.captureWarnings.some(warning => warning.code.startsWith('NATIVE_')), false);
@@ -437,29 +440,111 @@ test('an editor click inside the focused textfield records the field, not the gr
   assert.ok(!JSON.stringify(flow).includes('Zq-vs'));
 });
 
-test('a click that lost its window tree is retargeted to the textfield the following text proves', async () => {
-  const snapshot = vscodeSnapshot();
+// The helper reports the focused control on every text event, so the container
+// a click hit is corrected without reading the tree at all.
+const EDITOR_FOCUS = {
+  role: 'AXTextField', name: 'manifest.json', editable: true, bounds: [300, 120, 900, 660],
+};
+
+test('a container click is retargeted from the text event focus evidence, with no read', async () => {
   let reads = 0;
   const recording = vscodeRecording(async () => {
     reads += 1;
-    // The click's two attempts fail, exactly like the live VS Code recording;
-    // the first text event then reads the tree successfully.
-    if (reads <= 2) throw new Error('snapshot unavailable');
-    return structuredClone(snapshot);
+    throw new Error('focus evidence must be enough');
   });
   for (const event of [
-    vscodeEvent('click', 100, { point: EDITOR_POINT, decision: 'record', owner: { ...VSCODE_OWNER, role: 'AXGroup' } }),
-    vscodeEvent('text', 200, { chars: 'Zq-vs' }),
-    vscodeEvent('text', 260, { chars: 'Zq-vs' }),
+    vscodeEvent('click', 100, {
+      point: EDITOR_POINT, decision: 'record', owner: { ...VSCODE_OWNER, role: 'AXGroup' },
+    }),
+    vscodeEvent('text', 200, { chars: 'Zq-vs', focus: EDITOR_FOCUS }),
+    vscodeEvent('text', 260, { chars: 'Zq-vs', focus: EDITOR_FOCUS }),
   ]) await recording.add(parseCaptureEvent(event));
 
   const flow = recording.finish();
+  assert.equal(reads, 0);
   assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'type']);
-  // The group recorded from native evidence is corrected in place.
   assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'textfield', name: 'manifest.json' });
   assert.deepEqual(flow.steps[1].target, flow.steps[0].target);
   assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
   assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_RETARGETED_TO_TEXT'));
+});
+
+test('a click that carries focus evidence binds the field at click time, with no read', async () => {
+  let reads = 0;
+  const recording = vscodeRecording(async () => {
+    reads += 1;
+    throw new Error('focus evidence must be enough');
+  });
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 100, {
+    point: EDITOR_POINT, decision: 'record',
+    owner: { ...VSCODE_OWNER, role: 'AXGroup' }, focus: EDITOR_FOCUS,
+  })));
+  await recording.add(parseCaptureEvent(vscodeEvent('text', 200, { chars: 'Zq-vs', focus: EDITOR_FOCUS })));
+
+  const flow = recording.finish();
+  assert.equal(reads, 0);
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'type']);
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'textfield', name: 'manifest.json' });
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'FOCUSED_EDITABLE_TARGET'));
+});
+
+test('ten typed characters bind from focus evidence with no read and under 50 ms', async () => {
+  let reads = 0;
+  const recording = vscodeRecording(async () => {
+    reads += 1;
+    throw new Error('the fast path must not read the tree');
+  });
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 90, {
+    point: EDITOR_POINT, decision: 'record',
+    owner: { ...VSCODE_OWNER, role: 'AXTextField', name: 'manifest.json' },
+  })));
+  const started = performance.now();
+  for (let index = 0; index < 10; index += 1) {
+    await recording.add(parseCaptureEvent(vscodeEvent('text', 100 + index * 60, {
+      chars: 'a', focus: EDITOR_FOCUS,
+    })));
+  }
+  const elapsed = performance.now() - started;
+
+  const flow = recording.finish();
+  assert.equal(reads, 0);
+  assert.ok(elapsed < 50, `ten characters took ${elapsed.toFixed(1)} ms`);
+  // Three backspaces after the burst stay their own parameterless steps.
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'type']);
+  assert.deepEqual(flow.steps[1].target, { kind: 'element', role: 'textfield', name: 'manifest.json' });
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+});
+
+test('a fallback focus read is reused by every later character of the burst', async () => {
+  const snapshot = vscodeSnapshot();
+  let reads = 0;
+  const recording = vscodeRecording(async () => {
+    reads += 1;
+    return structuredClone(snapshot);
+  });
+  for (let index = 0; index < 6; index += 1) {
+    await recording.add(parseCaptureEvent(vscodeEvent('text', 200 + index * 60, { chars: 'a' })));
+  }
+  const flow = recording.finish();
+  assert.equal(reads, 1);
+  assert.deepEqual(flow.steps.map(step => step.kind), ['type']);
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'textfield', name: 'manifest.json' });
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+});
+
+test('one failed fallback read does not cascade into the next characters', async () => {
+  let reads = 0;
+  const recording = vscodeRecording(async () => {
+    reads += 1;
+    throw new Error('snapshot unavailable');
+  });
+  await recording.add(parseCaptureEvent(vscodeEvent('text', 200, { chars: 'a' })));
+  await recording.add(parseCaptureEvent(vscodeEvent('text', 300, { chars: 'a', focus: EDITOR_FOCUS })));
+  const flow = recording.finish();
+  assert.equal(reads, 1);
+  assert.deepEqual(flow.steps.map(step => step.kind), ['type']);
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'textfield', name: 'manifest.json' });
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_TEXT'));
 });
 
 test('a large tree that answers past the pointer budget still binds the typed characters', async () => {
@@ -505,6 +590,27 @@ test('typing keeps its target from the click when no window tree can be read at 
   assert.deepEqual(flow.steps[3].target, flow.steps[1].target);
   assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
   assert.ok(recording.captureWarnings.some(warning => warning.code === 'TEXT_TARGET_FROM_CLICK'));
+});
+
+test('a focus change between fields starts a new type step from evidence, with no read', async () => {
+  let reads = 0;
+  const recording = vscodeRecording(async () => {
+    reads += 1;
+    throw new Error('focus evidence must be enough');
+  });
+  const other = { role: 'AXTextField', name: 'settings.json', editable: true, bounds: [100, 700, 400, 40] };
+  await recording.add(parseCaptureEvent(vscodeEvent('text', 100, { chars: 'a', focus: EDITOR_FOCUS })));
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 200, {
+    point: [200, 720], decision: 'record',
+    owner: { ...VSCODE_OWNER, role: 'AXTextField', name: 'settings.json' },
+  })));
+  await recording.add(parseCaptureEvent(vscodeEvent('text', 300, { chars: 'b', focus: other })));
+  const flow = recording.finish();
+  assert.equal(reads, 0);
+  assert.deepEqual(flow.steps.map(step => step.kind), ['type', 'click', 'type']);
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'textfield', name: 'manifest.json' });
+  assert.deepEqual(flow.steps[2].target, { kind: 'element', role: 'textfield', name: 'settings.json' });
+  assert.notEqual(flow.steps[0].input, flow.steps[2].input);
 });
 
 test('a click in another field starts a new typing target in the same window', async () => {
@@ -558,24 +664,68 @@ test('a focused field elsewhere is never taken as the target of an unrelated cli
   assert.notEqual(flow.steps[0].target.name, 'manifest.json');
 });
 
-test('a text event with no focused control and no click anchor leaves a reasoned gap', async () => {
+test('text with neither focus evidence nor a provable control is dropped, not a gap', async () => {
   const snapshot = vscodeSnapshot({ focused: false });
-  const recording = vscodeRecording(async () => structuredClone(snapshot));
+  let reads = 0;
+  const recording = vscodeRecording(async () => {
+    reads += 1;
+    return structuredClone(snapshot);
+  });
+  // A key step first: text alone would leave an empty recording to assert on.
+  await recording.add(parseCaptureEvent(vscodeEvent('key', 100, { key: 'escape', modifiers: [] })));
   await recording.add(parseCaptureEvent(vscodeEvent('text', 200, { chars: 'Zq-vs' })));
   const flow = recording.finish();
-  assert.deepEqual(flow.steps.map(step => step.kind), ['gap']);
-  assert.equal(flow.steps[0].code, 'CAPTURE_SCOPE_UNVERIFIED');
-  const warning = recording.captureWarnings.find(entry => entry.code === 'TEXT_TARGET_UNRESOLVED');
-  assert.ok(warning, 'the gap must say why the text could not be bound');
+  assert.equal(reads, 1);
+  assert.deepEqual(flow.steps.map(step => step.kind), ['key']);
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_TEXT'),
+    'the drop must say why the text could not be bound');
 });
 
-test('a text event too far behind the stream stays a stale gap', async () => {
+test('a 2.5 second queue delay still records text without STALE_CAPTURE', async () => {
   const snapshot = vscodeSnapshot();
-  const recording = new GlobalRecording(async () => structuredClone(snapshot), { now: () => NOW + 11_000 });
-  await recording.add(parseCaptureEvent(vscodeEvent('text', 200, { chars: 'Zq-vs' })));
+  let reads = 0;
+  const recording = new GlobalRecording(async () => {
+    reads += 1;
+    throw new Error('focus evidence must be enough');
+  }, { now: () => NOW + 2500 });
+  await recording.add(parseCaptureEvent(vscodeEvent('text', 200, { chars: 'Zq-vs', focus: EDITOR_FOCUS })));
   const flow = recording.finish();
-  assert.deepEqual(flow.steps.map(step => step.kind), ['gap']);
-  assert.equal(flow.steps[0].code, 'STALE_CAPTURE');
+  assert.equal(reads, 0);
+  assert.deepEqual(flow.steps.map(step => step.kind), ['type']);
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'STALE_CAPTURE'), false);
+});
+
+test('a text event eight seconds behind the stream is dropped with one backlog warning', async () => {
+  const recording = new GlobalRecording(async () => {
+    throw new Error('a backlogged text event must not be read for');
+  }, { now: () => NOW + 11_000 });
+  await recording.add(parseCaptureEvent(vscodeEvent('key', 100, { key: 'escape', modifiers: [] })));
+  await recording.add(parseCaptureEvent(vscodeEvent('text', 200, { chars: 'Zq-vs', focus: EDITOR_FOCUS })));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['key']);
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'CAPTURE_BACKLOG'));
+});
+
+test('unverified startup events are dropped without leaving a gap', async () => {
+  const recording = vscodeRecording(async () => {
+    throw new Error('startup noise must not be read for');
+  });
+  // The helper's first line has no window: the live recording turned it into s1 gap.
+  await recording.add(parseCaptureEvent({
+    kind: 'gap', gapCode: 'CAPTURE_SCOPE_UNVERIFIED', t: 40, seen: NOW,
+    focusGeneration: 0, secure: false,
+  }));
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 120, {
+    point: EDITOR_POINT, decision: 'record',
+    owner: { ...VSCODE_OWNER, role: 'AXTextField', name: 'manifest.json' },
+  })));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'CAPTURE_STARTUP'));
 });
 
 
@@ -788,7 +938,9 @@ test('record --global writes a v2 flow with scopes and no typed content', { skip
   assert.ok(!run.written.includes(secret));
   assert.ok(!run.stderr.includes(secret));
   assert.ok(!JSON.stringify(run.response).includes(secret));
-  assert.equal(run.commands.filter(command => command.startsWith('snapshot')).length, 3);
+  // The click's own element evidence and its anchor carry the first text; only
+  // the TextEdit window needs one fallback read.
+  assert.equal(run.commands.filter(command => command.startsWith('snapshot')).length, 1);
 });
 
 test('record --global keeps a partial flow when the helper stops after an event', { skip: process.platform !== 'darwin' }, t => {

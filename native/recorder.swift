@@ -378,12 +378,42 @@ final class Capture {
         emit(row)
     }
 
-    private func focusedElementIsSecure(_ application: NSRunningApplication) -> Bool {
-        let axApp = AXUIElementCreateApplication(application.processIdentifier)
-        guard let element = axElement(axApp, kAXFocusedUIElementAttribute as String) else { return false }
-        let role = axString(element, kAXRoleAttribute as String) ?? ""
-        let subrole = axString(element, kAXSubroleAttribute as String) ?? ""
-        return secureControl(role: role, subrole: subrole)
+    /** AX roles that accept typed text. A protected field is one of them. */
+    private static let editableRoles: Set<String> = [
+        "AXTextField", "AXTextArea", "AXSearchField", "AXComboBox", "AXSecureTextField",
+    ]
+
+    /**
+     * Constant-time evidence about the accessibility focused element: role,
+     * label, screen frame and whether it accepts text. Only single attributes
+     * are read — never kAXValueAttribute — so a secure field's content never
+     * enters the stream, and no window tree is walked.
+     */
+    private func focusElementEvidence(_ application: NSRunningApplication? = nil) -> [String: Any]? {
+        guard let targetPid = focusPid ?? application?.processIdentifier else { return nil }
+        let axApp = AXUIElementCreateApplication(targetPid)
+        guard let element = axElement(axApp, kAXFocusedUIElementAttribute as String) else { return nil }
+        let role = axString(element, kAXRoleAttribute as String)
+        let subrole = axString(element, kAXSubroleAttribute as String)
+        var evidence: [String: Any] = [:]
+        if let role, !role.isEmpty { evidence["role"] = role }
+        evidence["editable"] = Self.editableRoles.contains(role ?? "")
+        let secure = secureControl(role: role, subrole: subrole)
+        if secure {
+            // A protected control keeps its role but never a label.
+            evidence["secure"] = true
+        } else {
+            let title = axString(element, kAXTitleAttribute as String)
+            let label = title?.isEmpty == false ? title : axString(element, kAXDescriptionAttribute as String)
+            if let label, !label.isEmpty { evidence["name"] = String(label.prefix(256)) }
+        }
+        if let position = axPoint(element, kAXPositionAttribute as String),
+           let size = axSize(element, kAXSizeAttribute as String),
+           size.width > 0, size.height > 0 {
+            evidence["bounds"] = [Int(position.x.rounded()), Int(position.y.rounded()),
+                                  Int(size.width.rounded()), Int(size.height.rounded())]
+        }
+        return evidence.isEmpty ? nil : evidence
     }
 
     /** The bound instance, or nil when no path identity was requested. */
@@ -757,11 +787,14 @@ final class Capture {
             (.maskCommand, "meta"), (.maskControl, "ctrl"), (.maskAlternate, "alt"), (.maskShift, "shift")
         ]
         let modifiers = flags.compactMap { flag, name in event.flags.contains(flag) ? name : nil }
+        // One focused-element read serves the secure check and the evidence
+        // attached to whatever this keystroke becomes.
+        let keyFocus = global ? focusElementEvidence(frontmost) : nil
         // Secure content is never read. One secure event opens the interval; the
         // helper reports why it was secure and the TypeScript engine folds the
         // interval into one manual checkpoint without keeping any content.
-        if global, let frontmost {
-            let secureControl = focusedElementIsSecure(frontmost)
+        if global {
+            let secureControl = keyFocus?["secure"] as? Bool ?? false
             if secureInput || secureControl {
                 var evidence: [String] = []
                 if secureInput { evidence.append("system_secure_input") }
@@ -770,7 +803,7 @@ final class Capture {
                     "kind": "text", "secure": true, "secureEvidence": evidence,
                     "t": t, "seen": seen,
                 ]
-                addFocusEvidence(&payload)
+                addFocusEvidence(&payload, focus: keyFocus)
                 // addFocusEvidence copies only the system-wide flag; a protected
                 // control stays secure even when that flag is false.
                 payload["secure"] = true
@@ -800,7 +833,7 @@ final class Capture {
                             "t": t, "seen": seen,
                         ]
                         if ime { payload["ime"] = true }
-                        if global { addFocusEvidence(&payload) }
+                        if global { addFocusEvidence(&payload, focus: keyFocus) }
                         emit(payload)
                         return
                     }
@@ -811,16 +844,20 @@ final class Capture {
         }
         guard let key = special ?? ansiKeys[code] else { warn("UNSUPPORTED_KEY"); return }
         var payload: [String: Any] = ["kind": "key", "key": key, "modifiers": modifiers, "t": t, "seen": seen]
-        if global { addFocusEvidence(&payload) }
+        if global { addFocusEvidence(&payload, focus: keyFocus) }
         emit(payload)
     }
 
     /** Adds the front window's evidence to a key/text payload. */
-    private func addFocusEvidence(_ payload: inout [String: Any]) {
+    private func addFocusEvidence(_ payload: inout [String: Any], focus: [String: Any]? = nil) {
         payload["focusGeneration"] = focusGeneration
         payload["secure"] = secureInput
         let owner = focusOwner()
         if !owner.isEmpty { payload["owner"] = owner }
+        // The focused element is read here, once per event, with attribute
+        // calls only: the TypeScript side can then name the typing target
+        // without reading the window tree.
+        if let focus = focus ?? focusElementEvidence() { payload["focus"] = focus }
     }
 
     private func focusOwner() -> [String: Any] {
@@ -957,6 +994,10 @@ final class Capture {
             let evidence = global ? (pendingPointEvidence ?? unresolvedPointerEvidence()) : nil
             pendingPointEvidence = nil
             var emitted = click.payload(t: captureTime ?? elapsedMs(), seen: wallClockMs(), evidence: evidence)
+            // The click's focus evidence names the control that will receive
+            // typing next, so the TypeScript side can bind text without a tree
+            // read and can retarget a container click to that control.
+            if global, let focus = focusElementEvidence() { emitted["focus"] = focus }
             if traceClicks { emitted["traceId"] = click.down.traceId }
             emit(emitted)
         case .dragStarted:

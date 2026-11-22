@@ -1,19 +1,18 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { defaultCheckpointTimeoutMs, flowV2Check } from './contracts-v2.js';
 import type { FlowV2, StepV2, WindowScope } from './contracts-v2.js';
 import { parseCaptureEvent } from './capture-protocol.js';
-import type { CaptureEvent, CaptureGapCode } from './capture-protocol.js';
+import type { CaptureEvent, CaptureFocus, CaptureGapCode } from './capture-protocol.js';
 import type { Desktop } from './desktop.js';
 import { scopeKey, validateFlowV2 } from './flow-v2.js';
 import type { InputSource } from './ime.js';
 import type { ElementLocator } from './contracts.js';
 import { defaultLifecyclePollMs, LifecycleWatcher } from './lifecycle.js';
 import type { LifecycleObservation, LifecycleWatchOptions } from './lifecycle.js';
-import { Fault, contains, flatten, hitTest, object, resolve, toLocator } from './locator.js';
+import { Fault, contains, flatten, hitTest, object, toLocator } from './locator.js';
 import type { Located, Point, Snapshot } from './locator.js';
 import type { LifecycleEvent } from './wait-candidates.js';
 
@@ -29,25 +28,30 @@ const scrollGapMs = 350;
 const multiClickGapMs = 1500;
 const multiClickDistance = 4;
 const deltaLimit = 1000;
-const staleCaptureMs = 2000;
 /**
- * A `type` step only needs the focused control's identity; the tree's age does
- * not change which control received the characters. A large Electron tree can
- * answer just past the pointer budget, so a text read gets one longer window.
+ * A text event this far behind the helper's clock can no longer be tied to the
+ * live focus; the helper's own queue reported the same lag. It is dropped with
+ * one CAPTURE_BACKLOG warning instead of becoming a gap per character.
  */
-const lateCaptureMs = 3000;
+const captureBacklogMs = 8000;
 /**
- * Past this lag the helper's own queue has already decided the evidence is
- * gone; a text event this old is no longer attributed to a live focus.
+ * A window-tree read is the fallback, never the recording's normal path. The
+ * desktop call enforces this budget itself, so a slow tree cannot hold the
+ * event stream past it.
  */
-const captureBacklogMs = 10_000;
+const snapshotTimeoutMs = 3000;
+/**
+ * A recording can start with a click that dismisses a dialog before its window
+ * is provable. Unverified events in this opening window are startup noise, not
+ * user actions, and are dropped without a gap.
+ */
+const startupGraceMs = 500;
 const defaultStepLimit = 500;
 const dragCenterTolerance = 4;
 const dragPathLimit = 64;
 const clickTextFallbackMs = 5000;
 const maxWindowBindings = 64;
-/** One retry for a window-tree read: a slow window can finish just past its budget. */
-const snapshotRetryMs = 100;
+const maxFocusEntries = 64;
 
 const editable = new Set(['textfield', 'textbox', 'textarea', 'searchfield', 'combobox']);
 /** Keys that can move accessibility focus away from the control a click selected. */
@@ -126,6 +130,26 @@ function bareRole(role: string) {
   return role.replace(/^AX/, '').toLowerCase();
 }
 
+/** The focused element's screen frame, in the snapshot's shape. */
+function focusBounds(focus: CaptureFocus | undefined) {
+  if (!focus?.bounds) return undefined;
+  const [x, y, width, height] = focus.bounds;
+  return { x, y, width, height };
+}
+
+/**
+ * The replayable target the helper's focused-element evidence names. A secure
+ * control never becomes a target: its content is a manual checkpoint instead.
+ */
+function focusedTarget(focus: CaptureFocus | undefined): ElementLocator | undefined {
+  if (!focus || focus.secure) return undefined;
+  if (!focus.editable && !editableRole(focus.role)) return undefined;
+  const role = nativeLabel(focus.role);
+  if (!role) return undefined;
+  const name = nativeLabel(focus.name);
+  return { kind: 'element', role: bareRole(role), ...(name ? { name } : {}) };
+}
+
 /** A display label is stored, never the raw window title from arbitrary apps. */
 function displayTitle(title: string | undefined) {
   const trimmed = (title ?? '').trim();
@@ -172,6 +196,21 @@ export class GlobalRecording {
     at: number; point: Point; index: number; scope: string; locator: string; button: 'left' | 'right';
   };
   private textAnchor?: { at: number; scope: string; locator: ElementLocator };
+  /**
+   * Focused-element evidence the helper already carried, per window and focus
+   * generation. It lets the next text event reuse the proof without any read.
+   */
+  private focusTargets = new Map<string, ElementLocator>();
+  /**
+   * Text waiting for one fallback tree read. It is buffered, never awaited by
+   * the text path: the read resolves in the background and the buffered burst
+   * becomes one `type` step when it does. A non-text event settles it first so
+   * step order still follows event order.
+   */
+  private pendingText?: { key: string; scope: WindowScope; scopeId: string; at: number };
+  private pendingSettle?: Promise<void>;
+  private startupOpen = true;
+  private startupDropped = 0;
   private notes = new Map<string, string>();
   private lifecycleEvents: LifecycleEvent[] = [];
   private exclude: Set<string>;
@@ -251,6 +290,20 @@ export class GlobalRecording {
       return;
     }
     if (this.systemDialogVisible) return;
+
+    if (this.startupOpen && event.t > startupGraceMs) this.startupOpen = false;
+    // Before the front window is provable, an event with no window at all is
+    // startup noise (a click that dismissed a dialog, a queued gap); it must not
+    // become the first thing the flow reports.
+    if (this.startupOpen && !this.steps.length && !this.bindingFor(event)) {
+      this.startupDropped += 1;
+      return;
+    }
+    // A buffered text burst has to become its step before the next action, so
+    // step order stays event order. A text event in the same window joins it.
+    if (this.pendingText && this.pendingText.key !== this.eventFocusKey(event)) {
+      await this.settlePending();
+    }
 
     // The system authorization UI is evidence of a secure boundary even when the
     // system-wide flag has not caught up yet; its own window never becomes a scope.
@@ -343,54 +396,70 @@ export class GlobalRecording {
     if (!this.claim(event, binding)) return;
     this.ensureScope(binding);
     const scope = this.windowScope(binding);
+    const scopeId = scopeKey(scope);
     const button = event.button ?? 'left';
     const count = Math.max(1, Math.min(3, event.count ?? 1));
     // A click moves the caret and can select another control: any burst that
     // was still open described the state before this click.
     this.endBursts();
-    // The window tree is the normal evidence for a click target; the click
-    // itself survives when that read fails, because its owner and point are
-    // already recorded. A click never disappears into a capture gap here.
-    const snapshot = await this.snapshot(binding, event, { gapOnFailure: false });
+    if (event.focus?.secure) {
+      this.enterSecure();
+      return;
+    }
+    const hitRole = nativeLabel(event.owner?.role);
     let target: ClickTarget;
-    if (snapshot) {
-      const hit = this.hit(snapshot, event.point);
-      if (!hit) {
-        this.pushGap('CAPTURE_SCOPE_UNVERIFIED');
-        return;
-      }
-      if (hit.node.secure) {
-        this.enterSecure();
-        return;
-      }
-      // Electron editors expose their text surface as a group above the
-      // editable control. When the click lands inside the focused editable but
-      // the deepest hit is a container, the control is the target that replays.
-      const field = editableRole(hit.node.role) ? undefined : this.focusedField(snapshot, event.point);
-      if (field?.node.secure) {
-        this.enterSecure();
-        return;
-      }
-      const chosen = field ?? hit;
-      const locator = toLocator(snapshot, chosen);
-      if (field) {
+    if (hitRole) {
+      // The helper already hit-tested this click with AXUIElementCopyElementAtPosition,
+      // so the element under the pointer needs no window-tree read.
+      const hitName = nativeLabel(event.owner?.name);
+      target = { kind: 'element', role: bareRole(hitRole), ...(hitName ? { name: hitName } : {}) };
+      const field = focusedTarget(event.focus);
+      if (field && !editableRole(hitRole) && contains(focusBounds(event.focus), event.point)) {
+        // Electron exposes its text surface as a container above the editable
+        // control: the click landed in the focused field, so the field is the
+        // target that actually replays.
+        target = field;
         this.warn('FOCUSED_EDITABLE_TARGET',
           'A click landed inside the focused editable control and was bound to it, not to the container under the pointer');
       }
-      target = locator;
-      if (button === 'left' && chosen.node.ref && editableRole(locator.role)) {
-        this.textAnchor = { at: event.t, scope: scopeKey(scope), locator };
+      if (field) this.rememberFocus(this.focusKey(binding, event.focusGeneration), field);
+      if (button === 'left' && target.kind === 'element' && editableRole(target.role)) {
+        this.textAnchor = { at: event.t, scope: scopeId, locator: target };
       }
     } else {
-      target = this.nativeTarget(event);
-      // The helper's own AX evidence can already name the editable control; a
-      // failed tree read then costs nothing for the text that follows. The role
-      // is stored the way a snapshot spells it so replay can resolve it.
-      if (button === 'left' && target.kind === 'element' && editableRole(target.role)) {
-        this.textAnchor = {
-          at: event.t, scope: scopeKey(scope),
-          locator: { ...target, role: bareRole(target.role) },
-        };
+      // Without element evidence the window tree is the only source for a target.
+      const snapshot = await this.snapshot(binding, { gapOnFailure: false });
+      if (snapshot) {
+        const hit = this.hit(snapshot, event.point);
+        if (!hit) {
+          this.pushGap('CAPTURE_SCOPE_UNVERIFIED');
+          return;
+        }
+        if (hit.node.secure) {
+          this.enterSecure();
+          return;
+        }
+        // Electron editors expose their text surface as a group above the
+        // editable control. When the click lands inside the focused editable
+        // but the deepest hit is a container, the control is the replay target.
+        const field = editableRole(hit.node.role) ? undefined : this.focusedField(snapshot, event.point);
+        if (field?.node.secure) {
+          this.enterSecure();
+          return;
+        }
+        const chosen = field ?? hit;
+        const locator = toLocator(snapshot, chosen);
+        if (field) {
+          this.warn('FOCUSED_EDITABLE_TARGET',
+            'A click landed inside the focused editable control and was bound to it, not to the container under the pointer');
+        }
+        target = locator;
+        if (button === 'left' && chosen.node.ref && editableRole(locator.role)) {
+          this.textAnchor = { at: event.t, scope: scopeId, locator };
+          this.rememberFocus(this.focusKey(binding, event.focusGeneration), locator);
+        }
+      } else {
+        target = this.nativeTarget(event);
       }
     }
     const previous = this.lastClick;
@@ -418,21 +487,14 @@ export class GlobalRecording {
   }
 
   /**
-   * The target a click keeps when its window tree could not be read. The AX
-   * role the helper saw under the pointer is the stronger evidence; without it
-   * the recorded point stays, marked by a warning the workbench shows. Replaying
-   * a point needs physical input and an element target edited in first.
+   * The target a click keeps when it has no element evidence and its window
+   * tree could not be read. The point stays, marked by a warning the workbench
+   * shows. Replaying a point needs physical input and an element target edited
+   * in first.
    */
   private nativeTarget(event: Extract<CaptureEvent, { kind: 'click' }>): ClickTarget {
-    const role = nativeLabel(event.owner?.role);
-    if (role) {
-      const name = nativeLabel(event.owner?.name);
-      this.warn('NATIVE_ELEMENT_FALLBACK',
-        'A click was kept from the helper\'s element evidence because reading its window tree failed');
-      return { kind: 'element', role, ...(name ? { name } : {}) };
-    }
     this.warn('NATIVE_POINT_FALLBACK',
-      'A click was kept at its screen point because reading its window tree failed; edit it into an element before replay');
+      'A click was kept at its screen point because the helper had no element evidence and reading its window tree failed; edit it into an element before replay');
     return { kind: 'point', point: event.point };
   }
 
@@ -467,7 +529,7 @@ export class GlobalRecording {
         return;
       }
     }
-    const snapshot = await this.snapshot(binding, event);
+    const snapshot = await this.snapshot(binding);
     if (!snapshot) return;
     const hit = this.hit(snapshot, event.point);
     if (!hit) {
@@ -500,7 +562,7 @@ export class GlobalRecording {
     }
     if (!this.claim(event, binding)) return;
     this.ensureScope(binding);
-    const snapshot = await this.snapshot(binding, event);
+    const snapshot = await this.snapshot(binding);
     if (!snapshot) return;
     const hit = this.hit(snapshot, event.point);
     // A hover without a named element cannot be replayed: v2 has no coordinate
@@ -536,7 +598,7 @@ export class GlobalRecording {
     }
     if (!this.claim(event, binding)) return;
     this.ensureScope(binding);
-    const snapshot = await this.snapshot(binding, event);
+    const snapshot = await this.snapshot(binding);
     if (!snapshot) return;
     const from = this.hit(snapshot, event.from);
     const to = this.hit(snapshot, event.to);
@@ -574,69 +636,65 @@ export class GlobalRecording {
     }
     const scope = this.windowScope(binding);
     const scopeId = scopeKey(scope);
-    // An event that has fallen this far behind cannot be tied to the live focus
-    // any more; the helper's own queue reports the same lag.
+    // An event this far behind the helper cannot be tied to the live focus any
+    // more; the whole queue is late, so one warning is more useful than a gap
+    // per character. The event is dropped, never guessed.
     if (this.now() - event.seen > captureBacklogMs) {
-      this.warn('STALE_CAPTURE', 'The capture stream fell behind the helper and a text event could not be attributed');
-      this.pushGap('STALE_CAPTURE');
+      this.warn('CAPTURE_BACKLOG',
+        'The capture stream fell more than 8 seconds behind the helper; text events from the backlog were dropped');
       return;
     }
+    if (event.focus?.secure) {
+      this.enterSecure();
+      return;
+    }
+    const key = this.focusKey(binding, event.focusGeneration);
+    // The helper's focused-element evidence is the normal path: role, label and
+    // frame of the control that received the character, with no tree read.
+    const direct = focusedTarget(event.focus);
+    if (direct) {
+      this.rememberFocus(key, direct);
+      this.retargetClickFromEvidence(event, direct, scopeId);
+      this.bindText(scope, scopeId, event.t, direct);
+      return;
+    }
+    // A burst already proved which control receives the characters; another
+    // read per keystroke would prove nothing more.
     const burst = this.textBurst;
     if (burst && burst.scope === scopeId && event.t - burst.at <= textGapMs) {
-      // The open burst already proved which control received these characters;
-      // re-reading the tree for every keystroke would prove nothing more. A
-      // burst without a snapshot was bound from the click that selected the
-      // control, so its target still stands.
-      this.bindText(scope, scopeId, event, burst.target, burst.snapshot);
+      this.bindText(scope, scopeId, event.t, burst.target);
       return;
     }
-    const snapshot = await this.snapshot(binding, event, { gapOnFailure: false, lateOk: true });
-    if (snapshot) {
-      const field = this.textTarget(snapshot, scopeId, event);
-      if (field) {
-        // The characters prove the click landed inside this control: a click
-        // recorded as its container is corrected while the flow is still open.
-        this.retargetClick(snapshot, field, scopeId, event);
-        this.bindText(scope, scopeId, event, toLocator(snapshot, field), snapshot);
-        return;
-      }
-      // A secure focused control opened a checkpoint interval for this event;
-      // nothing inside it may become a step.
-      if (this.secureOpen) return;
-    }
-    // Without a snapshot the control the click selected is still proven: it was
-    // editable at click time and the characters went somewhere in this window.
+    // The click that selected the control is proven evidence even without the tree.
     const anchor = this.textAnchor;
     if (anchor && anchor.scope === scopeId && event.t - anchor.at <= clickTextFallbackMs) {
       this.warn('TEXT_TARGET_FROM_CLICK',
-        'The window tree was unavailable for a text event; its target was taken from the click that selected the control');
-      this.bindText(scope, scopeId, event, anchor.locator, undefined);
+        'A text event carried no focused-element evidence; its target was taken from the click that selected the control');
+      this.bindText(scope, scopeId, event.t, anchor.locator);
       return;
     }
-    if (!snapshot) {
-      this.warn('STALE_CAPTURE',
-        'A text event could not read its window tree and had no click-selected control to bind to');
-      this.pushGap('STALE_CAPTURE');
+    // Evidence already proven for this window and focus generation is reused.
+    const cached = this.focusTargets.get(key);
+    if (cached) {
+      this.bindText(scope, scopeId, event.t, cached);
       return;
     }
-    this.warn('TEXT_TARGET_UNRESOLVED',
-      'A text event had no focused editable control and no click-selected control to bind to');
-    this.pushGap('CAPTURE_SCOPE_UNVERIFIED');
+    // Fallback: buffer the burst and read the tree once, off the event path.
+    await this.bufferText(binding, key, scope, scopeId, event);
   }
 
   /** Records one text event against a proven control, merging a running burst. */
   private bindText(
-    scope: WindowScope, scopeId: string, event: Extract<CaptureEvent, { kind: 'text' }>,
-    target: ElementLocator, snapshot: Snapshot | undefined,
+    scope: WindowScope, scopeId: string, at: number, target: ElementLocator, snapshot?: Snapshot,
   ) {
     const locatorId = locatorKey(target);
     const burst = this.textBurst;
     if (burst && burst.scope === scopeId && burst.locator === locatorId &&
-        event.t - burst.at <= textGapMs) {
-      burst.at = event.t;
+        at - burst.at <= textGapMs) {
+      burst.at = at;
       burst.target = target;
       if (snapshot) burst.snapshot = snapshot;
-      this.textAnchor = { at: event.t, scope: scopeId, locator: target };
+      this.textAnchor = { at, scope: scopeId, locator: target };
       return;
     }
     this.endBursts();
@@ -645,10 +703,112 @@ export class GlobalRecording {
     this.push({ kind: 'type', scope, target, input });
     if (!this.steps.length || this.steps[this.steps.length - 1].kind !== 'type') return;
     this.textBurst = {
-      at: event.t, scope: scopeId, locator: locatorId, target,
+      at, scope: scopeId, locator: locatorId, target,
       ...(snapshot ? { snapshot } : {}),
     };
-    this.textAnchor = { at: event.t, scope: scopeId, locator: target };
+    this.textAnchor = { at, scope: scopeId, locator: target };
+  }
+
+  /**
+   * Buffers text that arrived without focused-element evidence and starts one
+   * tree read for its window. The read is not awaited here: the text path never
+   * waits for the accessibility tree, and every later character of the burst
+   * joins the buffer instead of triggering another read.
+   */
+  private async bufferText(
+    binding: WindowBinding, key: string, scope: WindowScope, scopeId: string,
+    event: Extract<CaptureEvent, { kind: 'text' }>,
+  ) {
+    // A pause longer than a burst ends it even while the first read is pending;
+    // the read has to settle before the next burst can be its own step.
+    if (this.pendingText && this.pendingText.key === key && event.t - this.pendingText.at > textGapMs) {
+      await this.settlePending();
+    }
+    const cached = this.focusTargets.get(key);
+    if (cached) {
+      this.bindText(scope, scopeId, event.t, cached);
+      return;
+    }
+    const pending = this.pendingText;
+    if (pending && pending.key === key) {
+      pending.at = event.t;
+      return;
+    }
+    this.pendingText = { key, scope, scopeId, at: event.t };
+    this.pendingSettle = this.resolvePendingText(binding, key);
+  }
+
+  /**
+   * One fallback read for a buffered burst. A resolved focused control becomes
+   * the burst's target and is cached for the rest of the focus generation; a
+   * failed or late read drops the buffered characters with a warning, never a
+   * gap, and never delays the events behind it.
+   */
+  private async resolvePendingText(binding: WindowBinding, key: string) {
+    let snapshot: Snapshot | undefined;
+    try {
+      snapshot = await this.read(this.windowFor(binding));
+    } catch {
+      snapshot = undefined;
+    }
+    const pending = this.pendingText;
+    this.pendingText = undefined;
+    this.pendingSettle = undefined;
+    if (!pending || pending.key !== key) return;
+    if (!snapshot) {
+      this.warn('UNTARGETED_TEXT',
+        'Text arrived without focused-element evidence and its window tree read failed; those characters were dropped');
+      return;
+    }
+    const focused = flatten(snapshot.tree).filter(entry => entry.node.states.includes('focused'));
+    if (focused.some(entry => entry.node.secure)) {
+      this.enterSecure();
+      return;
+    }
+    const [single] = focused;
+    if (focused.length !== 1 || !single?.node.ref || !editable.has(single.node.role)) {
+      this.warn('UNTARGETED_TEXT',
+        'Text arrived without focused-element evidence and its window tree had no unique focused editable control; those characters were dropped');
+      return;
+    }
+    const target = toLocator(snapshot, single);
+    this.rememberFocus(key, target);
+    this.retargetClick(snapshot, single, pending.scopeId, pending.at);
+    this.bindText(pending.scope, pending.scopeId, pending.at, target, snapshot);
+  }
+
+  /** Waits for a buffered burst's fallback read, so its step lands in order. */
+  async settlePending(): Promise<void> {
+    const settle = this.pendingSettle;
+    if (settle) await settle;
+  }
+
+  private windowFor(binding: WindowBinding) {
+    return {
+      app: binding.app, pid: binding.pid, windowNumber: binding.windowNumber,
+      windowTitle: binding.title,
+      ...(binding.processInstance === undefined ? {} : { processInstance: binding.processInstance }),
+    };
+  }
+
+  private eventFocusKey(event: CaptureEvent) {
+    const owner = event.owner;
+    if (!owner?.pid || !owner.windowNumber) return '';
+    return `${owner.pid}:${owner.processInstance ?? 0}:${owner.windowNumber}:${event.focusGeneration}`;
+  }
+
+  private focusKey(binding: WindowBinding, generation: number) {
+    return `${binding.pid}:${binding.processInstance ?? 0}:${binding.windowNumber}:${generation}`;
+  }
+
+  private rememberFocus(key: string, target: ElementLocator) {
+    if (!key) return;
+    this.focusTargets.delete(key);
+    this.focusTargets.set(key, target);
+    if (this.focusTargets.size > maxFocusEntries) {
+      const oldest = this.focusTargets.keys().next().value;
+      if (oldest !== undefined) this.focusTargets.delete(oldest);
+    }
   }
 
   /**
@@ -665,36 +825,23 @@ export class GlobalRecording {
   }
 
   /**
-   * Focus is the normal evidence for a text event. Safari can report the caret
-   * before its accessibility focus flag, so a recent click on an editable field
-   * may stand in once that field itself shows the typed character.
+   * A click recorded as its container is corrected in place when the following
+   * text proves the field — from the helper's own bounds when it has them.
    */
-  private textTarget(
-    snapshot: Snapshot, scope: string, event: Extract<CaptureEvent, { kind: 'text' }>,
-  ): Located | undefined {
-    const focused = flatten(snapshot.tree).filter(entry => entry.node.states.includes('focused'));
-    const [single] = focused;
-    if (focused.length === 1 && single.node.ref && editable.has(single.node.role)) {
-      if (single.node.secure) {
-        this.enterSecure();
-        return undefined;
-      }
-      return single;
-    }
-    if (focused.some(entry => entry.node.secure)) {
-      this.enterSecure();
-      return undefined;
-    }
-    const anchor = this.textAnchor;
-    if (!anchor || anchor.scope !== scope || event.t - anchor.at > clickTextFallbackMs) return undefined;
-    try {
-      const field = resolve(snapshot, anchor.locator);
-      if (!field.node.ref || field.node.secure || !editable.has(field.node.role)) return undefined;
-      if (event.chars && !(field.node.value ?? field.node.text ?? '').includes(event.chars)) return undefined;
-      return field;
-    } catch {
-      return undefined;
-    }
+  private retargetClickFromEvidence(
+    event: Extract<CaptureEvent, { kind: 'text' }>, target: ElementLocator, scope: string,
+  ) {
+    const click = this.lastClick;
+    if (!click || click.button !== 'left' || click.scope !== scope) return;
+    if (click.index !== this.steps.length - 1 || event.t - click.at > clickTextFallbackMs) return;
+    const step = this.steps[click.index];
+    if (step?.kind !== 'click' || step.target.kind !== 'element') return;
+    if (editableRole(step.target.role)) return;
+    if (!contains(focusBounds(event.focus), click.point)) return;
+    (step as { target: ElementLocator }).target = target;
+    click.locator = locatorKey(target);
+    this.warn('CLICK_RETARGETED_TO_TEXT',
+      'A click recorded as its container was retargeted to the editable control the following text proved');
   }
 
   /**
@@ -703,10 +850,10 @@ export class GlobalRecording {
    * so the click that selected it is corrected in place while it is still the
    * last step. Only a click whose point was inside the control qualifies.
    */
-  private retargetClick(snapshot: Snapshot, field: Located, scope: string, event: Extract<CaptureEvent, { kind: 'text' }>) {
+  private retargetClick(snapshot: Snapshot, field: Located, scope: string, at: number) {
     const click = this.lastClick;
     if (!click || click.button !== 'left' || click.scope !== scope) return;
-    if (click.index !== this.steps.length - 1 || event.t - click.at > clickTextFallbackMs) return;
+    if (click.index !== this.steps.length - 1 || at - click.at > clickTextFallbackMs) return;
     const step = this.steps[click.index];
     if (step?.kind !== 'click' || step.target.kind !== 'element') return;
     if (editableRole(step.target.role)) return;
@@ -731,9 +878,16 @@ export class GlobalRecording {
     if (!this.claim(event, binding)) return;
     this.ensureScope(binding);
     this.endBursts();
-    // Editing keys keep the click-selected control valid; a key that can move
-    // accessibility focus invalidates it, so the next text needs a fresh read.
-    if (focusMovingKeys.has(event.key)) this.textAnchor = undefined;
+    // The key event's own focused-element evidence is the freshest proof of
+    // which control has the caret, and it costs no tree read.
+    const target = focusedTarget(event.focus);
+    if (target) {
+      this.rememberFocus(this.focusKey(binding, event.focusGeneration), target);
+      this.textAnchor = { at: event.t, scope: scopeKey(this.windowScope(binding)), locator: target };
+    } else if (focusMovingKeys.has(event.key)) {
+      // A key that can move accessibility focus invalidates the old control.
+      this.textAnchor = undefined;
+    }
     this.push({
       kind: 'key', scope: this.windowScope(binding), key: event.key,
       ...(event.modifiers.length ? { modifiers: event.modifiers } : {}),
@@ -757,12 +911,15 @@ export class GlobalRecording {
     if (this.secureOpen) return;
     this.secureOpen = true;
     this.endBursts();
+    // A secure boundary invalidates whatever control was proven before it.
+    this.textAnchor = undefined;
   }
 
   /** Closes a secure interval and emits the one checkpoint it becomes. */
   private closeSecure() {
     this.secureOpen = false;
     this.endBursts();
+    this.textAnchor = undefined;
     this.pushCheckpoint('secure_input');
   }
 
@@ -886,50 +1043,24 @@ export class GlobalRecording {
   }
 
   /**
-   * Reads the window tree for one event. A failed or late read is retried once
-   * after a short backoff, because a window with many items can finish just
-   * outside its first budget. When it still fails the caller decides: every
-   * input except a click becomes a `gap`, and a click keeps its own evidence.
-   * A text read may accept a slower answer (`lateOk`), because a `type` step
-   * only needs to know which control received the characters.
+   * Reads the window tree for one pointer step. This is fallback evidence: the
+   * helper's own element evidence is preferred, and a text event never waits for
+   * this. A failed read is reported once and the caller decides; a click keeps
+   * its own evidence, every other gesture becomes a gap.
    */
   private async snapshot(
-    binding: WindowBinding, event: CaptureEvent, { gapOnFailure = true, lateOk = false } = {},
+    binding: WindowBinding, { gapOnFailure = true } = {},
   ): Promise<Snapshot | undefined> {
-    const budget = lateOk ? lateCaptureMs : staleCaptureMs;
-    let stale = false;
-    let failed: string | undefined;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      if (attempt > 0) await sleep(snapshotRetryMs);
-      // A read that already missed the budget cannot be improved by reading
-      // again: the budget only shrinks, so a late event stops immediately.
-      if (this.now() - event.seen > budget) {
-        stale = true;
-        break;
+    try {
+      return await this.read(this.windowFor(binding));
+    } catch (error) {
+      if (gapOnFailure) {
+        const reason = error instanceof Fault ? error.code : 'no answer';
+        this.warn('SNAPSHOT_UNAVAILABLE', `An accessibility read failed (${reason}); the step is a gap`);
+        this.pushGap('STALE_CAPTURE');
       }
-      try {
-        const snapshot = await this.read({
-          app: binding.app, pid: binding.pid, windowNumber: binding.windowNumber,
-          windowTitle: binding.title,
-          ...(binding.processInstance === undefined ? {} : { processInstance: binding.processInstance }),
-        });
-        if (this.now() - event.seen > budget) {
-          stale = true;
-          break;
-        }
-        return snapshot;
-      } catch (error) {
-        // Kept for the warning: a tree that is incomplete and a tree that is
-        // slow are different defects, and the recording should say which.
-        failed = error instanceof Fault ? error.code : 'UNKNOWN';
-      }
+      return undefined;
     }
-    if (gapOnFailure) {
-      const reason = stale ? 'missed its capture budget' : `failed (${failed ?? 'no answer'})`;
-      this.warn('STALE_CAPTURE', `An accessibility read ${reason}; the step is a gap`);
-      this.pushGap('STALE_CAPTURE');
-    }
-    return undefined;
   }
 
   private pushGap(code: CaptureGapCode) {
@@ -951,8 +1082,19 @@ export class GlobalRecording {
    * still has to reach the workbench so the gap can be resolved there.
    */
   finish(): FlowV2 {
+    if (this.pendingText) {
+      // A buffered burst whose read never returned cannot be placed; dropping it
+      // is better than a flow that silently loses every later step's order.
+      this.pendingText = undefined;
+      this.warn('UNTARGETED_TEXT',
+        'A fallback tree read for buffered text did not finish before the recording ended; those characters were dropped');
+    }
     this.endBursts();
     if (this.secureOpen) this.closeSecure();
+    if (this.startupDropped) {
+      this.warn('CAPTURE_STARTUP',
+        `${this.startupDropped} unverified event(s) in the first ${startupGraceMs} ms of the recording were dropped as startup noise`);
+    }
     if (!this.steps.length) throw new Fault('EMPTY_RECORDING', 'No supported actions were captured');
     if (this.truncated) this.warn('STEP_LIMIT', `The flow retains the first ${this.stepLimit} steps`);
     const id = randomUUID();
@@ -1035,7 +1177,7 @@ export async function recordGlobal(
   let sessionTimeout: NodeJS.Timeout | undefined;
 
   const recording = new GlobalRecording(
-    window => desktop.snapshotWindow(`w-${window.windowNumber}`, window.windowTitle, 1200),
+    window => desktop.snapshotWindow(`w-${window.windowNumber}`, window.windowTitle, snapshotTimeoutMs),
     { exclude },
   );
   if (options.inputSource && !options.inputSource.ascii) {
@@ -1136,6 +1278,9 @@ export async function recordGlobal(
   }
 
   if (!ready) throw failure ?? new Fault('CAPTURE_DEPENDENCY', 'Capture helper unavailable');
+  // A buffered text burst may still be waiting for its one fallback read; let it
+  // land before the flow is built so its step is not lost.
+  await recording.settlePending();
   let flow: FlowV2;
   try {
     flow = recording.finish();

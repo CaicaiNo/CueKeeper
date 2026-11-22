@@ -31,6 +31,28 @@ const secureEvidenceSet = new Set<string>(secureEvidenceKinds);
 /** A point in Quartz screen coordinates: top-left origin, whole pixels. */
 export type CapturePoint = [number, number];
 
+/** A rectangle in Quartz screen coordinates: x, y, width, height. */
+export type CaptureBounds = [number, number, number, number];
+
+/**
+ * What the helper read from the accessibility focused element at event time.
+ * These are single-attribute reads, never a tree walk: they exist so a text or
+ * key event does not need a window snapshot to name its target. The helper never
+ * reads a control's value, and a secure control contributes no label.
+ */
+export interface CaptureFocus {
+  /** AX role, spelled the AX way (`AXTextField`). */
+  role?: string;
+  /** AX title or description of the focused element. */
+  name?: string;
+  /** Screen frame of the focused element. */
+  bounds?: CaptureBounds;
+  /** The focused element accepts typed text. */
+  editable?: boolean;
+  /** The focused element is a protected input; its label is withheld. */
+  secure?: boolean;
+}
+
 export const captureModifiers = ['meta', 'ctrl', 'alt', 'shift'] as const;
 export type CaptureModifier = typeof captureModifiers[number];
 const modifierSet = new Set<string>(captureModifiers);
@@ -71,6 +93,8 @@ interface CaptureEventBase {
   /** Why the event was secure; absent when `secure` is false. */
   secureEvidence?: SecureEvidence[];
   owner?: CaptureOwner;
+  /** The accessibility focused element at event time, when the helper could read it. */
+  focus?: CaptureFocus;
   decision?: 'record' | 'navigate' | 'gap';
   gapCode?: CaptureGapCode;
 }
@@ -181,6 +205,41 @@ function secureEvidence(value: unknown): SecureEvidence[] | undefined {
   return [...new Set(value)] as SecureEvidence[];
 }
 
+function bounds(value: unknown): CaptureBounds {
+  if (!Array.isArray(value) || value.length !== 4) fail('focus.bounds must be x, y, width, height');
+  const [x, y, width, height] = value;
+  return [
+    integer(x, 'focus.bounds x', -100_000, 100_000),
+    integer(y, 'focus.bounds y', -100_000, 100_000),
+    integer(width, 'focus.bounds width', 1, 100_000),
+    integer(height, 'focus.bounds height', 1, 100_000),
+  ];
+}
+
+function focusEvidence(value: unknown): CaptureFocus {
+  const input = object(value);
+  const parsed: CaptureFocus = {};
+  if (input.role !== undefined) {
+    if (typeof input.role !== 'string' || !input.role) fail('focus.role must be a short string');
+    parsed.role = input.role.length > 128 ? input.role.slice(0, 128) : input.role;
+  }
+  if (input.name !== undefined) {
+    if (typeof input.name !== 'string' || input.name.length > 512) fail('focus.name must be a short string');
+    const name = input.name.trim();
+    if (name) parsed.name = name.length > 256 ? name.slice(0, 256) : name;
+  }
+  if (input.bounds !== undefined) parsed.bounds = bounds(input.bounds);
+  if (input.editable !== undefined) {
+    if (typeof input.editable !== 'boolean') fail('focus.editable must be a boolean');
+    parsed.editable = input.editable;
+  }
+  if (input.secure !== undefined) {
+    if (typeof input.secure !== 'boolean') fail('focus.secure must be a boolean');
+    parsed.secure = input.secure;
+  }
+  return parsed;
+}
+
 /**
  * Validates one helper line. Text content is accepted but never stored by the
  * engine; it exists only so the helper can describe a printable event.
@@ -199,6 +258,7 @@ export function parseCaptureEvent(value: unknown): CaptureEvent {
     t, seen, focusGeneration, secure: input.secure,
     ...(evidence === undefined ? {} : { secureEvidence: evidence }),
     ...(input.owner === undefined ? {} : { owner: owner(input.owner) }),
+    ...(input.focus === undefined ? {} : { focus: focusEvidence(input.focus) }),
     ...(input.decision === undefined ? {} : { decision: decision(input.decision) }),
     ...(input.gapCode === undefined ? {} : { gapCode: gapCode(input.gapCode) }),
   };
