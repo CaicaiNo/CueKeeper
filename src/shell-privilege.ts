@@ -578,7 +578,7 @@ export interface RootRunnerOptions {
   prompt?: string;
   /** How long the password dialog waits before it reports a timeout. */
   promptTimeoutMs?: number;
-  /** Hard cap on the `sudo -A -k -v` authentication probe. */
+  /** Hard cap on the non-prompting `sudo -n -l` policy probe. */
   probeTimeoutMs?: number;
   /** Unattended sudoers execution stays off until HAOC-76 verifies it. */
   allowSudoers?: boolean;
@@ -595,7 +595,7 @@ export function createRootPrivilegeRunner(options: RootRunnerOptions = {}): Priv
   const sudoPath = options.sudoPath ?? '/usr/bin/sudo';
   const osascriptPath = options.osascriptPath ?? '/usr/bin/osascript';
   const promptTimeoutMs = options.promptTimeoutMs ?? 60_000;
-  const probeTimeoutMs = options.probeTimeoutMs ?? promptTimeoutMs + 15_000;
+  const probeTimeoutMs = options.probeTimeoutMs ?? 10_000;
   const allowSudoers = options.allowSudoers ?? false;
   const promptCommand = options.prompt
     ? shQuote(options.prompt)
@@ -647,57 +647,53 @@ export function createRootPrivilegeRunner(options: RootRunnerOptions = {}): Priv
         return commandExecution(result);
       }
       const nonce = randomUUID();
-      const authPath = join(request.directory, `askpass-${nonce}-auth.sh`);
-      const runPath = join(request.directory, `askpass-${nonce}-run.sh`);
-      const authStatus = join(request.directory, `askpass-${nonce}-auth.status`);
-      const runStatus = join(request.directory, `askpass-${nonce}-run.status`);
+      const askpass = join(request.directory, `askpass-${nonce}.sh`);
+      const status = join(request.directory, `askpass-${nonce}.status`);
       try {
-        await writeAskpass(authPath, authStatus, promptCommand);
-        await writeAskpass(runPath, runStatus, promptCommand);
+        await writeAskpass(askpass, status, promptCommand);
       } catch {
         return { started: false, state: 'failed', startFailed: true };
       }
 
-      // One dialog per root step: -k ignores any cached ticket, -v validates the
-      // credential without running a command, so sudoers command restrictions
-      // never turn the probe into a denial.
-      const auth = await runSupervised(launch, sudoPath, ['-A', '-k', '-v'],
-        { cwd: request.cwd, env: sudoEnvironment(authPath), timeoutMs: probeTimeoutMs, signal });
-      if (auth.cancelled) {
-        return { started: false, state: 'terminated', cancelled: true, cleanup: auth.cleanup };
-      }
-      if (auth.startFailed) return { started: false, state: 'failed', startFailed: true };
-      const authLines = await readPromptStatus(authStatus);
-      if (authLines.includes('cancelled')) return authenticationFailure('cancelled');
-      if (authLines.includes('timeout') || auth.timedOut) return authenticationFailure('timeout');
-      if (authLines.includes('unavailable')) return authenticationFailure('unavailable');
-      if (auth.code !== 0) {
-        return authenticationFailure(
-          authLines.includes('provided') || authLines.includes('retry') ? 'rejected' : 'refused',
-        );
-      }
-
+      // One sudo invocation per root step. `-k` drops any cached ticket so the
+      // dialog belongs to this step, and sudo reuses the credential it just
+      // obtained to run the command. A separate `sudo -A -k -v` probe prompted
+      // twice on macOS: without a TTY the ticket validated by `-v` does not
+      // cover the following sudo run (HAOC-100).
+      // The deadline carries one full dialog window on top of the command
+      // budget, so typing the password never eats into the command's time.
+      // The dialog also bounds itself at promptTimeoutMs.
       const run = await runSupervised(launch, sudoPath,
-        ['-A', '-u', 'root', '--', request.program, ...request.args],
-        { cwd: request.cwd, env: sudoEnvironment(runPath), timeoutMs: request.timeoutMs, signal });
+        ['-A', '-k', '-u', 'root', '--', request.program, ...request.args],
+        {
+          cwd: request.cwd, env: sudoEnvironment(askpass),
+          timeoutMs: request.timeoutMs + promptTimeoutMs, signal,
+        });
+      if (run.startFailed) return { started: false, state: 'failed', startFailed: true };
       if (run.cancelled) {
         return { started: true, state: 'terminated', cancelled: true, cleanup: run.cleanup };
       }
+      const lines = await readPromptStatus(status);
+      if (lines.includes('cancelled')) return authenticationFailure('cancelled');
+      if (lines.includes('timeout')) return authenticationFailure('timeout');
+      if (lines.includes('unavailable')) return authenticationFailure('unavailable');
       if (run.timedOut) {
         return { started: true, state: 'terminated', timedOut: true, cleanup: run.cleanup };
       }
-      if (run.startFailed) return { started: false, state: 'failed', startFailed: true };
-      const runLines = await readPromptStatus(runStatus);
-      if (runLines.includes('cancelled')) return authenticationFailure('cancelled');
-      if (runLines.includes('timeout')) return authenticationFailure('timeout');
-      if (runLines.includes('unavailable')) return authenticationFailure('unavailable');
-      // A second prompt happened because the cached ticket no longer covered
-      // this command. `retry` means sudo asked again after rejecting the
-      // password; otherwise the command itself ran and its exit code stands.
-      if (runLines.includes('retry') && run.code !== 0) {
-        return authenticationFailure('rejected');
-      }
-      return commandExecution(run);
+      // The helper answers once and refuses every later sudo attempt, so a
+      // `retry` line means sudo rejected the password and never ran the
+      // command; otherwise the exit code is the command's own.
+      if (lines.includes('retry') && run.code !== 0) return authenticationFailure('rejected');
+      if (lines.includes('provided') || lines.includes('retry')) return commandExecution(run);
+      if (run.code === 0) return commandExecution(run);
+      // sudo never asked: a NOPASSWD rule let the command run, or the account
+      // may not use sudo at all. A non-prompting policy check tells the two
+      // apart without opening a second dialog.
+      const policy = await runSupervised(launch, sudoPath,
+        ['-n', '-l', '--', request.program, ...request.args],
+        { cwd: request.cwd, env: sudoEnvironment(), timeoutMs: probeTimeoutMs, signal });
+      if (policy.code === 0) return commandExecution(run);
+      return authenticationFailure('refused');
     },
   };
 }
