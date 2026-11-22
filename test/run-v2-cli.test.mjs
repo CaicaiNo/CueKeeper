@@ -254,3 +254,62 @@ test('CLI: a checkpoint resumes after the operator types continue and reports me
     assert.ok(cli.probes().every(line => line === '--secure-state'));
     assert.equal(cli.calls().filter(call => call.command === 'type').length, 2);
   });
+
+test('CLI: --checkpoint-events announces the wait on stderr and continues from stdin',
+  { skip: process.platform !== 'darwin' }, t => {
+    const cli = fixture(t);
+    const result = cli.run([
+      'run', cli.checkpointFlowPath, '--foreground', '--inputs', cli.valuesPath,
+      '--json', '--checkpoint-events',
+    ], 'continue\n');
+    assert.equal(result.code, 0, result.stderr);
+    // The parent reads exactly this marker; the report stays pure JSON on stdout.
+    assert.match(result.stderr, /^CHECKPOINT_WAIT auth type-note 120000$/m);
+    const envelope = JSON.parse(result.stdout);
+    assert.equal(envelope.ok, true);
+    assert.equal(envelope.data.status, 'passed');
+    assert.deepEqual(envelope.data.entries.map(entry => [entry.id, entry.status]), [
+      ['launch', 'passed'], ['type-note', 'passed'], ['auth', 'passed'], ['type-after', 'passed'],
+    ]);
+    assert.deepEqual(envelope.data.entries[2].checkpoint, {
+      reason: 'secure_input', triggerStepId: 'type-note', timeoutMs: 120_000, confirmedBy: 'operator',
+    });
+  });
+
+test('CLI: --checkpoint-events cancel fails at the checkpoint and skips later steps',
+  { skip: process.platform !== 'darwin' }, t => {
+    const cli = fixture(t);
+    const result = cli.run([
+      'run', cli.checkpointFlowPath, '--foreground', '--inputs', cli.valuesPath,
+      '--json', '--checkpoint-events',
+    ], 'cancel\n');
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /^CHECKPOINT_WAIT auth type-note 120000$/m);
+    const envelope = JSON.parse(result.stdout);
+    assert.equal(envelope.ok, false);
+    assert.equal(envelope.data.status, 'blocked');
+    assert.equal(envelope.data.entries[2].code, 'MANUAL_CHECKPOINT_CANCELLED');
+    assert.equal(envelope.data.entries[3].status, 'skipped');
+    assert.equal(cli.calls().filter(call => call.command === 'type').length, 1);
+  });
+
+test('CLI: --checkpoint-events needs --json and stays a v2 flag',
+  { skip: process.platform !== 'darwin' }, t => {
+    const cli = fixture(t);
+    const withoutJson = cli.run([
+      'run', cli.checkpointFlowPath, '--foreground', '--inputs', cli.valuesPath, '--checkpoint-events',
+    ]);
+    assert.equal(withoutJson.code, 2);
+    assert.match(withoutJson.stderr, /combine it with --json/);
+    // A v1 flow has no checkpoint channel; the flag stays a v2-only spelling.
+    const v1Flow = join(cli.dir, 'v1-flow.json');
+    writeFileSync(v1Flow, JSON.stringify({
+      version: 1, id: 'v1-flag', name: 'v1 flag',
+      target: { app, window: windowTitle },
+      steps: [{ id: 'type-1', kind: 'type', target: { kind: 'element', role: 'textfield' }, text: 'x' }],
+    }));
+    const v1 = cli.run(['run', v1Flow, '--checkpoint-events', '--json']);
+    assert.equal(v1.code, 2);
+    assert.equal(JSON.parse(v1.stdout).error.code, 'UNSUPPORTED_FLAG');
+    assert.deepEqual(cli.calls(), []);
+  });

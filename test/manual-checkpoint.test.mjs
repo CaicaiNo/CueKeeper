@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import test from 'node:test';
 import {
-  CheckpointFault, nativeSecureInputProbe, runHandOff, terminalCheckpointChannel,
+  CheckpointFault, eventsCheckpointChannel, nativeSecureInputProbe, parseCheckpointWait, runHandOff,
+  terminalCheckpointChannel,
 } from '../dist/manual-checkpoint.js';
 
 // Checkpoints are driven by fake channels and probes: no terminal, app or system
@@ -193,4 +194,27 @@ test('the native secure probe reads one boolean line and rejects garbage', async
   writeFileSync(bad, '#!/bin/sh\nprintf \'not json\\n\'\n');
   chmodSync(bad, 0o700);
   await assert.rejects(nativeSecureInputProbe(bad)(), { code: 'SECURE_STATE_UNAVAILABLE' });
+});
+
+test('the event channel emits the fixed marker and reads one answer from stdin', async () => {
+  const output = [];
+  const sink = new Writable({ write(chunk, _encoding, callback) { output.push(String(chunk)); callback(); } });
+  const channel = eventsCheckpointChannel({ input: Readable.from(['continue\n']), output: sink });
+  await channel.announce(request);
+  assert.equal(output.join(''), 'CHECKPOINT_WAIT s3 s2 120000\n');
+  assert.equal(await channel.confirm(request, new AbortController().signal), 'continue');
+
+  assert.deepEqual(parseCheckpointWait('CHECKPOINT_WAIT s3 s2 120000'), {
+    stepId: 's3', triggerStepId: 's2', timeoutMs: 120000,
+  });
+  assert.equal(parseCheckpointWait('CHECKPOINT_WAIT s3 s2'), undefined);
+  assert.equal(parseCheckpointWait('noise'), undefined);
+});
+
+test('the event channel ignores noise, accepts cancel and treats closed stdin as a refusal', async () => {
+  const sink = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+  const cancel = eventsCheckpointChannel({ input: Readable.from(['noise\ncancel\n']), output: sink });
+  assert.equal(await cancel.confirm(request, new AbortController().signal), 'cancel');
+  const closed = eventsCheckpointChannel({ input: Readable.from([]), output: sink });
+  assert.equal(await closed.confirm(request, new AbortController().signal), 'cancel');
 });

@@ -433,6 +433,13 @@ body.v2-mode .draft { display: none; }
 }
 .v2-footer .muted { margin: 0; font-size: 11px; }
 .v2-errors { margin: 0; padding-left: 18px; color: var(--danger); font-size: 11px; }
+.v2-checkpoint {
+  display: grid; gap: 6px; margin: 8px 20px; padding: 10px 12px; border-radius: 8px;
+  border: 1px solid var(--line); background: #fffaf0;
+}
+.v2-checkpoint-head { display: flex; align-items: center; gap: 8px; }
+.v2-checkpoint .muted { margin: 0; font-size: 11.5px; }
+.v2-checkpoint .actions { display: flex; gap: 6px; }
 .run-status { flex: none; display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--muted); }
 .run-status::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .run-status.passed, .run-status.resolved { color: var(--ok); }

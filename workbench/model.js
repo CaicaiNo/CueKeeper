@@ -465,6 +465,25 @@ export function statusMap(report) {
   return map;
 }
 
+/** One candidate in the v2 "pick from the current window" dialog. */
+export function pickCandidateLabel(candidate) {
+  const frame = candidate.bounds
+    ? ` · ${candidate.bounds.width} × ${candidate.bounds.height} @ ${candidate.bounds.x}, ${candidate.bounds.y}`
+    : '';
+  return `${candidate.interactive ? '可交互' : '容器'} · ${v2TargetLabel(candidate.locator)}${frame}`;
+}
+
+/** The waiting-checkpoint facts the run panel shows; never a secret. */
+export function checkpointWaitFacts(checkpoint, appName = id => id) {
+  if (!checkpoint) return [];
+  return [
+    ['当前步骤', checkpoint.stepId],
+    ['触发步骤', checkpoint.triggerStepId],
+    ['App / 窗口', checkpoint.scope ? scopeDescription(checkpoint.scope, appName) : '—'],
+    ['等待上限', `${Math.round(checkpoint.timeoutMs / 1000)} 秒`],
+  ];
+}
+
 /**
  * Build an assertion from the dialog. `target` is a window marker or an element
  * locator; text/value assertions carry exactly one comparator.

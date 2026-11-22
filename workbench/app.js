@@ -5,6 +5,7 @@ import {
   shellDraft, shellSummary, dragSummary, undoCondition, visibleRows,
   V2_COPYABLE_KINDS, V2_INSERT_KINDS, V2_TARGET_KINDS, assertCheck, checkLabel, diffSummary,
   filterStepsByScope, scopeKey, scopeOptions, statusMap, stepTemplate, v2StepLabel, v2TargetLabel,
+  checkpointWaitFacts, pickCandidateLabel,
 } from './model.js';
 import { createAppPicker } from './picker.js';
 
@@ -15,6 +16,7 @@ const state = {
   expanded: new Set(), showIgnored: false, focused: null, draft: [], tab: 'actions', saving: false,
   running: false, setup: null, appPaths: {}, catalog: null, catalogAt: 0, catalogError: null, appNames: {},
   v2: null, v2Report: null, v2Selected: null, v2Filter: '', v2Busy: false,
+  v2Running: false, v2Checkpoint: null,
 };
 
 const dom = createDom(document);
@@ -192,6 +194,7 @@ function setSession(session) {
     appPaths: session?.target?.appPath ? { [session.target.app]: session.target.appPath } : {},
     appNames: Object.fromEntries(Object.entries(session?.apps ?? {}).map(([id, app]) => [id, app.name])),
     v2: session?.v2 ?? null, v2Report: null, v2Selected: null, v2Filter: '', v2Busy: false,
+    v2Running: false, v2Checkpoint: null,
   });
   $('show-ignored').checked = false;
   $('test-name').value = session ? `${session.name.slice(0, 248)} 测试` : '';
@@ -704,7 +707,7 @@ function renderV2() {
   const visible = filterStepsByScope(flow, state.v2Filter);
   const statuses = statusMap(state.v2Report);
   const selected = state.v2Selected;
-  const busy = state.v2Busy;
+  const busy = state.v2Busy || state.v2Running;
   const saved = editor.saved?.at(-1);
 
   const filter = select([['', '全部作用域'], ...options.map(option => [option.key, option.label])],
@@ -717,6 +720,11 @@ function renderV2() {
       : step.kind === 'manual_checkpoint'
         ? button('查看', () => v2CheckpointDialog(step), { style: 'small', icon: 'eye', disabled: busy })
         : button('编辑', () => v2EditDialog(step), { style: 'small', icon: 'sliders', disabled: busy }),
+    V2_TARGET_KINDS.has(step.kind) && step.kind !== 'drag'
+      ? button('从窗口拾取', () => void v2PickDialog(step), {
+        style: 'small', icon: 'crosshair', title: '从当前窗口拾取目标元素', disabled: busy,
+      })
+      : undefined,
     button('上移', () => v2Move(step.id, steps.findIndex(entry => entry.id === step.id) - 1), {
       style: 'small', icon: 'up', iconOnly: true, title: '上移',
       disabled: busy || steps.findIndex(entry => entry.id === step.id) === 0,
@@ -769,6 +777,10 @@ function renderV2() {
       el('h2', {}, el('span', { className: 'sec' }, '03'), ' v2 时间线编辑'),
       el('span', { className: `state-chip ${dirty ? 'inferred' : 'confirmed'}` },
         dirty ? '未保存修改' : diff.changed ? '已保存 revision' : '与录制一致'),
+      state.v2Running
+        ? el('span', { className: `state-chip ${state.v2Checkpoint ? 'inferred' : 'confirmed'}` },
+          state.v2Checkpoint ? '等待人工授权' : '回放中')
+        : undefined,
       el('span', { className: 'trailing' }),
       filter,
       button('撤销', () => void v2Undo(), { style: 'small', icon: 'undo', disabled: busy || !editor.canUndo }),
@@ -778,9 +790,11 @@ function renderV2() {
         style: 'small', icon: 'save', disabled: busy || !dirty,
       }),
       button('dry-run', () => void v2DryRun(), { style: 'small', icon: 'checkCircle', disabled: busy }),
-      button('实时回放', () => v2LiveDialog(), {
-        style: 'small primary', icon: 'play', disabled: busy || !state.allowLive,
+      button(state.v2Running ? '停止回放' : '实时回放', () => state.v2Running ? void v2StopRun() : v2LiveDialog(), {
+        style: 'small primary', icon: state.v2Running ? 'x' : 'play',
+        disabled: !state.v2Running && (busy || !state.allowLive),
       })),
+    checkpointPanel(),
     rows.length ? el('div', { className: 'v2-rows' }, ...rows) : empty('当前作用域筛选下没有步骤。'),
     el('div', { className: 'v2-footer' },
       muted(diff.changed ? `与录制相比：${diff.lines.join('；')}` : '与录制一致，尚未修改。'),
@@ -808,27 +822,29 @@ function v2LiveDialog() {
   const saved = state.v2?.saved?.at(-1);
   const confirmed = el('input', { type: 'checkbox' });
   const values = new Map((flow.inputs ?? []).map(name => [name, input({ maxLength: 4000, spellcheck: false, autocomplete: 'off' })]));
+  const checkpoints = flow.steps.filter(step => step.kind === 'manual_checkpoint');
   openDialog('实时回放 v2 流程', [
     muted(saved && !state.v2?.dirty
       ? `将回放已保存的 revision：${saved.path}`
       : '实时回放只能运行已保存的 revision；请先保存当前修改。'),
-    muted('会占用前台并可能触发 macOS 权限提示；运行期间点「停止」会中断 CLI。'),
+    muted('会占用前台并可能触发 macOS 权限提示；运行期间点「停止回放」会中断 CLI。'),
+    ...(checkpoints.length ? [muted(
+      `含 ${checkpoints.length} 个人工检查点：回放会暂停在检查点，由你在真实界面完成授权，` +
+      '再回到工作台点「已完成授权，继续」。工作台不接收密码；超时或取消就停在检查点。')] : []),
     el('label', { className: 'checkbox' }, confirmed, '我确认回放会操作当前桌面的应用窗口'),
     ...(values.size ? [
       el('h3', {}, '运行参数值'),
       muted('参数值只传给本次回放进程，不写入 flow 或报告。'),
       ...[...values.entries()].map(([name, node]) => field(name, node)),
     ] : []),
-  ], '开始回放', async () => {
+  ], '开始回放', () => {
     if (!confirmed.checked) throw new Error('确认后才会开始实时回放。');
+    if (!saved || state.v2?.dirty) throw new Error('实时回放只能运行已保存的 revision；请先保存当前修改。');
     const inputs = Object.fromEntries([...values.entries()].map(([name, node]) => [name, node.value]));
-    const report = await api('run', { session: state.session.id, mode: 'live', confirm: true, inputs });
-    state.v2Report = report;
-    renderV2();
-    renderTimeline();
-    status(`实时回放${resultStatus[report.status] ?? report.status} · ${report.entries.length} 步` +
-      (report.stopped ? ' · 已停止' : ''), report.status === 'passed' ? 'success' : 'error');
-    setTimeout(() => showV2Result(report), 0);
+    // The replay may pause at a checkpoint; close the dialog and keep the page
+    // live so the waiting panel can be answered.
+    dialog.close();
+    void v2StartLive(inputs);
   });
 }
 
@@ -1189,6 +1205,122 @@ function v2InsertDialog() {
 
 function v2SelectedStep() {
   return state.v2Selected ? v2Step(state.v2Selected) : undefined;
+}
+
+/** The waiting-checkpoint card; the page never receives or stores a password. */
+function checkpointPanel() {
+  const checkpoint = state.v2Checkpoint;
+  if (!checkpoint) return undefined;
+  return el('article', { className: 'v2-checkpoint' },
+    el('div', { className: 'v2-checkpoint-head' },
+      el('strong', {}, '等待人工授权'),
+      el('span', { className: 'state-chip inferred' }, '回放已暂停')),
+    infoList(checkpointWaitFacts(checkpoint, appLabel), 'meta-grid'),
+    muted('请在真实界面由操作者完成授权或输入密码；工作台只发确认，不接收密码。' +
+      '完成后点「已完成授权，继续」，CLI 会重新核对安全输入与恢复条件。'),
+    muted('超时或取消会停在检查点，后续步骤标为 skipped。'),
+    el('div', { className: 'actions' },
+      button('已完成授权，继续', () => void v2CheckpointAnswer('continue'),
+        { style: 'small primary', icon: 'check' }),
+      button('取消运行', () => void v2CheckpointAnswer('cancel'),
+        { style: 'small danger', icon: 'x' })));
+}
+
+async function v2CheckpointAnswer(answer) {
+  try {
+    await api('run/checkpoint', { session: state.session.id, answer });
+    state.v2Checkpoint = null;
+    renderV2();
+    status(answer === 'continue'
+      ? '已发送继续；CLI 会重新核对安全输入与恢复条件'
+      : '已发送取消；后续步骤不会执行', answer === 'continue' ? 'success' : '');
+  } catch (error) {
+    status(error.message, 'error');
+  }
+}
+
+async function v2StopRun() {
+  try {
+    await api('stop', {});
+    status('正在停止当前回放…');
+  } catch (error) {
+    status(error.message, 'error');
+  }
+}
+
+/**
+ * Starts a v2 replay without blocking the page: the run POST stays in flight
+ * while the page polls for a checkpoint and answers it.
+ */
+async function v2StartLive(inputs) {
+  state.v2Running = true;
+  state.v2Checkpoint = null;
+  renderV2();
+  status('实时回放已启动；可在时间线看到每一步的结果。', '');
+  const timer = setInterval(async () => {
+    try {
+      const info = await api('run/status', { session: state.session.id });
+      const next = info.running ? info.checkpoint ?? null : null;
+      if (JSON.stringify(next) === JSON.stringify(state.v2Checkpoint)) return;
+      state.v2Checkpoint = next;
+      renderV2();
+      if (next) status(`等待人工授权 · ${next.stepId}`, '');
+    } catch {
+      // A transient poll failure must not interrupt the replay; retry next tick.
+    }
+  }, 500);
+  try {
+    const report = await api('run', { session: state.session.id, mode: 'live', confirm: true, inputs });
+    state.v2Report = report;
+    renderV2();
+    renderTimeline();
+    status(`实时回放${resultStatus[report.status] ?? report.status} · ${report.entries.length} 步` +
+      (report.stopped ? ' · 已停止' : ''), report.status === 'passed' ? 'success' : 'error');
+    setTimeout(() => showV2Result(report), 0);
+  } catch (error) {
+    status(error.message, 'error');
+  } finally {
+    clearInterval(timer);
+    state.v2Running = false;
+    state.v2Checkpoint = null;
+    renderV2();
+  }
+}
+
+/** Reads the live window snapshot behind one step's scope and applies a pick. */
+async function v2PickDialog(step) {
+  if (!step.scope || step.scope.kind !== 'window') {
+    openDialog('从当前窗口拾取', [
+      muted('这个步骤没有窗口作用域，读不到可拾取的控件快照。请先把作用域改成窗口。'),
+      muted('仍可以在「编辑」里手动填写角色/名称/路径。'),
+    ]);
+    return;
+  }
+  let picked;
+  try {
+    picked = await api('v2/pick', { session: state.session.id, stepId: step.id });
+  } catch (error) {
+    openDialog('从当前窗口拾取', [
+      muted(`无法从窗口读取控件：${error.message}`),
+      muted(`${v2ScopeText(step.scope)}；确认应用正在运行并打开了该窗口，且已授予 CueKeeper 辅助功能权限。`),
+      muted('仍可以在「编辑」里手动填写角色/名称/路径。'),
+    ]);
+    return;
+  }
+  const candidates = picked.candidates ?? [];
+  const chooser = select(candidates.map((candidate, index) => [String(index), pickCandidateLabel(candidate)]));
+  const detail = el('p', { className: 'muted' }, pickCandidateLabel(candidates[0]));
+  chooser.onchange = () => { detail.textContent = pickCandidateLabel(candidates[Number(chooser.value)]); };
+  openDialog(`从当前窗口拾取 · ${picked.windowTitle}`, [
+    muted(`${v2ScopeText(step.scope)} · 窗口 ${picked.windowId} · ${candidates.length} 个控件`),
+    field('控件', chooser),
+    detail,
+    muted(step.target?.kind === 'point'
+      ? '当前目标是坐标；确认后会替换成元素定位器（point → element）。'
+      : '确认后会替换这一步的目标定位器。'),
+    muted('只读快照：不会点击、聚焦或输入。'),
+  ], '使用此控件', () =>
+    v2Edit({ kind: 'update', id: step.id, patch: { target: candidates[Number(chooser.value)].locator } }));
 }
 
 function render() {

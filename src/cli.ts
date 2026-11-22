@@ -28,7 +28,7 @@ import { record } from './record.js';
 import { recordGlobal } from './record-v2.js';
 import { displayRecordingsDirectory, recordingFileName, recordingsDirectory, writeRecording } from './recording-output.js';
 import { packReport } from './report.js';
-import { nativeSecureInputProbe, terminalCheckpointChannel } from './manual-checkpoint.js';
+import { eventsCheckpointChannel, nativeSecureInputProbe, terminalCheckpointChannel } from './manual-checkpoint.js';
 import { blockedShellReport, runFlow } from './run.js';
 import type { ShellRunOptions } from './run.js';
 import { runFlowV2 } from './run-v2.js';
@@ -49,7 +49,7 @@ const help = `Cuekeeper ${buildInfo().version}
   cuekeeper flow validate <flow.json|test.json> [--json]
   cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--interactive|--non-interactive] [--report <report.json>] [--allow-shell] [--allow-sudo] [--capture-shell-output] [--input-source-switch [--input-source <id>] [--strict-ime]] [--json]
   cuekeeper run <flow-v2.json> --dry-run [--report <report-v2.json>] [--json]   (v2: scope plan only)
-  cuekeeper run <flow-v2.json> --foreground [--inputs <values.json>] [--headed] [--report <report-v2.json>] [--json]
+  cuekeeper run <flow-v2.json> --foreground [--inputs <values.json>] [--headed] [--report <report-v2.json>] [--json [--checkpoint-events]]
   cuekeeper run ... [--no-input-source-switch]   (accepted; equal to the default)
   cuekeeper sudo set|status|clear [--json]   (login-keychain credential for --non-interactive root steps)
   cuekeeper ime status|list [--input-source <id>] [--json]
@@ -403,12 +403,20 @@ async function main() {
         'no-input-source-switch': { type: 'boolean' }, 'input-source': { type: 'string' },
         'input-source-switch': { type: 'boolean' },
         'strict-ime': { type: 'boolean' },
+        'checkpoint-events': { type: 'boolean' },
       },
     });
     checkPositionals(positionals, 1);
     const dryRun = values['dry-run'] ?? false;
     const interactive = values.interactive ?? false;
     const nonInteractive = values['non-interactive'] ?? false;
+    // The checkpoint event channel is only meaningful to a parent process that
+    // reads the machine report; a terminal run keeps the human prompt.
+    const checkpointEvents = values['checkpoint-events'] ?? false;
+    if (checkpointEvents && !machine) {
+      throw new UsageFault('CHECKPOINT_EVENTS_REQUIRES_JSON',
+        '--checkpoint-events is the machine checkpoint channel; combine it with --json');
+    }
     // Replay manages no input source unless asked: Unicode injection does not
     // depend on the IME, so the default run never reads TIS, never switches,
     // writes no ime.json and reports no IME warnings. `--no-input-source-switch`
@@ -455,10 +463,13 @@ async function main() {
           'Live replay of a version 2 flow drives the mouse and keyboard across apps; pass --foreground to confirm');
       }
       // A checkpoint needs an operator in the same session. Machine output has
-      // no independent confirmation channel, so refuse before any desktop call.
-      if (machine && flow.steps.some(step => step.kind === 'manual_checkpoint')) {
+      // no independent confirmation channel unless the parent asked for the
+      // fixed --checkpoint-events channel, so refuse before any desktop call.
+      const hasCheckpoints = flow.steps.some(step => step.kind === 'manual_checkpoint');
+      if (machine && hasCheckpoints && !checkpointEvents) {
         throw new UsageFault('MANUAL_CHECKPOINT_REQUIRED',
-          'A flow with manual checkpoints needs an interactive terminal; --json has no operator confirmation channel');
+          'A flow with manual checkpoints needs an interactive terminal or --checkpoint-events; ' +
+          '--json alone has no operator confirmation channel');
       }
       macOnly();
       const inputs = values.inputs ? await readInputs(values.inputs) : undefined;
@@ -467,7 +478,7 @@ async function main() {
         runFlowV2(flow, {
           desktop, signal, baselineDir,
           ...(inputs ? { inputs } : {}),
-          checkpoints: terminalCheckpointChannel(),
+          checkpoints: checkpointEvents ? eventsCheckpointChannel() : terminalCheckpointChannel(),
           secureInputActive: nativeSecureInputProbe(),
         }));
       if (values.report) await writeNew(values.report, JSON.stringify(report, null, 2) + '\n');
@@ -482,6 +493,9 @@ async function main() {
     }
     if (values['foreground'] || values.inputs) {
       throw new UsageFault('UNSUPPORTED_FLAG', '--foreground and --inputs only apply to flow version 2');
+    }
+    if (values['checkpoint-events']) {
+      throw new UsageFault('UNSUPPORTED_FLAG', '--checkpoint-events only applies to flow version 2');
     }
     const { flow, secrets } = parseTestItem(document);
     const planned = plan(flow);
