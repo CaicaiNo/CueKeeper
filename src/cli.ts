@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { dirname, resolve } from 'node:path';
-import { mkdir, realpath } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
+import { mkdir, realpath, writeFile } from 'node:fs/promises';
 import { discoverAssets } from './assets.js';
 import { countdown, detectTarget } from './auto-target.js';
 import { capturePreflight, diagnose, formatDoctor, preflightFault } from './doctor.js';
@@ -691,6 +691,7 @@ async function main() {
         global: { type: 'boolean' }, exclude: { type: 'string' }, 'max-seconds': { type: 'string' },
         'no-indicator': { type: 'boolean' }, sound: { type: 'boolean' },
         'trace-clicks': { type: 'boolean' }, clipboard: { type: 'boolean' },
+        'no-lifecycle': { type: 'boolean' },
       },
     });
     const countdownSeconds = Number(values.countdown);
@@ -735,22 +736,34 @@ async function main() {
       await globalCountdown(countdownSeconds, signal);
       const options = {
         seconds: maxSeconds, indicator: !values['no-indicator'], sound: values.sound ?? false,
-        exclude, ...(inputSource ? { inputSource } : {}),
+        exclude, lifecycle: values['no-lifecycle'] ? false : true,
+        ...(inputSource ? { inputSource } : {}),
       };
       const result = await withDesktop({ headed: false, signal },
         desktop => recordGlobal(desktop, options, signal));
       const contents = JSON.stringify(result.flow, null, 2) + '\n';
       const saved = output ?? await writeRecording(directory!, recordingFileName(new Date()), contents);
       if (output) await writeNew(output, contents);
+      // Lifecycle facts sit next to the flow so the workbench can propose wait
+      // candidates from the recording itself. A recording with no such facts
+      // writes no file instead of an empty one.
+      if (result.lifecycle.length) {
+        await writeFile(join(dirname(saved), 'lifecycle.json'),
+          JSON.stringify({ version: 1, events: result.lifecycle }, null, 2) + '\n');
+      }
       const workbench = output ? undefined : `cuekeeper workbench ${displayRecordingsDirectory()}`;
       const data = {
         version: 2, output: saved, flowId: result.flow.id, actions: result.flow.steps.length,
+        ...(result.lifecycle.length ? { lifecycle: result.lifecycle.length } : {}),
         ...(workbench ? { workbench } : {}),
         ...(inputSource ? { inputSource } : {}),
         ...(result.partial ? { partial: true } : {}),
         ...(result.warnings.length ? { warnings: result.warnings } : {}),
       };
       const lines = [`Saved ${result.flow.steps.length} global steps to ${saved}${result.partial ? ' (partial flow)' : ''}`];
+      if (result.lifecycle.length) {
+        lines.push(`记录了 ${result.lifecycle.length} 个下载/安装事件：工作台会据此提出候选等待`);
+      }
       if (workbench) lines.push(workbench);
       const fault = result.failure ??
         (result.partial ? new Fault('PARTIAL_RECORDING', 'Some input was skipped') : undefined);

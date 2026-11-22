@@ -24,6 +24,8 @@ const ratio = T.Number({ minimum: 0, maximum: 1 });
 export const defaultWaitTimeoutMs = 15_000;
 export const maxWaitTimeoutMs = 1_800_000;
 export const defaultCheckpointTimeoutMs = 120_000;
+/** A download counts as finished once its size and mtime stay quiet this long. */
+export const defaultFileQuietMs = 1000;
 
 const element = object({
   kind: T.Literal('element'),
@@ -66,7 +68,18 @@ const surfaceScope = T.Union([
     app: bundleId, windowKey, windowTitle: label,
   }),
 ]);
-export const scopeSchema = T.Union([windowScope, appScope, surfaceScope]);
+// A file scope names a local directory and exactly one file: either the exact
+// name or an installer-assigned suffix such as `pkg (1).pkg`. Only a wait uses
+// it; the file is read, never written, moved or deleted.
+const fileDirectory = T.String({
+  minLength: 1, maxLength: 4096, pattern: appPathPattern,
+});
+const fileName = T.String({ minLength: 1, maxLength: 255, pattern: '^[^/\\\\]+$' });
+const fileScope = T.Union([
+  object({ kind: T.Literal('file'), directory: fileDirectory, name: fileName }),
+  object({ kind: T.Literal('file'), directory: fileDirectory, suffix: fileName }),
+]);
+export const scopeSchema = T.Union([windowScope, appScope, surfaceScope, fileScope]);
 const focusAfter = T.Optional(T.Union([windowScope, appScope]));
 
 const comparator = T.Union([T.Literal('equals'), T.Literal('contains'), T.Literal('matches')]);
@@ -128,6 +141,17 @@ const windowWaitCheck = T.Union([
 const appWaitCheck = T.Union([
   object({ kind: T.Literal('app_running'), equals: T.Boolean() }),
   object({ kind: T.Literal('app_installed'), equals: T.Boolean() }),
+]);
+// A file wait reads the download directory: a matching file exists, or it has
+// finished writing (its size and mtime have been quiet for `quietMs`).
+const fileWaitCheck = T.Union([
+  object({ kind: T.Literal('file_exists'), equals: T.Boolean() }),
+  object({
+    kind: T.Literal('file_stable'),
+    quietMs: T.Optional(T.Integer({
+      minimum: 100, maximum: 60_000, default: defaultFileQuietMs,
+    })),
+  }),
 ]);
 const waitTimeout = T.Optional(T.Integer({
   minimum: 1000, maximum: maxWaitTimeoutMs, default: defaultWaitTimeoutMs,
@@ -208,6 +232,10 @@ const waitStep = T.Union([
   object({
     ...stepId, kind: T.Literal('wait'), scope: appScope, focusAfter,
     check: appWaitCheck, timeoutMs: waitTimeout,
+  }),
+  object({
+    ...stepId, kind: T.Literal('wait'), scope: fileScope,
+    check: fileWaitCheck, timeoutMs: waitTimeout,
   }),
 ]);
 const assertStep = T.Union([
@@ -381,6 +409,8 @@ export type ReportV2 = Static<typeof reportV2Schema>;
 export type ReportV2Entry = Static<typeof entry>;
 export type WindowWaitCheck = Static<typeof windowWaitCheck>;
 export type AppWaitCheck = Static<typeof appWaitCheck>;
+export type FileWaitCheck = Static<typeof fileWaitCheck>;
+export type FileScope = Static<typeof fileScope>;
 export type AssertCheckV2 = Static<typeof assertCheck>;
 export type ElementV2 = Static<typeof element>;
 export type DeliveryV2 = Static<typeof deliveryState>;

@@ -325,6 +325,64 @@
                     ]
                   }
                 ]
+              },
+              {
+                "anyOf": [
+                  {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "const": "file",
+                        "type": "string"
+                      },
+                      "directory": {
+                        "minLength": 1,
+                        "maxLength": 4096,
+                        "pattern": "^(?![\\s\\S]*[\\u0000-\\u001f\\u007f])(?:/(?!/)[\\s\\S]+|[A-Za-z]:[/\\\\][^/\\\\][\\s\\S]*|\\\\\\\\(?![?.]\\\\)[^/\\\\]+\\\\[^/\\\\]+\\\\[^/\\\\][\\s\\S]*)$",
+                        "type": "string"
+                      },
+                      "name": {
+                        "minLength": 1,
+                        "maxLength": 255,
+                        "pattern": "^[^/\\\\]+$",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "directory",
+                      "name"
+                    ]
+                  },
+                  {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "const": "file",
+                        "type": "string"
+                      },
+                      "directory": {
+                        "minLength": 1,
+                        "maxLength": 4096,
+                        "pattern": "^(?![\\s\\S]*[\\u0000-\\u001f\\u007f])(?:/(?!/)[\\s\\S]+|[A-Za-z]:[/\\\\][^/\\\\][\\s\\S]*|\\\\\\\\(?![?.]\\\\)[^/\\\\]+\\\\[^/\\\\]+\\\\[^/\\\\][\\s\\S]*)$",
+                        "type": "string"
+                      },
+                      "suffix": {
+                        "minLength": 1,
+                        "maxLength": 255,
+                        "pattern": "^[^/\\\\]+$",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "directory",
+                      "suffix"
+                    ]
+                  }
+                ]
               }
             ]
           },

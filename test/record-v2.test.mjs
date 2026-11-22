@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
-  cpSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+  cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,6 +12,7 @@ import { parseCaptureEvent } from '../dist/capture-protocol.js';
 import { flowV2Check } from '../dist/contracts-v2.js';
 import { parseFlowV2 } from '../dist/flow-v2.js';
 import { GlobalRecording } from '../dist/record-v2.js';
+import { loadSession } from '../dist/workbench-session.js';
 
 // The engine is exercised offline: events and window trees come from fixtures,
 // no helper is spawned and no accessibility tree is read from the desktop.
@@ -380,7 +381,9 @@ test('record --global is an explicit mode that rejects target flags', { skip: pr
  * emits a ready line and the events; the desktop only serves the fixture trees.
  * No GUI, accessibility API or capture tap is involved.
  */
-function globalCliFixture(t, { events, snapshots, cliArgs = [], seconds = 2, exit = 0, ready }) {
+function globalCliFixture(t, {
+  events, snapshots, cliArgs = [], seconds = 2, exit = 0, ready, download,
+}) {
   const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-global-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const dist = join(dir, 'dist');
@@ -436,6 +439,10 @@ process.exit(1);
 
   const capture = join(dir, 'cuekeeper-capture');
   const captureArgs = join(dir, 'capture-args.json');
+  const downloadDir = download === undefined ? undefined : join(dir, 'Downloads');
+  // The directory exists before the recording starts, so only the file that
+  // appears mid-session is a lifecycle event.
+  if (downloadDir !== undefined) mkdirSync(downloadDir, { recursive: true });
   writeFileSync(capture, `#!/usr/bin/env node
 import { writeFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
@@ -452,6 +459,12 @@ const messages = [
   ...${JSON.stringify(events)},
 ];
 writeFileSync(1, messages.map((event, t) => JSON.stringify({ ...event, seen, t })).join('\\n') + '\\n');
+// A download that appears during the recording is what the lifecycle watcher
+// turns into a candidate wait; the helper stays alive so it can observe it. The
+// short delay keeps the file out of the watcher's baseline.
+await new Promise(resolve => setTimeout(resolve, ${download === undefined ? 0 : 300}));
+${download === undefined ? '' : `writeFileSync(${JSON.stringify(join(downloadDir, download.name))}, 'x'.repeat(${download.size}));`}
+await new Promise(resolve => setTimeout(resolve, ${download === undefined ? 0 : (download.stayAliveMs ?? 1800)}));
 process.exitCode = ${exit};
 `, { mode: 0o700 });
 
@@ -465,13 +478,17 @@ process.exitCode = ${exit};
       CUEKEEPER_RECORDER: capture,
       CUEKEEPER_APP_IDENTITY: join(dir, 'identity'),
       CUEKEEPER_IME_DIR: join(dir, 'ime-root'),
+      ...(downloadDir === undefined ? {} : {
+        CUEKEEPER_LIFECYCLE_DOWNLOAD_DIRS: downloadDir,
+        CUEKEEPER_LIFECYCLE_APP_DIRS: join(dir, 'Applications'),
+      }),
     },
     encoding: 'utf8', timeout: 20_000,
   });
   const response = JSON.parse(result.stdout);
   const written = existsSync(output) ? readFileSync(output, 'utf8') : undefined;
   return {
-    code: result.status, response, stderr: result.stderr, output, written,
+    dir, downloadDir, code: result.status, response, stderr: result.stderr, output, written,
     captureArgs: JSON.parse(readFileSync(captureArgs, 'utf8')),
     commands: readFileSync(commandsLog, 'utf8').trim().split('\n').filter(Boolean),
   };
@@ -532,4 +549,80 @@ test('a helper that does not confirm global mode is refused', { skip: process.pl
   assert.equal(run.response.ok, false);
   assert.equal(run.response.error.code, 'CAPTURE_PROTOCOL');
   assert.equal(run.written, undefined);
+});
+
+test('a recording exposes its lifecycle facts for candidates without a hand-written file', async t => {
+  const recording = await recordFixture('two-apps-three-windows');
+  const lastStep = recording.stepCount;
+  recording.recordLifecycle({ at: 120_000, kind: 'download_completed', path: '/Users/qa/Downloads/App.pkg' });
+  recording.recordLifecycle({
+    at: 130_000, kind: 'install_completed',
+    app: 'com.apple.TextEdit', path: '/Applications/TextEdit.app',
+  });
+  recording.recordLifecycle({ at: 140_000, kind: 'uninstall_completed', app: 'com.apple.TextEdit' });
+  const flow = recording.finish();
+  const events = recording.lifecycle;
+
+  assert.equal(events.length, 3);
+  // Each event is placed after the step that was recorded when it arrived.
+  assert.deepEqual(events.map(event => event.afterStepId), Array(3).fill(`s${lastStep}`));
+  assert.deepEqual(events.map(event => event.kind),
+    ['download_completed', 'install_completed', 'uninstall_completed']);
+
+  const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-record-lifecycle-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, 'flow.json'), JSON.stringify(flow));
+  writeFileSync(join(dir, 'lifecycle.json'), JSON.stringify({ version: 1, events }));
+
+  const session = await loadSession(dir);
+  const candidates = session.view.waitCandidates;
+  assert.deepEqual(candidates.map(candidate => candidate.eventKind),
+    ['download_completed', 'install_completed', 'uninstall_completed']);
+  assert.deepEqual(candidates.map(candidate => candidate.ready), [true, true, true]);
+  // The recorded download waits on the recorded file, not on a download window.
+  assert.deepEqual(candidates[0].step.scope,
+    { kind: 'file', directory: '/Users/qa/Downloads', name: 'App.pkg' });
+  assert.deepEqual(candidates[0].step.check, { kind: 'file_stable' });
+  assert.deepEqual(candidates[1].step.check, { kind: 'app_installed', equals: true });
+  assert.deepEqual(candidates[2].step.check, { kind: 'app_installed', equals: false });
+});
+
+test('record --global writes lifecycle.json from what the download directory proved', {
+  skip: process.platform !== 'darwin',
+}, t => {
+  const data = fixture('two-apps-three-windows');
+  const run = globalCliFixture(t, {
+    events: [data.events[0], data.events[1]],
+    snapshots: data.snapshots,
+    download: { name: 'CuekeeperTest.pkg', size: 4096, stayAliveMs: 1800 },
+    seconds: 3,
+  });
+  assert.equal(run.code, 0, (run.stderr || '') + JSON.stringify(run.response));
+  assert.equal(run.response.data.lifecycle, 1);
+  const lifecyclePath = join(run.dir, 'lifecycle.json');
+  assert.ok(existsSync(lifecyclePath), 'the CLI writes lifecycle.json next to the flow');
+  const lifecycle = JSON.parse(readFileSync(lifecyclePath, 'utf8'));
+  assert.equal(lifecycle.version, 1);
+  assert.equal(lifecycle.events.length, 1);
+  const [event] = lifecycle.events;
+  assert.equal(event.kind, 'download_completed');
+  assert.equal(event.path, join(run.downloadDir, 'CuekeeperTest.pkg'));
+  // The event knows which recorded step it followed, so the workbench can place
+  // a wait without any hand-written afterStepId.
+  assert.match(event.afterStepId, /^s\d+$/);
+  assert.ok(!JSON.stringify(run.response).includes(run.downloadDir));
+});
+
+test('record --global --no-lifecycle writes no lifecycle file', { skip: process.platform !== 'darwin' }, t => {
+  const data = fixture('two-apps-three-windows');
+  const run = globalCliFixture(t, {
+    events: [data.events[0]],
+    snapshots: data.snapshots,
+    cliArgs: ['--no-lifecycle'],
+    download: { name: 'CuekeeperTest.pkg', size: 4096, stayAliveMs: 1800 },
+    seconds: 3,
+  });
+  assert.equal(run.code, 0, (run.stderr || '') + JSON.stringify(run.response));
+  assert.equal(run.response.data.lifecycle, undefined);
+  assert.equal(existsSync(join(run.dir, 'lifecycle.json')), false);
 });

@@ -521,7 +521,7 @@ export type AppIdentityReason =
   | 'invalid_bundle_path' | 'bundle_id_mismatch' | 'unsupported_path_platform'
   | 'path_mismatch' | 'multiple_instances' | 'multiple_installed_copies'
   | 'identity_unproven' | 'instance_changed' | 'driver_target_unconfirmed'
-  | 'fixture_path_mismatch' | 'untargeted_input';
+  | 'fixture_path_mismatch' | 'untargeted_input' | 'preflight_deferred';
 export type BatchReport = Static<typeof batchReportSchema>;
 export type Entry = Static<typeof entry>;
 export type AssertCheck = Static<typeof assertCheck>;

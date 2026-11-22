@@ -39,6 +39,22 @@ export interface DownloadLocation {
   mtimeMs: number;
 }
 
+/**
+ * Read-only result of one file wait. An ambiguous match and an unreadable
+ * directory are hard stops; a missing, partial or still-growing file is an
+ * observation the wait keeps polling.
+ */
+export interface FileEvidence {
+  /** Exactly one finished file matches the directory and name/suffix. */
+  present: boolean;
+  /** A matching partial or zero-byte file exists, so it is not finished yet. */
+  incomplete: boolean;
+  /** The matched file's name, for the wait's timeout message; never a path. */
+  name?: string;
+  size?: number;
+  mtimeMs?: number;
+}
+
 export interface InstallEvidence {
   /** True only with bundle or receipt evidence; never from a process exit. */
   installed: boolean;
@@ -133,6 +149,55 @@ export class InstallState {
     /** Ignore files older than this wall-clock time (recording start). */
     notBeforeMs?: number;
   }): Promise<DownloadLocation> {
+    const scan = await this.scanDownload(options);
+    if (!scan.matches.length && scan.partial.length) {
+      throw new Fault('DOWNLOAD_INCOMPLETE', `Download ${scan.partial[0]} has not finished writing`);
+    }
+    if (!scan.matches.length) {
+      throw new Fault('DOWNLOAD_NOT_FOUND', `No completed download matches in ${scan.directory}`);
+    }
+    if (scan.matches.length > 1) {
+      throw new Fault('DOWNLOAD_AMBIGUOUS',
+        `${scan.matches.length} downloads match; the wait does not pick one by position`);
+    }
+    const match = scan.matches[0];
+    return { path: join(scan.directory, match.name), size: match.size, mtimeMs: match.mtimeMs };
+  }
+
+  /**
+   * One read-only file observation for a file wait. It reports absence and an
+   * unfinished write as state, but an unreadable directory or more than one
+   * matching file still stops: neither proves a download completed.
+   */
+  async fileEvidence(options: {
+    directory: string;
+    name?: string;
+    suffix?: string;
+    notBeforeMs?: number;
+  }): Promise<FileEvidence> {
+    const scan = await this.scanDownload(options);
+    if (scan.matches.length > 1) {
+      throw new Fault('DOWNLOAD_AMBIGUOUS',
+        `${scan.matches.length} downloads match; the wait does not pick one by position`);
+    }
+    const [match] = scan.matches;
+    if (match) {
+      return { present: true, incomplete: false, name: match.name, size: match.size, mtimeMs: match.mtimeMs };
+    }
+    return { present: false, incomplete: scan.partial.length > 0 };
+  }
+
+  /** Lists matching files once; every caller must decide what a match means. */
+  private async scanDownload(options: {
+    directory: string;
+    name?: string;
+    suffix?: string;
+    notBeforeMs?: number;
+  }): Promise<{
+    directory: string;
+    matches: Array<{ name: string; size: number; mtimeMs: number }>;
+    partial: string[];
+  }> {
     const directory = safeDirectory(options.directory);
     if (options.name === undefined && options.suffix === undefined) {
       invalid('name or suffix is required');
@@ -143,10 +208,14 @@ export class InstallState {
     if (names === undefined) {
       throw new Fault('DOWNLOAD_PATH_INVALID', `Download directory ${directory} is not readable`);
     }
-    const matches: string[] = [];
+    const matches: Array<{ name: string; size: number; mtimeMs: number }> = [];
     const partial: string[] = [];
     for (const entry of names) {
-      if (name !== undefined ? entry !== name : !entry.endsWith(suffix!)) continue;
+      const exact = name !== undefined ? entry === name : entry.endsWith(suffix!);
+      // A browser writes `Name.pkg.crdownload` while `Name.pkg` does not exist
+      // yet; that sibling is evidence the named download is still running.
+      const sibling = name !== undefined && entry.startsWith(`${name}.`) && partialDownload.test(entry);
+      if (!exact && !sibling) continue;
       if (partialDownload.test(entry)) {
         partial.push(entry);
         continue;
@@ -158,20 +227,9 @@ export class InstallState {
         continue;
       }
       if (options.notBeforeMs !== undefined && facts.mtimeMs < options.notBeforeMs) continue;
-      matches.push(entry);
+      matches.push({ name: entry, size: facts.size, mtimeMs: facts.mtimeMs });
     }
-    if (!matches.length && partial.length) {
-      throw new Fault('DOWNLOAD_INCOMPLETE', `Download ${partial[0]} has not finished writing`);
-    }
-    if (!matches.length) {
-      throw new Fault('DOWNLOAD_NOT_FOUND', `No completed download matches in ${directory}`);
-    }
-    if (matches.length > 1) {
-      throw new Fault('DOWNLOAD_AMBIGUOUS',
-        `${matches.length} downloads match; the wait does not pick one by position`);
-    }
-    const facts = (await this.stat(join(directory, matches[0])))!;
-    return { path: join(directory, matches[0]), size: facts.size, mtimeMs: facts.mtimeMs };
+    return { directory, matches, partial };
   }
 
   /**

@@ -19,6 +19,7 @@ export interface PlannedStepV2 {
 
 const windowWaitKinds = new Set(['window_exists', 'element_enabled', 'element', 'window']);
 const appWaitKinds = new Set(['app_running', 'app_installed']);
+const fileWaitKinds = new Set(['file_exists', 'file_stable']);
 
 /**
  * An entry point that still depends on the v1 contract refuses a v2 document
@@ -44,6 +45,9 @@ export function isFlowV2(input: unknown): input is FlowV2 {
 export function scopeKey(scope: Scope): string {
   if (scope.kind === 'window') return `window:${scope.app}:${scope.windowKey}`;
   if (scope.kind === 'app') return `app:${scope.app}`;
+  if (scope.kind === 'file') {
+    return `file:${scope.directory}/${'name' in scope ? scope.name : `*${scope.suffix}`}`;
+  }
   if (scope.surface === 'app_menu_bar') return `surface:app_menu_bar:${scope.app}`;
   if (scope.surface === 'app_context_menu') {
     return `surface:app_context_menu:${scope.app}:${scope.windowKey}`;
@@ -55,6 +59,9 @@ export function scopeKey(scope: Scope): string {
 export function scopeLabel(scope: Scope): string {
   if (scope.kind === 'window') return `${scope.app} · ${scope.windowTitle} (${scope.windowKey})`;
   if (scope.kind === 'app') return scope.app;
+  if (scope.kind === 'file') {
+    return `文件 · ${'name' in scope ? scope.name : `*${scope.suffix}`}（${scope.directory}）`;
+  }
   if (scope.surface === 'app_menu_bar') return `${scope.app} · menu bar`;
   if (scope.surface === 'app_context_menu') {
     return `${scope.app} · ${scope.windowTitle} context menu (${scope.windowKey})`;
@@ -67,7 +74,10 @@ function describeScope(scope: Scope): string {
 }
 
 function waitCheckFor(kind: string) {
-  return windowWaitKinds.has(kind) ? 'window' : appWaitKinds.has(kind) ? 'app' : undefined;
+  return windowWaitKinds.has(kind) ? 'window'
+    : appWaitKinds.has(kind) ? 'app'
+      : fileWaitKinds.has(kind) ? 'file'
+        : undefined;
 }
 
 function validateWaitScope(scope: Scope, check: { kind: string }, where: string) {
@@ -92,6 +102,14 @@ function validateScope(scope: Scope, where: string, state: ScopeState) {
   }
   if (scope.kind === 'app') {
     state.apps.add(scope.app);
+    return;
+  }
+  if (scope.kind === 'file') {
+    // A file wait names no app; only an absolute, non-climbing directory is a
+    // location the run may read.
+    if (!scope.directory.startsWith('/') || scope.directory.split('/').includes('..')) {
+      fail(`${where}: expected an absolute download directory`);
+    }
     return;
   }
   if (scope.surface === 'app_menu_bar') {

@@ -11,8 +11,11 @@ import type { Desktop } from './desktop.js';
 import { scopeKey, validateFlowV2 } from './flow-v2.js';
 import type { InputSource } from './ime.js';
 import type { ElementLocator } from './contracts.js';
+import { defaultLifecyclePollMs, LifecycleWatcher } from './lifecycle.js';
+import type { LifecycleObservation, LifecycleWatchOptions } from './lifecycle.js';
 import { Fault, flatten, hitTest, object, resolve, toLocator } from './locator.js';
 import type { Located, Point, Snapshot } from './locator.js';
+import type { LifecycleEvent } from './wait-candidates.js';
 
 // Global recording turns the helper's evidence stream into a version 2 flow.
 // Attribution is frozen when the event happened: every step is generated from
@@ -137,6 +140,7 @@ export class GlobalRecording {
   };
   private textAnchor?: { at: number; scope: string; locator: ElementLocator };
   private notes = new Map<string, string>();
+  private lifecycleEvents: LifecycleEvent[] = [];
   private exclude: Set<string>;
   private now: () => number;
   private stepLimit: number;
@@ -159,6 +163,28 @@ export class GlobalRecording {
 
   get hasGaps() {
     return this.steps.some(step => step.kind === 'gap');
+  }
+
+  /**
+   * Explicit lifecycle facts the recording layer proved: a finished download, an
+   * installed or removed bundle. Each event is placed after the last real step,
+   * so the workbench can propose a wait at a known position instead of guessing
+   * from idle time. Nothing is proposed when no step preceded the event.
+   */
+  recordLifecycle(observation: LifecycleObservation): void {
+    const last = [...this.steps].reverse().find(step => step.kind !== 'gap');
+    this.lifecycleEvents.push({
+      at: Math.max(0, Math.round(observation.at)),
+      kind: observation.kind,
+      ...(observation.app === undefined ? {} : { app: observation.app }),
+      ...(observation.path === undefined ? {} : { path: observation.path }),
+      ...(last === undefined ? {} : { afterStepId: last.id }),
+    });
+  }
+
+  /** Lifecycle events in the order the recording proved them. */
+  get lifecycle(): LifecycleEvent[] {
+    return this.lifecycleEvents;
   }
 
   /** Public so a live session can report helper warnings without a step. */
@@ -802,6 +828,12 @@ export interface GlobalCaptureOptions {
   sound: boolean;
   exclude?: string[];
   inputSource?: InputSource;
+  /**
+   * Install/download observation while recording. `true` (the default) watches
+   * the user's Downloads and application directories; `false` disables it; an
+   * object overrides the directories, quiet window or read-only seams.
+   */
+  lifecycle?: boolean | LifecycleWatchOptions;
 }
 
 export interface GlobalCaptureResult {
@@ -809,6 +841,8 @@ export interface GlobalCaptureResult {
   warnings: CaptureWarning[];
   partial: boolean;
   failure?: Fault;
+  /** Explicit lifecycle facts, for `lifecycle.json` next to the flow. */
+  lifecycle: LifecycleEvent[];
 }
 
 function indicatorConfirmed(value: unknown) {
@@ -860,6 +894,35 @@ export async function recordGlobal(
 
   let ready = false;
   let failure: Fault | undefined;
+  // Install lifecycle facts are observed while recording, not hand-written
+  // afterwards. The watcher only lists directories and reads bundle IDs.
+  const watcher = options.lifecycle === false ? undefined : new LifecycleWatcher(
+    typeof options.lifecycle === 'object' ? options.lifecycle : {},
+  );
+  let polling = false;
+  let lifecycleTimer: NodeJS.Timeout | undefined;
+  const pollLifecycle = async () => {
+    if (!polling || !watcher) return;
+    try {
+      for (const observation of await watcher.poll()) recording.recordLifecycle(observation);
+    } catch {
+      recording.warn('LIFECYCLE_WATCH_FAILED',
+        '安装/下载观察失败：本次录制没有这些事件的候选等待，可手工补充 lifecycle.json');
+    }
+    if (polling) lifecycleTimer = setTimeout(pollLifecycle, defaultLifecyclePollMs);
+  };
+  const startWatcher = async () => {
+    if (!watcher) return;
+    try {
+      await watcher.start();
+    } catch {
+      recording.warn('LIFECYCLE_WATCH_FAILED',
+        '安装/下载观察失败：本次录制没有这些事件的候选等待，可手工补充 lifecycle.json');
+      return;
+    }
+    polling = true;
+    lifecycleTimer = setTimeout(pollLifecycle, defaultLifecyclePollMs);
+  };
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
   try {
     for await (const line of lines) {
@@ -884,6 +947,7 @@ export async function recordGlobal(
         ready = true;
         clearTimeout(startupTimeout);
         sessionTimeout = setTimeout(() => child.kill('SIGKILL'), (options.seconds + 5) * 1000);
+        await startWatcher();
         process.stderr.write(
           `Recording globally for up to ${options.seconds} seconds. Ctrl+Option+P pauses or resumes. ` +
           'Ctrl+Option+X stops and saves.\n');
@@ -910,6 +974,8 @@ export async function recordGlobal(
     failure = signal.aborted ? new Fault('INTERRUPTED', 'Recording interrupted') :
       error instanceof Fault ? error : new Fault('CAPTURE_PROTOCOL', 'Could not read the global capture stream');
   } finally {
+    polling = false;
+    clearTimeout(lifecycleTimer);
     lines.close();
     child.kill();
     await completion;
@@ -931,5 +997,6 @@ export async function recordGlobal(
     warnings: recording.captureWarnings,
     partial: Boolean(failure),
     ...(failure ? { failure } : {}),
+    lifecycle: recording.lifecycle,
   };
 }

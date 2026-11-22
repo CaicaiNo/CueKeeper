@@ -446,3 +446,159 @@ test('cancelling a wait stops the run with WAIT_CANCELLED and releases the lease
   assert.deepEqual(callsOf(world, 'click'), []);
   assert.equal(existsSync(join(dir, 'run.lock')), false);
 });
+
+// --- File waits (HAOC-119) ---------------------------------------------------
+// A download wait can rest on the file the browser wrote instead of a UI
+// element, so a download window that closes or retitles cannot hide completion.
+
+const downloadDir = '/Users/qa/Downloads';
+const downloadName = 'CuekeeperTest.pkg';
+
+/** A desktop that must never be touched by a file wait. */
+function fileOnlyDesktop(calls) {
+  const refuse = command => async () => {
+    calls.push([command]);
+    throw new Fault('UNSUPPORTED', `a file wait must not call ${command}`);
+  };
+  return {
+    snapshotWindow: refuse('snapshotWindow'), listAllWindows: refuse('listAllWindows'),
+    focusedWindow: refuse('focusedWindow'), listWindows: refuse('listWindows'),
+    focusWindow: refuse('focusWindow'), click: refuse('click'), type: refuse('type'),
+    press: refuse('press'), scroll: refuse('scroll'), drag: refuse('drag'),
+    hoverAt: refuse('hoverAt'), snapshot: refuse('snapshot'), property: refuse('property'),
+    ensure: refuse('ensure'), listApps: refuse('listApps'), readClipboard: refuse('readClipboard'),
+    writeClipboard: refuse('writeClipboard'), screenshotWindow: refuse('screenshotWindow'),
+    screenshot: refuse('screenshot'), focus: refuse('focus'),
+  };
+}
+
+function fileWaitHarness(t, files) {
+  const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-file-wait-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const calls = [];
+  const desktop = fileOnlyDesktop(calls);
+  const install = new InstallState({
+    async stat(path) {
+      const entry = files.get(path);
+      if (!entry) return undefined;
+      return {
+        isFile: () => true, isDirectory: () => false,
+        size: entry.size, mtimeMs: entry.mtimeMs,
+      };
+    },
+    async readdir(directory) {
+      if (directory !== downloadDir) return undefined;
+      return [...files.keys()].map(path => path.slice(downloadDir.length + 1));
+    },
+    async bundleId() { return undefined; },
+    async receipts() { return []; },
+    async process() { throw new Error('a file wait never reads processes'); },
+  });
+  const controller = new AbortController();
+  const run = flow => runFlowV2(flow, {
+    desktop, signal: controller.signal, leaseDirectory: dir,
+    identityFor: () => { throw new Error('a file wait binds no app'); },
+    installState: install,
+  });
+  return { calls, files, run };
+}
+
+const downloadStep = (check, timeoutMs = 5000) => parseFlowV2({
+  version: 2, id: 'file-wait', name: 'File wait',
+  steps: [{ id: 'wait-download', kind: 'wait', timeoutMs,
+    scope: { kind: 'file', directory: downloadDir, name: downloadName }, check }],
+});
+
+test('file_stable waits until the download stops growing and reads no window', async t => {
+  const file = join(downloadDir, downloadName);
+  // The first two reads see a growing file; then it stops changing.
+  let reads = 0;
+  const files = new Map();
+  const grow = () => {
+    reads += 1;
+    files.set(file, {
+      size: reads < 3 ? reads * 100 : 300,
+      mtimeMs: reads < 3 ? 1_700_000_000_000 + reads : 1_700_000_000_000 + 3,
+    });
+  };
+  grow();
+  const harness = fileWaitHarness(t, files);
+  const ticking = setInterval(grow, 40);
+  t.after(() => clearInterval(ticking));
+
+  const report = await harness.run(downloadStep({ kind: 'file_stable', quietMs: 100 }));
+
+  clearInterval(ticking);
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries, null, 2));
+  assert.ok(reads >= 4, 'the wait kept observing until the file stopped changing');
+  assert.deepEqual(harness.calls, [], 'a file wait never reads, focuses or clicks');
+  // The report carries the declared file scope, never a screen element.
+  assert.deepEqual(entry(report, 'wait-download').scope, { kind: 'file', directory: downloadDir, name: downloadName });
+});
+
+test('file_exists proves presence and absence without a UI condition', async t => {
+  const file = join(downloadDir, downloadName);
+  const files = new Map();
+  const harness = fileWaitHarness(t, files);
+
+  const absent = await harness.run(downloadStep({ kind: 'file_exists', equals: false }));
+  assert.equal(absent.status, 'passed', JSON.stringify(absent.entries, null, 2));
+
+  files.set(file, { size: 1024, mtimeMs: 1 });
+  const present = await harness.run(downloadStep({ kind: 'file_exists', equals: true }));
+  assert.equal(present.status, 'passed', JSON.stringify(present.entries, null, 2));
+  assert.deepEqual(harness.calls, []);
+});
+
+test('a file wait keeps polling a partial download and times out with its evidence', async t => {
+  const files = new Map([[join(downloadDir, `${downloadName}.crdownload`), { size: 512, mtimeMs: 1 }]]);
+  const harness = fileWaitHarness(t, files);
+
+  const report = await harness.run(downloadStep({ kind: 'file_stable', quietMs: 100 }, 1000));
+
+  assert.equal(report.status, 'failed');
+  assert.equal(entry(report, 'wait-download').code, 'WAIT_TIMEOUT');
+  assert.match(entry(report, 'wait-download').message, /still writing/);
+  assert.deepEqual(harness.calls, []);
+});
+
+test('two matching downloads stop the wait instead of picking one', async t => {
+  const files = new Map([
+    [join(downloadDir, downloadName), { size: 10, mtimeMs: 1 }],
+    [join(downloadDir, 'CuekeeperTest (1).pkg'), { size: 10, mtimeMs: 2 }],
+  ]);
+  const harness = fileWaitHarness(t, files);
+  const flow = parseFlowV2({
+    version: 2, id: 'ambiguous-file', name: 'Ambiguous file',
+    steps: [{
+      id: 'wait-download', kind: 'wait', timeoutMs: 5000,
+      scope: { kind: 'file', directory: downloadDir, suffix: '.pkg' },
+      check: { kind: 'file_stable', quietMs: 100 },
+    }],
+  });
+
+  const report = await harness.run(flow);
+
+  assert.equal(report.status, 'blocked');
+  assert.equal(entry(report, 'wait-download').code, 'DOWNLOAD_AMBIGUOUS');
+  assert.deepEqual(harness.calls, []);
+});
+
+test('a file wait refuses a climbing directory before any observation', () => {
+  assert.throws(() => parseFlowV2({
+    version: 2, id: 'bad-file', name: 'Bad file',
+    steps: [{
+      id: 'wait-download', kind: 'wait', timeoutMs: 1000,
+      scope: { kind: 'file', directory: '/Users/qa/../Shared', name: downloadName },
+      check: { kind: 'file_exists', equals: true },
+    }],
+  }), /absolute download directory/);
+  // A file check needs a file scope: a window wait never observes the disk.
+  assert.throws(() => parseFlowV2({
+    version: 2, id: 'wrong-scope', name: 'Wrong scope',
+    steps: [{
+      id: 'wait-download', kind: 'wait', timeoutMs: 1000,
+      scope: browserScope, check: { kind: 'file_stable' },
+    }],
+  }), /Invalid flow version 2/);
+});

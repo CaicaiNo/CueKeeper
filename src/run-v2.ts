@@ -5,9 +5,9 @@ import type { IdentityDeps } from './app-identity.js';
 import { evaluateAssertion } from './assertion.js';
 import type { AssertionObservation } from './assertion.js';
 import type { AssertCheck, ElementLocator } from './contracts.js';
-import { defaultCheckpointTimeoutMs, defaultWaitTimeoutMs } from './contracts-v2.js';
+import { defaultCheckpointTimeoutMs, defaultFileQuietMs, defaultWaitTimeoutMs } from './contracts-v2.js';
 import type {
-  AppWaitCheck, DeliveryV2, FlowV2, ReportV2, ReportV2Entry, Scope, StepV2,
+  AppWaitCheck, DeliveryV2, FileScope, FileWaitCheck, FlowV2, ReportV2, ReportV2Entry, Scope, StepV2,
   WindowScope, WindowWaitCheck,
 } from './contracts-v2.js';
 import { DesktopFault } from './desktop.js';
@@ -123,6 +123,10 @@ function scrollIntent(step: Extract<StepV2, { kind: 'scroll' }>): {
 /** A wait's scope and condition for the timeout message; never a captured value. */
 function waitDescription(step: Extract<StepV2, { kind: 'wait' }>): string {
   const check = step.check as { kind: string; equals?: boolean; expect?: { property?: string } };
+  if (step.scope.kind === 'file') {
+    const name = 'name' in step.scope ? step.scope.name : `*${step.scope.suffix}`;
+    return `file ${name}; ${check.kind}`;
+  }
   const condition = check.kind === 'element' || check.kind === 'window'
     ? (check.expect?.property ?? 'condition')
     : `${check.kind} = ${String(check.equals)}`;
@@ -149,7 +153,9 @@ function flowApps(flow: FlowV2): string[] {
   const add = (scope: Scope | undefined) => {
     if (!scope) return;
     if (scope.kind === 'window' || scope.kind === 'app') apps.add(scope.app);
-    else if (scope.surface === 'app_menu_bar' || scope.surface === 'app_context_menu') apps.add(scope.app);
+    else if (scope.kind === 'surface' &&
+        (scope.surface === 'app_menu_bar' || scope.surface === 'app_context_menu')) apps.add(scope.app);
+    // A file scope names no app: its wait observes the filesystem only.
   };
   for (const step of flow.steps) {
     if (step.kind === 'gap') continue;
@@ -191,6 +197,9 @@ class StepRunner {
   private get desktop() { return this.ctx.desktop; }
   private get resolver() { return this.ctx.resolver; }
   private get signal() { return this.ctx.signal; }
+
+  /** Per-step file stability memory: size, mtime and when they last changed. */
+  private readonly fileStability = new Map<string, { size: number; mtimeMs: number; since: number }>();
 
   async run(step: StepV2): Promise<StepOutcome> {
     this.signal.throwIfAborted();
@@ -500,6 +509,9 @@ class StepRunner {
 
   private async observeWait(step: Extract<StepV2, { kind: 'wait' }>): Promise<WaitObservation> {
     assertWaitCheckSupported(step.check.kind);
+    if (step.scope.kind === 'file') {
+      return this.fileWait(step.scope, step.check as FileWaitCheck, step.id);
+    }
     if (step.scope.kind === 'app') {
       const check = step.check as AppWaitCheck;
       if (check.kind === 'app_installed') {
@@ -555,6 +567,51 @@ class StepRunner {
     };
   }
 
+  /**
+   * A file wait reads the download directory only. A file that is still
+   * partial, absent or recently written keeps the wait polling; an unreadable
+   * directory or two matching files stop it, because neither proves completion.
+   */
+  private async fileWait(scope: FileScope, check: FileWaitCheck, stepId: string): Promise<WaitObservation> {
+    const evidence = await this.ctx.install.fileEvidence({
+      directory: scope.directory,
+      ...('name' in scope ? { name: scope.name } : { suffix: scope.suffix }),
+    });
+    const name = evidence.name ?? ('name' in scope ? scope.name : `*${scope.suffix}`);
+    if (check.kind === 'file_exists') {
+      const detail = evidence.present
+        ? `file_exists=true (${name})`
+        : `file_exists=false${evidence.incomplete ? ' (still writing)' : ''}`;
+      return { matched: evidence.present === check.equals, detail };
+    }
+    // `file_stable` needs two reads: the size and mtime must stay unchanged for
+    // the whole quiet window, so a single instantaneous read never matches.
+    const quietMs = check.quietMs ?? defaultFileQuietMs;
+    const previous = this.fileStability.get(stepId);
+    if (!evidence.present || evidence.size === undefined || evidence.mtimeMs === undefined) {
+      this.fileStability.delete(stepId);
+      return {
+        matched: false,
+        detail: `file_stable=false ${evidence.incomplete ? `${name} is still writing` : 'absent'}`,
+      };
+    }
+    const now = performance.now();
+    if (!previous || previous.size !== evidence.size || previous.mtimeMs !== evidence.mtimeMs) {
+      this.fileStability.set(stepId, { size: evidence.size, mtimeMs: evidence.mtimeMs, since: now });
+      return {
+        matched: false,
+        detail: `file_stable=false ${name} size=${evidence.size} still changing`,
+      };
+    }
+    const unchangedForMs = Math.round(now - previous.since);
+    const stable = unchangedForMs >= quietMs;
+    return {
+      matched: stable,
+      detail: `file_stable=${stable} ${name} size=${evidence.size} ` +
+        `unchangedForMs=${unchangedForMs} quietMs=${quietMs}`,
+    };
+  }
+
   private async assertStep(step: Extract<StepV2, { kind: 'assert' }>): Promise<StepOutcome> {
     if (step.scope.kind === 'app') {
       // A missing app is an empty window inventory, so `exists: false` can still
@@ -593,6 +650,8 @@ export async function runFlowV2(input: FlowV2, options: FlowV2RunOptions): Promi
   const apps = flowApps(flow);
   const titles = recordedTitles(flow);
   const identities = new Map<string, AppIdentitySession>();
+  /** Apps whose pinned path was absent; each is proven at its first real use. */
+  const deferred = new Set<string>();
 
   function identityFor(app: string): AppIdentitySession {
     let identity = identities.get(app);
@@ -617,6 +676,14 @@ export async function runFlowV2(input: FlowV2, options: FlowV2RunOptions): Promi
       if (options.blocked?.app === app) return [options.blocked];
       const identity = identities.get(app);
       if (identity?.verified) return [{ app, mode: identity.mode, status: 'verified' }];
+      // A deferred pin was never accepted: a run that only waited for the
+      // install never proved this app's path, so it is not reported verified.
+      if (deferred.has(app)) {
+        return [{
+          app, mode: identity?.mode ?? 'bundle_path', status: 'blocked',
+          code: 'APP_UNVERIFIED', reason: 'preflight_deferred',
+        }];
+      }
       // A passed run omits an app it never had to bind (e.g. only asserted as
       // absent); a stopped run lists it so the operator sees what was skipped.
       if (!options.includeUnreached) return [];
@@ -637,10 +704,13 @@ export async function runFlowV2(input: FlowV2, options: FlowV2RunOptions): Promi
   }
 
   // Path pinning and the identity helper are checked before any desktop call,
-  // report artifact or lease file exists.
+  // report artifact or lease file exists. A missing pinned path is deferred to
+  // the app's first real use: the same flow may install it first. An existing
+  // path that holds another bundle still stops here.
   for (const app of apps) {
     try {
-      await identityFor(app).preflight();
+      const outcome = await identityFor(app).preflight({ allowMissingPath: true });
+      if (outcome === 'missing') deferred.add(app);
     } catch (error) {
       const fault = toFault(error);
       return blockedReport(fault,

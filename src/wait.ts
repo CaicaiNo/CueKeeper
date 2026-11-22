@@ -12,6 +12,7 @@ export const maxWaitPollMs = 500;
 
 const supportedWaitChecks = new Set([
   'window_exists', 'element_enabled', 'element', 'window', 'app_running', 'app_installed',
+  'file_exists', 'file_stable',
 ]);
 
 /** A wait condition whose kind the runner does not implement is a hard stop. */

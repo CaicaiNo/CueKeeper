@@ -210,19 +210,21 @@ function fakeWorld(options = {}) {
   return { state, desktop, probe };
 }
 
-function identityFactory(world, readBundleId = {}) {
+function identityFactory(world, readBundleId = {}, options = {}) {
   const sessions = new Map();
-  const pathToBundle = Object.fromEntries(Object.entries(appPaths).map(([app, path]) => [path, app]));
+  const pathToBundle = options.pathToBundle ??
+    Object.fromEntries(Object.entries(appPaths).map(([app, path]) => [path, app]));
+  const present = options.present ?? (() => true);
   return app => {
     let session = sessions.get(app);
     if (!session) {
       session = new AppIdentitySession(
-        { app, window: '', appPath: appPaths[app] },
+        { app, window: '', appPath: options.appPath?.(app) ?? appPaths[app] },
         {
           platform: 'darwin',
           probe: world.probe,
           realpath: async path => path,
-          stat: async () => ({ isDirectory: () => true }),
+          stat: async path => ({ isDirectory: () => present(path) }),
           readBundleId: async path => readBundleId[path] ?? pathToBundle[path],
           sleep: async ms => new Promise(resolve => setTimeout(resolve, ms)),
         },
@@ -274,9 +276,11 @@ function harness(t, options = {}) {
   const run = (flow = crossAppFlow(), overrides = {}) => runFlowV2(flow, {
     desktop: world.desktop,
     signal: overrides.signal ?? controller.signal,
-    identityFor: identityFactory(world, overrides.readBundleId ?? options.readBundleId),
+    identityFor: identityFactory(world, overrides.readBundleId ?? options.readBundleId,
+      overrides.identityOptions ?? options.identityOptions ?? {}),
     leaseDirectory: dir,
     inputs: overrides.inputs ?? inputs,
+    ...(overrides.installState === undefined ? {} : { installState: overrides.installState }),
     ...((overrides.launchTimeoutMs ?? options.launchTimeoutMs) === undefined
       ? {} : { launchTimeoutMs: overrides.launchTimeoutMs ?? options.launchTimeoutMs }),
     ...(overrides.checkpoints === undefined ? {} : { checkpoints: overrides.checkpoints }),
@@ -890,4 +894,183 @@ test('a recorded point outside the bound window is refused instead of clicked', 
   assert.equal(entry(report, 'open-pkg').status, 'blocked');
   assert.equal(entry(report, 'open-pkg').code, 'UNSAFE_POINT');
   assert.deepEqual(callsOf(world.world, 'clickPoint'), []);
+});
+// --- Deferred path preflight (HAOC-119) ---------------------------------------
+// A flow that installs the app before it uses it cannot fail before that
+// install. The pin is still proven at the first real use, and an existing path
+// that holds another bundle still stops before any desktop call.
+
+const target = 'com.example.CuekeeperTest';
+const targetPath = '/Applications/CuekeeperTest.app';
+const targetScope = { kind: 'window', app: target, windowKey: 'target', windowTitle: 'CuekeeperTest' };
+
+/** One fake install state that can flip the pinned path into existence. */
+function installStateFake(state) {
+  return {
+    async appInstalled(app, options) {
+      assert.equal(app, target);
+      assert.equal(options.path, targetPath);
+      state.reads += 1;
+      if (state.reads >= 2) state.installed = true;
+      return { installed: state.installed, evidence: state.installed ? ['bundle'] : [] };
+    },
+    async fileEvidence() { throw new Error('a file wait is not part of this flow'); },
+  };
+}
+
+/** An install followed by the first real use of the installed app. */
+function installThenUseFlow() {
+  return parseFlowV2({
+    version: 2, id: 'install-then-use', name: 'Install then use',
+    appPaths: { [target]: targetPath },
+    steps: [
+      {
+        id: 'wait-installed', kind: 'wait', scope: { kind: 'app', app: target }, timeoutMs: 5000,
+        check: { kind: 'app_installed', equals: true },
+      },
+      { id: 'launch-target', kind: 'launch_app', scope: { kind: 'app', app: target }, focusAfter: targetScope },
+      {
+        id: 'click-open', kind: 'click', scope: targetScope,
+        target: { kind: 'element', role: 'button', name: 'Continue' },
+      },
+    ],
+  });
+}
+
+/** The afterOpen hook that installation and launch produce in the fake world. */
+function opensTarget(state) {
+  state.apps.set(target, [{ pid: 801, startedAt: '801.1', bundleId: target, bundlePath: targetPath }]);
+  state.windows.push(windowRecord({
+    id: 'w-51', app: target, pid: 801, title: 'CuekeeperTest', fields: [['name', '@w51:e1']],
+  }));
+  state.focused = 'w-51';
+}
+
+function targetIdentityOptions(state, bundleId = target) {
+  return {
+    appPath: () => targetPath,
+    pathToBundle: { [targetPath]: bundleId },
+    present: path => path !== targetPath || state.installed,
+  };
+}
+
+test('a pinned path that does not exist yet is proven after the install, not before', async t => {
+  const state = { reads: 0, installed: false };
+  const world = harness(t, {
+    hooks: { afterOpen: opensTarget },
+    identityOptions: targetIdentityOptions(state),
+  });
+
+  const report = await world.run(installThenUseFlow(), {
+    installState: installStateFake(state),
+  });
+
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries, null, 2));
+  assert.deepEqual(report.entries.map(item => item.status), ['passed', 'passed', 'passed']);
+  // The wait ran before the path existed; the launch is the first desktop call
+  // and it opened the exact installed bundle.
+  assert.deepEqual(callsOf(world.world, 'open'), [['open', targetPath, false]]);
+  assert.deepEqual(callsOf(world.world, 'click'), [['click', '@w51:e9']]);
+  // Only after the window was read is the app reported verified.
+  assert.deepEqual(report.appIdentities, [{ app: target, mode: 'bundle_path', status: 'verified' }]);
+});
+
+test('a pinned path that never appears stops at its first use with APP_PATH_INVALID', async t => {
+  const state = { reads: 0, installed: false };
+  const world = harness(t, { identityOptions: targetIdentityOptions(state) });
+  const flow = parseFlowV2({
+    version: 2, id: 'never-installed', name: 'Never installed',
+    appPaths: { [target]: targetPath },
+    steps: [
+      { id: 'launch-target', kind: 'launch_app', scope: { kind: 'app', app: target } },
+      {
+        id: 'click-open', kind: 'click', scope: targetScope,
+        target: { kind: 'element', role: 'button', name: 'Continue' },
+      },
+    ],
+  });
+
+  const report = await world.run(flow);
+
+  assert.equal(report.status, 'blocked');
+  assert.equal(entry(report, 'launch-target').code, 'APP_PATH_INVALID');
+  assert.equal(entry(report, 'click-open').status, 'skipped');
+  // The failure names the step that needed the app and never binds another copy.
+  assert.deepEqual(report.appIdentities, [{
+    app: target, mode: 'bundle_path', status: 'blocked', code: 'APP_PATH_INVALID',
+    reason: 'invalid_bundle_path', entryId: 'launch-target',
+  }]);
+  assert.deepEqual(world.world.state.calls, [], 'nothing is launched, focused or read');
+});
+
+test('an installed path holding another bundle still fails closed at first use', async t => {
+  const state = { reads: 0, installed: false };
+  const world = harness(t, {
+    hooks: { afterOpen: opensTarget },
+    // The install lands, but the pinned path now declares a different bundle.
+    identityOptions: targetIdentityOptions(state, 'com.example.Other'),
+  });
+
+  const report = await world.run(installThenUseFlow(), { installState: installStateFake(state) });
+
+  assert.equal(report.status, 'blocked');
+  assert.equal(entry(report, 'wait-installed').status, 'passed');
+  assert.equal(entry(report, 'launch-target').code, 'APP_PATH_INVALID');
+  assert.deepEqual(report.appIdentities, [{
+    app: target, mode: 'bundle_path', status: 'blocked', code: 'APP_PATH_INVALID',
+    reason: 'bundle_id_mismatch', entryId: 'launch-target',
+  }]);
+  assert.deepEqual(callsOf(world.world, 'open'), [], 'another bundle is never opened');
+  assert.deepEqual(callsOf(world.world, 'click'), []);
+});
+
+test('an app_installed wait reads evidence without touching the missing pin', async t => {
+  const state = { reads: 0, installed: false };
+  const world = harness(t, { identityOptions: targetIdentityOptions(state) });
+  const flow = parseFlowV2({
+    version: 2, id: 'install-evidence', name: 'Install evidence',
+    appPaths: { [target]: targetPath },
+    steps: [
+      {
+        id: 'wait-installed', kind: 'wait', scope: { kind: 'app', app: target }, timeoutMs: 5000,
+        check: { kind: 'app_installed', equals: true },
+      },
+    ],
+  });
+
+  const report = await world.run(flow, { installState: installStateFake(state) });
+
+  assert.equal(report.status, 'passed');
+  assert.equal(state.reads >= 2, true);
+  assert.deepEqual(world.world.state.calls, []);
+  // A deferred pin that was never used is not reported verified.
+  assert.deepEqual(report.appIdentities, [{
+    app: target, mode: 'bundle_path', status: 'blocked', code: 'APP_UNVERIFIED',
+    reason: 'preflight_deferred',
+  }]);
+});
+
+test('a deferred app is verified only after its window is bound', async t => {
+  const state = { reads: 0, installed: true };
+  const world = harness(t, {
+    hooks: { afterOpen: opensTarget },
+    identityOptions: targetIdentityOptions(state),
+  });
+  const flow = parseFlowV2({
+    version: 2, id: 'deferred-then-used', name: 'Deferred then used',
+    appPaths: { [target]: targetPath },
+    steps: [
+      { id: 'launch-target', kind: 'launch_app', scope: { kind: 'app', app: target }, focusAfter: targetScope },
+      {
+        id: 'click-open', kind: 'click', scope: targetScope,
+        target: { kind: 'element', role: 'button', name: 'Continue' },
+      },
+    ],
+  });
+
+  const report = await world.run(flow);
+
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries, null, 2));
+  assert.deepEqual(report.appIdentities, [{ app: target, mode: 'bundle_path', status: 'verified' }]);
+  assert.deepEqual(callsOf(world.world, 'click'), [['click', '@w51:e9']]);
 });

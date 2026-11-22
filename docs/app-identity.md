@@ -21,7 +21,7 @@
 | 指定路径有效，且恰有一个运行者与该路径相符 | 已实现 | 绑定该实例。已证实在其他路径的同 ID 实例可同时运行。 |
 | 同 ID 运行者只在其他路径，或指定路径有多个运行者 | 已实现 | `APP_AMBIGUOUS`。同 ID 实例中有无法排除是目标副本的未知路径，也以该错误阻塞。 |
 | 同 ID 实例确认为零 | 已实现 | 进入未运行状态。需要目标时保留 `APP_NOT_FOUND`，现有已确认的 `ensure` 可以按 §3 启动。完整的只读窗口清单此时可为空，供 `exists: false` 判断。 |
-| 路径不存在、读取失败、目标已移动、解析后不是有效 bundle，或其 Info.plist 的 bundle ID 不符 | 已实现 | `APP_PATH_INVALID`，即使原位置曾有同 ID 副本也需重新选择。 |
+| 路径不存在、读取失败、目标已移动、解析后不是有效 bundle，或其 Info.plist 的 bundle ID 不符 | 已实现 | `APP_PATH_INVALID`，即使原位置曾有同 ID 副本也需重新选择。例外：v2 路径固定流程启动预检时路径还不存在（首次安装场景），该 App 标记为 `deferred`，延后到首次真正使用再核对；报告里记 `APP_UNVERIFIED` / `preflight_deferred`，不记 `verified`。 |
 | 实例已证实，所需标题不存在或匹配多扇窗口 | 已实现 | 保留 `WINDOW_NOT_FOUND` 或 `AMBIGUOUS_TARGET`。已绑定窗口消失时用 `WINDOW_CHANGED`。若同一窗口 ID 已归属其他进程，按 `APP_AMBIGUOUS` 处理。 |
 
 ## 2. 契约与采集
@@ -35,6 +35,7 @@
 ## 3. 回放绑定和送达
 
 1. **已实现** · CLI 和工作台共用实时入口。开始运行时先做主目标的文件和实例预检，再调用会聚焦、启动或送输入的命令。已有 `setup.ensure` 和窗口断言指向主 bundle ID 时继承路径与进程绑定，允许在该实例内另选窗口。其他 bundle ID 各自按旧版唯一实例规则核对。观察到的歧义向上透传，不能作为空窗口清单、可重试的缺窗或修复触发条件。
+   - **已实现（v2 延后预检）** · v2 跨 App 回放启动时对每个 App 做路径预检，但「路径不存在」不算阻塞：该 App 标为 `deferred`，等 `launch_app`、`activate_app`、`focus_window` 或窗口输入/断言第一次真正需要它时，在该步重新 `realpath` + 读 `CFBundleIdentifier`。因此「同一流程先安装、后启动」不会在安装前失败。首次使用时仍不存在就在该步返回 `APP_PATH_INVALID`，且不会改绑同 bundle 的其他副本；路径存在但 bundle ID 不符仍在任何桌面调用前早失败。`app_installed` 等待只读安装证据，不触发路径预检。
 2. **已实现** · 只有原有已确认的 `ensure` 可以启动应用。目标无运行实例时，指定路径直接作为 `NSWorkspace.openApplication(at:configuration:)` 的文件 URL。禁用运行副本替换，按修复动作决定是否激活，避免系统代为请求交互。旧流程无运行者时，先从可用安装候选中确认唯一可用路径，再走同一启动路线。多个候选或探测结果不完整时阻塞。启动后重新读取 PID、启动标识与 `bundleURL`。一旦完成绑定，同一轮的 `ensure` 不接管重启后的新进程。 [Apple 按 URL 启动接口](https://developer.apple.com/documentation/appkit/nsworkspace/openapplication(at:configuration:completionhandler:)) · [运行副本替换选项](https://developer.apple.com/documentation/appkit/nsworkspace/openconfiguration/allowsrunningapplicationsubstitution)
 3. **已实现** · 使用按 PID 过滤的窗口清单。以原生 `kCGWindowNumber` / `kCGWindowOwnerPID` 与驱动无 `--app` 的 `list-windows` 对照，核对 `w-<number>`、PID 和驱动的 `process_instance`。窗口选择、清单缺失与身份冲突分别处理。无法获得覆盖目标实例的清单时，返回 `APP_AMBIGUOUS`，不能凭窗口标题或显示名猜测。 [Apple 窗口清单接口](https://developer.apple.com/documentation/coregraphics/cgwindowlistcopywindowinfo(_:_:)) · [驱动窗口字段](https://github.com/vercel-labs/agent-desktop/blob/v1.3.1/crates/core/src/system/window_info.rs)
 4. **已实现（上游）** · agent-desktop 1.3.1 的 `snapshot` 与 `press` 有按窗口 ID 查询的代码路径，`focus-window` 也能只传窗口 ID。`snapshot` 的 `data.window` 只给 ID 和标题。`screenshot` 同时传 `--app` 时会先解析应用，再按窗口 ID 查询。`mouse-click` 使用全局屏幕坐标，命令参数没有窗口 ID。 [窗口选择](https://github.com/vercel-labs/agent-desktop/blob/v1.3.1/crates/core/src/snapshot/surface_target.rs#L154-L176) · [快照响应](https://github.com/vercel-labs/agent-desktop/blob/v1.3.1/crates/core/src/commands/snapshot.rs#L125-L144) · [键盘目标](https://github.com/vercel-labs/agent-desktop/blob/v1.3.1/crates/core/src/commands/press.rs#L76-L95) · [聚焦](https://github.com/vercel-labs/agent-desktop/blob/v1.3.1/crates/core/src/commands/focus_window.rs#L11-L48) · [截图](https://github.com/vercel-labs/agent-desktop/blob/v1.3.1/crates/core/src/commands/screenshot.rs#L84-L123) · [坐标点击](https://github.com/vercel-labs/agent-desktop/blob/v1.3.1/crates/core/src/commands/mouse_click.rs#L12-L46)
@@ -50,6 +51,7 @@
 | 已实现 | `APP_AMBIGUOUS`（新增） | `path_mismatch`、`multiple_instances`、`multiple_installed_copies` | 「无法唯一确认目标副本。请打开选中的副本，或关闭冲突实例后重新运行。」 |
 | 已实现 | `APP_AMBIGUOUS` | `identity_unproven`、`instance_changed`、`driver_target_unconfirmed` | 「无法确认操作仍指向选中的副本，本轮已停止。」送达不明时加「请检查上一步是否已经生效。」 |
 | 已实现 | `APP_AMBIGUOUS` | `fixture_path_mismatch` | 「快照来自另一个应用路径，请重新采集快照或恢复与快照匹配的目标。」 |
+| 已实现 | `APP_UNVERIFIED` | `preflight_deferred` | 「该 App 的安装路径在启动时还不存在：等待安装后首次使用时再核对。」 |
 | 已实现 | `UNSUPPORTED_PLATFORM`（复用） | `unsupported_path_platform` | 「该应用路径属于另一平台。本机可验证流程或使用离线快照。」 |
 | 已实现 | `UNSAFE_POINT`（复用） | `untargeted_input` | 「该坐标操作无法绑定到选中的副本，请改用元素定位器。」 |
 
