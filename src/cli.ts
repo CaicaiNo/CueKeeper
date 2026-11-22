@@ -13,6 +13,9 @@ import { fixtureAppPath, offlineDesktop, withDesktop } from './desktop.js';
 import { ensureNew, readJson, writeNew } from './files.js';
 import { parseFlow, plan } from './flow.js';
 import {
+  UnsupportedFlowVersionError, describePlannedStep, dryRunFlowV2, isFlowV2, parseFlowV2, planFlowV2,
+} from './flow-v2.js';
+import {
   InputSourceManager, chooseAsciiSource, defaultImeDir, detectInputSource, nativeImeBackend,
   readImeLock, readImeRecord, releaseImeLock, removeImeRecord, restoreImeRecord,
 } from './ime.js';
@@ -40,6 +43,7 @@ const help = `Cuekeeper ${buildInfo().version}
   cuekeeper doctor [--json]
   cuekeeper flow validate <flow.json|test.json> [--json]
   cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--interactive|--non-interactive] [--report <report.json>] [--allow-shell] [--allow-sudo] [--capture-shell-output] [--input-source-switch [--input-source <id>] [--strict-ime]] [--json]
+  cuekeeper run <flow-v2.json> --dry-run [--report <report-v2.json>] [--json]   (v2: scope plan only; live replay is not available yet)
   cuekeeper run ... [--no-input-source-switch]   (accepted; equal to the default)
   cuekeeper sudo set|status|clear [--json]   (login-keychain credential for --non-interactive root steps)
   cuekeeper ime status|list [--input-source <id>] [--json]
@@ -134,7 +138,16 @@ async function main() {
   if (command === 'flow' && rest[0] === 'validate') {
     const { positionals } = parseArgs({ args: rest.slice(1), options: common, allowPositionals: true });
     checkPositionals(positionals, 1);
-    const { flow } = parseTestItem(await readJson(positionals[0]));
+    const document = await readJson(positionals[0]);
+    if (isFlowV2(document)) {
+      // v2 has no flow-level target and no behavior expansion: the step count is
+      // the plan, and any capture gap refuses the flow here.
+      const flow = parseFlowV2(document);
+      const actions = planFlowV2(flow).length;
+      success({ flowId: flow.id, actions, version: 2 }, `Valid version 2 flow ${flow.id} with ${actions} steps`);
+      return;
+    }
+    const { flow } = parseTestItem(document);
     const actions = plan(flow).length;
     success({ flowId: flow.id, actions }, `Valid flow ${flow.id} with ${actions} actions`);
     return;
@@ -354,7 +367,28 @@ async function main() {
     if (values.snapshot && !dryRun) throw new Error('--snapshot requires --dry-run');
     if (values.headed && dryRun) throw new Error('--headed is only for replay');
     if (values.report) await ensureNew(values.report);
-    const { flow, secrets } = parseTestItem(await readJson(positionals[0]));
+    const document = await readJson(positionals[0]);
+    if (isFlowV2(document)) {
+      // A v2 flow is refused at the entry points it cannot honour yet. The dry
+      // run is a structural scope plan: no launch, focus, clipboard or input.
+      const flow = parseFlowV2(document);
+      if (values.data) {
+        throw new UnsupportedFlowVersionError('Batch runs do not support flow version 2 yet');
+      }
+      if (!dryRun) {
+        throw new UnsupportedFlowVersionError(
+          'Live replay of flow version 2 needs the cross-app runner; use --dry-run for now');
+      }
+      if (values.snapshot) {
+        throw new UnsupportedFlowVersionError('A version 2 dry run resolves scopes from the flow; --snapshot fixtures are not supported yet');
+      }
+      const report = dryRunFlowV2(flow);
+      if (values.report) await writeNew(values.report, JSON.stringify(report, null, 2) + '\n');
+      const details = planFlowV2(flow).map(describePlannedStep).join('\n');
+      success(report, `${report.mode} ${report.status}\n${details}`);
+      return;
+    }
+    const { flow, secrets } = parseTestItem(document);
     const planned = plan(flow);
     const input = await realpath(resolve(positionals[0]));
     const shell: ShellRunOptions = {
@@ -617,6 +651,9 @@ async function main() {
     const [input, rawFlow, assets] = await Promise.all([
       readJson(positionals[0]), readJson(path), discoverAssets(positionals[0], values.assets),
     ]);
+    if (isFlowV2(rawFlow)) {
+      throw new UnsupportedFlowVersionError('Report packing does not support flow version 2 yet');
+    }
     const archive = packReport(input, parseFlow(rawFlow), { assets });
     await writeNew(output, archive);
     let upload: { queued: boolean; queue?: string; id?: string; duplicate?: boolean; error?: string } | undefined;
@@ -665,12 +702,15 @@ async function main() {
 try {
   await main();
 } catch (error) {
-  const code = signal.aborted ? 130 : error instanceof BatchError ? 2 :
+  const code = signal.aborted ? 130 : error instanceof UnsupportedFlowVersionError ? 2 :
+    error instanceof BatchError ? 2 :
     error instanceof Fault && !error.dependency ? 1 : 2;
   const reason = error instanceof Error ? error.message : 'Unexpected error';
   if (machine) {
     console.log(JSON.stringify({ ok: false, error: {
-      code: signal.aborted ? 'INTERRUPTED' : error instanceof Fault ? error.code :
+      code: signal.aborted ? 'INTERRUPTED' :
+        error instanceof UnsupportedFlowVersionError ? error.code :
+        error instanceof Fault ? error.code :
         error instanceof BatchError ? error.code : 'INPUT_ERROR',
       message: reason,
     } }));

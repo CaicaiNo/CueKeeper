@@ -1,8 +1,8 @@
 import { createDom } from './dom.js';
 import {
-  KIND_LABELS, actionKind, canUndo, changeTarget, compileDraft, confirmCondition, confirmedSetup, deleteCondition, id,
-  makeBehavior, retargetCondition, sameTarget, scrollLabel, setupDraft, shellDraft, shellSummary, dragSummary,
-  undoCondition, visibleRows,
+  KIND_LABELS, SURFACE_LABELS, actionKind, canUndo, changeTarget, compileDraft, confirmCondition, confirmedSetup,
+  deleteCondition, id, makeBehavior, retargetCondition, sameTarget, scopeDescription, scrollLabel, setupDraft,
+  shellDraft, shellSummary, dragSummary, undoCondition, visibleRows,
 } from './model.js';
 import { createAppPicker } from './picker.js';
 
@@ -21,6 +21,8 @@ const KIND_ICONS = {
   click: 'pointer', doubleClick: 'pointerDouble', tripleClick: 'pointerDouble', rightClick: 'pointerRight',
   scroll: 'wheel', drag: 'drag', hover: 'pointer', paste: 'clipboard', type: 'text', key: 'keyboard', wait: 'clock', assert: 'checkCircle',
   behavior: 'layers', shell: 'terminal',
+  launch_app: 'play', activate_app: 'appWindow', focus_window: 'crosshair',
+  open_system_surface: 'layers', surface_press: 'pointer', manual_checkpoint: 'checkCircle', gap: 'list',
 };
 
 function kindChip(action) {
@@ -32,7 +34,10 @@ function kindChip(action) {
 const duration = ms => ms === undefined ? '—' : ms >= 1000 ? `${(ms / 1000).toFixed(2)} s` : `${ms} ms`;
 const timestamp = ms => ms === undefined ? '—' : `+${(ms / 1000).toFixed(2)} s`;
 const actionTarget = action => action.target ?? action.check?.target;
-const isCompatible = row => sameTarget(row, state.session.target);
+const isCompatible = row => state.session?.version === 1 && sameTarget(row, state.session.target);
+
+/** v2 rows carry their own step scope; v1 rows inherit the flow target. */
+const scopeText = scope => scopeDescription(scope, appLabel);
 const getRows = () => state.session?.timeline ?? [];
 const selectedRows = () => visibleRows(getRows(), state.app, state.ignored, false).filter(row => state.selected.has(row.id));
 const short = (text, length = 82) => text.length > length ? text.slice(0, length) + '…' : text;
@@ -111,11 +116,31 @@ function actionLabel(action) {
     case 'scroll': return `${scrollLabel(action)} · ${label}`;
     case 'drag': return `${dragSummary(action)} · ${action.durationMs} ms`;
     case 'hover': return `悬停 · ${label} · ${action.durationMs} ms`;
-    case 'paste': return `粘贴 ${action.text.length} 字 · ${label}`;
-    case 'type': return typeof action.text === 'string' ? `输入 “${short(action.text)}”` : `输入参数 ${action.text.param}`;
+    case 'paste':
+      // v1 pins clipboard text on the step; v2 names the copy step or input.
+      if (typeof action.text === 'string') return `粘贴 ${action.text.length} 字 · ${label}`;
+      return `粘贴 · ${action.source?.kind === 'copy'
+        ? `复制 ${action.source.stepId}` : `参数 ${action.source?.input ?? ''}`} · ${label}`;
+    case 'type':
+      if (typeof action.text === 'string') return `输入 “${short(action.text)}”`;
+      if (action.input) return `输入参数 ${action.input}`;
+      return `输入参数 ${action.text?.param}`;
     case 'key': return shortcutLabel(action);
     case 'assert':
-    case 'wait': return `${label} · ${action.check.expect.property} = ${short(String(action.check.expect.equals))}`;
+    case 'wait': {
+      const check = action.check;
+      if (check?.expect) return `${label} · ${check.expect.property} = ${short(String(check.expect.equals))}`;
+      if (check?.kind) return `${label} · ${check.kind} = ${String(check.equals ?? '')}`.trim();
+      return label;
+    }
+    case 'launch_app': return `启动 ${appLabel(action.scope.app)}`;
+    case 'activate_app': return `激活 ${appLabel(action.scope.app)}`;
+    case 'focus_window': return `聚焦 ${action.scope.windowTitle}`;
+    case 'open_system_surface':
+      return `打开 ${SURFACE_LABELS[action.scope.surface] ?? action.scope.surface}`;
+    case 'surface_press': return `操作 ${SURFACE_LABELS[action.scope.surface] ?? action.scope.surface} · ${action.selector.kind}`;
+    case 'manual_checkpoint': return `人工检查点 · ${action.reason}`;
+    case 'gap': return `缺口 · ${action.code}`;
     case 'shell': return `Shell · ${short(shellSummary(action).command)}`;
     default: return action.kind;
   }
@@ -167,16 +192,19 @@ function renderSummary() {
     return;
   }
   const apps = new Map();
+  const groups = new Set();
   const windows = new Set();
   for (const row of session.timeline) {
-    apps.set(row.app, (apps.get(row.app) ?? 0) + 1);
+    if (row.app) apps.set(row.app, (apps.get(row.app) ?? 0) + 1);
+    if (row.scopeGroup) groups.add(row.scopeGroup);
     windows.add(JSON.stringify([row.app, row.window]));
   }
   const timing = { capture: '录制时间', replay: '回放时间', 'dry-run': '离线验证时间' }[session.timingSource];
   $('summary').replaceChildren(
     muted(short(session.directory.split('/').at(-1), 48)),
     infoList([['时长', duration(session.durationMs)], ['动作', session.timeline.length],
-      ['应用', apps.size], ['窗口', windows.size]], 'stats'),
+      ['应用', apps.size], [session.version === 2 ? '作用域' : '窗口',
+        session.version === 2 ? groups.size : windows.size]], 'stats'),
     muted(timing ?? '原始录制缺少时间数据'),
     session.startedAt ? el('time', { className: 'muted', dateTime: session.startedAt },
       session.startedAt.slice(0, 19).replace('T', ' ') + ' UTC') : undefined,
@@ -232,6 +260,10 @@ function renderSetup() {
   const panel = $('setup');
   if (!session || !setup) {
     panel.replaceChildren(muted('导入运行目录后显示推断的前置条件。'));
+    return;
+  }
+  if (session.version === 2) {
+    panel.replaceChildren(muted('全局 flow 没有顶层目标或前置条件；启动、激活与等待都写在声明作用域的步骤里。'));
     return;
   }
   const conditions = setup.conditions;
@@ -290,7 +322,18 @@ function renderTimeline() {
     $('timeline').replaceChildren(empty(state.session ? '当前筛选下没有动作。' : '导入运行目录后查看录制动作。'));
     return;
   }
-  $('timeline').replaceChildren(...rows.map(row => {
+  const groupSteps = new Map((state.session?.scopeGroups ?? []).map(group => [group.key, group.stepIds.length]));
+  const nodes = [];
+  let lastGroup;
+  for (const row of rows) {
+    // v2 groups consecutive steps that share one scope under a header, so a
+    // cross-app recording reads as blocks instead of an undifferentiated list.
+    if (state.session?.version === 2 && row.scopeGroup !== lastGroup) {
+      nodes.push(el('article', { className: 'scope-head' },
+        el('strong', {}, scopeText(row.scope)),
+        el('small', { className: 'muted' }, `${groupSteps.get(row.scopeGroup) ?? 1} 步`)));
+      lastGroup = row.scopeGroup;
+    }
     const ignored = state.ignored.has(row.id);
     const selector = el('input', {
       id: `select-${row.id}`, type: 'checkbox', checked: state.selected.has(row.id), disabled: ignored,
@@ -309,7 +352,7 @@ function renderTimeline() {
     el('span', { className: 'time' }, timestamp(row.atMs)),
     kindChip(row.action),
     el('span', { className: 'row-description' }, el('strong', {}, actionLabel(row.action)),
-      el('small', {}, `${appLabel(row.app)} · ${row.window}${ignored ? ' · 已忽略' : ''}`)),
+      el('small', {}, `${row.scope ? scopeText(row.scope) : `${appLabel(row.app)} · ${row.window}`}${ignored ? ' · 已忽略' : ''}`)),
     el('span', { className: 'time row-duration', title: '动作耗时' }, duration(row.durationMs)));
     const thumbnail = row.thumbnail && el('details', {
       className: 'thumbnail', open: state.expanded.has(row.id),
@@ -318,10 +361,11 @@ function renderTimeline() {
         else state.expanded.delete(row.id);
       },
     }, el('summary', {}, '查看缩略图'), el('img', { src: row.thumbnail, alt: '动作截图', loading: 'lazy' }));
-    return el('article', {
+    nodes.push(el('article', {
       className: `row${state.focused === row.id ? ' active' : ''}${ignored ? ' ignored' : ''}`,
-    }, el('div', { className: 'row-line' }, selector, focus), thumbnail || undefined);
-  }));
+    }, el('div', { className: 'row-line' }, selector, focus), thumbnail || undefined));
+  }
+  $('timeline').replaceChildren(...nodes);
 }
 
 function addAction(action) {
@@ -353,16 +397,26 @@ function renderOverview() {
       el('span', { className: 'legend-kind' }, KIND_LABELS[kind] ?? kind),
       el('span', { className: 'legend-count' }, String(count))))),
     infoList([
-      ['目标', `${appLabel(state.session.target.app)} · ${state.session.target.window}`],
-      ['应用路径', state.session.target.appPath ?? '未指定（按唯一运行实例）'],
-      ...(state.session.pathConflict
-        ? [['快照路径', `${state.session.snapshotAppPath} · 与应用路径不一致`]]
-        : []),
+      ...(state.session.version === 2
+        ? [
+          ['作用域', `${state.session.scopeGroups.length} 个`],
+          ['应用路径', Object.entries(state.session.appPaths ?? {}).map(([app, path]) => `${appLabel(app)}: ${path}`)
+            .join('\n') || '未固定（按唯一运行实例）'],
+        ]
+        : [
+          ['目标', `${appLabel(state.session.target.app)} · ${state.session.target.window}`],
+          ['应用路径', state.session.target.appPath ?? '未指定（按唯一运行实例）'],
+          ...(state.session.pathConflict
+            ? [['快照路径', `${state.session.snapshotAppPath} · 与应用路径不一致`]]
+            : []),
+        ]),
       ['来源', short(state.session.directory.split('/').at(-1), 44)],
     ], 'meta-grid'),
     state.session.pathConflict
       ? muted('快照来自另一个应用路径，离线运行会以 APP_AMBIGUOUS / fixture_path_mismatch 阻塞。请重新采集快照或恢复与快照匹配的目标。')
-      : muted('选择时间线中的动作查看定位器与整理操作。'));
+      : muted(state.session.version === 2
+        ? '全局 flow 按步骤作用域分组；实时回放要等跨 App 调度器接入。'
+        : '选择时间线中的动作查看定位器与整理操作。'));
 }
 
 function renderInspector() {
@@ -371,7 +425,7 @@ function renderInspector() {
   if (state.tab === 'library') {
     const items = [...state.library].sort((a, b) => a.behavior.name.localeCompare(b.behavior.name));
     panel.replaceChildren(items.length ? el('div', { className: 'stack' }, ...items.map(item => {
-      const compatible = state.session && sameTarget(item.target, state.session.target);
+      const compatible = state.session?.version === 1 && sameTarget(item.target, state.session.target);
       const { behavior, parameterTypes } = item;
       const shell = item.shell ?? { steps: 0, privileged: 0 };
       return el('article', { className: 'library-item stack' },
@@ -404,8 +458,14 @@ function renderInspector() {
           ['时长', `${row.action.durationMs} ms`]]
         : []),
       ...(row.action.kind === 'hover' ? [['停留', `${row.action.durationMs} ms`]] : []),
-      ...(row.action.kind === 'paste' ? [['文本', `${row.action.text.length} 字（内容不写入报告）`]] : []),
-      ['应用', appLabel(row.app)], ['窗口', row.window],
+      ...(row.action.kind === 'paste'
+        ? [typeof row.action.text === 'string'
+          ? ['文本', `${row.action.text.length} 字（内容不写入报告）`]
+          : ['粘贴来源', row.action.source.kind === 'copy'
+            ? `复制 · ${row.action.source.stepId}` : `参数 · ${row.action.source.input}`]]
+        : []),
+      ...(row.scope ? [['作用域', scopeText(row.scope)]] : []),
+      ...(row.scope ? [] : [['应用', appLabel(row.app)], ['窗口', row.window]]),
       ...(target ? [['定位器', locatorLabel(target)]] : []),
       ['时间', timestamp(row.atMs)], ['耗时', duration(row.durationMs)],
     ], 'meta-grid'),
@@ -431,8 +491,8 @@ function renderDraft() {
   const { draft, session, saving } = state;
   $('draft-count').textContent = `${draft.length} 项`;
   $('save-button').disabled = !draft.length || saving || state.running;
-  $('shell-button').disabled = saving || state.running;
-  $('run-button').disabled = (!draft.length && !state.running) || saving;
+  $('shell-button').disabled = saving || state.running || state.session?.version === 2;
+  $('run-button').disabled = (!draft.length && !state.running) || saving || state.session?.version === 2;
   const runLabel = state.running ? '停止' : '运行测试项';
   const runButton = $('run-button');
   if (runButton.lastChild?.nodeType === 3) runButton.lastChild.textContent = runLabel;
@@ -917,6 +977,13 @@ async function stopRun() {
 
 function runDialog() {
   const { session, allowLive } = state;
+  if (session.version === 2) {
+    openDialog('运行测试项', [
+      muted('全局 flow 的实时回放要等跨 App 回放调度器（HAOC-113）接入。' +
+        '工作台目前只按作用域复盘 v2 时间线，不会启动、聚焦或输入。'),
+    ]);
+    return;
+  }
   if (!session.hasSnapshot && !allowLive) {
     openDialog('运行测试项', [
       muted('离线运行需要目录内的 snapshot.json。实时回放需要在启动工作台时显式启用 --allow-live-replay。'),

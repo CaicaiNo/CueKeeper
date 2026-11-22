@@ -5,6 +5,9 @@ export const KIND_LABELS = {
   click: '点击', doubleClick: '双击', tripleClick: '三击', rightClick: '右键', scroll: '滚轮',
   drag: '拖拽', hover: '悬停', paste: '粘贴', type: '输入', key: '快捷键', wait: '等待',
   assert: '断言', behavior: '行为', shell: 'Shell',
+  launch_app: '启动', activate_app: '激活', focus_window: '聚焦窗口',
+  open_system_surface: '打开系统界面', surface_press: '系统界面操作',
+  manual_checkpoint: '人工检查点', gap: '缺口',
 };
 
 /** The timeline shows pointer variants as their own kind without changing the flow. */
@@ -14,6 +17,20 @@ export function actionKind(action) {
   if (action.count === 2) return 'doubleClick';
   if (action.count === 3) return 'tripleClick';
   return 'click';
+}
+
+export const SURFACE_LABELS = {
+  dock: 'Dock', app_menu_bar: 'App 菜单栏', app_context_menu: '上下文菜单',
+  menu_bar_extras: '系统状态项', spotlight: 'Spotlight',
+};
+
+/** A v2 step scope as shown in the timeline; `appName` resolves bundle IDs. */
+export function scopeDescription(scope, appName = id => id) {
+  if (!scope) return '缺口';
+  if (scope.kind === 'window') return `${appName(scope.app)} · ${scope.windowTitle}`;
+  if (scope.kind === 'app') return `${appName(scope.app)} · 应用`;
+  return [SURFACE_LABELS[scope.surface] ?? scope.surface,
+    scope.app ? appName(scope.app) : '', scope.windowTitle ?? ''].filter(Boolean).join(' · ');
 }
 
 const scrollArrows = { up: '↑', down: '↓', left: '←', right: '→' };

@@ -1,0 +1,535 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Cuekeeper report-v2 v2",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 2,
+      "type": "number"
+    },
+    "flowId": {
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
+      "type": "string"
+    },
+    "flowSha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "startedAt": {
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+      "type": "string"
+    },
+    "mode": {
+      "anyOf": [
+        {
+          "const": "replay",
+          "type": "string"
+        },
+        {
+          "const": "dry-run",
+          "type": "string"
+        }
+      ]
+    },
+    "status": {
+      "anyOf": [
+        {
+          "const": "passed",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "type": "string"
+        },
+        {
+          "const": "blocked",
+          "type": "string"
+        }
+      ]
+    },
+    "appIdentities": {
+      "maxItems": 32,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "app": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*(?:\\.[A-Za-z0-9][A-Za-z0-9-]*)+$",
+            "type": "string"
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "const": "bundle_path",
+                "type": "string"
+              },
+              {
+                "const": "legacy_bundle_id",
+                "type": "string"
+              }
+            ]
+          },
+          "status": {
+            "anyOf": [
+              {
+                "const": "verified",
+                "type": "string"
+              },
+              {
+                "const": "offline_unverified",
+                "type": "string"
+              },
+              {
+                "const": "blocked",
+                "type": "string"
+              }
+            ]
+          },
+          "code": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "entryId": {
+            "minLength": 1,
+            "maxLength": 196,
+            "type": "string"
+          }
+        },
+        "required": [
+          "app",
+          "mode",
+          "status"
+        ]
+      }
+    },
+    "entries": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "id": {
+            "minLength": 1,
+            "maxLength": 196,
+            "type": "string"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "const": "click",
+                "type": "string"
+              },
+              {
+                "const": "type",
+                "type": "string"
+              },
+              {
+                "const": "key",
+                "type": "string"
+              },
+              {
+                "const": "scroll",
+                "type": "string"
+              },
+              {
+                "const": "drag",
+                "type": "string"
+              },
+              {
+                "const": "hover",
+                "type": "string"
+              },
+              {
+                "const": "paste",
+                "type": "string"
+              },
+              {
+                "const": "wait",
+                "type": "string"
+              },
+              {
+                "const": "assert",
+                "type": "string"
+              },
+              {
+                "const": "launch_app",
+                "type": "string"
+              },
+              {
+                "const": "activate_app",
+                "type": "string"
+              },
+              {
+                "const": "focus_window",
+                "type": "string"
+              },
+              {
+                "const": "open_system_surface",
+                "type": "string"
+              },
+              {
+                "const": "surface_press",
+                "type": "string"
+              },
+              {
+                "const": "manual_checkpoint",
+                "type": "string"
+              },
+              {
+                "const": "gap",
+                "type": "string"
+              }
+            ]
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "window",
+                    "type": "string"
+                  },
+                  "app": {
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*(?:\\.[A-Za-z0-9][A-Za-z0-9-]*)+$",
+                    "type": "string"
+                  },
+                  "windowKey": {
+                    "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+                    "type": "string"
+                  },
+                  "windowTitle": {
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "app",
+                  "windowKey",
+                  "windowTitle"
+                ]
+              },
+              {
+                "additionalProperties": false,
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "app",
+                    "type": "string"
+                  },
+                  "app": {
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*(?:\\.[A-Za-z0-9][A-Za-z0-9-]*)+$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "app"
+                ]
+              },
+              {
+                "anyOf": [
+                  {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "const": "surface",
+                        "type": "string"
+                      },
+                      "surface": {
+                        "anyOf": [
+                          {
+                            "const": "dock",
+                            "type": "string"
+                          },
+                          {
+                            "const": "menu_bar_extras",
+                            "type": "string"
+                          },
+                          {
+                            "const": "spotlight",
+                            "type": "string"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "surface"
+                    ]
+                  },
+                  {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "const": "surface",
+                        "type": "string"
+                      },
+                      "surface": {
+                        "const": "app_menu_bar",
+                        "type": "string"
+                      },
+                      "app": {
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*(?:\\.[A-Za-z0-9][A-Za-z0-9-]*)+$",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "surface",
+                      "app"
+                    ]
+                  },
+                  {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "const": "surface",
+                        "type": "string"
+                      },
+                      "surface": {
+                        "const": "app_context_menu",
+                        "type": "string"
+                      },
+                      "app": {
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*(?:\\.[A-Za-z0-9][A-Za-z0-9-]*)+$",
+                        "type": "string"
+                      },
+                      "windowKey": {
+                        "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+                        "type": "string"
+                      },
+                      "windowTitle": {
+                        "minLength": 1,
+                        "maxLength": 256,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "surface",
+                      "app",
+                      "windowKey",
+                      "windowTitle"
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "status": {
+            "anyOf": [
+              {
+                "const": "passed",
+                "type": "string"
+              },
+              {
+                "const": "failed",
+                "type": "string"
+              },
+              {
+                "const": "blocked",
+                "type": "string"
+              },
+              {
+                "const": "skipped",
+                "type": "string"
+              },
+              {
+                "const": "resolved",
+                "type": "string"
+              }
+            ]
+          },
+          "atMs": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "durationMs": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "const": "prepare",
+                "type": "string"
+              },
+              {
+                "const": "observe",
+                "type": "string"
+              },
+              {
+                "const": "dispatch",
+                "type": "string"
+              },
+              {
+                "const": "verify",
+                "type": "string"
+              },
+              {
+                "const": "handoff",
+                "type": "string"
+              }
+            ]
+          },
+          "delivery": {
+            "anyOf": [
+              {
+                "const": "delivered_verified",
+                "type": "string"
+              },
+              {
+                "const": "delivered_unverified",
+                "type": "string"
+              },
+              {
+                "const": "delivery_uncertain",
+                "type": "string"
+              },
+              {
+                "const": "not_delivered",
+                "type": "string"
+              },
+              {
+                "const": "unknown",
+                "type": "string"
+              }
+            ]
+          },
+          "intent": {
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "intentId": {
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
+                "type": "string"
+              },
+              "sourceStepIds": {
+                "minItems": 1,
+                "maxItems": 500,
+                "type": "array",
+                "items": {
+                  "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
+                  "type": "string"
+                }
+              },
+              "equivalence": {
+                "anyOf": [
+                  {
+                    "const": "same_ui",
+                    "type": "string"
+                  },
+                  {
+                    "const": "same_end_state",
+                    "type": "string"
+                  }
+                ]
+              },
+              "skippedUiStepIds": {
+                "maxItems": 500,
+                "type": "array",
+                "items": {
+                  "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
+                  "type": "string"
+                }
+              },
+              "effects": {
+                "maxItems": 10,
+                "type": "array",
+                "items": {
+                  "additionalProperties": false,
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "minLength": 1,
+                      "maxLength": 256,
+                      "type": "string"
+                    },
+                    "status": {
+                      "anyOf": [
+                        {
+                          "const": "verified",
+                          "type": "string"
+                        },
+                        {
+                          "const": "failed",
+                          "type": "string"
+                        },
+                        {
+                          "const": "unverified",
+                          "type": "string"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "status"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "intentId",
+              "sourceStepIds",
+              "equivalence",
+              "effects"
+            ]
+          },
+          "fallback": {
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "reason": {
+                "minLength": 1,
+                "maxLength": 256,
+                "type": "string"
+              },
+              "candidateIntentId": {
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "status",
+          "atMs",
+          "durationMs"
+        ]
+      }
+    }
+  },
+  "required": [
+    "version",
+    "flowId",
+    "flowSha256",
+    "startedAt",
+    "mode",
+    "status",
+    "entries"
+  ]
+}

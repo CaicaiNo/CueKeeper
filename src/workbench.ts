@@ -10,6 +10,7 @@ import { loadBaseline } from './assertion.js';
 import { fixtureAppPath, offlineDesktop, withDesktop } from './desktop.js';
 import { readJson, writeNew } from './files.js';
 import { hashFlow, plan } from './flow.js';
+import { isFlowV2 } from './flow-v2.js';
 import { object } from './locator.js';
 import { crop, decodePng, encodePng } from './png.js';
 import { runFlow } from './run.js';
@@ -200,9 +201,18 @@ export async function startWorkbench(options: {
     }
     const current = session;
     if (!current || data.session !== current.view.id) return send(response, 409, { error: 'Reload the current session' });
+    // Editing, saving and replay all still depend on the v1 single-window
+    // contract. A v2 session is review-only until the cross-app runner lands.
+    const activeFlow = current.flow;
+    if (isFlowV2(activeFlow)) {
+      return send(response, 400, {
+        error: 'UNSUPPORTED_FLOW_VERSION: a flow version 2 session is read-only in the workbench; ' +
+          'editing and replay arrive with the cross-app runner',
+      });
+    }
     if (path === '/api/library') {
       const item = parseLibraryItem(data.item);
-      if (!sameTarget(item.target, current.flow.target)) throw new Error('Behavior target must match the session');
+      if (!sameTarget(item.target, activeFlow.target)) throw new Error('Behavior target must match the session');
       await mkdir(library, { mode: 0o700, recursive: true });
       await writeNew(join(library, `${item.behavior.id}.behavior.json`), JSON.stringify(item, null, 2) + '\n');
       return send(response, 201, libraryEntry(item));
@@ -216,7 +226,7 @@ export async function startWorkbench(options: {
     }
     if (path === '/api/plan') {
       const { flow, secrets } = parseTestItem(data.test);
-      if (!sameTarget(flow.target, current.flow.target)) throw new Error('Test target must match the session');
+      if (!sameTarget(flow.target, activeFlow.target)) throw new Error('Test target must match the session');
       const planned = plan(flow);
       const shells = reachableShells(planned);
       const captureOutput = data.captureOutput === true;
@@ -249,7 +259,7 @@ export async function startWorkbench(options: {
       // skips the rest, but a saved file should not carry unapproved setup.
       const test = keepConfirmedSetup(data.test);
       const { flow, secrets } = parseTestItem(test);
-      if (!sameTarget(flow.target, current.flow.target)) throw new Error('Test target must match the session');
+      if (!sameTarget(flow.target, activeFlow.target)) throw new Error('Test target must match the session');
       for (const { action } of plan(flow)) {
         if (action.kind === 'assert' && action.check.target.kind === 'window' &&
             action.check.expect.property === 'screenshot') {
@@ -262,7 +272,7 @@ export async function startWorkbench(options: {
       return send(response, 201, { output });
     }
     const { flow, secrets } = parseTestItem(data.test);
-    if (!sameTarget(flow.target, current.flow.target)) throw new Error('Test target must match the session');
+    if (!sameTarget(flow.target, activeFlow.target)) throw new Error('Test target must match the session');
     if (data.mode !== 'offline' && data.mode !== 'live') throw new Error('Choose a replay mode');
     if (running) throw new Error('A test is already running');
     const dryRun = data.mode === 'offline';

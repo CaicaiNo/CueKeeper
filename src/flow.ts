@@ -136,15 +136,16 @@ export function plan(flow: Flow): PlannedStep[] {
   return expanded;
 }
 
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+/** Canonical JSON: object keys sorted recursively, array order kept. */
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   if (value !== null && typeof value === 'object') {
     const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonical(record[key])}`).join(',')}}`;
+    return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`;
   }
   return JSON.stringify(value);
 }
 
 export function hashFlow(flow: Flow) {
-  return createHash('sha256').update(canonical(flow)).digest('hex');
+  return createHash('sha256').update(canonicalJson(flow)).digest('hex');
 }
