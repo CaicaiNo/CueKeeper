@@ -284,6 +284,36 @@ test('saveRevision writes a new sibling file and leaves the recording byte-ident
   assert.deepEqual(await readFile(path), rawBefore);
 });
 
+test('drag endpoints use the same element target rules', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'cuekeeper-workbench-drag-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, 'drag.json');
+  const scope = {
+    kind: 'window', app: 'com.apple.finder', windowKey: 'downloads', windowTitle: 'Downloads',
+  };
+  await writeFile(path, JSON.stringify({
+    version: 2, id: 'drag-flow', name: 'drag endpoints',
+    steps: [{
+      id: 'drag-1', kind: 'drag', scope,
+      from: { kind: 'element', role: 'image', name: 'Source' },
+      to: { kind: 'element', role: 'image', name: 'Target' },
+      durationMs: 200,
+    }],
+  }));
+  const editor = await loadEditableFlow(path);
+  editor.updateStep('drag-1', {
+    from: { kind: 'element', role: 'image', name: 'Source', index: 0 },
+    to: { kind: 'point', x: 40, y: 50, element: { role: 'image', name: 'Target', index: 1 } },
+  });
+  assert.deepEqual(step(editor, 'drag-1').from, {
+    kind: 'element', role: 'image', name: 'Source', index: 0,
+  });
+  assert.deepEqual(step(editor, 'drag-1').to, {
+    kind: 'element', role: 'image', name: 'Target', index: 1,
+  });
+  assert.equal(editor.validate().ok, true);
+});
+
 test('save refuses the original path and invalid documents', async t => {
   const { path, editor } = await fixture(t);
   await assert.rejects(editor.saveRevision(path), error => error.code === 'ORIGINAL_OVERWRITE');
