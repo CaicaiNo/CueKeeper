@@ -146,10 +146,13 @@ node dist/cli.js run /path/to/shell.flow.json --allow-shell --json
 node dist/cli.js run /path/to/shell.flow.json --dry-run --json
 node dist/cli.js run /path/to/test.json --allow-shell --allow-sudo --capture-shell-output --report out/run.json
 node dist/cli.js run /path/to/root.flow.json --allow-shell --allow-sudo --interactive --report out/run.json
+node dist/cli.js sudo set                 # 一次性保存管理员密码到登录钥匙串
+node dist/cli.js run /path/to/root.flow.json --allow-shell --allow-sudo --non-interactive
 ```
 
 - 实时执行必须显式给 `--allow-shell`；`privilege: "sudo"` 的固定任务与 `privilege: "root"` 的 root 步骤另需 `--allow-sudo`，固定任务首版仍按禁用处理，真实提权留给 HAOC-76 真机验收。
 - `privilege: "root"` + `privilegeMode: "prompt"`（默认）每次运行弹原生密码框，必须再加 `--interactive`；与 `--json` 互斥（`--dry-run` 预览除外）。`privilegeMode: "sudoers"` 走 `sudo -n` 无人值守白名单，未授权时明确阻塞。密码不落盘、不进报告，风险说明见 [Root 步骤与管理员授权](docs/shell-security.md)。
+- `--non-interactive` 或 `privilegeMode: "keychain"` 从登录钥匙串读取 `cuekeeper sudo set` 保存的管理员密码，不弹框；缺凭据报 `SUDO_CREDENTIAL_MISSING` 并阻塞，不会回退弹框。`cuekeeper sudo status` 只查元数据，`cuekeeper sudo clear` 删除该项。
 - `--dry-run` 只输出静态计划（步骤 ID、模式、权限），不解析秘密、不启动 shell 或 sudo；纯 Shell 流程无需 `--snapshot`。
 - 输出文本默认不采集；`--capture-shell-output` 单次开启。存在秘密引用或提权步骤时只保留元数据。
 - 含 Shell 定义的 flow 不能 `report pack`，仍可 `--report` 写 JSON 并在工作台查看。
@@ -180,7 +183,8 @@ node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --selec
 | `record --app <bundle-id> --window <精确标题> --out <flow.json> [--app-path <路径>]` | 录制目标窗口，显示计时 HUD，支持 `--no-indicator`、`--sound` 与显式开启剪贴板文本的 `--clipboard` |
 | `pick --app <bundle-id> --window <精确标题> [--app-path <路径>] [--select <ref>] [--snapshot <snapshot.json>]` | 只读快照，按可交互元素优先列出候选，或输出可写入 flow 的定位器 |
 | `run <flow.json> --dry-run` | 用当前窗口解析定位器；纯 Shell 流程无需快照 |
-| `run <flow.json> --allow-shell [--allow-sudo] [--interactive] [--capture-shell-output]` | 执行 Shell 步骤；固定任务首版禁用，root 步骤走密码框或 sudoers |
+| `run <flow.json> --allow-shell [--allow-sudo] [--interactive|--non-interactive] [--capture-shell-output]` | 执行 Shell 步骤；固定任务首版禁用，root 步骤走密码框、sudoers 或登录钥匙串 |
+| `sudo set\|status\|clear [--json]` | 保存 / 查询 / 删除登录钥匙串里的管理员凭据，供 `--non-interactive` 的 root 步骤使用 |
 | `run <flow.json> --headed --report <report.json>` | 允许物理点击，回放并记录逐步结果 |
 | `run <test.json> --data <rows.json> [--report <batch.json>]` | 每行覆盖行为调用参数后串行执行；报告写汇总与逐行 v1 报告 |
 | `report pack <report.json> --flow <flow.json> --out <report.zip>` | 验证报告与流程配对，生成可离线打开的 ZIP；`--assets <dir>` 带入截图、日志和 AX 快照；配置上传后自动入队 |

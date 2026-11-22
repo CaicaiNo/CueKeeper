@@ -1180,6 +1180,10 @@
                           {
                             "const": "sudoers",
                             "type": "string"
+                          },
+                          {
+                            "const": "keychain",
+                            "type": "string"
                           }
                         ]
                       },
@@ -1242,6 +1246,10 @@
                           },
                           {
                             "const": "sudoers",
+                            "type": "string"
+                          },
+                          {
+                            "const": "keychain",
                             "type": "string"
                           }
                         ]
@@ -1466,6 +1474,10 @@
                           {
                             "const": "sudoers",
                             "type": "string"
+                          },
+                          {
+                            "const": "keychain",
+                            "type": "string"
                           }
                         ]
                       },
@@ -1687,6 +1699,10 @@
                           },
                           {
                             "const": "sudoers",
+                            "type": "string"
+                          },
+                          {
+                            "const": "keychain",
                             "type": "string"
                           }
                         ]

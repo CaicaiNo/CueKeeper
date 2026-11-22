@@ -23,7 +23,7 @@ CueKeeper 整体使用 root 会让导入的命令、测试工作台和桌面适�
 | `env` | 最多 32 个大小写敏感的键。值为普通字符串或 `{"secretEnv":"CUEKEEPER_SECRET_FIXTURE_TOKEN"}`。运行前从宿主环境按名称解析引用，缺值时阻止启动。变量值中的 NUL 无效，执行前检查参数和环境合计 UTF-8 体积不超过 64 KiB。 |
 | `timeoutMs`、`expectedExitCode` | 用户态默认 30,000 ms，可设 1–120,000 ms。预期退出码默认 0，可设 0–255。默认值在规划时计算，保留原输入与 flow hash。 |
 | `privilege` | 默认 `"user"`。`"sudo"` 必须使用单元素 `argv`，绝对路径须符合 `/Library/CueKeeper/privileged/<任务 ID>` 且登记在本机管理员清单。该形态禁止传入 `cwd`、`env`、`timeoutMs` 和命令字符串，固定 30 秒任务期限，由管理员任务负责。 |
-| `privilege: "root"`、`privilegeMode` | 以 root 执行逐项 `argv`，不接受 `shell: true`、`command` 或 `env`。`privilegeMode` 默认 `"prompt"`：每次运行弹原生密码框，需 CLI `--interactive` 或工作台运行确认；可选 `"sudoers"`：`sudo -n` 无人值守白名单。允许 `cwd`、`timeoutMs` 和 `expectedExitCode`。风险、授权与失败语义见 [Root 步骤与管理员授权](shell-security.md)。 |
+| `privilege: "root"`、`privilegeMode` | 以 root 执行逐项 `argv`，不接受 `shell: true`、`command` 或 `env`。`privilegeMode` 默认 `"prompt"`：每次运行弹原生密码框，需 CLI `--interactive` 或工作台运行确认；可选 `"sudoers"`：`sudo -n` 无人值守白名单，或 `"keychain"`：从登录钥匙串读取 `cuekeeper sudo set` 保存的管理员密码（CLI 也可用 `--non-interactive` 开启）。允许 `cwd`、`timeoutMs` 和 `expectedExitCode`。风险、授权与失败语义见 [Root 步骤与管理员授权](shell-security.md)。 |
 
 用户态环境仅由 CueKeeper 建立的 `HOME`、`USER`、`LOGNAME`、`TMPDIR`、`LANG=C` 和固定 `PATH=/usr/bin:/bin:/usr/sbin:/sbin` 起步。HOME 与用户名取自运行账号，TMPDIR 由每次运行创建的私有临时目录提供。需要 Homebrew 或项目工具时填绝对路径。保留这些基础键以及 `SUDO_*`、`DYLD_*`、`LD_*`、`CUEKEEPER_*` 和 `NODE_OPTIONS`，禁止 flow 直接覆盖。宿主环境、登录配置和凭据只通过明确允许的输入进入步骤。子进程的 stdin 为 EOF，无交互终端。
 

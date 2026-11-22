@@ -61,7 +61,7 @@ out/assets/logs/runner.log
 | --- | --- |
 | `mode` | `argv`（默认）或 `shell`（显式脚本） |
 | `privilege` | `user`、`sudo` 或 `root` |
-| `privilegeMode` | 仅 root 步骤：`prompt`（管理员密码框）或 `sudoers`（无人值守白名单） |
+| `privilegeMode` | 仅 root 步骤：`prompt`（管理员密码框）、`sudoers`（无人值守白名单）或 `keychain`（登录钥匙串自动填充） |
 | `execution` | `preview`、`not-run`、`finished`、`terminated` 或 `unknown` |
 | `exitCode` / `signal` | 二者互斥；只记录真实退出码或被终止的信号 |
 | `cleanup` | 终止后按进程组回收的结果：`complete` 或 `unknown` |

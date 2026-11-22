@@ -185,10 +185,13 @@ const shellEnv = T.Record(shellEnvKey, T.Union([
 ]), { additionalProperties: false, maxProperties: 32 });
 const shellTimeout = T.Optional(T.Integer({ minimum: 1, maximum: 120_000, default: 30_000 }));
 const shellExpectedExit = T.Optional(T.Integer({ minimum: 0, maximum: 255, default: 0 }));
-// Interactive authorization for root steps. `prompt` shows the native password
-// dialog through sudo -A and SUDO_ASKPASS; `sudoers` relies on a pre-installed
-// NOPASSWD policy and never prompts.
-const shellPrivilegeMode = T.Optional(T.Union([T.Literal('prompt'), T.Literal('sudoers')]));
+// Authorization for root steps. `prompt` shows the native password dialog
+// through sudo -A and SUDO_ASKPASS; `sudoers` relies on a pre-installed
+// NOPASSWD policy and never prompts; `keychain` reads a password stored by
+// `cuekeeper sudo set` through the system security binary.
+const shellPrivilegeMode = T.Optional(T.Union([
+  T.Literal('prompt'), T.Literal('sudoers'), T.Literal('keychain'),
+]));
 const shellFields = {
   ...step, kind: T.Literal('shell'),
   shell: T.Optional(T.Literal(false)),

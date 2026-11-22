@@ -3,7 +3,9 @@ import { randomUUID } from 'node:crypto';
 import { chmod, lstat, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { userInfo } from 'node:os';
 import { ShellFault, shellPath } from './shell.js';
+import { defaultSecurityPath, sudoKeychainService } from './sudo-credential.js';
 
 export const privilegeRoot = '/Library/CueKeeper/privileged';
 export const privilegeRegistryName = 'registry.json';
@@ -26,8 +28,11 @@ export interface PrivilegeExecution {
   cleanup?: 'complete' | 'unknown';
 }
 
-/** How a root step proves it may run: a password dialog or a sudoers policy. */
-export type RootMode = 'prompt' | 'sudoers';
+/**
+ * How a root step proves it may run: a password dialog per step, a sudoers
+ * policy, or a login-keychain item that an askpass helper reads unattended.
+ */
+export type RootMode = 'prompt' | 'sudoers' | 'keychain';
 
 export interface RootPreflight {
   program: string;
@@ -47,7 +52,7 @@ export interface RootRequest extends RootPreflight {
  * returned a password; the command result is reported separately.
  */
 export type RootAuthentication =
-  'provided' | 'rejected' | 'cancelled' | 'timeout' | 'unavailable' | 'refused';
+  'provided' | 'rejected' | 'cancelled' | 'timeout' | 'unavailable' | 'refused' | 'missing';
 
 export interface RootExecution {
   started: boolean;
@@ -452,6 +457,37 @@ async function writeAskpass(path: string, statusPath: string, promptCommand: str
   await chmod(path, 0o700);
 }
 
+/**
+ * Unattended SUDO_ASKPASS helper for `privilegeMode: "keychain"`. It reads the
+ * password through the system `security` binary, whose ACL is the only trusted
+ * client, and writes it straight into sudo's pipe. A missing item, a refused
+ * Keychain authorization and any other read failure all become `missing`; the
+ * helper never falls back to a dialog and never stores the password anywhere.
+ */
+function keychainAskpassSource(statusPath: string, security: string, service: string, account: string) {
+  return `#!/bin/sh
+umask 077
+status=${shQuote(statusPath)}
+if [ -e "$status" ]; then
+  printf 'retry\\n' >> "$status"
+  exit 1
+fi
+out=$(${shQuote(security)} find-generic-password -w -s ${shQuote(service)} -a ${shQuote(account)} 2>/dev/null)
+if [ -z "$out" ]; then
+  printf 'missing\\n' > "$status"
+  exit 1
+fi
+printf 'provided\\n' > "$status"
+printf '%s\\n' "$out"
+exit 0
+`;
+}
+
+async function writeAskpassSource(path: string, source: string) {
+  await writeFile(path, source, { mode: 0o700 });
+  await chmod(path, 0o700);
+}
+
 async function assertExecutable(path: string, message: string) {
   let info;
   try {
@@ -574,6 +610,11 @@ export interface RootRunnerOptions {
   platform?: NodeJS.Platform;
   sudoPath?: string;
   osascriptPath?: string;
+  /** System keychain CLI used by `privilegeMode: "keychain"`. */
+  securityPath?: string;
+  /** Keychain service and account the helper reads; they match `cuekeeper sudo set`. */
+  keychainService?: string;
+  keychainAccount?: string;
   /** Program that answers the prompt. Tests inject a fake; defaults to osascript. */
   prompt?: string;
   /** How long the password dialog waits before it reports a timeout. */
@@ -594,6 +635,9 @@ export function createRootPrivilegeRunner(options: RootRunnerOptions = {}): Priv
   const platform = options.platform ?? process.platform;
   const sudoPath = options.sudoPath ?? '/usr/bin/sudo';
   const osascriptPath = options.osascriptPath ?? '/usr/bin/osascript';
+  const securityPath = options.securityPath ?? defaultSecurityPath;
+  const keychainService = options.keychainService ?? sudoKeychainService;
+  const keychainAccount = options.keychainAccount ?? userInfo().username;
   const promptTimeoutMs = options.promptTimeoutMs ?? 60_000;
   const probeTimeoutMs = options.probeTimeoutMs ?? 10_000;
   const allowSudoers = options.allowSudoers ?? false;
@@ -632,6 +676,10 @@ export function createRootPrivilegeRunner(options: RootRunnerOptions = {}): Priv
         throw new ShellFault('SHELL_PRIVILEGE_UNAVAILABLE', 'The administrator password dialog is only available on macOS');
       }
       await assertExecutable(sudoPath, 'The system sudo binary is missing');
+      if (request.mode === 'keychain') {
+        await assertExecutable(securityPath, 'The system security binary is missing');
+        return;
+      }
       await assertExecutable(
         options.prompt ?? osascriptPath, 'The administrator password dialog helper is missing',
       );
@@ -649,8 +697,15 @@ export function createRootPrivilegeRunner(options: RootRunnerOptions = {}): Priv
       const nonce = randomUUID();
       const askpass = join(request.directory, `askpass-${nonce}.sh`);
       const status = join(request.directory, `askpass-${nonce}.status`);
+      const keychain = request.mode === 'keychain';
       try {
-        await writeAskpass(askpass, status, promptCommand);
+        if (keychain) {
+          await writeAskpassSource(
+            askpass, keychainAskpassSource(status, securityPath, keychainService, keychainAccount),
+          );
+        } else {
+          await writeAskpass(askpass, status, promptCommand);
+        }
       } catch {
         return { started: false, state: 'failed', startFailed: true };
       }
@@ -662,18 +717,22 @@ export function createRootPrivilegeRunner(options: RootRunnerOptions = {}): Priv
       // cover the following sudo run (HAOC-100).
       // The deadline carries one full dialog window on top of the command
       // budget, so typing the password never eats into the command's time.
-      // The dialog also bounds itself at promptTimeoutMs.
+      // The dialog also bounds itself at promptTimeoutMs. The keychain path
+      // reads without a dialog, so it only gets the command budget.
       const run = await runSupervised(launch, sudoPath,
         ['-A', '-k', '-u', 'root', '--', request.program, ...request.args],
         {
           cwd: request.cwd, env: sudoEnvironment(askpass),
-          timeoutMs: request.timeoutMs + promptTimeoutMs, signal,
+          timeoutMs: request.timeoutMs + (keychain ? 0 : promptTimeoutMs), signal,
         });
       if (run.startFailed) return { started: false, state: 'failed', startFailed: true };
       if (run.cancelled) {
         return { started: true, state: 'terminated', cancelled: true, cleanup: run.cleanup };
       }
       const lines = await readPromptStatus(status);
+      // A missing, denied or unreadable Keychain item blocks the step; it never
+      // degrades into a password dialog.
+      if (lines.includes('missing')) return authenticationFailure('missing');
       if (lines.includes('cancelled')) return authenticationFailure('cancelled');
       if (lines.includes('timeout')) return authenticationFailure('timeout');
       if (lines.includes('unavailable')) return authenticationFailure('unavailable');

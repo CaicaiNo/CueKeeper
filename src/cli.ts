@@ -21,6 +21,7 @@ import { packReport } from './report.js';
 import { blockedShellReport, runFlow } from './run.js';
 import type { ShellRunOptions } from './run.js';
 import { createRootPrivilegeRunner } from './shell-privilege.js';
+import { createSudoKeychainStore, runSudoCommand } from './sudo-credential.js';
 import { flowHasShellDefinitions, reachableShells, shellGate } from './shell.js';
 import { parseTestItem, resolveSecrets } from './test-item.js';
 import { enqueueUpload, processUploadQueue } from './upload-queue.js';
@@ -34,7 +35,8 @@ const help = `Cuekeeper ${buildInfo().version}
   cuekeeper --version
   cuekeeper doctor [--json]
   cuekeeper flow validate <flow.json|test.json> [--json]
-  cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--interactive] [--report <report.json>] [--allow-shell] [--allow-sudo] [--capture-shell-output] [--json]
+  cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--interactive|--non-interactive] [--report <report.json>] [--allow-shell] [--allow-sudo] [--capture-shell-output] [--json]
+  cuekeeper sudo set|status|clear [--json]   (login-keychain credential for --non-interactive root steps)
   cuekeeper workbench [run-directory] [--port <port>] [--library <directory>] [--allow-live-replay] [--allow-shell] [--allow-sudo]
   cuekeeper pick --app <bundle-id> --window <title> [--app-path <path>] [--select <ref>] [--snapshot <snapshot.json>] [--json]
   cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--app-path <path>] [--seconds 25] [--clipboard] [--no-indicator] [--sound] [--trace-clicks] [--json]
@@ -129,6 +131,26 @@ async function main() {
     return;
   }
 
+  if (command === 'sudo') {
+    const { positionals } = parseArgs({ args: rest, allowPositionals: true, options: common });
+    checkPositionals(positionals, 1);
+    const action = positionals[0];
+    if (action !== 'set' && action !== 'status' && action !== 'clear') {
+      throw new Error('Unknown sudo action. Use set, status or clear');
+    }
+    // `security` prompts for the password on its own terminal. Without one it
+    // would fail anyway; say so instead of leaving a confusing exit status.
+    if (action === 'set' && process.stdin.isTTY !== true) {
+      throw new Fault(
+        'SUDO_TERMINAL_REQUIRED',
+        'cuekeeper sudo set needs an interactive terminal: the password is typed into security\'s own prompt',
+      );
+    }
+    const result = await runSudoCommand(action, createSudoKeychainStore());
+    success(result.data, result.message, result.code);
+    return;
+  }
+
   if (command === 'pick') {
     const { values } = parseArgs({
       args: rest, options: {
@@ -210,11 +232,16 @@ async function main() {
         report: { type: 'string' }, snapshot: { type: 'string' }, data: { type: 'string' },
         'allow-shell': { type: 'boolean' }, 'allow-sudo': { type: 'boolean' },
         'capture-shell-output': { type: 'boolean' }, interactive: { type: 'boolean' },
+        'non-interactive': { type: 'boolean' },
       },
     });
     checkPositionals(positionals, 1);
     const dryRun = values['dry-run'] ?? false;
     const interactive = values.interactive ?? false;
+    const nonInteractive = values['non-interactive'] ?? false;
+    if (interactive && nonInteractive) {
+      throw new Error('--interactive cannot be combined with --non-interactive');
+    }
     // Machine mode has no human to answer a password dialog; refuse instead of
     // silently downgrading an interactive root step. A dry run never prompts,
     // so it stays allowed under --json.
@@ -231,6 +258,7 @@ async function main() {
       allowShell: values['allow-shell'] ?? false,
       allowSudo: values['allow-sudo'] ?? false,
       interactive,
+      nonInteractive,
       baseDir: dirname(input),
       captureOutput: values['capture-shell-output'] ?? false,
       privilege: createRootPrivilegeRunner(),
@@ -302,7 +330,7 @@ async function main() {
     let report;
     if (gate) {
       // No desktop adapter and no shell process is created for a blocked run.
-      report = blockedShellReport(flow, planned, gate);
+      report = blockedShellReport(flow, planned, gate, { nonInteractive });
     } else {
       const needsDesktop = (flow.setup?.length ?? 0) > 0 ||
         planned.some(step => step.action.kind !== 'shell' || (step.action.setup?.length ?? 0) > 0);

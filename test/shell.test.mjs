@@ -12,7 +12,7 @@ import {
   createFileRegistry, createRootPrivilegeRunner, createSudoPrivilegeRunner, disabledPrivilegeRunner,
   interpretPrivilegeOutput, sudoInvocation,
 } from '../dist/shell-privilege.js';
-import { ShellFault } from '../dist/shell.js';
+import { ShellFault, previewShell, shellGate } from '../dist/shell.js';
 import { parseFlow, plan } from '../dist/flow.js';
 import { fileURLToPath } from 'node:url';
 
@@ -878,10 +878,25 @@ async function rootFixture(t, options = {}) {
     (answer === '' ? 'exit 1\n' : `printf '%s\\n' '${answer}'\n`),
   { mode: 0o700 });
   await chmod(prompt, 0o700);
+  const securityConfig = join(root, 'security.json');
+  const securityLog = join(root, 'security.log');
+  const keychainAccount = options.keychainAccount ?? 'fixture-account';
+  await writeFile(securityConfig, JSON.stringify({
+    log: securityLog,
+    password: options.password ?? 'test-password-42',
+    present: options.keychainPresent ?? true,
+    behavior: options.keychainBehavior ?? 'normal',
+    account: keychainAccount,
+  }));
+  const security = join(root, 'fake-security.mjs');
+  await writeFile(security, `#!${process.execPath}\n${fakeSecurityReader(securityConfig)}`, { mode: 0o700 });
+  await chmod(security, 0o700);
   const runner = createRootPrivilegeRunner({
     sudoPath: sudo, prompt, platform: options.platform ?? 'darwin',
     allowSudoers: options.allowSudoers ?? true,
     promptTimeoutMs: options.promptTimeoutMs ?? 5000,
+    securityPath: security,
+    keychainAccount,
   });
   const log = join(root, 'sudo.log');
   const calls = async () => {
@@ -899,7 +914,31 @@ async function rootFixture(t, options = {}) {
       return 0;
     }
   };
-  return { root, directory, runner, calls, dialogs, sudo, prompt };
+  const securityCalls = async () => {
+    try {
+      return (await readFile(securityLog, 'utf8'))
+        .trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+    } catch {
+      return [];
+    }
+  };
+  return { root, directory, runner, calls, dialogs, securityCalls, sudo, prompt, security };
+}
+
+function fakeSecurityReader(configPath) {
+  return `
+import { appendFileSync, readFileSync } from 'node:fs';
+const config = JSON.parse(readFileSync(${JSON.stringify(configPath)}, 'utf8'));
+const args = process.argv.slice(2);
+appendFileSync(config.log, JSON.stringify(args) + '\\n');
+if (args[0] !== 'find-generic-password' || args[args.length - 1] !== config.account) process.exit(2);
+if (config.behavior === 'denied') process.exit(128);
+if (config.behavior === 'error') process.exit(1);
+if (!config.present) process.exit(44);
+if (!args.includes('-w')) process.exit(2);
+process.stdout.write(config.password + '\\n');
+process.exit(0);
+`;
 }
 
 const rootRequest = (root, directory, extra = {}) => ({
@@ -1097,6 +1136,10 @@ test('root steps appear as argv-only contract, report fields, and gate on --inte
     version: 1, id: 'root-flow', name: 'Root', target,
     steps: [{ ...rootStep, privilegeMode: 'sudoers' }],
   }), true);
+  assert.equal(flowCheck.Check({
+    version: 1, id: 'root-flow', name: 'Root', target,
+    steps: [{ ...rootStep, privilegeMode: 'keychain' }],
+  }), true);
   const invalid = [
     { ...rootStep, shell: true, command: 'true' },
     { ...rootStep, env: { FIXTURE: 'x' } },
@@ -1188,4 +1231,145 @@ test('the CLI refuses interactive JSON runs and blocks root steps without --inte
   const previewReport = JSON.parse(preview.stdout).data;
   assert.equal(previewReport.entries[0].shell.execution, 'preview');
   assert.equal(previewReport.entries[0].shell.privilege, 'root');
+});
+
+test('keychain mode reads the stored password through security with no dialog', async t => {
+  const { root, directory, runner, calls, dialogs, securityCalls } = await rootFixture(t);
+  const marker = join(root, 'keychain-ran.json');
+  const script = await nodeScript(root, 'keychain-root.mjs',
+    `import { writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ argv: process.argv.slice(2) }));`);
+  const result = await runner.runRoot(rootRequest(root, directory, {
+    mode: 'keychain', program: process.execPath, args: [script], timeoutMs: 10_000,
+  }), signal);
+  assert.equal(result.state, 'finished', JSON.stringify(result));
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(JSON.parse(await readFile(marker, 'utf8')).argv, []);
+  // No dialog was shown: security supplied the password to the askpass pipe.
+  assert.equal(await dialogs(), 0);
+  assert.deepEqual((await calls()).filter(entry => entry.ask).map(entry => entry.accepted), [true]);
+  assert.deepEqual(await securityCalls(),
+    [['find-generic-password', '-w', '-s', 'com.cuekeeper.sudo', '-a', 'fixture-account']]);
+
+  // The generated helper is keychain-only: no dialog program, no password.
+  const helpers = (await readdir(directory)).filter(name => name.endsWith('.sh'));
+  assert.equal(helpers.length, 1);
+  const source = await readFile(join(directory, helpers[0]), 'utf8');
+  assert.match(source, /find-generic-password -w -s 'com\.cuekeeper\.sudo' -a 'fixture-account'/);
+  assert.doesNotMatch(source, /osascript|display dialog/);
+  assert.doesNotMatch(source, /test-password-42/);
+  const status = (await readdir(directory)).find(name => name.endsWith('.status'));
+  assert.equal((await readFile(join(directory, status), 'utf8')).trim(), 'provided');
+  // Neither the result, the sudo argv log nor the private directory keeps it.
+  assert.doesNotMatch(JSON.stringify(result), /test-password-42/);
+  assert.doesNotMatch(JSON.stringify(await calls()), /test-password-42/);
+  for (const name of await readdir(directory)) {
+    assert.doesNotMatch(await readFile(join(directory, name), 'utf8'), /test-password-42/, name);
+  }
+});
+
+test('a missing or denied keychain item blocks with SUDO_CREDENTIAL_MISSING and never prompts', async t => {
+  for (const [index, options] of [{ keychainPresent: false }, { keychainBehavior: 'denied' }].entries()) {
+    const { root, directory, runner, dialogs, securityCalls } = await rootFixture(t, options);
+    const marker = join(root, `never-${index}`);
+    const result = await runner.runRoot(rootRequest(root, directory, {
+      mode: 'keychain', program: '/usr/bin/touch', args: [marker],
+    }), signal);
+    assert.equal(result.state, 'failed', JSON.stringify(result));
+    assert.equal(result.authentication, 'missing');
+    assert.equal(existsSync(marker), false);
+    // A read failure never degrades into the password dialog.
+    assert.equal(await dialogs(), 0);
+    // security was read once; the retry never reaches it.
+    assert.equal((await securityCalls()).length, 1);
+    const status = (await readdir(directory)).find(name => name.endsWith('.status'));
+    assert.equal((await readFile(join(directory, status), 'utf8')).trim().split('\n').join(','),
+      'missing,retry');
+  }
+});
+
+test('an explicit keychain root step reports SUDO_CREDENTIAL_MISSING in the flow report', async t => {
+  const { root, runner, dialogs } = await rootFixture(t, { keychainPresent: false });
+  const marker = join(root, 'never');
+  const flow = flowOf([{
+    id: 'root-step', kind: 'shell', argv: ['/usr/bin/touch', marker],
+    privilege: 'root', privilegeMode: 'keychain',
+  }]);
+  const report = await runFlow(flow, undefined, {
+    dryRun: false, signal,
+    shell: {
+      allowShell: true, allowSudo: true, interactive: false, baseDir: root, privilege: runner,
+    },
+  });
+  assert.equal(report.status, 'blocked', JSON.stringify(report.entries));
+  assert.equal(report.entries[0].code, 'SUDO_CREDENTIAL_MISSING');
+  assert.match(report.entries[0].message, /cuekeeper sudo set/);
+  assert.equal(report.entries[0].shell.privilegeMode, 'keychain');
+  assert.equal(report.entries[0].shell.execution, 'not-run');
+  assert.equal(reportCheck.Check(report), true);
+  assert.doesNotMatch(JSON.stringify(report), /test-password-42/);
+  assert.equal(existsSync(marker), false);
+  assert.equal(await dialogs(), 0);
+});
+
+test('--non-interactive resolves prompt root steps to the keychain and never to a dialog', async t => {
+  const { root, runner, dialogs } = await rootFixture(t);
+  const marker = join(root, 'non-interactive-ran');
+  const flow = flowOf([{
+    id: 'root-step', kind: 'shell', argv: ['/usr/bin/touch', marker], privilege: 'root',
+  }]);
+  const planned = plan(flow);
+  assert.equal(shellGate(flow, planned, {
+    allowShell: true, allowSudo: true, interactive: false, nonInteractive: true,
+  }), undefined);
+  assert.match(shellGate(flow, planned, {
+    allowShell: true, allowSudo: true, interactive: false,
+  }).message, /--interactive or --non-interactive/);
+
+  const blocked = await runFlow(flow, undefined, {
+    dryRun: false, signal,
+    shell: { allowShell: true, allowSudo: true, interactive: false, baseDir: root, privilege: runner },
+  });
+  assert.equal(blocked.entries[0].code, 'SHELL_PRIVILEGE_REQUIRED');
+
+  const report = await runFlow(flow, undefined, {
+    dryRun: false, signal,
+    shell: {
+      allowShell: true, allowSudo: true, interactive: false, nonInteractive: true,
+      baseDir: root, privilege: runner,
+    },
+  });
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.equal(report.entries[0].shell.privilegeMode, 'keychain');
+  assert.equal(existsSync(marker), true);
+  assert.equal(await dialogs(), 0);
+
+  // An explicit sudoers step is never rewritten into the keychain.
+  assert.equal(previewShell({
+    id: 'sudoers', kind: 'shell', argv: ['/usr/bin/true'], privilege: 'root', privilegeMode: 'sudoers',
+  }, { nonInteractive: true }).shell.privilegeMode, 'sudoers');
+  assert.equal(previewShell({
+    id: 'prompt', kind: 'shell', argv: ['/usr/bin/true'], privilege: 'root',
+  }, { nonInteractive: true }).shell.privilegeMode, 'keychain');
+});
+
+test('the CLI exposes --non-interactive and keeps it exclusive with --interactive', async t => {
+  const root = await scratch(t);
+  const flowPath = join(root, 'root.json');
+  await writeFile(flowPath, JSON.stringify({
+    version: 1, id: 'root-cli', name: 'Root CLI', target,
+    steps: [{ id: 'root', kind: 'shell', argv: ['/usr/bin/true'], privilege: 'root' }],
+  }));
+  const run = (...args) => spawnSync(process.execPath, [cliPath, 'run', flowPath, ...args, '--json'],
+    { encoding: 'utf8' });
+
+  const both = run('--allow-shell', '--allow-sudo', '--interactive', '--non-interactive', '--dry-run');
+  assert.equal(both.status, 2, both.stdout + both.stderr);
+  assert.match(JSON.parse(both.stdout).error.message, /cannot be combined/);
+
+  const preview = run('--allow-shell', '--allow-sudo', '--non-interactive', '--dry-run');
+  assert.equal(preview.status, 0, preview.stdout + preview.stderr);
+  const previewReport = JSON.parse(preview.stdout).data;
+  assert.equal(previewReport.entries[0].shell.privilegeMode, 'keychain');
+  assert.equal(previewReport.entries[0].shell.execution, 'preview');
 });
