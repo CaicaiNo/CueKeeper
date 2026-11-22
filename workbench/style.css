@@ -244,8 +244,15 @@ input::placeholder { color: #a5a199; }
 }
 .time {
   color: var(--muted); font: 10.5px var(--mono); font-variant-numeric: tabular-nums;
-  white-space: nowrap;
+  white-space: nowrap; display: flex; flex-direction: column; gap: 1px; min-width: 0;
 }
+.time-value { display: block; }
+.step-id {
+  display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+  color: #a5a199; font: 9.5px var(--mono); letter-spacing: .01em;
+}
+.inspector-heading { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.inspector-heading .step-id { color: var(--muted); }
 .kind {
   justify-self: start; display: inline-flex; align-items: center; gap: 6px;
   color: var(--muted); font: 10px var(--mono);
@@ -258,7 +265,7 @@ input::placeholder { color: #a5a199; }
 }
 .row-description strong { font-size: 12.5px; font-weight: 500; color: var(--ink); }
 .row-description small { color: var(--muted); font-size: 10.5px; margin-top: 1px; }
-.row-duration { text-align: right; overflow-wrap: anywhere; }
+.row-duration { text-align: right; overflow-wrap: anywhere; align-items: flex-end; }
 .scope-head {
   display: flex; align-items: baseline; gap: 10px;
   margin: 10px 0 0; padding: 6px 10px;
@@ -413,13 +420,18 @@ body.v2-mode .draft { display: none; }
 .v2-header select { width: auto; min-width: 150px; height: 28px; }
 .v2-rows { flex: 1; min-height: 0; overflow: auto; padding: 0 20px; }
 .v2-row {
-  display: grid; grid-template-columns: 24px 64px minmax(0, 1fr) auto auto;
+  display: grid; grid-template-columns: 40px 64px minmax(0, 1fr) auto auto;
   align-items: center; gap: 10px; min-height: 42px; padding: 4px 2px;
   border-bottom: 1px solid var(--line-soft); cursor: pointer;
 }
 .v2-row:hover { background: #f7f5ef; }
 .v2-row.selected { background: #fdf6f2; box-shadow: inset 2px 0 var(--accent); }
-.v2-index { color: #a5a199; font: 10px var(--mono); }
+.v2-index {
+  display: flex; flex-direction: column; gap: 1px; min-width: 0;
+  color: #a5a199; font: 10px var(--mono);
+}
+.v2-ordinal { display: block; }
+.v2-index .step-id { font-size: 9px; }
 .v2-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .v2-copy strong {
   font-size: 12.5px; font-weight: 500;
@@ -452,7 +464,7 @@ body.v2-mode .draft { display: none; }
 @media (max-width: 900px) {
   body.v2-mode { display: block; }
   .v2 { max-height: none; }
-  .v2-row { grid-template-columns: 24px 52px minmax(0, 1fr); }
+  .v2-row { grid-template-columns: 40px 52px minmax(0, 1fr); }
   .v2-row-actions { grid-column: 2 / -1; }
 }
 .record-bar { display: flex; align-items: center; gap: 8px; min-width: 0; }

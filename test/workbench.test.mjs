@@ -500,11 +500,11 @@ test('the timeline labels distinguish double, triple, right clicks and scroll di
   assert.equal(dragSummary({
     from: { kind: 'point', point: [135, 165] },
     to: { kind: 'element', role: 'textfield' },
-  }), '拖拽 坐标 (135, 165) → textfield');
+  }), '拖拽 坐标 (135, 165) → 文本输入框');
   assert.equal(dragSummary({
     from: { kind: 'element', role: 'row', name: 'Report.txt' },
     to: { kind: 'element', role: 'row', name: 'Archive' },
-  }), '拖拽 row “Report.txt” → row “Archive”');
+  }), '拖拽 Report.txt → Archive');
   assert.equal(scrollLabel({ kind: 'scroll', deltaX: 0, deltaY: -5 }), '滚轮 ↓ 5 行');
   assert.equal(scrollLabel({ kind: 'scroll', deltaX: 0, deltaY: 4 }), '滚轮 ↑ 4 行');
   assert.equal(scrollLabel({ kind: 'scroll', deltaX: 0, deltaY: 0 }), '滚轮 ← 1 行');

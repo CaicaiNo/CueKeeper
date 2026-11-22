@@ -11,8 +11,8 @@ import { hashFlowV2 } from '../dist/flow-v2.js';
 import { startWorkbench } from '../dist/workbench.js';
 import { pickWindowCandidates } from '../dist/workbench-pick.js';
 import {
-  assertCheck, checkLabel, checkpointWaitFacts, diffSummary, filterStepsByScope, pickCandidateLabel,
-  scopeKey, scopeOptions, statusMap, stepTemplate, v2StepLabel,
+  assertCheck, checkLabel, checkpointWaitFacts, diffSummary, dragSummary, filterStepsByScope, locatorDetail,
+  pickCandidateLabel, roleLabel, scopeKey, scopeOptions, statusMap, stepTemplate, targetLabel, v2StepLabel,
 } from '../workbench/model.js';
 
 const examplePath = name => new URL(`../examples/${name}.json`, import.meta.url);
@@ -122,6 +122,21 @@ test('a v2 recording opens editable with a diff, undo/redo and a read-only check
   assert.equal(dry.entries.length, state.session.v2.flow.steps.length);
   assert.equal(dry.flowSha256, hashFlowV2(state.session.v2.flow));
   assert.ok(dry.entries.every(entry => entry.status === 'resolved'));
+});
+
+test('copying a step inserts a new id and leaves every recorded id in place', async t => {
+  const { root, directory, flow } = await fixture(t);
+  const { post } = await server(t, { root });
+  const session = await post('import', { directory });
+  const source = stepOf(flow, 'type-address');
+  const copied = await edit(post, session, {
+    kind: 'insert', index: 1, step: { ...structuredClone(source), id: 'type-address-copy' },
+  });
+  assert.deepEqual(copied.flow.steps.slice(0, 3).map(step => step.id),
+    ['launch-browser', 'type-address-copy', 'wait-browser']);
+  // The original steps keep the ids the recording wrote; only the copy is new.
+  assert.deepEqual(copied.flow.steps.filter(step => step.id !== 'type-address-copy').map(step => step.id),
+    flow.steps.map(step => step.id));
 });
 
 test('saving writes a sibling revision, keeps the recording bytes and a live run shells out to the CLI', async t => {
@@ -261,8 +276,8 @@ test('a point target is marked on the timeline and refused by the workbench dry 
   await writeFile(join(directory, 'flow.json'), JSON.stringify(flow));
 
   // The timeline says a recorded coordinate is not a proven target.
-  assert.equal(v2StepLabel(flow.steps[0]), '点击 · 坐标回放 · 需确认 (420, 300)');
-  assert.equal(v2StepLabel(flow.steps[1]), '点击 · row · manifest.json');
+  assert.equal(v2StepLabel(flow.steps[0]), '点击 坐标回放 · 需确认 (420, 300)');
+  assert.equal(v2StepLabel(flow.steps[1]), '点击 manifest.json');
 
   const { post } = await server(t, { root });
   const session = await post('import', { directory });
@@ -280,6 +295,47 @@ test('a point target is marked on the timeline and refused by the workbench dry 
   const dry = await post('run', { session: session.id, mode: 'dry-run' });
   assert.equal(dry.status, 'passed');
   assert.ok(dry.entries.every(entry => entry.status === 'resolved'));
+});
+
+test('a target label names the control in product words and never leaks a raw AX role', () => {
+  // The recorded name wins: a file, a field or a button the user can recognise.
+  assert.equal(targetLabel({ kind: 'element', role: 'AXCell', name: 'manifest.json' }), 'manifest.json');
+  assert.equal(targetLabel({ kind: 'element', role: 'AXButton', name: '保存' }), '保存');
+  // Without a name the role is translated; both AX spellings land on one word.
+  assert.equal(targetLabel({ kind: 'element', role: 'AXTextField' }), '文本输入框');
+  assert.equal(targetLabel({ kind: 'element', role: 'textfield' }), '文本输入框');
+  assert.equal(targetLabel({ kind: 'element', role: 'AXGroup' }), '区域');
+  assert.equal(roleLabel('AXCell'), '文件项');
+  assert.equal(roleLabel('AXMenuItem'), '菜单项');
+  // The deepest path segment is the next best readable name.
+  assert.equal(targetLabel({
+    kind: 'element', role: 'AXGroup', path: ['AXWindow', 'AXScrollArea', 'AXButton'],
+  }), '按钮');
+  // Nothing readable left: an honest placeholder instead of `AX*`.
+  assert.equal(targetLabel({ kind: 'element', role: 'AXFancyNewControl' }), '控件');
+  assert.equal(targetLabel({ kind: 'element', role: '' }), '未命名控件');
+  // A raw point keeps its own warning; a window marker stays a window.
+  assert.equal(targetLabel({ kind: 'point', point: [420, 300] }), '坐标回放 · 需确认 (420, 300)');
+  assert.equal(targetLabel({ kind: 'window' }), '窗口');
+  assert.equal(targetLabel(null), '目标窗口');
+
+  const labels = [
+    targetLabel({ kind: 'element', role: 'AXTextField', name: '搜索' }),
+    targetLabel({ kind: 'element', role: 'AXTextField' }),
+    targetLabel({ kind: 'point', point: [1, 2] }),
+    dragSummary({ from: { kind: 'element', role: 'AXCell' }, to: { kind: 'element', role: 'AXButton', name: '打开' } }),
+    checkLabel({ target: { kind: 'element', role: 'AXTextField' }, expect: { property: 'text', equals: 'hi' } }),
+    pickCandidateLabel({ interactive: true, locator: { kind: 'element', role: 'AXGroup' } }),
+  ];
+  for (const label of labels) assert.doesNotMatch(label, /AX/, label);
+
+  // The inspector keeps the raw locator so role, name, path and index stay visible.
+  assert.equal(locatorDetail({
+    kind: 'element', role: 'AXCell', name: 'manifest.json',
+    path: ['AXWindow', 'AXOutline', 'AXCell'], index: 2,
+  }), 'AXCell · 名称 “manifest.json” · AXWindow › AXOutline › AXCell · [2]');
+  assert.equal(locatorDetail({ kind: 'element', role: 'AXTextField' }), 'AXTextField');
+  assert.equal(locatorDetail({ kind: 'point', point: [10, 20] }), 'point (10, 20)');
 });
 
 test('v2 timeline helpers describe steps, scopes, diffs and build EditOp payloads', () => {
@@ -301,22 +357,23 @@ test('v2 timeline helpers describe steps, scopes, diffs and build EditOp payload
       { id: 'gap-1', kind: 'gap', code: 'CAPTURE_GAP' },
     ],
   };
-  assert.equal(v2StepLabel(flow.steps[0]), '点击 · button · Go');
+  assert.equal(v2StepLabel(flow.steps[0]), '点击 Go');
   assert.equal(v2StepLabel(flow.steps[1]), '输入参数 query');
   assert.equal(v2StepLabel(flow.steps[2], app => app), '等待 · 窗口属性 · title = Notes');
-  // A target with no name must not borrow the window title as its identity.
+  // A target with no name is named by its role in product words, never by the
+  // window title and never by the raw AX spelling.
   assert.equal(
     v2StepLabel({
       kind: 'click', count: 2,
       scope: { kind: 'window', app: 'com.apple.finder', windowKey: 'f', windowTitle: 'cuekeeper-demo' },
       target: { kind: 'element', role: 'AXTextField' },
     }, app => app),
-    '双击 · AXTextField · 未知目标');
+    '双击 文本输入框');
   assert.equal(checkLabel({ kind: 'window_exists', equals: true }), '窗口存在 = 成立');
   assert.equal(checkLabel({
     target: { kind: 'element', role: 'textfield' },
     expect: { property: 'text', equals: 'hello' },
-  }), 'textfield · 未知目标 · text = hello');
+  }), '文本输入框 · text = hello');
 
   const options = scopeOptions(flow, appId => appId);
   assert.deepEqual(options.map(option => option.key), [
@@ -462,7 +519,7 @@ test('pick labels and checkpoint facts describe exactly what the page shows', ()
   assert.match(pickCandidateLabel({
     interactive: true, locator: { kind: 'element', role: 'button', name: '刷新' },
     bounds: { x: 430, y: 40, width: 60, height: 30 },
-  }), /^可交互 · button · 刷新 · 60 × 30 @ 430, 40$/);
+  }), /^可交互 · 刷新 · 60 × 30 @ 430, 40$/);
   assert.deepEqual(checkpointWaitFacts({
     stepId: 'auth', triggerStepId: 'type-note', timeoutMs: 120_000,
     scope: { kind: 'window', app: 'com.apple.TextEdit', windowKey: 'notes', windowTitle: 'QA Notes' },

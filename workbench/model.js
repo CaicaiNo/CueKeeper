@@ -36,6 +36,69 @@ export function scopeDescription(scope, appName = id => id) {
     scope.app ? appName(scope.app) : '', scope.windowTitle ?? ''].filter(Boolean).join(' · ');
 }
 
+/**
+ * Product words for the AX roles a recording can carry. The timeline names a
+ * control by what it is, so a bare `AXGroup` never reaches a label; the raw
+ * role stays in the locator's technical detail. Keys are bare, lower-case
+ * role names — `AXTextField` and `textfield` both land on `textfield`.
+ */
+export const ROLE_LABELS = {
+  window: '窗口', group: '区域', textfield: '文本输入框', textarea: '文本区域',
+  securetextfield: '密码输入框', searchfield: '搜索框', button: '按钮', cell: '文件项',
+  row: '行', table: '表格', outline: '列表', list: '列表', menuitem: '菜单项', menu: '菜单',
+  menubar: '菜单栏', menuitemcheckbox: '菜单勾选项', menuitemradio: '菜单选项',
+  statictext: '文本', heading: '标题', image: '图片', checkbox: '勾选框',
+  radiobutton: '单选框', radiogroup: '单选项组', popupbutton: '下拉菜单', combobox: '组合框',
+  slider: '滑块', scrollarea: '滚动区域', link: '链接', tabgroup: '标签页', tab: '标签页',
+  toolbar: '工具栏', toolbarbutton: '工具栏按钮', sheet: '工作表', dialog: '对话框',
+  webarea: '网页内容', progressindicator: '进度指示器', splitgroup: '分栏',
+  disclosuretriangle: '展开三角形', grid: '网格', column: '列', layoutarea: '版面区域',
+  layoutitem: '版面元素',
+};
+
+/** One role in product words; an unknown role still never leaks `AX*`. */
+export function roleLabel(role) {
+  const raw = typeof role === 'string' ? role.trim() : '';
+  if (!raw || raw === 'AX') return '';
+  const bare = raw.replace(/^AX/, '').toLowerCase();
+  if (!bare) return '';
+  return ROLE_LABELS[bare] ?? '控件';
+}
+
+/**
+ * The one readable name a user can recognise: the control's own name (file,
+ * field or button title) first, then the deepest path segment, then its role.
+ * A raw point keeps the warning; nothing readable becomes 「未命名控件」.
+ */
+export function targetLabel(target) {
+  if (!target) return '目标窗口';
+  if (target.kind === 'window') return '窗口';
+  if (target.kind === 'point') {
+    return `坐标回放 · 需确认${Array.isArray(target.point) ? ` (${target.point.join(', ')})` : ''}`;
+  }
+  const name = typeof target.name === 'string' ? target.name.trim() : '';
+  if (name) return name;
+  const path = Array.isArray(target.path)
+    ? target.path.filter(segment => typeof segment === 'string' && segment.trim()) : [];
+  const fromPath = path.length ? roleLabel(path.at(-1)) : '';
+  if (fromPath && fromPath !== '控件') return fromPath;
+  return roleLabel(target.role) || '未命名控件';
+}
+
+/** The raw locator the detail panel keeps: role, name, path and index. */
+export function locatorDetail(target) {
+  if (!target) return '—';
+  if (target.kind === 'point') return `point (${target.point?.join(', ') ?? ''})`;
+  if (target.kind === 'window') {
+    return ['window', target.app, target.window, target.match].filter(Boolean).join(' · ');
+  }
+  return [target.role,
+    typeof target.name === 'string' ? `名称 “${target.name}”` : '',
+    Array.isArray(target.path) && target.path.length ? target.path.join(' › ') : '',
+    target.index === undefined ? '' : `[${target.index}]`]
+    .filter(Boolean).join(' · ');
+}
+
 const scrollArrows = { up: '↑', down: '↓', left: '←', right: '→' };
 
 export function scrollDetail(action) {
@@ -58,7 +121,7 @@ export function scrollLabel(action) {
 export function dragSummary(action) {
   const endpoint = target => target.kind === 'point'
     ? `坐标 (${target.point[0]}, ${target.point[1]})`
-    : `${target.role}${target.name ? ` “${target.name}”` : ''}`;
+    : targetLabel(target);
   return `拖拽 ${endpoint(action.from)} → ${endpoint(action.to)}`;
 }
 
@@ -343,20 +406,6 @@ export function scopeKey(scope) {
   return `surface:${scope.surface}:${scope.app ?? ''}:${scope.windowKey ?? ''}`;
 }
 
-export function v2TargetLabel(target) {
-  if (!target) return '';
-  if (target.kind === 'window') return '窗口';
-  // A raw point is a last-resort target: replay cannot prove it still names the
-  // same control, so the timeline says so instead of showing a bare coordinate.
-  if (target.kind === 'point') return `坐标回放 · 需确认 (${target.point?.join(', ')})`;
-  // A role alone is not a target: showing the window title or the bare role
-  // here would claim an identity the recording never proved.
-  const name = typeof target.name === 'string' && target.name.trim() ? target.name : '未知目标';
-  return [target.role, name, target.path?.join(' › '),
-    target.index === undefined ? '' : `[${target.index}]`]
-    .filter(value => value !== undefined && value !== '').join(' · ');
-}
-
 export function expectLabel(expect) {
   if (!expect) return '';
   if (expect.property === 'exists') return `存在 = ${expect.equals ? '成立' : '不成立'}`;
@@ -373,7 +422,7 @@ export function checkLabel(check) {
   if (!check) return '—';
   if (check.expect) {
     const target = check.target
-      ? (check.target.kind === 'window' ? '窗口' : v2TargetLabel(check.target))
+      ? (check.target.kind === 'window' ? '窗口' : targetLabel(check.target))
       : '';
     const label = check.kind ? `${waitKindLabels[check.kind] ?? check.kind} · ` : '';
     return `${label}${target}${target ? ' · ' : ''}${expectLabel(check.expect)}`;
@@ -391,15 +440,15 @@ export function v2StepLabel(step, appName = id => id) {
     case 'click': {
       const prefix = step.button === 'right' ? '右键'
         : step.count === 2 ? '双击' : step.count === 3 ? '三击' : '点击';
-      return `${prefix} · ${v2TargetLabel(step.target)}`;
+      return `${prefix} ${targetLabel(step.target)}`;
     }
     case 'type': return 'text' in step
       ? `输入 “${step.text.length > 60 ? `${step.text.slice(0, 60)}…` : step.text}”`
       : `输入参数 ${step.input}`;
     case 'key': return `快捷键 ${[...(step.modifiers ?? []), step.key].join('+')}`;
-    case 'scroll': return `滚轮 ${v2TargetLabel(step.target)}`;
-    case 'drag': return `拖拽 ${v2TargetLabel(step.from)} → ${v2TargetLabel(step.to)}`;
-    case 'hover': return `悬停 · ${v2TargetLabel(step.target)} · ${step.durationMs} ms`;
+    case 'scroll': return `滚轮 ${targetLabel(step.target)}`;
+    case 'drag': return `拖拽 ${targetLabel(step.from)} → ${targetLabel(step.to)}`;
+    case 'hover': return `悬停 · ${targetLabel(step.target)} · ${step.durationMs} ms`;
     case 'paste': return step.source.kind === 'copy'
       ? `粘贴 · 复制 ${step.source.stepId}`
       : `粘贴 · 参数 ${step.source.input}`;
@@ -475,7 +524,7 @@ export function pickCandidateLabel(candidate) {
   const frame = candidate.bounds
     ? ` · ${candidate.bounds.width} × ${candidate.bounds.height} @ ${candidate.bounds.x}, ${candidate.bounds.y}`
     : '';
-  return `${candidate.interactive ? '可交互' : '容器'} · ${v2TargetLabel(candidate.locator)}${frame}`;
+  return `${candidate.interactive ? '可交互' : '容器'} · ${targetLabel(candidate.locator)}${frame}`;
 }
 
 /** The waiting-checkpoint facts the run panel shows; never a secret. */

@@ -2,9 +2,9 @@ import { createDom } from './dom.js';
 import {
   KIND_LABELS, SURFACE_LABELS, actionKind, canUndo, changeTarget, compileDraft, confirmCondition, confirmedSetup,
   deleteCondition, id, makeBehavior, retargetCondition, sameTarget, scopeDescription, scrollLabel, setupDraft,
-  shellDraft, shellSummary, dragSummary, undoCondition, visibleRows,
+  shellDraft, shellSummary, dragSummary, undoCondition, visibleRows, locatorDetail, targetLabel,
   V2_COPYABLE_KINDS, V2_INSERT_KINDS, V2_TARGET_KINDS, assertCheck, checkLabel, diffSummary,
-  filterStepsByScope, scopeKey, scopeOptions, statusMap, stepTemplate, v2StepLabel, v2TargetLabel,
+  filterStepsByScope, scopeKey, scopeOptions, statusMap, stepTemplate, v2StepLabel,
   checkpointWaitFacts, pickCandidateLabel,
 } from './model.js';
 import { createAppPicker } from './picker.js';
@@ -90,13 +90,6 @@ const appPicker = createAppPicker({
   requestAnimationFrame, dialog, dom, state, api, openDialog, status, render,
   appGlyph, appTitle,
 });
-function locatorLabel(target) {
-  if (!target) return '目标窗口';
-  if (target.kind === 'point') return `坐标回放 · 需确认 (${target.point.join(', ')})`;
-  return [target.role, target.name, target.path?.join(' › '), target.index === undefined ? '' : `[${target.index}]`]
-    .filter(Boolean).join(' · ');
-}
-
 const modifierOrder = ['ctrl', 'alt', 'shift', 'meta'];
 const modifierLabels = { ctrl: 'Ctrl', alt: 'Opt', shift: 'Shift', meta: 'Cmd' };
 const keyLabels = {
@@ -114,22 +107,22 @@ function resumeLabel(check) {
   if (!check) return '—';
   if (check.kind === 'window_exists') return check.equals ? '窗口存在' : '窗口已关闭';
   if (check.kind === 'element_enabled') {
-    return `${locatorLabel(check.target)} · ${check.equals ? '可用' : '不可用'}`;
+    return `${targetLabel(check.target)} · ${check.equals ? '可用' : '不可用'}`;
   }
   if (check.kind === 'window') {
     return `窗口 ${check.expect?.property} = ${short(String(check.expect?.equals ?? ''))}`;
   }
-  return `${locatorLabel(check.target)} · ${check.expect?.property} = ${short(String(check.expect?.equals ?? ''))}`;
+  return `${targetLabel(check.target)} · ${check.expect?.property} = ${short(String(check.expect?.equals ?? ''))}`;
 }
 
 function actionLabel(action) {
   const target = actionTarget(action);
-  const label = target ? locatorLabel(target) : '';
+  const label = target ? targetLabel(target) : '';
   switch (action.kind) {
     case 'click':
-      if (action.button === 'right') return `右键 · ${label}`;
-      if (action.count === 2) return `双击 · ${label}`;
-      if (action.count === 3) return `三击 · ${label}`;
+      if (action.button === 'right') return `右键 ${label}`;
+      if (action.count === 2) return `双击 ${label}`;
+      if (action.count === 3) return `三击 ${label}`;
       return label;
     case 'scroll': return `${scrollLabel(action)} · ${label}`;
     case 'drag': return `${dragSummary(action)} · ${action.durationMs} ms`;
@@ -256,7 +249,7 @@ function conditionDetail(condition) {
   const ensure = condition.ensure;
   if (ensure?.kind === 'window_ready') return `${appLabel(ensure.app)} · ${ensure.window}`;
   if (ensure?.kind === 'app_running') return appLabel(ensure.app);
-  return locatorLabel(condition.check.target);
+  return targetLabel(condition.check.target);
 }
 
 function conditionDialog(condition) {
@@ -403,7 +396,9 @@ function renderTimeline() {
       'aria-pressed': String(state.focused === row.id),
       onclick: () => { state.focused = row.id; state.tab = 'actions'; render(); },
     },
-    el('span', { className: 'time' }, timestamp(row.atMs)),
+    el('span', { className: 'time' },
+      el('span', { className: 'time-value' }, timestamp(row.atMs)),
+      el('span', { className: 'step-id', title: `步骤 ${row.id}` }, row.id)),
     kindChip(row.action),
     el('span', { className: 'row-description' }, el('strong', {}, actionLabel(row.action)),
       el('small', {}, `${row.scope ? scopeText(row.scope) : `${appLabel(row.app)} · ${row.window}`}${ignored ? ' · 已忽略' : ''}`),
@@ -506,12 +501,13 @@ function renderInspector() {
   const editable = !ignored && isCompatible(row);
   const target = actionTarget(row.action);
   panel.replaceChildren(el('div', { className: 'stack' },
-    el('h3', {}, actionLabel(row.action)),
+    el('h3', { className: 'inspector-heading' },
+      el('span', { className: 'step-id', title: '步骤 id' }, row.id), actionLabel(row.action)),
     infoList([
       ['动作', KIND_LABELS[actionKind(row.action)] ?? row.action.kind],
       ...(row.action.kind === 'scroll' ? [['滚动', scrollLabel(row.action)]] : []),
       ...(row.action.kind === 'drag'
-        ? [['起点', locatorLabel(row.action.from)], ['终点', locatorLabel(row.action.to)],
+        ? [['起点', targetLabel(row.action.from)], ['终点', targetLabel(row.action.to)],
           ['时长', `${row.action.durationMs} ms`]]
         : []),
       ...(row.action.kind === 'hover' ? [['停留', `${row.action.durationMs} ms`]] : []),
@@ -528,7 +524,7 @@ function renderInspector() {
         ['恢复条件', resumeLabel(row.action.resume?.check)],
         ['等待上限', duration(row.action.timeoutMs)],
       ] : []),
-      ...(target ? [['定位器', locatorLabel(target)]] : []),
+      ...(target ? [['定位器', locatorDetail(target)]] : []),
       ['时间', timestamp(row.atMs)], ['耗时', duration(row.durationMs)],
     ], 'meta-grid'),
     isCompatible(row) ? undefined : muted('该动作属于另一窗口，只能在时间线复盘。'),
@@ -762,7 +758,9 @@ function renderV2() {
       },
       onclick: () => { state.v2Selected = step.id; renderV2(); },
     },
-    el('span', { className: 'v2-index' }, String(index + 1)),
+    el('span', { className: 'v2-index' },
+      el('span', { className: 'v2-ordinal' }, String(index + 1)),
+      el('span', { className: 'step-id', title: `步骤 ${step.id}` }, step.id)),
     kindChip(typeof step === 'string' ? step : step.kind),
     el('div', { className: 'v2-copy' },
       el('strong', {}, v2StepLabel(step, appLabel)),
@@ -857,13 +855,50 @@ function showV2Result(report) {
     ...(report.appIdentities ?? []).map(identity => muted(
       `${identity.app} · ${identity.status}${identity.code ? ` · ${identity.code}` : ''}` +
       (identity.reason ? ` · ${identity.reason}` : ''))),
-    el('ol', { className: 'stack' }, ...report.entries.map(entry => el('li', {},
-      el('button', {
-        type: 'button', className: 'link-button',
-        onclick: () => { state.v2Selected = entry.id; dialog.close(); renderV2(); },
-      }, `${entry.id} · ${KIND_LABELS[entry.kind] ?? entry.kind}`),
-      el('span', { className: `run-status ${entry.status}` }, resultStatus[entry.status] ?? entry.status),
-      entry.code ? muted(`${entry.code}${entry.message ? ` · ${entry.message}` : ''}`) : undefined))),
+    el('ol', { className: 'stack' }, ...report.entries.map(entry => {
+      const step = v2Step(entry.id);
+      return el('li', {},
+        el('button', {
+          type: 'button', className: 'link-button',
+          onclick: () => { state.v2Selected = entry.id; dialog.close(); renderV2(); },
+        }, `${entry.id} · ${step ? v2StepLabel(step, appLabel) : KIND_LABELS[entry.kind] ?? entry.kind}`),
+        el('span', { className: `run-status ${entry.status}` }, resultStatus[entry.status] ?? entry.status),
+        entry.code ? muted(`${entry.code}${entry.message ? ` · ${entry.message}` : ''}`) : undefined);
+    })),
+  ]);
+}
+
+/** Every v2 detail panel names the flow step it edits, so the id matches the row. */
+const withStepId = (title, step) => step?.id ? `${title} · ${step.id}` : title;
+
+/** The row's 编辑 button opens the editor that fits the step's kind. */
+function v2EditDialog(step) {
+  switch (step.kind) {
+    case 'click': case 'scroll': case 'hover':
+      return v2TargetDialog(step);
+    case 'type': return v2TypeDialog(step);
+    case 'drag': return v2DragDialog(step);
+    case 'key': return v2KeyDialog(step);
+    case 'wait': return v2WaitDialog(step);
+    case 'assert': return v2AssertDialog(step);
+    case 'launch_app': case 'activate_app': case 'focus_window':
+    case 'open_system_surface': case 'surface_press':
+      return v2ScopeDialog(step);
+    case 'manual_checkpoint': return v2CheckpointDialog(step);
+    case 'gap': return v2GapDialog(step);
+    default: return v2StepFactsDialog(step);
+  }
+}
+
+/** A step without an editor still opens its facts under the same id. */
+function v2StepFactsDialog(step) {
+  openDialog(withStepId('步骤详情（只读）', step), [
+    infoList([
+      ['步骤 id', step.id],
+      ['动作', v2StepLabel(step, appLabel)],
+      ['作用域', step.kind === 'gap' ? '缺口' : v2ScopeText(step.scope)],
+    ], 'meta-grid'),
+    muted('这一步目前没有可视化编辑器；可在 flow 文件里修改后重新导入。'),
   ]);
 }
 
@@ -898,11 +933,11 @@ function v2ScopeFields(initial = {}) {
 
 function v2ScopeDialog(step) {
   if (!step.scope || step.scope.kind === 'surface') {
-    openDialog('作用域', [muted('系统界面步骤的作用域在录制时固定，当前版本只支持窗口与应用作用域编辑。')]);
+    openDialog(withStepId('作用域', step), [muted('系统界面步骤的作用域在录制时固定，当前版本只支持窗口与应用作用域编辑。')]);
     return;
   }
   const fields = v2ScopeFields(step.scope);
-  openDialog('编辑作用域', [
+  openDialog(withStepId('编辑作用域', step), [
     ...fields.controls,
     muted(step.scope.kind === 'window'
       ? '更换 App 时会重建 windowKey；窗口标题必须同时更新。'
@@ -912,7 +947,9 @@ function v2ScopeDialog(step) {
 
 function v2TargetDialog(step) {
   const picker = locatorFields(step.target ?? step.to);
-  openDialog('编辑点击目标', [
+  const title = step.kind === 'scroll' ? '编辑滚动目标'
+    : step.kind === 'hover' ? '编辑悬停目标' : '编辑点击目标';
+  openDialog(withStepId(title, step), [
     ...picker.controls,
     muted('v2 流程只保存元素定位器；坐标必须先解析成元素。'),
   ], '应用', () => v2Edit({ kind: 'update', id: step.id, patch: { target: picker.value() } }));
@@ -921,7 +958,7 @@ function v2TargetDialog(step) {
 function v2DragDialog(step) {
   const from = locatorFields(step.from);
   const to = locatorFields(step.to);
-  openDialog('编辑拖拽端点', [...from.controls, el('hr'), ...to.controls], '应用', () =>
+  openDialog(withStepId('编辑拖拽端点', step), [...from.controls, el('hr'), ...to.controls], '应用', () =>
     v2Edit({ kind: 'update', id: step.id, patch: { from: from.value(), to: to.value() } }));
 }
 
@@ -940,7 +977,7 @@ function v2TypeDialog(step) {
   };
   mode.onchange = sync;
   sync();
-  openDialog('编辑输入步骤', [
+  openDialog(withStepId('编辑输入步骤', step), [
     ...picker.controls, field('内容来源', mode), textBox, paramBox,
     muted('参数值保存在测试数据里，不写入 flow。'),
   ], '应用', () => {
@@ -967,7 +1004,7 @@ function v2KeyDialog(step) {
     name,
     node: el('input', { type: 'checkbox', checked: (step.modifiers ?? []).includes(name) }),
   }));
-  openDialog('编辑快捷键', [
+  openDialog(withStepId('编辑快捷键', step), [
     field('按键', key),
     el('div', { className: 'parameter-list' }, ...boxes.map(({ name, node }) =>
       el('label', { className: 'checkbox' }, node, name))),
@@ -1022,7 +1059,7 @@ function v2WaitDialog(step) {
   kind.onchange = sync;
   property.onchange = sync;
   sync();
-  openDialog('编辑等待', [
+  openDialog(withStepId('编辑等待', step), [
     field('条件', kind), elements, propertyBox, toggleBox, valueBox, field('超时（毫秒）', timeout),
   ], '应用', () => {
     let check;
@@ -1097,12 +1134,12 @@ function v2AssertFields(initial) {
 
 function v2AssertDialog(step) {
   const fields = v2AssertFields(step.check);
-  openDialog('编辑断言', fields.controls, '应用', () =>
+  openDialog(withStepId('编辑断言', step), fields.controls, '应用', () =>
     v2Edit({ kind: 'update', id: step.id, patch: { check: fields.value() } }));
 }
 
 function v2CheckpointDialog(step) {
-  openDialog('人工检查点（只读）', [
+  openDialog(withStepId('人工检查点（只读）', step), [
     infoList([
       ['触发步骤', step.triggerStepId],
       ['原因', step.reason],
@@ -1119,7 +1156,7 @@ function v2GapDialog(step) {
   const fields = v2ScopeFields(step.scope);
   const timeout = el('input', { type: 'number', min: '1000', max: '1800000', step: '1000', value: '15000' });
   const trigger = v2Steps()[Math.max(0, v2Steps().findIndex(entry => entry.id === step.id) - 1)];
-  openDialog(`处理缺口 · ${step.code}`, [
+  openDialog(withStepId(`处理缺口 · ${step.code}`, step), [
     muted('缺口没有可回放的作用域，运行前必须转成等待或人工检查点。'),
     field('转换方式', kind), ...fields.controls, field('超时（毫秒）', timeout),
     kind.value === 'manual_checkpoint'
@@ -1293,7 +1330,7 @@ async function v2StartLive(inputs) {
 /** Reads the live window snapshot behind one step's scope and applies a pick. */
 async function v2PickDialog(step) {
   if (!step.scope || step.scope.kind !== 'window') {
-    openDialog('从当前窗口拾取', [
+    openDialog(withStepId('从当前窗口拾取', step), [
       muted('这个步骤没有窗口作用域，读不到可拾取的控件快照。请先把作用域改成窗口。'),
       muted('仍可以在「编辑」里手动填写角色/名称/路径。'),
     ]);
@@ -1303,7 +1340,7 @@ async function v2PickDialog(step) {
   try {
     picked = await api('v2/pick', { session: state.session.id, stepId: step.id });
   } catch (error) {
-    openDialog('从当前窗口拾取', [
+    openDialog(withStepId('从当前窗口拾取', step), [
       muted(`无法从窗口读取控件：${error.message}`),
       muted(`${v2ScopeText(step.scope)}；确认应用正在运行并打开了该窗口，且已授予 CueKeeper 辅助功能权限。`),
       muted('仍可以在「编辑」里手动填写角色/名称/路径。'),
@@ -1314,7 +1351,7 @@ async function v2PickDialog(step) {
   const chooser = select(candidates.map((candidate, index) => [String(index), pickCandidateLabel(candidate)]));
   const detail = el('p', { className: 'muted' }, pickCandidateLabel(candidates[0]));
   chooser.onchange = () => { detail.textContent = pickCandidateLabel(candidates[Number(chooser.value)]); };
-  openDialog(`从当前窗口拾取 · ${picked.windowTitle}`, [
+  openDialog(withStepId(`从当前窗口拾取 · ${picked.windowTitle}`, step), [
     muted(`${v2ScopeText(step.scope)} · 窗口 ${picked.windowId} · ${candidates.length} 个控件`),
     field('控件', chooser),
     detail,
@@ -1472,7 +1509,7 @@ function frameLabel(candidate) {
 }
 
 function candidateLabel(candidate) {
-  return `${candidate.interactive ? '可交互' : '容器'} · ${locatorLabel(candidate.locator)}`;
+  return `${candidate.interactive ? '可交互' : '容器'} · ${targetLabel(candidate.locator)} · ${frameLabel(candidate)}`;
 }
 
 function locatorFields(original) {
@@ -1761,12 +1798,14 @@ function showResult(mode, report) {
     identityNotice(report),
     report.stopped ? muted('本次运行已在停止请求后结束。') : undefined,
     el('ol', { className: 'stack' }, ...report.entries.map(entry => {
+      const row = state.session?.timeline.find(item => item.id === entry.id);
+      const name = row ? actionLabel(row.action) : KIND_LABELS[entry.kind] ?? entry.kind;
       const shell = entry.kind === 'shell'
         ? ` · ${entry.shell.privilege}${entry.shell.privilegeMode ? `(${entry.shell.privilegeMode})` : ''}` +
           `/${entry.shell.mode} · ${entry.shell.execution}` +
           (entry.shell.exitCode === undefined ? '' : ` · 退出码 ${entry.shell.exitCode}`)
         : '';
-      return el('li', {}, `${entry.id} · ${entry.kind}${shell} · ${resultStatus[entry.status]} · ${entry.durationMs} ms`,
+      return el('li', {}, `${entry.id} · ${name}${shell} · ${resultStatus[entry.status]} · ${entry.durationMs} ms`,
         entry.message ? muted(entry.message) : undefined);
     })),
   ]), 0);
