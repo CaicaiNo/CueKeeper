@@ -15,4 +15,5 @@ export const workbenchAssets: readonly WorkbenchAsset[] = [
   { path: '/dom.js', file: 'dom.js', type: 'text/javascript' },
   { path: '/model.js', file: 'model.js', type: 'text/javascript' },
   { path: '/picker.js', file: 'picker.js', type: 'text/javascript' },
+  { path: '/record.js', file: 'record.js', type: 'text/javascript' },
 ];

@@ -148,16 +148,22 @@ function parseFlowDocumentOrGaps(input: unknown) {
   return { version: 2 as const, flow };
 }
 
-export async function loadSession(path: string) {
+/**
+ * `flowFile` names the flow inside the directory instead of letting the loader
+ * pick one. The workbench passes the recording it just stopped, so a directory
+ * that also holds older one-key recordings cannot resolve to the wrong flow.
+ */
+export async function loadSession(path: string, options: { flowFile?: string } = {}) {
   const directory = await realpath(path);
   if (!(await stat(directory)).isDirectory()) throw new Error('Select a run directory');
   const [primary, recorded, rawReport, rawActions, rawLifecycle, snapshot] = await Promise.all(
     ['flow.json', 'recorded.flow.json', 'report.json', 'actions.json', 'lifecycle.json', 'snapshot.json']
       .map(name => readArtifact(directory, name)),
   );
-  let source = primary ?? recorded;
+  let source = options.flowFile ? await readArtifact(directory, options.flowFile) : primary ?? recorded;
   let flowPath = primary !== undefined ? join(directory, 'flow.json')
     : recorded !== undefined ? join(directory, 'recorded.flow.json') : undefined;
+  if (source === undefined && options.flowFile) throw new Error('The requested flow file is missing');
   if (source === undefined) {
     const oneKey = await newestRecording(directory);
     if (oneKey === undefined) {
@@ -170,6 +176,7 @@ export async function loadSession(path: string) {
   if (parsed.version === 2) {
     return loadV2Session(directory, parsed.flow, rawReport, rawActions, rawLifecycle, flowPath as string);
   }
+
   const flow = parsed.flow;
   const planned = plan(flow);
   let report: Report | undefined;

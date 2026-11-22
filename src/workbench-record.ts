@@ -1,0 +1,336 @@
+import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
+import { lstat, mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { recordingFileName, recordingsDirectory } from './recording-output.js';
+
+/** Only the CLI's final `--json` line is parsed; nothing here is logged. */
+const stdoutLimit = 64 * 1024;
+const defaultCountdown = 3;
+const bundleIdPattern = /^[a-z\d][a-z\d.-]*\.[a-z\d][a-z\d-]*$/i;
+const excludeLimit = 32;
+
+export interface RecordStartRequest {
+  mode?: unknown;
+  exclude?: unknown;
+  maxSeconds?: unknown;
+  countdown?: unknown;
+}
+
+export interface RecordWarning {
+  code: string;
+  message: string;
+}
+
+export interface RecordFault {
+  code: string;
+  message: string;
+}
+
+export interface RecordStatus {
+  recording: boolean;
+  /** Absolute path of the flow the CLI writes when it stops. */
+  flowPath?: string;
+  startedAt?: string;
+  elapsedMs: number;
+  /** Countdown before the first captured event, in milliseconds. */
+  countdownMs?: number;
+  /** Steps the CLI reported for the saved flow. */
+  steps?: number;
+  /** The saved flow is incomplete: interrupted, or killed after a stop timeout. */
+  partial?: boolean;
+  timedOut?: boolean;
+  exitCode?: number | null;
+  signal?: NodeJS.Signals | null;
+  warnings: RecordWarning[];
+  error?: RecordFault;
+}
+
+interface Recording {
+  child: ChildProcess;
+  flowPath: string;
+  startedAt: number;
+  countdownMs: number;
+  output: string;
+  stopping: boolean;
+  settled?: RecordStatus;
+  done: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+}
+
+export interface RecordControllerOptions {
+  /** Absolute path of the CLI entry point that owns `record --global`. */
+  cli: string;
+  /** Directory that receives web-started recordings. */
+  recordings?: string;
+  /** How long a stop waits for the CLI to exit before it is killed. */
+  stopTimeoutMs?: number;
+  /** True while the workbench is running a test. */
+  busy?: () => boolean;
+}
+
+function wholeNumber(value: unknown, fallback: number, low: number, high: number, label: string) {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < low || value > high) {
+    throw new Error(`${label} must be an integer from ${low} to ${high}`);
+  }
+  return value;
+}
+
+function excludeList(value: unknown) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > excludeLimit) {
+    throw new Error(`exclude must be an array of at most ${excludeLimit} bundle IDs`);
+  }
+  const entries = value.map(entry => {
+    if (typeof entry !== 'string' || !bundleIdPattern.test(entry)) {
+      throw new Error(`exclude entry ${String(entry)} is not a bundle ID such as com.apple.TextEdit`);
+    }
+    return entry;
+  });
+  return [...new Set(entries)];
+}
+
+/**
+ * A timestamped name that is still free. The CLI refuses to replace an
+ * existing file, so the check is a courtesy that keeps the collision out of
+ * the recording itself.
+ */
+async function freeFlowPath(directory: string) {
+  const name = recordingFileName(new Date());
+  const stem = name.replace(/\.flow\.json$/i, '');
+  for (let nth = 1; nth <= 100; nth++) {
+    const path = join(directory, nth === 1 ? name : `${stem}-${nth}.flow.json`);
+    try {
+      await lstat(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return path;
+      throw error;
+    }
+  }
+  throw new Error(`No free recording name left in ${directory}`);
+}
+
+function record(value: unknown) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown> : undefined;
+}
+
+function readText(value: unknown, limit: number) {
+  return typeof value === 'string' && value.trim() ? value.slice(0, limit) : undefined;
+}
+
+function readFault(value: unknown): RecordFault | undefined {
+  const fault = record(value);
+  if (!fault) return undefined;
+  const code = readText(fault.code, 64) ?? 'RECORD_FAILED';
+  const message = readText(fault.message, 2000) ?? 'The recorder failed';
+  return { code, message };
+}
+
+function readWarnings(value: unknown): RecordWarning[] {
+  if (!Array.isArray(value)) return [];
+  const warnings: RecordWarning[] = [];
+  for (const item of value.slice(0, 20)) {
+    const warning = record(item);
+    const message = readText(warning?.message, 500);
+    if (message) warnings.push({ code: readText(warning?.code, 64) ?? 'RECORD_WARNING', message });
+  }
+  return warnings;
+}
+
+/** The last `--json` line the CLI printed, if the run reached that point. */
+function readOutcome(output: string) {
+  const lines = output.split('\n');
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const line = lines[index].trim();
+    if (!line.startsWith('{')) continue;
+    try {
+      const parsed = record(JSON.parse(line));
+      if (parsed && 'ok' in parsed) {
+        return { data: record(parsed.data), error: readFault(parsed.error) };
+      }
+    } catch {
+      // Progress lines are not JSON; only the final envelope matters.
+    }
+  }
+  return { data: undefined, error: undefined };
+}
+
+/**
+ * Owns the one global `record --global` child the workbench may have. Every
+ * route reads its state here, so a crashed child can never look like it is
+ * still recording, and stop is the only place that imports the result.
+ */
+export function createRecordController(options: RecordControllerOptions) {
+  const recordings = options.recordings ?? recordingsDirectory();
+  const stopTimeoutMs = options.stopTimeoutMs ?? 10_000;
+  let active: Recording | undefined;
+  let stopping: Promise<RecordStatus> | undefined;
+  let last: RecordStatus | undefined;
+
+  function settle(recording: Recording, exitCode: number | null, signal: NodeJS.Signals | null,
+    timedOut: boolean): RecordStatus {
+    if (recording.settled) return recording.settled;
+    const { data, error: cliError } = readOutcome(recording.output);
+    const steps = data && Number.isInteger(data.actions) ? data.actions as number : undefined;
+    const partial = data?.partial === true;
+    let error: RecordFault | undefined;
+    if (timedOut) {
+      error = {
+        code: 'RECORD_STOP_TIMEOUT',
+        message: `The recorder did not stop within ${stopTimeoutMs} ms and was killed; ` +
+          'the flow it had not written yet is lost.',
+      };
+    } else if (cliError && cliError.code !== 'INTERRUPTED') {
+      // A normal stop ends in INTERRUPTED; any other fault is a real failure.
+      error = cliError;
+    } else if (exitCode !== 0 && exitCode !== 130) {
+      error = {
+        code: 'RECORD_FAILED',
+        message: signal
+          ? `The recorder stopped with signal ${signal}`
+          : `The recorder exited with code ${exitCode ?? 'unknown'}`,
+      };
+    }
+    const status: RecordStatus = {
+      recording: false,
+      flowPath: recording.flowPath,
+      startedAt: new Date(recording.startedAt).toISOString(),
+      elapsedMs: Math.max(0, Date.now() - recording.startedAt),
+      countdownMs: recording.countdownMs,
+      ...(steps !== undefined ? { steps } : {}),
+      partial: partial || timedOut,
+      ...(timedOut ? { timedOut: true } : {}),
+      exitCode,
+      signal,
+      warnings: readWarnings(data?.warnings),
+      ...(error ? { error } : {}),
+    };
+    recording.settled = status;
+    if (active === recording) active = undefined;
+    last = status;
+    return status;
+  }
+
+  function status(): RecordStatus {
+    if (active) {
+      return {
+        recording: true,
+        flowPath: active.flowPath,
+        startedAt: new Date(active.startedAt).toISOString(),
+        elapsedMs: Math.max(0, Date.now() - active.startedAt),
+        countdownMs: active.countdownMs,
+        warnings: [],
+      };
+    }
+    return last ?? { recording: false, elapsedMs: 0, warnings: [] };
+  }
+
+  async function start(request: RecordStartRequest): Promise<RecordStatus> {
+    if (active || stopping) throw new Error('A recording is already in progress');
+    if (options.busy?.()) throw new Error('A test is running; stop it before recording');
+    const mode = request.mode ?? 'global';
+    if (mode !== 'global') throw new Error('Only a global desktop recording is supported');
+    const countdown = wholeNumber(request.countdown, defaultCountdown, 0, 60, 'countdown');
+    const maxSeconds = request.maxSeconds === undefined
+      ? undefined : wholeNumber(request.maxSeconds, 600, 1, 3600, 'maxSeconds');
+    const exclude = excludeList(request.exclude);
+    await mkdir(recordings, { recursive: true, mode: 0o700 });
+    const flowPath = await freeFlowPath(recordings);
+    const args = [
+      options.cli, 'record', '--global', '--out', flowPath,
+      '--countdown', String(countdown), '--json',
+    ];
+    if (maxSeconds !== undefined) args.push('--max-seconds', String(maxSeconds));
+    if (exclude.length) args.push('--exclude', exclude.join(','));
+
+    const child = spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'], env: process.env });
+    const recording: Recording = {
+      child, flowPath, startedAt: Date.now(), countdownMs: countdown * 1000,
+      output: '', stopping: false,
+      done: new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal }))),
+    };
+    child.stderr?.resume();
+    child.stdout?.setEncoding('utf8');
+    child.stdout?.on('data', (chunk: string) => {
+      if (recording.output.length < stdoutLimit) {
+        recording.output = (recording.output + chunk).slice(0, stdoutLimit);
+      }
+    });
+    // A failed spawn emits `error` and then `close`; keep the error handled.
+    child.on('error', () => { /* settled by close */ });
+    recording.done.then(({ code, signal }) => {
+      if (active === recording && !recording.stopping) settle(recording, code, signal, false);
+    });
+    active = recording;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.once('spawn', resolve);
+        child.once('error', reject);
+      });
+    } catch (error) {
+      if (active === recording) active = undefined;
+      const detail = error instanceof Error ? error.message : 'unknown error';
+      last = {
+        recording: false, flowPath, elapsedMs: 0, countdownMs: recording.countdownMs, warnings: [],
+        error: { code: 'RECORD_SPAWN_FAILED', message: `Could not start the recorder: ${detail}` },
+      };
+      throw new Error(last.error!.message);
+    }
+    return status();
+  }
+
+  async function stop(): Promise<RecordStatus> {
+    if (stopping) return stopping;
+    const recording = active;
+    if (!recording) {
+      // The child may already have exited on its own; stopping then means
+      // "finish and import", so the last outcome is the answer.
+      if (last) return last;
+      throw new Error('No recording is in progress');
+    }
+    recording.stopping = true;
+    stopping = (async () => {
+      try {
+        let timedOut = false;
+        if (recording.child.exitCode === null && recording.child.signalCode === null) {
+          recording.child.kill('SIGINT');
+          let timer: NodeJS.Timeout | undefined;
+          const late = new Promise<'timeout'>(resolve => {
+            timer = setTimeout(() => resolve('timeout'), stopTimeoutMs);
+          });
+          const first = await Promise.race([recording.done.then(() => 'exit' as const), late]);
+          if (timer) clearTimeout(timer);
+          if (first === 'timeout') {
+            timedOut = true;
+            recording.child.kill('SIGKILL');
+          }
+        }
+        const { code, signal } = await recording.done;
+        return settle(recording, code, signal, timedOut);
+      } finally {
+        recording.stopping = false;
+        stopping = undefined;
+      }
+    })();
+    return stopping;
+  }
+
+  return {
+    start,
+    stop,
+    status,
+    /** Server shutdown: stop the child without waiting for a flow. */
+    cancel() {
+      const recording = active;
+      if (!recording || recording.settled) return;
+      recording.stopping = true;
+      recording.child.kill('SIGINT');
+      const kill = setTimeout(() => recording.child.kill('SIGKILL'), stopTimeoutMs);
+      kill.unref();
+    },
+    get recording() { return Boolean(active); },
+  };
+}
+
+export type RecordController = ReturnType<typeof createRecordController>;

@@ -5,7 +5,7 @@ import { lstat, mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/prom
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listApps } from './app-catalog.js';
 import { appIconPng } from './apps.js';
@@ -26,6 +26,8 @@ import {
 import { keepConfirmedSetup } from './setup.js';
 import { parseLibraryItem, parseTestItem, resolveSecrets } from './test-item.js';
 import { workbenchAssets } from './workbench-assets.js';
+import { createRecordController } from './workbench-record.js';
+import type { RecordStatus } from './workbench-record.js';
 import { loadSession, sameTarget } from './workbench-session.js';
 import { EditError, loadEditableFlow } from './workbench-edit.js';
 import type { EditableFlowV2, EditOp } from './workbench-edit.js';
@@ -195,8 +197,10 @@ export async function startWorkbench(options: {
    * replace the live agent-desktop call with a fake desktop.
    */
   pickWindow?: (scope: WindowScope, signal: AbortSignal) => Promise<WindowPickResult>;
+  record?: { cli?: string; recordings?: string; stopTimeoutMs?: number };
 }) {
   let session = options.directory ? await loadSession(options.directory) : undefined;
+  let importedRecording: string | undefined;
   // A v2 session keeps its editing state in this server process; the P2 engine
   // owns mutations, undo/redo, validation, the diff and revision writes.
   const openEditor = async (loaded: Awaited<ReturnType<typeof loadSession>> | undefined) => {
@@ -224,6 +228,12 @@ export async function startWorkbench(options: {
   /** Writes one answer line to the CLI child's stdin; only set for a checkpoint run. */
   let checkpointAnswer: ((line: string) => boolean) | undefined;
   let origin: string;
+  const recorder = createRecordController({
+    cli: options.record?.cli ?? fileURLToPath(new URL('./cli.js', import.meta.url)),
+    recordings: options.record?.recordings,
+    stopTimeoutMs: options.record?.stopTimeoutMs,
+    busy: () => running,
+  });
 
   /** The editing snapshot the page renders after every v2 call. */
   function v2View() {
@@ -323,6 +333,43 @@ export async function startWorkbench(options: {
     };
   }
 
+  /**
+   * A stopped recording enters the workbench through the same session loader
+   * the import button uses, so the timeline reflects it without a second
+   * reader. A flow the CLI never wrote (killed after the stop timeout, empty
+   * run) becomes a warning on the stop result, not a failed request.
+   */
+  async function importRecording(result: RecordStatus) {
+    if (!result.flowPath) return undefined;
+    const warn = (code: string, message: string) => {
+      // A repeated stop returns the same result object; keep its warnings stable.
+      if (!result.warnings.some(warning => warning.code === code)) result.warnings.push({ code, message });
+    };
+    // A repeated stop must not pull an older recording back over a session the
+    // operator imported by hand afterwards.
+    if (result.flowPath === importedRecording) return undefined;
+    let present = false;
+    try {
+      present = (await lstat(result.flowPath)).isFile();
+    } catch {
+      present = false;
+    }
+    if (!present) {
+      warn('RECORD_NOT_SAVED', 'The recording stopped before CueKeeper wrote a flow file.');
+      return undefined;
+    }
+    try {
+      const imported = await loadSession(dirname(result.flowPath), { flowFile: basename(result.flowPath) });
+      session = imported;
+      importedRecording = result.flowPath;
+      return imported.view;
+    } catch (error) {
+      warn('RECORD_IMPORT_FAILED',
+        `The recording was saved but could not be imported: ${error instanceof Error ? error.message : 'unknown error'}`);
+      return undefined;
+    }
+  }
+
   async function listLibrary() {
     let names;
     try {
@@ -364,6 +411,15 @@ export async function startWorkbench(options: {
       response.writeHead(200, { 'Content-Type': image.type }).end(data);
       return;
     }
+    // Record status is polled while a recording runs, so it answers GET. A
+    // cross-origin caller cannot set this header without a preflight that this
+    // server never approves, which keeps the read same-origin.
+    if (request.method === 'GET' && path === '/api/record/status') {
+      if (request.headers['x-cuekeeper-workbench'] !== '1') {
+        return send(response, 403, { error: 'Use the local CueKeeper workbench' });
+      }
+      return send(response, 200, recorder.status());
+    }
     if (request.method !== 'POST' || request.headers.origin !== origin ||
         request.headers['x-cuekeeper-workbench'] !== '1' || request.headers['content-type'] !== 'application/json') {
       return send(response, 403, { error: 'Use the local CueKeeper workbench' });
@@ -372,13 +428,21 @@ export async function startWorkbench(options: {
     if (path === '/api/state') {
       return send(response, 200, {
         session: session ? sessionView(session) : undefined,
+        record: recorder.status(),
         allowLive, allowShell, allowSudo, library: await listLibrary(),
       });
     }
     if (path === '/api/apps') return send(response, 200, { apps: await listApps() });
+    if (path === '/api/record/start') return send(response, 200, await recorder.start(data));
+    if (path === '/api/record/stop') {
+      const result = await recorder.stop();
+      const view = await importRecording(result);
+      return send(response, 200, { ...result, ...(view ? { session: view } : {}) });
+    }
     if (path === '/api/import') {
       if (typeof data.directory !== 'string' || !data.directory.trim()) throw new Error('Enter a run directory');
       if (running) throw new Error('A test is running');
+      if (recorder.recording) throw new Error('Stop the recording before importing another run directory');
       const path = data.directory.trim();
       const imported = await loadSession(path.startsWith('~/') ? join(homedir(), path.slice(2)) : path);
       if (running) throw new Error('A test is running');
@@ -675,6 +739,7 @@ export async function startWorkbench(options: {
     if (!sameTarget(flow.target, activeFlow.target)) throw new Error('Test target must match the session');
     if (data.mode !== 'offline' && data.mode !== 'live') throw new Error('Choose a replay mode');
     if (running) throw new Error('A test is already running');
+    if (recorder.recording) throw new Error('A recording is in progress; stop it before replaying');
     const dryRun = data.mode === 'offline';
     const planned = plan(flow);
     const shells = reachableShells(planned);
@@ -764,7 +829,11 @@ export async function startWorkbench(options: {
       resolve();
     });
   });
-  const stop = () => server.close();
+  const stop = () => {
+    // A recording outlives no server: stop it before the port closes.
+    recorder.cancel();
+    server.close();
+  };
   options.signal.addEventListener('abort', stop, { once: true });
   if (options.signal.aborted) stop();
   return { url: origin!, closed };

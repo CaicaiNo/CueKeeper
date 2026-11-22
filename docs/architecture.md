@@ -26,6 +26,7 @@ flowchart LR
 - `src/desktop.ts` 调用 agent-desktop 的 JSON CLI。版本固定为 1.3.1，使用独立临时状态目录，退出时清理。文本经 stdin 传递。定位和执行分开，每次执行重新抓树并取得当次 ref。执行不自动重试。
 - `src/run.ts` 将流程展开为动作，校验窗口和前置条件，执行业务动作。全局前置条件失败会阻塞整个流程，局部失败只阻塞所属动作。回放中的动作或断言失败会停止后续动作。报告保留投递状态，保存是否生效需要对应断言或外部文件核对。
 - `src/pick.ts` 从只读窗口快照生成可交互元素优先的候选，并复用 `src/locator.ts` 的定位器生成规则。CLI `pick` 与工作台「重新拾取」共用该模块；它只读取快照，不点击、不聚焦。
+- `src/workbench-record.ts` 负责网页工作台的全局录制：`POST /api/record/start` 用 `record --global --out` 起一个子进程，`GET /api/record/status` 汇报倒计时、计时和错误，`POST /api/record/stop` 发 SIGINT 等它写出 flow（超时 10 秒后 SIGKILL），再把该文件交给 `loadSession` 导入时间线。一个工作台同时只允许一个录制；子进程自行退出或崩溃时状态立即变为失败，不会假装仍在录制。停止超时被强杀时 CLI 还没有写出文件，结果会明确报告没有可导入的 flow。
 - `src/report.ts` 校对流程摘要与动作顺序，再打包 `index.html`、`report.json`、`flow.json`、`manifest.json` 和可选的 `assets/`。清单记录每个归档内容文件的长度、SHA-256 以及资产与步骤的对应关系。`src/viewer.ts` 生成预渲染的静态查看器，时间线、失败展开、断言、日志和断流预览都在本地完成，不依赖网络。
 - `src/doctor.ts` 提供只读环境自检与录制前预检：Node 版本、`dist/` 与 `workbench/` 文件、agent-desktop 1.3.1、录制器可执行性和辅助功能/输入监控状态。权限状态由录制器的 `--permissions` 预检返回，不触发系统弹框；`record` 在启动 agent-desktop 前调用同一套检查。`src/version.ts` 从 `build-info.json`（发布包）或 `package.json`（源码）读取版本。
 - 分发产物由 `scripts/package.mjs` 组装：内置 Node 运行时、`dist/`、`workbench/`、预编译录制器和运行时依赖闭包，并生成两级校验和。细节见 [打包与分发](packaging.md)。

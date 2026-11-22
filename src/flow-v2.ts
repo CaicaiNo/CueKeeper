@@ -156,7 +156,7 @@ function validateInputs(flow: FlowV2) {
   }
 }
 
-function validateSteps(flow: FlowV2, state: ScopeState) {
+function validateSteps(flow: FlowV2, state: ScopeState, allowGaps = false) {
   const index = new Map<string, number>();
   const gaps: string[] = [];
   for (const [position, step] of flow.steps.entries()) {
@@ -211,7 +211,7 @@ function validateSteps(flow: FlowV2, state: ScopeState) {
       fail(`${where}: an app-scoped assertion can only check window existence`);
     }
   }
-  if (gaps.length) {
+  if (gaps.length && !allowGaps) {
     throw new Fault('CAPTURE_GAP',
       `Flow ${flow.id} has unresolved capture gaps at ${gaps.join(', ')}; resolve them before any desktop call`);
   }
@@ -258,24 +258,26 @@ function validateIntents(flow: FlowV2, state: ScopeState) {
 /**
  * Semantic validation for a structurally valid v2 flow: unique IDs, stable
  * window keys, referenced app paths and inputs, copy ranges, checkpoint
- * adjacency and non-overlapping intent ranges. Capture gaps are a hard stop:
- * the flow is refused before any desktop call.
+ * adjacency and non-overlapping intent ranges. Capture gaps are a hard stop
+ * for execution: the flow is refused before any desktop call. A review reader
+ * that only displays the recording passes `allowGaps`, because the gap is part
+ * of what the operator has to see and resolve.
  */
-export function validateFlowV2(flow: FlowV2): FlowV2 {
+export function validateFlowV2(flow: FlowV2, options: { allowGaps?: boolean } = {}): FlowV2 {
   const state: ScopeState = { apps: new Set(), windows: new Map() };
-  validateSteps(flow, state);
+  validateSteps(flow, state, options.allowGaps === true);
   validateAppPaths(flow, state);
   validateInputs(flow);
   validateIntents(flow, state);
   return flow;
 }
 
-export function parseFlowV2(input: unknown): FlowV2 {
+export function parseFlowV2(input: unknown, options: { allowGaps?: boolean } = {}): FlowV2 {
   if (!flowV2Check.Check(input)) {
     const error = flowV2Check.Errors(input).First();
     fail(`Invalid flow version 2 ${error?.path ?? ''}: ${error?.message ?? 'schema mismatch'}`);
   }
-  return validateFlowV2(input);
+  return validateFlowV2(input, options);
 }
 
 /**
@@ -284,10 +286,10 @@ export function parseFlowV2(input: unknown): FlowV2 {
  * contract. Secret test items stay on the v1 parser, because the wrapper has no
  * top-level version.
  */
-export function parseFlowDocument(input: unknown):
+export function parseFlowDocument(input: unknown, options: { allowGaps?: boolean } = {}):
   | { version: 1; flow: Flow }
   | { version: 2; flow: FlowV2 } {
-  if (isFlowV2(input)) return { version: 2, flow: parseFlowV2(input) };
+  if (isFlowV2(input)) return { version: 2, flow: parseFlowV2(input, options) };
   return { version: 1, flow: parseFlow(input) };
 }
 

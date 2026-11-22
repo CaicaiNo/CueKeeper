@@ -1,0 +1,238 @@
+/**
+ * Global recording controls for the workbench. The page never records by
+ * itself: it drives `/api/record/*`, which owns the one `record --global` child
+ * and imports the flow it writes. Keeping this in its own module leaves the
+ * timeline code untouched.
+ */
+const COUNTDOWN_CHOICES = [0, 3, 5, 10];
+const POLL_MS = 1000;
+const TICK_MS = 250;
+const requestHeader = 'x-cuekeeper-workbench';
+
+const bar = document.createElement('div');
+bar.className = 'record-bar';
+bar.id = 'record-bar';
+
+const countdown = document.createElement('select');
+countdown.id = 'record-countdown';
+countdown.className = 'record-countdown';
+countdown.setAttribute('aria-label', '开始前倒计时');
+for (const seconds of COUNTDOWN_CHOICES) {
+  const option = document.createElement('option');
+  option.value = String(seconds);
+  option.textContent = seconds === 0 ? '立即录制' : `倒数 ${seconds} 秒`;
+  if (seconds === 3) option.selected = true;
+  countdown.append(option);
+}
+
+const startButton = document.createElement('button');
+startButton.type = 'button';
+startButton.id = 'record-start';
+startButton.className = 'button';
+startButton.textContent = '开始录制';
+
+const stopButton = document.createElement('button');
+stopButton.type = 'button';
+stopButton.id = 'record-stop';
+stopButton.className = 'button danger';
+stopButton.textContent = '停止录制';
+stopButton.hidden = true;
+
+const timer = document.createElement('span');
+timer.id = 'record-timer';
+timer.className = 'record-timer';
+timer.setAttribute('role', 'timer');
+
+const message = document.createElement('span');
+message.id = 'record-message';
+message.className = 'record-message';
+message.setAttribute('role', 'status');
+message.setAttribute('aria-live', 'polite');
+
+bar.append(countdown, startButton, stopButton, timer, message);
+const anchor = document.getElementById('session-name');
+if (anchor) anchor.after(bar);
+else document.querySelector('.topbar')?.append(bar);
+
+const state = {
+  recording: false, busy: false, elapsedMs: 0, countdownMs: 0, path: '', steps: undefined,
+  stopFailed: false,
+};
+let pollId;
+let tickId;
+
+function clock(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const minutes = String(Math.floor(total / 60)).padStart(2, '0');
+  const seconds = String(total % 60).padStart(2, '0');
+  return `${minutes}:${seconds}`;
+}
+
+function renderTimer() {
+  if (!state.recording) {
+    timer.textContent = state.steps === undefined ? '未录制' : `已保存 ${state.steps} 步`;
+    return;
+  }
+  if (state.elapsedMs < state.countdownMs) {
+    const left = Math.ceil((state.countdownMs - state.elapsedMs) / 1000);
+    timer.textContent = `${left} 秒后开始录制`;
+    return;
+  }
+  timer.textContent = `录制中 ${clock(state.elapsedMs - state.countdownMs)}`;
+}
+
+function render() {
+  startButton.disabled = state.recording || state.busy;
+  startButton.textContent = state.busy && !state.recording ? '正在开始…' : '开始录制';
+  stopButton.hidden = !state.recording;
+  stopButton.disabled = state.busy;
+  stopButton.textContent = state.busy && state.recording ? '正在保存…' : '停止录制';
+  countdown.disabled = state.recording || state.busy;
+  renderTimer();
+}
+
+function setMessage(text, error = false) {
+  message.textContent = text;
+  message.title = text;
+  message.className = `record-message${error ? ' error' : ''}`;
+}
+
+async function request(route, method = 'POST', body) {
+  const response = await fetch(`/${route}`, {
+    method,
+    headers: {
+      [requestHeader]: '1',
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  let result = {};
+  try {
+    result = await response.json();
+  } catch {
+    result = {};
+  }
+  if (!response.ok) throw new Error(result.error ?? `请求失败（HTTP ${response.status}）`);
+  return result;
+}
+
+function adopt(status) {
+  state.recording = status.recording === true;
+  state.elapsedMs = Number.isFinite(status.elapsedMs) ? status.elapsedMs : 0;
+  state.countdownMs = Number.isFinite(status.countdownMs) ? status.countdownMs : 0;
+  if (typeof status.flowPath === 'string') state.path = status.flowPath;
+  if (Number.isInteger(status.steps)) state.steps = status.steps;
+  if (status.recording) {
+    setMessage(state.path ? `录制文件：${state.path}` : '');
+    startLoops();
+  } else {
+    stopLoops();
+  }
+  render();
+}
+
+function startLoops() {
+  if (!pollId) pollId = setInterval(() => { void poll(); }, POLL_MS);
+  if (!tickId) tickId = setInterval(tick, TICK_MS);
+}
+
+function stopLoops() {
+  if (pollId) clearInterval(pollId);
+  if (tickId) clearInterval(tickId);
+  pollId = undefined;
+  tickId = undefined;
+}
+
+function tick() {
+  if (!state.recording) return;
+  state.elapsedMs += TICK_MS;
+  renderTimer();
+}
+
+async function poll() {
+  let status;
+  try {
+    status = await request('api/record/status', 'GET');
+  } catch (error) {
+    // A transient read failure must not mask a recording that is still going.
+    setMessage(`无法读取录制状态：${error.message}`, true);
+    return;
+  }
+  const wasRecording = state.recording;
+  adopt(status);
+  if (!status.recording && wasRecording && !state.busy && !state.stopFailed) {
+    // The recorder finished on its own (max duration, crash, permission stop).
+    // Stopping now is what imports the flow and reports the reason.
+    await finish();
+  }
+}
+
+async function begin() {
+  if (state.busy || state.recording) return;
+  state.busy = true;
+  state.stopFailed = false;
+  setMessage('');
+  render();
+  try {
+    const seconds = Number(countdown.value);
+    const status = await request('api/record/start', 'POST', {
+      mode: 'global', countdown: Number.isFinite(seconds) ? seconds : 3,
+    });
+    adopt(status);
+  } catch (error) {
+    setMessage(error.message, true);
+    state.busy = false;
+    render();
+    return;
+  }
+  state.busy = false;
+  render();
+}
+
+async function finish() {
+  if (state.busy) return;
+  state.busy = true;
+  render();
+  let result;
+  try {
+    result = await request('api/record/stop', 'POST', {});
+  } catch (error) {
+    setMessage(`停止录制失败：${error.message}`, true);
+    state.busy = false;
+    state.stopFailed = true;
+    render();
+    return;
+  }
+  state.busy = false;
+  state.stopFailed = false;
+  adopt(result);
+  if (result.error) {
+    setMessage(`${result.error.code}：${result.error.message}`, true);
+  } else if (Array.isArray(result.warnings) && result.warnings.length) {
+    const text = result.warnings.map(warning => `${warning.code}：${warning.message}`).join('；');
+    setMessage(text, result.partial === true);
+  } else if (!result.session) {
+    setMessage('录制已停止，但没有生成可导入的录制文件。', true);
+  }
+  if (result.session) {
+    const steps = Array.isArray(result.session.timeline) ? result.session.timeline.length : 0;
+    setMessage(`录制已导入时间线（${steps} 步），正在刷新…`);
+    stopLoops();
+    setTimeout(() => window.location.reload(), 600);
+    return;
+  }
+  render();
+}
+
+startButton.addEventListener('click', () => { void begin(); });
+stopButton.addEventListener('click', () => { void finish(); });
+
+render();
+// A page loaded while a recording runs shows its timer instead of hiding it.
+void (async () => {
+  try {
+    await poll();
+  } catch (error) {
+    setMessage(`无法读取录制状态：${error.message}`, true);
+  }
+})();
