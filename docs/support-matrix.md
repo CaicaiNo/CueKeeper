@@ -6,7 +6,7 @@
 - **部分**：只在限定条件下可用，条件写在单元格里。
 - **不支持**：显式报错，或在「不支持的操作」一节标注明确的警告 / 拒绝方式，不会静默变成别的动作。
 
-离线测试来自 `pnpm test` 与 `sh scripts/test-recording-pointer.sh`（后者只编译纯逻辑测试二进制，不碰 AX、TCC 或真实输入）。**HAOC-95（双击/三击/右键/滚轮）、HAOC-93（拖拽）与 HAOC-94（悬停/剪贴板/中文 IME）只做离线实现与测试，真机一列全部是「未验证」，统一指向 HAOC-76 / HAOC-87。** 真机验证须按项目纪律先获批时间窗，不随离线任务执行。
+离线测试来自 `pnpm test` 与 `sh scripts/test-recording-pointer.sh`（后者只编译纯逻辑测试二进制，不碰 AX、TCC 或真实输入）。**HAOC-95（双击/三击/右键/滚轮）、HAOC-93（拖拽）与 HAOC-94（悬停/剪贴板/中文 IME）只做离线实现与测试，真机一列全部是「未验证」，统一指向 HAOC-76 / HAOC-87。** 真机验证须按项目纪律先获批时间窗，不随离线任务执行。HAOC-97 修正 `type` 的 headed 注入方式（Chrome web 内容在无头路径下 `ACTION_FAILED`），真机复测同样归 HAOC-87。
 
 `--headed` 指回放命令必须显式传入 `run --headed`。物理输入缺失该参数时以 `HEADED_REQUIRED` 失败，不会降级成单击或无头近似。
 
@@ -62,11 +62,19 @@
 
 | 操作 | 录制 | 回放 | 离线测试 | 真机状态 | 错误码 |
 | --- | --- | --- | --- | --- | --- |
-| ASCII 文本输入 | 支持。按焦点可编辑控件与 1.5 s 时间间隔合并为 `type` | 支持。驱动 `type <ref> --stdin`，文本不进 argv | `test/cuekeeper.test.mjs`（录制 click/type/key） | 未验证 → HAOC-76/87 | `UNSAFE_TEXT_TARGET`（录制：无焦点或保护控件）、`SECURE_INPUT`（录制）、`UNSAFE_TARGET`（回放：安全控件或无 ref） |
+| ASCII 文本输入 | 支持。按焦点可编辑控件与 1.5 s 时间间隔合并为 `type` | 支持。驱动 `type <ref> --stdin`，文本不进 argv；headed 回放带 `--headed`，无头回放不带 | `test/cuekeeper.test.mjs`（录制 click/type/key）、`test/type-headed.test.mjs`（headed/无头参数、错误码保留） | 未验证 → HAOC-76/87 | `UNSAFE_TEXT_TARGET`（录制：无焦点或保护控件）、`SECURE_INPUT`（录制）、`UNSAFE_TARGET`（回放：安全控件或无 ref） |
+| Chrome / Chromium 页面文本输入 | 支持。与 ASCII 文本输入同一路径，目标为 web 可编辑控件 | 支持，走 headed 注入：`run --headed` 下驱动 `type <ref> --headed --stdin`，文本仍只走 stdin。无头路径对 web 内容会失败，不静默降级 | `test/type-headed.test.mjs`（headed 参数、stdin 文本、`ACTION_FAILED` 原样保留且不重试） | 修复前真机已复现 `ACTION_FAILED`；修复后的真机回放待 HAOC-87（需先获批时间窗） | `ACTION_FAILED`（web 内容走无头注入时）、`UNSAFE_TARGET` |
 | 快捷键 / 特殊键 | 支持。ANSI 可打印键与方向键、F1–F12、修饰键组合；按住重复只记一次并报 `KEY_REPEAT` | 支持。驱动 `press <combo> --window-id` | `test/cuekeeper.test.mjs`、`test/recording-hotkeys` | 未验证 → HAOC-76/87 | `UNSUPPORTED_KEY`（录制警告）、`UNSUPPORTED_EVENT`（录制警告）、`KEY_REPEAT`（录制警告） |
 | 复制 Cmd+C | 支持。录为 `key: meta+c`；即使开启 `--clipboard` 也不在按键瞬间读取复制结果，内容由后续 Cmd+V 固化 | 支持。驱动 `press meta+c` | `test/cuekeeper.test.mjs`（快捷键路径）、`test/input-ii.test.mjs`（Cmd+V 固化） | 未验证 → HAOC-76/87（真实复制选区） | `UNSUPPORTED_KEY`（录制警告，非 ANSI 键）、`UNSAFE_TEXT_TARGET`（仅文本输入路径） |
 | 粘贴（文本剪贴板） | 默认关闭，只记 `key: meta+v`。`record --clipboard` 显式开启后，在 Cmd+V 时读取 pasteboard：只有 ≤4000 字符的纯文本会固化为 `kind: "paste"`，目标取当时唯一聚焦的可编辑、非安全控件；图片 / 文件 URL / 超长 / 含 NUL / 读失败 / 无安全目标都保留快捷键并给警告 | 支持。先 `focus <ref>`，再 `clipboard-set --stdin` 写入记录文本，最后 `press meta+v --window-id`；不把文本放进 argv | `test/input-ii.test.mjs`（录制固化、默认关闭、各类回退、回放调用、适配器参数、内容不进报告 / viewer） | 未验证 → HAOC-76/87（真实 Cmd+V、富文本、图片/文件粘贴、剪贴板所有权） | `CLIPBOARD_UNSUPPORTED_TYPE`、`CLIPBOARD_TOO_LARGE`、`CLIPBOARD_INVALID_TEXT`、`CLIPBOARD_READ_FAILED`、`UNSAFE_CLIPBOARD_TARGET`（录制警告）、`UNSAFE_TARGET`（回放：非可编辑或安全控件） |
 | 中文 / 非 ASCII（IME 提交文本） | 部分。只记录提交后的 Unicode 文本，记为 `type` 并带 `ime: true`，同时报 `IME_COMPOSITION_UNSUPPORTED`；组合中间态、候选框与逐键物理输入不记录 | 支持文本插入：驱动 `type <ref> --stdin` 写入 Unicode；不重放拼音/候选框，需要物理按键的自绘输入框不支持 | `test/input-ii.test.mjs`（录制合并、IME 标记、回放 Unicode） | 未验证 → HAOC-76/87（中文输入法、候选选择、终端 / 自绘控件） | `IME_COMPOSITION_UNSUPPORTED`（录制警告）、`UNSUPPORTED_TEXT`（仍有不可打印字符时）、`UNSAFE_TEXT_TARGET`、`SECURE_INPUT` |
+
+### 浏览器文本输入的已知限制
+
+- **headed 注入是 web 内容的唯一可靠路径**：Chromium 的可访问性文本表面在无头路径读取失败时返回 `ACTION_FAILED`。headed 回放把文本经 stdin 交给驱动，不进入命令行。
+- **不自动降级**：headed 失败时保留驱动原始错误码（如 `ACTION_FAILED`），不会改走无头路径重试；无头运行 `type` 打到 web 内容仍会失败。
+- **原生控件**：TextEdit 等原生控件在无头回放中仍走原路径（不带 `--headed`）；headed 回放对原生控件的表现随同一路径变化，真机回归归 HAOC-87。
+- **真机复测**：Chrome 页面 click → type → click 的完整回放归 HAOC-87，需按项目纪律先获批时间窗；本轮只做离线实现与断言。
 
 ## 流程动作
 

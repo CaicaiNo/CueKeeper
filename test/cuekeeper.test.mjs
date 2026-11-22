@@ -511,7 +511,9 @@ console.log(JSON.stringify({ version: '2.6', command, ok: true, data }));
   assert.deepEqual(calls.map(call => call.command), ['version', 'snapshot', 'click', 'snapshot', 'type', 'snapshot', 'press']);
   assert.deepEqual(calls[1].args.slice(0, 2), ['--app', 'com.apple.TextEdit']);
   assert.deepEqual(calls[2].args, ['--headed', '@scuekeeper:e1']);
-  assert.deepEqual(calls[4], { command: 'type', args: ['@scuekeeper:e1', '--stdin'], input: 'Cuekeeper M1' });
+  // Headed replay injects text through the headed path; the text still only
+  // travels on stdin.
+  assert.deepEqual(calls[4], { command: 'type', args: ['--headed', '@scuekeeper:e1', '--stdin'], input: 'Cuekeeper M1' });
   assert.deepEqual(calls[6].args, ['--headed', 'meta+s', '--window-id', 'w-1234']);
 });
 
