@@ -414,6 +414,228 @@ test('a small list view still records the clicked element rather than a fallback
   assert.equal(recording.captureWarnings.some(warning => warning.code.startsWith('NATIVE_')), false);
 });
 
+// VS Code (Electron) exposes the editor as a textfield whose surface is a deep
+// group, so a click lands on the group while the caret is in the textfield. The
+// live flow recorded that group and lost every typed character to gaps.
+const VSCODE_OWNER = {
+  app: 'com.microsoft.VSCode', pid: 300, processInstance: 1_700_000_000_000,
+  windowNumber: 33, windowTitle: 'manifest.json — saio_副本',
+};
+const EDITOR = { x: 300, y: 120, width: 900, height: 660 };
+
+function vscodeContextLine(index) {
+  return {
+    role: 'group', name: `line-${index}`, ref: `@vscode:e${index + 20}`,
+    bounds: { x: 300, y: 120 + index * 16, width: 900, height: 16 },
+    states: [], secure: false, children: [],
+  };
+}
+
+function vscodeSnapshot({ focused = true, field = EDITOR } = {}) {
+  // A large tree: a sidebar of unrelated surfaces plus forty editor rows. Only
+  // the row under the click overlaps the point, so the hit is unambiguous.
+  const sidebar = Array.from({ length: 120 }, (_, index) => ({
+    role: 'group', name: `sidebar-${index}`, ref: `@vscode:e${index + 200}`,
+    bounds: { x: 0, y: index * 7, width: 300, height: 7 },
+    states: [], secure: false, children: [],
+  }));
+  return {
+    windowId: 'w-33',
+    tree: {
+      role: 'window', name: 'manifest.json — saio_副本', ref: '@vscode:e1',
+      bounds: { x: 0, y: 0, width: 1400, height: 900 }, states: [], secure: false,
+      children: [
+        {
+          role: 'group', name: 'sidebar', ref: '@vscode:e2',
+          bounds: { x: 0, y: 0, width: 300, height: 900 }, states: [], secure: false, children: sidebar,
+        },
+        {
+          role: 'group', name: 'editor', ref: '@vscode:e3', bounds: EDITOR, states: [], secure: false,
+          children: [{
+            role: 'textfield', name: 'manifest.json', ref: '@vscode:e4', bounds: field,
+            states: focused ? ['focused'] : [], secure: false,
+            children: [{
+              role: 'group', name: 'text surface', ref: '@vscode:e5', bounds: EDITOR,
+              states: [], secure: false,
+              children: Array.from({ length: 40 }, (_, index) => vscodeContextLine(index)),
+            }],
+          }],
+        },
+      ],
+    },
+  };
+}
+
+function vscodeEvent(kind, t, extra = {}) {
+  return { kind, t, seen: NOW, focusGeneration: 1, secure: false, owner: VSCODE_OWNER, ...extra };
+}
+
+const EDITOR_POINT = [700, 400];
+
+function vscodeRecording(reader, options = {}) {
+  return new GlobalRecording(reader, { now: () => NOW, ...options });
+}
+
+test('an editor click inside the focused textfield records the field, not the group under the pointer', async () => {
+  const snapshot = vscodeSnapshot();
+  const recording = vscodeRecording(async () => structuredClone(snapshot));
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 100, { point: EDITOR_POINT, decision: 'record' })));
+  await recording.add(parseCaptureEvent(vscodeEvent('text', 200, { chars: 'Zq-vs' })));
+  await recording.add(parseCaptureEvent(vscodeEvent('text', 260, { chars: 'Zq-vs' })));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'type']);
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'textfield', name: 'manifest.json' });
+  // Both keystrokes are one parameterised type step against the same field.
+  assert.deepEqual(flow.steps[1].target, flow.steps[0].target);
+  assert.equal(flow.steps[1].input, 'input_1');
+  assert.deepEqual(flow.inputs, ['input_1']);
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'FOCUSED_EDITABLE_TARGET'));
+  assert.ok(!JSON.stringify(flow).includes('Zq-vs'));
+});
+
+test('a click that lost its window tree is retargeted to the textfield the following text proves', async () => {
+  const snapshot = vscodeSnapshot();
+  let reads = 0;
+  const recording = vscodeRecording(async () => {
+    reads += 1;
+    // The click's two attempts fail, exactly like the live VS Code recording;
+    // the first text event then reads the tree successfully.
+    if (reads <= 2) throw new Error('snapshot unavailable');
+    return structuredClone(snapshot);
+  });
+  for (const event of [
+    vscodeEvent('click', 100, { point: EDITOR_POINT, decision: 'record', owner: { ...VSCODE_OWNER, role: 'AXGroup' } }),
+    vscodeEvent('text', 200, { chars: 'Zq-vs' }),
+    vscodeEvent('text', 260, { chars: 'Zq-vs' }),
+  ]) await recording.add(parseCaptureEvent(event));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'type']);
+  // The group recorded from native evidence is corrected in place.
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'textfield', name: 'manifest.json' });
+  assert.deepEqual(flow.steps[1].target, flow.steps[0].target);
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_RETARGETED_TO_TEXT'));
+});
+
+test('a large tree that answers past the pointer budget still binds the typed characters', async () => {
+  const snapshot = vscodeSnapshot();
+  let clock = NOW;
+  let reads = 0;
+  const recording = new GlobalRecording(async () => {
+    reads += 1;
+    // The text read needs 2.4s: past the 2s pointer budget, inside the text budget.
+    if (reads === 2) clock += 2400;
+    return structuredClone(snapshot);
+  }, { now: () => clock });
+  for (const event of [
+    vscodeEvent('click', 100, { point: EDITOR_POINT, decision: 'record' }),
+    vscodeEvent('text', 200, { chars: 'Zq-vs' }),
+    vscodeEvent('text', 260, { chars: 'Zq-vs' }),
+  ]) await recording.add(parseCaptureEvent(event));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'type']);
+  assert.equal(flow.steps[1].target.name, 'manifest.json');
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+});
+
+test('typing keeps its target from the click when no window tree can be read at all', async () => {
+  const recording = vscodeRecording(async () => {
+    throw new Error('snapshot unavailable');
+  });
+  for (const event of [
+    vscodeEvent('click', 100, {
+      point: EDITOR_POINT, decision: 'record',
+      owner: { ...VSCODE_OWNER, role: 'AXTextField', name: 'manifest.json' },
+    }),
+    vscodeEvent('text', 200, { chars: 'Zq-vs' }),
+    vscodeEvent('key', 400, { key: 'backspace', modifiers: [] }),
+    vscodeEvent('text', 500, { chars: 'Zq-vs' }),
+  ]) await recording.add(parseCaptureEvent(event));
+
+  const flow = recording.finish();
+  // The editing key splits the burst but never costs the characters.
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'type', 'key', 'type']);
+  assert.deepEqual(flow.steps[1].target, { kind: 'element', role: 'textfield', name: 'manifest.json' });
+  assert.deepEqual(flow.steps[3].target, flow.steps[1].target);
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'TEXT_TARGET_FROM_CLICK'));
+});
+
+test('a click in another field starts a new typing target in the same window', async () => {
+  const fieldSnapshot = focused => ({
+    windowId: 'w-34',
+    tree: {
+      role: 'window', name: 'settings.txt — Editor', ref: '@doc:e1',
+      bounds: { x: 0, y: 0, width: 1400, height: 900 }, states: [], secure: false,
+      children: [{
+        role: 'group', name: 'body', ref: '@doc:e2',
+        bounds: { x: 0, y: 0, width: 1400, height: 900 }, states: [], secure: false,
+        children: [
+          {
+            role: 'textfield', name: 'title.txt', ref: '@doc:e3',
+            bounds: { x: 300, y: 120, width: 400, height: 200 },
+            states: focused === 'title' ? ['focused'] : [], secure: false, children: [],
+          },
+          {
+            role: 'textfield', name: 'body.txt', ref: '@doc:e4',
+            bounds: { x: 720, y: 120, width: 400, height: 200 },
+            states: focused === 'body' ? ['focused'] : [], secure: false, children: [],
+          },
+        ],
+      }],
+    },
+  });
+  const owner = { app: 'com.microsoft.VSCode', pid: 301, windowNumber: 34, windowTitle: 'settings.txt — Editor' };
+  const event = (kind, t, extra) => ({ kind, t, seen: NOW, focusGeneration: 1, secure: false, owner, ...extra });
+  let focused = 'title';
+  const recording = new GlobalRecording(async () => structuredClone(fieldSnapshot(focused)), { now: () => NOW });
+  await recording.add(parseCaptureEvent(event('click', 100, { point: [400, 200], decision: 'record' })));
+  await recording.add(parseCaptureEvent(event('text', 200, { chars: 'Zq-a' })));
+  focused = 'body';
+  await recording.add(parseCaptureEvent(event('click', 400, { point: [900, 200], decision: 'record' })));
+  await recording.add(parseCaptureEvent(event('text', 500, { chars: 'Zq-b' })));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'type', 'click', 'type']);
+  assert.equal(flow.steps[1].target.name, 'title.txt');
+  assert.equal(flow.steps[3].target.name, 'body.txt');
+  assert.notEqual(flow.steps[1].input, flow.steps[3].input);
+});
+
+test('a focused field elsewhere is never taken as the target of an unrelated click', async () => {
+  const snapshot = vscodeSnapshot({ field: { x: 0, y: 0, width: 300, height: 40 } });
+  const recording = vscodeRecording(async () => structuredClone(snapshot));
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 100, { point: EDITOR_POINT, decision: 'record' })));
+  const flow = recording.finish();
+  assert.equal(flow.steps[0].kind, 'click');
+  assert.equal(flow.steps[0].target.role, 'group');
+  assert.notEqual(flow.steps[0].target.name, 'manifest.json');
+});
+
+test('a text event with no focused control and no click anchor leaves a reasoned gap', async () => {
+  const snapshot = vscodeSnapshot({ focused: false });
+  const recording = vscodeRecording(async () => structuredClone(snapshot));
+  await recording.add(parseCaptureEvent(vscodeEvent('text', 200, { chars: 'Zq-vs' })));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['gap']);
+  assert.equal(flow.steps[0].code, 'CAPTURE_SCOPE_UNVERIFIED');
+  const warning = recording.captureWarnings.find(entry => entry.code === 'TEXT_TARGET_UNRESOLVED');
+  assert.ok(warning, 'the gap must say why the text could not be bound');
+});
+
+test('a text event too far behind the stream stays a stale gap', async () => {
+  const snapshot = vscodeSnapshot();
+  const recording = new GlobalRecording(async () => structuredClone(snapshot), { now: () => NOW + 11_000 });
+  await recording.add(parseCaptureEvent(vscodeEvent('text', 200, { chars: 'Zq-vs' })));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['gap']);
+  assert.equal(flow.steps[0].code, 'STALE_CAPTURE');
+});
+
 
 test('excluded apps are dropped before their window is read', async () => {
   const data = fixture('queue-overflow');
