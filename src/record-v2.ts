@@ -141,9 +141,16 @@ function editableRole(role: string | undefined): boolean {
   return editable.has(bare);
 }
 
-/** The snapshot's spelling of an AX role, so a recorded target can resolve. */
+/**
+ * The snapshot's spelling of an AX role, so a recorded target can resolve.
+ * The desktop driver has a single editable role: its own filters fold
+ * textarea, textbox and searchfield into `textfield`, and real snapshots never
+ * contain those names. Keeping the AX spelling would record a target that
+ * replay could never find.
+ */
 function bareRole(role: string) {
-  return role.replace(/^AX/, '').toLowerCase();
+  const bare = role.replace(/^AX/, '').toLowerCase();
+  return bare === 'textarea' || bare === 'textbox' || bare === 'searchfield' ? 'textfield' : bare;
 }
 
 /** The focused element's screen frame, in the snapshot's shape. */

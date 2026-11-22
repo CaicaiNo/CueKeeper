@@ -535,10 +535,11 @@ test('a container click is retargeted from the text event focus evidence, with n
   assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_RETARGETED_TO_TEXT'));
 });
 
-// VS Code's editor is an AXTextArea. The helper spells the AX role, while the
-// window snapshot and the replay locator use the bare role, so the recorded
-// target has to be written in the snapshot's spelling to resolve at replay.
-test('an AXTextArea focus evidence records the snapshot role and resolves at replay', async () => {
+// VS Code's editor is an AXTextArea to the helper, but the desktop driver has a
+// single editable role: its own filters fold textarea, textbox and searchfield
+// into `textfield`, and the 121 snapshots taken on this machine contain
+// `textfield` only. The recorded target has to use that spelling to resolve.
+test('an AXTextArea focus records the driver textfield role and resolves at replay', async () => {
   const area = { role: 'AXTextArea', name: 'manifest.json', editable: true, bounds: [300, 120, 900, 660] };
   let reads = 0;
   const recording = vscodeRecording(async () => {
@@ -555,7 +556,7 @@ test('an AXTextArea focus evidence records the snapshot role and resolves at rep
   const flow = recording.finish();
   assert.equal(reads, 0);
   assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'type']);
-  const expected = { kind: 'element', role: 'textarea', name: 'manifest.json' };
+  const expected = { kind: 'element', role: 'textfield', name: 'manifest.json' };
   assert.deepEqual(flow.steps[0].target, expected);
   assert.deepEqual(flow.steps[1].target, expected);
   // The point proven by those chars: the recorded target finds the text area in
@@ -564,12 +565,12 @@ test('an AXTextArea focus evidence records the snapshot role and resolves at rep
     windowId: 'w-33',
     tree: {
       role: 'window', name: 'manifest.json — saio_副本', states: [], secure: false, children: [{
-        role: 'textarea', name: 'manifest.json', ref: '@vscode:e4', bounds: EDITOR,
+        role: 'textfield', name: 'manifest.json', ref: '@vscode:e4', bounds: EDITOR,
         states: ['focused'], secure: false, children: [],
       }],
     },
   };
-  assert.equal(resolve(snapshot, flow.steps[1].target).node.role, 'textarea');
+  assert.equal(resolve(snapshot, flow.steps[1].target).node.role, 'textfield');
 });
 
 test('a click that carries focus evidence binds the field at click time, with no read', async () => {
