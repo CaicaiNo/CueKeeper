@@ -15,6 +15,71 @@ struct PointerSample {
     }
 }
 
+struct GlobalCaptureLag {
+    private var lastGapAt: UInt64 = 0
+
+    mutating func shouldReport(isKeyDown: Bool, timestamp: UInt64, now: UInt64) -> Bool {
+        // A late key depends on live focus. Pointer actions carry their own
+        // location and scope evidence, and interruptions are reported separately.
+        guard isKeyDown, timestamp > 0, now > timestamp, now - timestamp > 500_000_000,
+              now > lastGapAt, now - lastGapAt > 2_000_000_000 else { return false }
+        lastGapAt = now
+        return true
+    }
+}
+
+/// Quartz can name the window that received a queued press. If that field is
+/// absent, a live hit is usable only if focus has not advanced past the press.
+struct GlobalPointerTarget {
+    let eventWindow: Int?
+    let liveWindow: Int?
+    let destination: Int32?
+    let predatesFocus: Bool
+
+    var window: Int? { eventWindow ?? (predatesFocus ? nil : liveWindow) }
+    var canReadAX: Bool { !predatesFocus && window != nil && window == liveWindow }
+
+    func matches(ownerPID: Int32) -> Bool {
+        window != nil && (destination == nil || destination == ownerPID)
+    }
+}
+
+struct GlobalPointerEvidence {
+    let owner: [String: Any]
+    let focusGeneration: Int
+    let secureEvidence: [String]
+    let targetMatches: Bool
+    let isFocused: Bool
+    // nil means AX could not resolve an element; false means it contradicted Quartz.
+    let axOwnerMatches: Bool?
+
+    private static let activationRoles: Set<String> = [
+        "AXWindow", "AXSheet", "AXGroup", "AXScrollArea", "AXLayoutArea", "AXSplitGroup", "AXUnknown",
+    ]
+
+    func fields(forClick: Bool) -> [String: Any] {
+        var fields: [String: Any] = [
+            "owner": owner, "focusGeneration": focusGeneration, "secure": !secureEvidence.isEmpty,
+        ]
+        if !secureEvidence.isEmpty {
+            fields["secureEvidence"] = secureEvidence
+            fields["decision"] = "gap"
+            fields["gapCode"] = "SECURE_INPUT"
+        } else if targetMatches && isFocused && (axOwnerMatches == true || (forClick && axOwnerMatches == nil)) {
+            fields["decision"] = "record"
+        } else if targetMatches && !isFocused && axOwnerMatches == true && forClick &&
+                    owner["pressable"] as? Bool == false &&
+                    Self.activationRoles.contains(owner["role"] as? String ?? "") {
+            // A click on the surface of a background window only activates it.
+            fields["decision"] = "navigate"
+        } else {
+            fields["decision"] = "gap"
+            fields["gapCode"] = "CAPTURE_SCOPE_UNVERIFIED"
+        }
+        return fields
+    }
+}
+
 /**
  * Turns a stream of unpressed pointer moves into at most one hover per dwell.
  * A dwell starts at the first sample, survives movement inside a small radius,
@@ -158,6 +223,22 @@ struct RecordingPointer {
         let button: Int64
         let count: Int64
         let truncated: Bool
+
+        func payload(t: Int, seen: Int, evidence: GlobalPointerEvidence? = nil) -> [String: Any] {
+            var row = evidence?.fields(forClick: true) ?? [:]
+            row["kind"] = "click"
+            row["point"] = [Int(down.location.x.rounded()), Int(down.location.y.rounded())]
+            row["count"] = Int(count)
+            if evidence != nil || button == 1 { row["button"] = button == 1 ? "right" : "left" }
+            row["t"] = t
+            row["seen"] = seen
+            return row
+        }
+
+        func elapsedMilliseconds(since start: UInt64) -> Int? {
+            guard down.timestamp != 0 else { return nil }
+            return down.timestamp > start ? Int((down.timestamp - start) / 1_000_000) : 0
+        }
     }
 
     struct Drag {
