@@ -366,7 +366,8 @@ export class GlobalRecording {
     if (this.startupOpen && event.t > startupGraceMs) this.startupOpen = false;
     // Before the front window is provable, an event with no window at all is
     // startup noise (a click that dismissed a dialog, a queued gap); it must not
-    // become the first thing the flow reports.
+    // become the first thing the flow reports. A scope gap is dropped later
+    // regardless of its time, because it names no window either.
     if (this.startupOpen && !this.steps.length && !this.bindingFor(event)) {
       this.startupDropped += 1;
       return;
@@ -1106,7 +1107,7 @@ export class GlobalRecording {
     if (trigger?.kind === 'manual_checkpoint' && reason === 'secure_input') return;
     if (!trigger || !('scope' in trigger) || trigger.scope.kind !== 'window' ||
         (reason === 'system_dialog' && trigger.kind !== 'click' && trigger.kind !== 'key')) {
-      this.pushGap(reason === 'secure_input' ? 'SECURE_INPUT' : 'CAPTURE_SCOPE_UNVERIFIED');
+      this.pushGap(reason === 'secure_input' ? 'SECURE_INPUT' : 'CAPTURE_SCOPE_UNVERIFIED', { evidence: true });
       return;
     }
     const scope = trigger.scope;
@@ -1357,8 +1358,18 @@ export class GlobalRecording {
       (names.get(entry.node) ?? '') === (target.name ?? ''));
   }
 
-  private pushGap(code: CaptureGapCode) {
+  /**
+   * A gap stands for a piece of the recording no step can replay. A scope gap
+   * before the first step names no window the flow could stand at, so it is
+   * startup noise like any other unprovable opening event; every other gap is
+   * evidence of lost input and is kept. A checkpoint gap is always kept.
+   */
+  private pushGap(code: CaptureGapCode, { evidence = false } = {}) {
     this.endBursts();
+    if (!evidence && code === 'CAPTURE_SCOPE_UNVERIFIED' && !this.steps.length) {
+      this.startupDropped += 1;
+      return;
+    }
     this.push({ kind: 'gap', code });
   }
 
@@ -1389,7 +1400,7 @@ export class GlobalRecording {
     this.dropTrees();
     if (this.startupDropped) {
       this.warn('CAPTURE_STARTUP',
-        `${this.startupDropped} unverified event(s) in the first ${startupGraceMs} ms of the recording were dropped as startup noise`);
+        `${this.startupDropped} event(s) before the first recorded step had no replayable target and were dropped as startup noise`);
     }
     if (!this.steps.length) throw new Fault('EMPTY_RECORDING', 'No supported actions were captured');
     if (this.truncated) this.warn('STEP_LIMIT', `The flow retains the first ${this.stepLimit} steps`);

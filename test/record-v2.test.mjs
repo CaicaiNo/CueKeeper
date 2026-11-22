@@ -1112,6 +1112,61 @@ test('unverified startup events are dropped without leaving a gap', async () => 
   assert.ok(recording.captureWarnings.some(warning => warning.code === 'CAPTURE_STARTUP'));
 });
 
+const FINDER_WINDOW = {
+  app: 'com.apple.finder', pid: 100, processInstance: 1, windowNumber: 11, windowTitle: 'Downloads',
+};
+const NOTES_WINDOW = {
+  app: 'com.apple.TextEdit', pid: 200, processInstance: 2, windowNumber: 21, windowTitle: 'Notes 1',
+};
+
+test('a gap and an unprovable click before the first step are startup noise', async () => {
+  const data = fixture('two-apps-three-windows');
+  const recording = new GlobalRecording(readerFor(data), { now: () => NOW });
+  // The helper's opening line arrives long after any fixed grace period, and it
+  // names nothing a replay could stand at, so it must not become s1.
+  await recording.add(parseCaptureEvent({
+    kind: 'gap', gapCode: 'CAPTURE_SCOPE_UNVERIFIED', t: 900, seen: NOW, focusGeneration: 0, secure: false,
+  }));
+  // The stream has already claimed TextEdit's window; the click that brings
+  // Finder forward belongs to another window and is only a first mouse-down.
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 950, seen: NOW, focusGeneration: 1, secure: false, owner: NOTES_WINDOW,
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 1000, seen: NOW, focusGeneration: 1, secure: false, decision: 'record',
+    point: [150, 110], owner: FINDER_WINDOW,
+  }));
+  // The first action the flow can actually replay: Finder comes forward, a
+  // click lands in its window.
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 1100, seen: NOW, focusGeneration: 2, secure: false, owner: FINDER_WINDOW,
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 1200, seen: NOW, focusGeneration: 2, secure: false, decision: 'record',
+    point: [150, 110], owner: { ...FINDER_WINDOW, role: 'AXTextField', name: 'Search', pressable: true },
+  }));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['activate_app', 'click']);
+  assert.equal(flow.steps[0].id, 's1');
+  assert.deepEqual(flow.steps[0].focusAfter, {
+    kind: 'window', app: 'com.apple.finder', windowKey: 'finder-1', windowTitle: 'Downloads',
+  });
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'CAPTURE_STARTUP'));
+});
+
+test('a gap after the first step is still kept', async () => {
+  const data = fixture('two-apps-three-windows');
+  const recording = new GlobalRecording(readerFor(data), { now: () => NOW });
+  await recording.add(parseCaptureEvent(data.events[0]));
+  await recording.add(parseCaptureEvent({
+    kind: 'gap', gapCode: 'CAPTURE_GAP', t: 150, seen: NOW, focusGeneration: 1, secure: false,
+  }));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'gap']);
+  assert.equal(flow.steps[1].code, 'CAPTURE_GAP');
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'CAPTURE_STARTUP'), false);
+});
 
 test('excluded apps are dropped before their window is read', async () => {
   const data = fixture('queue-overflow');
@@ -1182,10 +1237,12 @@ test('record --global is an explicit mode that rejects target flags', { skip: pr
 /**
  * Runs the real CLI against stub helper and desktop executables. The helper
  * emits a ready line and the events; the desktop only serves the fixture trees.
- * No GUI, accessibility API or capture tap is involved.
+ * `retitle` is appended to every window title the desktop answers with, which
+ * models a window that has retitled since the event that named it. No GUI,
+ * accessibility API or capture tap is involved.
  */
 function globalCliFixture(t, {
-  events, snapshots, cliArgs = [], seconds = 2, exit = 0, ready, download,
+  events, snapshots, cliArgs = [], seconds = 2, exit = 0, ready, download, retitle = '',
 }) {
   const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-global-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -1204,6 +1261,8 @@ function globalCliFixture(t, {
     const convert = node => ({
       role: node.role,
       ...(node.name === undefined ? {} : { name: node.name }),
+      ...(node.value === undefined ? {} : { value: node.value }),
+      ...(node.text === undefined ? {} : { text: node.text }),
       ...(node.ref === undefined ? {} : { ref_id: node.ref }),
       ...(node.bounds === undefined ? {} : { bounds: node.bounds }),
       states: node.states ?? [],
@@ -1232,7 +1291,7 @@ if (command === 'snapshot') {
   const [, window] = entry;
   console.log(JSON.stringify({ version: '2.6', command, ok: true, data: {
     complete: true, truncated: false,
-    window: { id: window.id, title: window.title }, tree: window.tree,
+    window: { id: window.id, title: window.title + ${JSON.stringify(retitle)} }, tree: window.tree,
   } }));
   process.exit(0);
 }
@@ -1326,6 +1385,25 @@ test('record --global writes a v2 flow with scopes and no typed content', { skip
   // the TextEdit window needs one fallback read.
   assert.equal(run.commands.filter(command => command.startsWith('snapshot')).length, 1);
   // The same number is reported as the recording's accessibility cost.
+  assert.equal(run.response.data.snapshotReads, 1);
+});
+
+test('record --global names a click after its window retitled', { skip: process.platform !== 'darwin' }, t => {
+  const data = fixture('finder-list-view-file-click');
+  // The click carries no element evidence, so it is named by reading the tree.
+  // That read answers a window whose title has moved on since the event that
+  // bound it, exactly like an editor's unsaved dot or problem count.
+  const run = globalCliFixture(t, {
+    events: data.events,
+    snapshots: data.snapshots,
+    retitle: ' — 1 problem in this file',
+  });
+  assert.equal(run.code, 0, (run.stderr || '') + JSON.stringify(run.response));
+  const flow = JSON.parse(run.written);
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'treeitem', name: 'manifest.json' });
+  // A retitle is not a capture failure: no gap and no unavailable-read warning.
+  assert.equal(run.response.data.warnings, undefined);
   assert.equal(run.response.data.snapshotReads, 1);
 });
 
