@@ -646,6 +646,55 @@ console.log(JSON.stringify({ version: '2.6', command, ok: true, data: payload })
   assert.equal(snap.args.includes('--app'), false);
 });
 
+test('a window bound by ID reads its tree after the title changed', { skip: process.platform !== 'darwin' }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'cuekeeper-window-retitle-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const log = join(root, 'calls.jsonl');
+  const stub = join(root, 'desktop');
+  const retitled = structuredClone(snapshotFixture.data);
+  // The window is the same one; only its title moved on since the event that
+  // named it (an unsaved dot, a problem count, a folder that followed the view).
+  retitled.window = { id: 'w-42', title: `${title} — 1 problem in this file` };
+  writeFileSync(stub, `#!/usr/bin/env node
+const fs = require('node:fs');
+const [command, ...args] = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ command, args }) + '\\n');
+const index = args.indexOf('--window-id');
+const bound = index < 0 ? '' : args[index + 1];
+let payload;
+if (command === 'version') payload = { version: '1.3.1' };
+else if (bound === 'w-42') payload = ${JSON.stringify(retitled)};
+else payload = { ...${JSON.stringify(retitled)}, window: { id: 'w-78', title: 'Another window' } };
+console.log(JSON.stringify({ version: '2.6', command, ok: true, data: payload }));
+`, { mode: 0o700 });
+  const previous = process.env.CUEKEEPER_AGENT_DESKTOP;
+  process.env.CUEKEEPER_AGENT_DESKTOP = stub;
+  t.after(() => {
+    if (previous === undefined) delete process.env.CUEKEEPER_AGENT_DESKTOP;
+    else process.env.CUEKEEPER_AGENT_DESKTOP = previous;
+  });
+
+  const tree = await withDesktop({ headed: false, signal },
+    desktop => desktop.snapshotWindow('w-42', title));
+  // The recorded title was a hint, not the identity: the tree still reads.
+  assert.equal(tree.windowId, 'w-42');
+  assert.equal(tree.tree.role, snapshotFixture.data.tree.role);
+  const calls = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+  const snap = calls.find(call => call.command === 'snapshot');
+  assert.equal(snap.args[snap.args.indexOf('--window-id') + 1], 'w-42');
+  assert.equal(snap.args.includes('--app'), false);
+
+  // A driver that answers with another window is still refused, and the error
+  // names both windows so the next read can be traced.
+  await assert.rejects(withDesktop({ headed: false, signal },
+    desktop => desktop.snapshotWindow('w-77', title)), error => {
+    assert.equal(error.code, 'WINDOW_CHANGED');
+    assert.match(error.message, /w-78/);
+    assert.match(error.message, /w-77/);
+    return true;
+  });
+});
+
 test('the CLI sends window-only commands for a path-fixed flow', { skip: process.platform !== 'darwin' }, t => {
   const root = mkdtempSync(join(tmpdir(), 'cuekeeper-identity-cli-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

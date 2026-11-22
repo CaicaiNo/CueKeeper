@@ -162,6 +162,26 @@ function appList(data: unknown): RunningApp[] {
   return apps;
 }
 
+/** The window one snapshot answer describes, as the driver reported it. */
+function readWindow(data: unknown): { id: string; title: string } {
+  try {
+    const window = object(object(data).window);
+    return {
+      id: typeof window.id === 'string' ? window.id : '',
+      title: typeof window.title === 'string' ? window.title : '',
+    };
+  } catch {
+    // The parse that follows reports the malformed answer with this context.
+    return { id: '', title: '' };
+  }
+}
+
+/** Where a tree read landed: its window number, its title then, and any hint. */
+function describeWindow(window: { id: string; title: string }, hint?: string) {
+  const recorded = hint && hint !== window.title ? `; recorded title "${hint}"` : '';
+  return `window ${window.id}, title "${window.title}"${recorded}`;
+}
+
 function delivery(result: Record<string, unknown>): Delivery | undefined {
   if (result.disposition === undefined) return undefined;
   const value = object(result.disposition).delivery;
@@ -377,14 +397,26 @@ export async function withDesktop<T>(
         const data = await call('snapshot', [
           '--include-bounds', '--max-depth', '50', '--timeout-ms', String(timeoutMs), '--window-id', windowId,
         ], undefined, timeoutMs + 3000);
-        // A v2 scope follows its window by number, so a recorded title that the
-        // user has since changed is not an identity check. Only the driver's own
-        // window ID is compared, by the caller.
-        const observed = title ?? (() => {
-          const window = object(object(data).window);
-          return typeof window.title === 'string' ? window.title : '';
-        })();
-        return parseSnapshot(data, { app: '', window: observed });
+        // A v2 scope follows its window by number, so a recorded title is only a
+        // hint: an editor drops its unsaved dot and a Finder window follows its
+        // folder, and neither changes which window this is. Identity is the
+        // driver's own window ID; the tree is parsed with the title the same
+        // answer reported, so a retitle never reads as a mismatch.
+        const observed = readWindow(data);
+        if (observed.id && observed.id !== windowId) {
+          throw new Fault('WINDOW_CHANGED',
+            `The accessibility read answered ${describeWindow(observed)} instead of the bound window ${windowId}`);
+        }
+        try {
+          return parseSnapshot(data, { app: '', window: observed.title });
+        } catch (error) {
+          if (!(error instanceof Fault)) throw error;
+          // A failed read has to say which window and title it was of, or the
+          // recording can only report the code again.
+          throw new Fault(error.code,
+            `${error.message} (${describeWindow({ ...observed, id: observed.id || windowId }, title)})`,
+            error.dependency);
+        }
       },
       async focusWindow(windowId, timeoutMs = 5000) {
         const result = object(await call('focus-window', ['--window-id', windowId], undefined, timeoutMs));
