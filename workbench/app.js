@@ -3,6 +3,8 @@ import {
   KIND_LABELS, SURFACE_LABELS, actionKind, canUndo, changeTarget, compileDraft, confirmCondition, confirmedSetup,
   deleteCondition, id, makeBehavior, retargetCondition, sameTarget, scopeDescription, scrollLabel, setupDraft,
   shellDraft, shellSummary, dragSummary, undoCondition, visibleRows,
+  V2_COPYABLE_KINDS, V2_INSERT_KINDS, V2_TARGET_KINDS, assertCheck, checkLabel, diffSummary,
+  filterStepsByScope, scopeKey, scopeOptions, statusMap, stepTemplate, v2StepLabel, v2TargetLabel,
 } from './model.js';
 import { createAppPicker } from './picker.js';
 
@@ -12,6 +14,7 @@ const state = {
   session: null, library: [], allowLive: false, app: '', selected: new Set(), ignored: new Set(),
   expanded: new Set(), showIgnored: false, focused: null, draft: [], tab: 'actions', saving: false,
   running: false, setup: null, appPaths: {}, catalog: null, catalogAt: 0, catalogError: null, appNames: {},
+  v2: null, v2Report: null, v2Selected: null, v2Filter: '', v2Busy: false,
 };
 
 const dom = createDom(document);
@@ -188,6 +191,7 @@ function setSession(session) {
     setup: session ? setupDraft(session.setup ?? []) : null,
     appPaths: session?.target?.appPath ? { [session.target.app]: session.target.appPath } : {},
     appNames: Object.fromEntries(Object.entries(session?.apps ?? {}).map(([id, app]) => [id, app.name])),
+    v2: session?.v2 ?? null, v2Report: null, v2Selected: null, v2Filter: '', v2Busy: false,
   });
   $('show-ignored').checked = false;
   $('test-name').value = session ? `${session.name.slice(0, 248)} 测试` : '';
@@ -367,6 +371,7 @@ function renderTimeline() {
     return;
   }
   const groupSteps = new Map((state.session?.scopeGroups ?? []).map(group => [group.key, group.stepIds.length]));
+  const v2Statuses = statusMap(state.v2Report);
   const nodes = [];
   let lastGroup;
   for (const row of rows) {
@@ -379,6 +384,7 @@ function renderTimeline() {
       lastGroup = row.scopeGroup;
     }
     const ignored = state.ignored.has(row.id);
+    const runEntry = state.session?.version === 2 ? v2Statuses.get(row.id) : undefined;
     const selector = el('input', {
       id: `select-${row.id}`, type: 'checkbox', checked: state.selected.has(row.id), disabled: ignored,
       'aria-label': `选择 ${row.action.kind} ${row.id}`,
@@ -396,7 +402,10 @@ function renderTimeline() {
     el('span', { className: 'time' }, timestamp(row.atMs)),
     kindChip(row.action),
     el('span', { className: 'row-description' }, el('strong', {}, actionLabel(row.action)),
-      el('small', {}, `${row.scope ? scopeText(row.scope) : `${appLabel(row.app)} · ${row.window}`}${ignored ? ' · 已忽略' : ''}`)),
+      el('small', {}, `${row.scope ? scopeText(row.scope) : `${appLabel(row.app)} · ${row.window}`}${ignored ? ' · 已忽略' : ''}`),
+      runEntry ? el('span', {
+        className: `run-status ${runEntry.status}`, title: [runEntry.code, runEntry.message].filter(Boolean).join(' · '),
+      }, resultStatus[runEntry.status] ?? runEntry.status) : undefined),
     el('span', { className: 'time row-duration', title: '动作耗时' }, duration(row.durationMs)));
     const thumbnail = row.thumbnail && el('details', {
       className: 'thumbnail', open: state.expanded.has(row.id),
@@ -573,6 +582,615 @@ function renderDraft() {
   ]));
 }
 
+// --- Version 2 editor -----------------------------------------------------------
+// The page never edits a flow itself: every button sends one EditOp to the
+// server-side P2 engine and renders the snapshot it returns.
+
+const v2Section = el('section', { className: 'v2 pane', id: 'v2-editor', hidden: true });
+document.querySelector('main.workspace').after(v2Section);
+
+const v2Flow = () => state.v2?.flow;
+const v2Steps = () => v2Flow()?.steps ?? [];
+const v2Step = stepId => v2Steps().find(step => step.id === stepId);
+const v2ScopeText = scope => scopeDescription(scope, appLabel);
+
+window.addEventListener('beforeunload', event => {
+  if (!state.v2?.dirty) return;
+  event.preventDefault();
+  event.returnValue = '';
+});
+
+async function v2Call(route, payload = {}) {
+  if (!state.session || state.v2Busy) return undefined;
+  state.v2Busy = true;
+  renderV2();
+  try {
+    const result = await api(route, { session: state.session.id, ...payload });
+    if (result?.v2) state.v2 = result.v2;
+    else if (result?.flow) {
+      state.v2 = result;
+      // A new edit invalidates the last run's per-step marks.
+      state.v2Report = null;
+    }
+    return result;
+  } catch (error) {
+    status(error.message, 'error');
+    throw error;
+  } finally {
+    state.v2Busy = false;
+    renderV2();
+    renderTimeline();
+  }
+}
+
+const v2Edit = op => v2Call('v2/edit', { op });
+
+async function v2Save() {
+  try {
+    const result = await api('save', { session: state.session.id });
+    state.v2 = result.v2;
+    renderV2();
+    renderTimeline();
+    status(`已保存 revision · ${result.output}`, 'success');
+  } catch (error) {
+    status(error.message, 'error');
+  }
+}
+
+async function v2Undo() {
+  const result = await api('v2/undo', { session: state.session.id }).catch(error => {
+    status(error.message, 'error');
+    return undefined;
+  });
+  if (result?.flow) {
+    state.v2 = result;
+    state.v2Report = null;
+    renderV2();
+    renderTimeline();
+  }
+}
+
+async function v2Redo() {
+  const result = await api('v2/redo', { session: state.session.id }).catch(error => {
+    status(error.message, 'error');
+    return undefined;
+  });
+  if (result?.flow) {
+    state.v2 = result;
+    state.v2Report = null;
+    renderV2();
+    renderTimeline();
+  }
+}
+
+function v2Move(stepId, toIndex) {
+  if (toIndex < 0 || toIndex >= v2Steps().length) return;
+  void v2Edit({ kind: 'move', id: stepId, toIndex }).catch(() => {});
+}
+
+function v2Delete(stepId) {
+  if (v2Steps().length <= 1) {
+    status('流程至少保留一个步骤。', 'error');
+    return;
+  }
+  void v2Edit({ kind: 'delete', id: stepId }).catch(() => {});
+}
+
+function v2Copy(step) {
+  if (!V2_COPYABLE_KINDS.has(step.kind)) {
+    status(`${KIND_LABELS[step.kind] ?? step.kind} 不能从时间线复制。`, 'error');
+    return;
+  }
+  const index = v2Steps().findIndex(entry => entry.id === step.id);
+  const copy = { ...structuredClone(step), id: id(step.kind) };
+  void v2Edit({ kind: 'insert', index: index + 1, step: copy }).catch(() => {});
+}
+
+function renderV2() {
+  const editor = state.v2;
+  if (!state.session || state.session.version !== 2 || !editor) {
+    v2Section.hidden = true;
+    v2Section.replaceChildren();
+    document.body.classList.remove('v2-mode');
+    return;
+  }
+  v2Section.hidden = false;
+  document.body.classList.add('v2-mode');
+  const flow = editor.flow;
+  const steps = flow.steps;
+  const diff = diffSummary(editor.diff);
+  const dirty = editor.dirty ?? diff.changed;
+  const options = scopeOptions(flow, appLabel);
+  const visible = filterStepsByScope(flow, state.v2Filter);
+  const statuses = statusMap(state.v2Report);
+  const selected = state.v2Selected;
+  const busy = state.v2Busy;
+  const saved = editor.saved?.at(-1);
+
+  const filter = select([['', '全部作用域'], ...options.map(option => [option.key, option.label])],
+    event => { state.v2Filter = event.target.value; renderV2(); });
+  filter.value = state.v2Filter;
+
+  const rowActions = step => el('div', { className: 'v2-row-actions' },
+    step.kind === 'gap'
+      ? button('处理缺口', () => v2GapDialog(step), { style: 'small', icon: 'sliders', disabled: busy })
+      : step.kind === 'manual_checkpoint'
+        ? button('查看', () => v2CheckpointDialog(step), { style: 'small', icon: 'eye', disabled: busy })
+        : button('编辑', () => v2EditDialog(step), { style: 'small', icon: 'sliders', disabled: busy }),
+    button('上移', () => v2Move(step.id, steps.findIndex(entry => entry.id === step.id) - 1), {
+      style: 'small', icon: 'up', iconOnly: true, title: '上移',
+      disabled: busy || steps.findIndex(entry => entry.id === step.id) === 0,
+    }),
+    button('下移', () => v2Move(step.id, steps.findIndex(entry => entry.id === step.id) + 1), {
+      style: 'small', icon: 'down', iconOnly: true, title: '下移',
+      disabled: busy || steps.findIndex(entry => entry.id === step.id) === steps.length - 1,
+    }),
+    button('复制', () => v2Copy(step), {
+      style: 'small', icon: 'copy', iconOnly: true, title: '复制步骤',
+      disabled: busy || !V2_COPYABLE_KINDS.has(step.kind),
+    }),
+    button('删除', () => v2Delete(step.id), {
+      style: 'small danger', icon: 'trash', iconOnly: true, title: '删除步骤', disabled: busy,
+    }));
+
+  const rows = visible.map(step => {
+    const index = steps.findIndex(entry => entry.id === step.id);
+    const entry = statuses.get(step.id);
+    return el('article', {
+      className: `v2-row${selected === step.id ? ' selected' : ''}`,
+      draggable: !busy,
+      ondragstart: event => {
+        event.dataTransfer.setData('text/plain', step.id);
+        event.dataTransfer.effectAllowed = 'move';
+      },
+      ondragover: event => event.preventDefault(),
+      ondrop: event => {
+        event.preventDefault();
+        const dragged = event.dataTransfer.getData('text/plain');
+        if (dragged && dragged !== step.id) v2Move(dragged, index);
+      },
+      onclick: () => { state.v2Selected = step.id; renderV2(); },
+    },
+    el('span', { className: 'v2-index' }, String(index + 1)),
+    kindChip(typeof step === 'string' ? step : step.kind),
+    el('div', { className: 'v2-copy' },
+      el('strong', {}, v2StepLabel(step, appLabel)),
+      el('small', { className: 'muted' },
+        `${step.kind === 'gap' ? '缺口' : v2ScopeText(step.scope)}`)),
+    entry ? el('span', {
+      className: `run-status ${entry.status}`, title: [entry.code, entry.message].filter(Boolean).join(' · '),
+    }, resultStatus[entry.status] ?? entry.status) : undefined,
+    rowActions(step));
+  });
+
+  const validation = editor.validation ?? { ok: true, errors: [] };
+  v2Section.replaceChildren(
+    el('div', { className: 'v2-header' },
+      el('h2', {}, el('span', { className: 'sec' }, '03'), ' v2 时间线编辑'),
+      el('span', { className: `state-chip ${dirty ? 'inferred' : 'confirmed'}` },
+        dirty ? '未保存修改' : diff.changed ? '已保存 revision' : '与录制一致'),
+      el('span', { className: 'trailing' }),
+      filter,
+      button('撤销', () => void v2Undo(), { style: 'small', icon: 'undo', disabled: busy || !editor.canUndo }),
+      button('重做', () => void v2Redo(), { style: 'small', icon: 'refresh', disabled: busy || !editor.canRedo }),
+      button('插入步骤', () => v2InsertDialog(), { style: 'small', icon: 'plus', disabled: busy }),
+      button('保存 revision', () => void v2Save(), {
+        style: 'small', icon: 'save', disabled: busy || !dirty,
+      }),
+      button('dry-run', () => void v2DryRun(), { style: 'small', icon: 'checkCircle', disabled: busy }),
+      button('实时回放', () => v2LiveDialog(), {
+        style: 'small primary', icon: 'play', disabled: busy || !state.allowLive,
+      })),
+    rows.length ? el('div', { className: 'v2-rows' }, ...rows) : empty('当前作用域筛选下没有步骤。'),
+    el('div', { className: 'v2-footer' },
+      muted(diff.changed ? `与录制相比：${diff.lines.join('；')}` : '与录制一致，尚未修改。'),
+      saved ? muted(`最近保存：${saved.path}`) : muted('保存会在录制旁写一个新的 revision 文件，原始录制不变。'),
+      validation.ok ? undefined : el('ul', { className: 'v2-errors' }, ...validation.errors.map(error =>
+        el('li', {}, `${error.stepId ? `${error.stepId} · ` : ''}${error.code} · ${error.message}`))),
+      muted('拖拽行可排序；点击行后「插入步骤」接在其后。未保存的修改在离开页面前会提示。')));
+}
+
+function v2DryRun() {
+  void v2Call('run', { mode: 'dry-run' }).then(report => {
+    if (!report?.entries) return;
+    state.v2Report = report;
+    renderV2();
+    renderTimeline();
+    const failed = report.entries.filter(entry => entry.status !== 'resolved');
+    status(`dry-run ${resultStatus[report.status] ?? report.status} · ${report.entries.length} 步` +
+      (failed.length ? ` · ${failed.length} 步异常` : ''), report.status === 'passed' ? 'success' : 'error');
+  }).catch(() => {});
+}
+
+function v2LiveDialog() {
+  const flow = v2Flow();
+  if (!flow) return;
+  const saved = state.v2?.saved?.at(-1);
+  const confirmed = el('input', { type: 'checkbox' });
+  const values = new Map((flow.inputs ?? []).map(name => [name, input({ maxLength: 4000, spellcheck: false, autocomplete: 'off' })]));
+  openDialog('实时回放 v2 流程', [
+    muted(saved && !state.v2?.dirty
+      ? `将回放已保存的 revision：${saved.path}`
+      : '实时回放只能运行已保存的 revision；请先保存当前修改。'),
+    muted('会占用前台并可能触发 macOS 权限提示；运行期间点「停止」会中断 CLI。'),
+    el('label', { className: 'checkbox' }, confirmed, '我确认回放会操作当前桌面的应用窗口'),
+    ...(values.size ? [
+      el('h3', {}, '运行参数值'),
+      muted('参数值只传给本次回放进程，不写入 flow 或报告。'),
+      ...[...values.entries()].map(([name, node]) => field(name, node)),
+    ] : []),
+  ], '开始回放', async () => {
+    if (!confirmed.checked) throw new Error('确认后才会开始实时回放。');
+    const inputs = Object.fromEntries([...values.entries()].map(([name, node]) => [name, node.value]));
+    const report = await api('run', { session: state.session.id, mode: 'live', confirm: true, inputs });
+    state.v2Report = report;
+    renderV2();
+    renderTimeline();
+    status(`实时回放${resultStatus[report.status] ?? report.status} · ${report.entries.length} 步` +
+      (report.stopped ? ' · 已停止' : ''), report.status === 'passed' ? 'success' : 'error');
+    setTimeout(() => showV2Result(report), 0);
+  });
+}
+
+function showV2Result(report) {
+  openDialog('v2 回放结果', [
+    el('h3', {}, resultStatus[report.status] ?? report.status),
+    ...(report.appIdentities ?? []).map(identity => muted(
+      `${identity.app} · ${identity.status}${identity.code ? ` · ${identity.code}` : ''}` +
+      (identity.reason ? ` · ${identity.reason}` : ''))),
+    el('ol', { className: 'stack' }, ...report.entries.map(entry => el('li', {},
+      el('button', {
+        type: 'button', className: 'link-button',
+        onclick: () => { state.v2Selected = entry.id; dialog.close(); renderV2(); },
+      }, `${entry.id} · ${KIND_LABELS[entry.kind] ?? entry.kind}`),
+      el('span', { className: `run-status ${entry.status}` }, resultStatus[entry.status] ?? entry.status),
+      entry.code ? muted(`${entry.code}${entry.message ? ` · ${entry.message}` : ''}`) : undefined))),
+  ]);
+}
+
+function v2ScopeFields(initial = {}) {
+  const kind = select([['window', '窗口'], ['app', '应用']]);
+  kind.value = initial.kind === 'app' ? 'app' : 'window';
+  const app = input({ value: initial.app ?? '', maxLength: 256, placeholder: 'com.apple.TextEdit' });
+  const title = input({ value: initial.windowTitle ?? '', maxLength: 256 });
+  const key = input({ value: initial.windowKey ?? '', maxLength: 64, placeholder: '留空自动生成' });
+  const titleBox = field('窗口标题', title);
+  const keyBox = field('windowKey', key);
+  const sync = () => {
+    titleBox.hidden = kind.value === 'app';
+    keyBox.hidden = kind.value === 'app';
+  };
+  kind.onchange = sync;
+  sync();
+  return {
+    controls: [field('作用域类型', kind), field('App 标识', app), titleBox, keyBox],
+    value() {
+      const appId = app.value.trim();
+      if (!appId) throw new Error('填写 App 标识。');
+      if (kind.value === 'app') return { kind: 'app', app: appId };
+      if (!title.value.trim()) throw new Error('填写窗口标题。');
+      return {
+        kind: 'window', app: appId, windowTitle: title.value.trim(),
+        ...(key.value.trim() ? { windowKey: key.value.trim() } : {}),
+      };
+    },
+  };
+}
+
+function v2ScopeDialog(step) {
+  if (!step.scope || step.scope.kind === 'surface') {
+    openDialog('作用域', [muted('系统界面步骤的作用域在录制时固定，当前版本只支持窗口与应用作用域编辑。')]);
+    return;
+  }
+  const fields = v2ScopeFields(step.scope);
+  openDialog('编辑作用域', [
+    ...fields.controls,
+    muted(step.scope.kind === 'window'
+      ? '更换 App 时会重建 windowKey；窗口标题必须同时更新。'
+      : 'App 作用域没有窗口键。'),
+  ], '应用', () => v2Edit({ kind: 'update', id: step.id, patch: { scope: fields.value() } }));
+}
+
+function v2TargetDialog(step) {
+  const picker = locatorFields(step.target ?? step.to);
+  openDialog('编辑点击目标', [
+    ...picker.controls,
+    muted('v2 流程只保存元素定位器；坐标必须先解析成元素。'),
+  ], '应用', () => v2Edit({ kind: 'update', id: step.id, patch: { target: picker.value() } }));
+}
+
+function v2DragDialog(step) {
+  const from = locatorFields(step.from);
+  const to = locatorFields(step.to);
+  openDialog('编辑拖拽端点', [...from.controls, el('hr'), ...to.controls], '应用', () =>
+    v2Edit({ kind: 'update', id: step.id, patch: { from: from.value(), to: to.value() } }));
+}
+
+function v2TypeDialog(step) {
+  const picker = locatorFields(step.target);
+  const mode = select([['text', '文本'], ['input', '参数名']]);
+  mode.value = 'input' in step ? 'input' : 'text';
+  const text = el('textarea', { rows: 3, maxLength: 4000 });
+  if ('text' in step) text.value = step.text;
+  const param = input({ maxLength: 64, value: 'input' in step ? step.input : '' });
+  const textBox = field('输入文本', text);
+  const paramBox = field('参数名', param);
+  const sync = () => {
+    textBox.hidden = mode.value !== 'text';
+    paramBox.hidden = mode.value !== 'input';
+  };
+  mode.onchange = sync;
+  sync();
+  openDialog('编辑输入步骤', [
+    ...picker.controls, field('内容来源', mode), textBox, paramBox,
+    muted('参数值保存在测试数据里，不写入 flow。'),
+  ], '应用', () => {
+    const patch = { target: picker.value() };
+    if (mode.value === 'text') {
+      if (!text.value) throw new Error('填写输入文本。');
+      patch.text = text.value;
+    } else {
+      const name = param.value.trim();
+      if (!/^[a-zA-Z][a-zA-Z0-9_]{0,63}$/.test(name)) throw new Error('参数名以字母开头，只含字母、数字与下划线。');
+      patch.input = name;
+    }
+    return v2Edit({ kind: 'update', id: step.id, patch });
+  });
+}
+
+const v2Keys = ['return', 'tab', 'space', 'escape', 'delete', 'backspace', 'up', 'down', 'left', 'right',
+  'home', 'end', 'pageup', 'pagedown', 'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'f9', 'f10', 'f11', 'f12'];
+const v2Modifiers = ['ctrl', 'alt', 'shift', 'meta'];
+
+function v2KeyDialog(step) {
+  const key = input({ value: step.key, maxLength: 20 });
+  const boxes = v2Modifiers.map(name => ({
+    name,
+    node: el('input', { type: 'checkbox', checked: (step.modifiers ?? []).includes(name) }),
+  }));
+  openDialog('编辑快捷键', [
+    field('按键', key),
+    el('div', { className: 'parameter-list' }, ...boxes.map(({ name, node }) =>
+      el('label', { className: 'checkbox' }, node, name))),
+    muted(`常用键：${v2Keys.join(' ')}；单字符键写小写字母或数字。`),
+  ], '应用', () => {
+    const name = key.value.trim().toLowerCase();
+    if (!/^(?:[a-z0-9]|space|return|tab|escape|delete|backspace|forwarddelete|up|down|left|right|home|end|pageup|pagedown|f[1-9]|f1[0-2])$/.test(name)) {
+      throw new Error('按键名不受支持。');
+    }
+    return v2Edit({
+      kind: 'update', id: step.id,
+      patch: { key: name, modifiers: boxes.filter(box => box.node.checked).map(box => box.name) },
+    });
+  });
+}
+
+function v2WaitDialog(step) {
+  const appScope = step.scope.kind === 'app';
+  const kinds = appScope
+    ? [['app_running', '应用运行中'], ['app_installed', '应用已安装']]
+    : [['window_exists', '窗口存在'], ['element', '元素状态'], ['element_enabled', '元素可用'], ['window', '窗口属性']];
+  const kind = select(kinds);
+  kind.value = step.check.kind;
+  const picker = locatorFields(step.check.target);
+  const property = select([['exists', '存在'], ['visible', '可见'], ['text', '文本'], ['value', '值']]);
+  const value = input({ maxLength: 4000, value: typeof step.check.expect?.equals === 'string' ? step.check.expect.equals : '' });
+  const toggle = select([['true', '成立'], ['false', '不成立']]);
+  toggle.value = step.check.equals === false || step.check.expect?.equals === false ? 'false' : 'true';
+  const elements = el('div', { className: 'stack' }, ...picker.controls);
+  const propertyBox = field('属性', property);
+  const toggleBox = field('预期结果', toggle);
+  const valueBox = field('预期内容', value);
+  const timeout = el('input', { type: 'number', min: '1000', max: '1800000', step: '1000', value: String(step.timeoutMs ?? 15000) });
+  const sync = () => {
+    const elementKind = kind.value === 'element';
+    elements.hidden = !['element', 'element_enabled'].includes(kind.value);
+    propertyBox.hidden = !['element', 'window'].includes(kind.value);
+    if (kind.value === 'window') {
+      property.replaceChildren(
+        el('option', { value: 'exists' }, '存在'), el('option', { value: 'title' }, '标题'));
+    } else {
+      property.replaceChildren(
+        el('option', { value: 'exists' }, '存在'), el('option', { value: 'visible' }, '可见'),
+        el('option', { value: 'text' }, '文本'), el('option', { value: 'value' }, '值'));
+    }
+    if (kind.value === 'window' && step.check.expect?.property === 'title') property.value = 'title';
+    else if (elementKind && step.check.expect?.property) property.value = step.check.expect.property;
+    const bool = property.value === 'exists' || property.value === 'visible';
+    toggleBox.hidden = !['window_exists', 'app_running', 'app_installed', 'element_enabled'].includes(kind.value) && !bool;
+    valueBox.hidden = propertyBox.hidden || bool;
+  };
+  kind.onchange = sync;
+  property.onchange = sync;
+  sync();
+  openDialog('编辑等待', [
+    field('条件', kind), elements, propertyBox, toggleBox, valueBox, field('超时（毫秒）', timeout),
+  ], '应用', () => {
+    let check;
+    if (kind.value === 'window_exists' || kind.value === 'app_running' || kind.value === 'app_installed') {
+      check = { kind: kind.value, equals: toggle.value === 'true' };
+    } else if (kind.value === 'element_enabled') {
+      check = { kind: 'element_enabled', target: picker.value(), equals: toggle.value === 'true' };
+    } else if (kind.value === 'element') {
+      const bool = property.value === 'exists' || property.value === 'visible';
+      check = {
+        kind: 'element', target: picker.value(),
+        expect: bool
+          ? { property: property.value, equals: toggle.value === 'true' }
+          : { property: property.value, equals: value.value },
+      };
+    } else {
+      check = {
+        kind: 'window',
+        expect: property.value === 'exists'
+          ? { property: 'exists', equals: toggle.value === 'true' }
+          : { property: 'title', equals: value.value },
+      };
+    }
+    const timeoutMs = Number(timeout.value);
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 1800000) {
+      throw new Error('超时需为 1000–1800000 毫秒。');
+    }
+    return v2Edit({ kind: 'update', id: step.id, patch: { check, timeoutMs } });
+  });
+}
+
+function v2AssertFields(initial) {
+  const targetKind = select([['element', '元素'], ['window', '窗口']]);
+  targetKind.value = initial?.target?.kind === 'window' ? 'window' : 'element';
+  const picker = locatorFields(initial?.target?.kind === 'window' ? undefined : initial?.target);
+  const property = select([['exists', '存在'], ['visible', '可见'], ['text', '文本'], ['value', '值'], ['title', '标题']]);
+  if (initial?.expect?.property) property.value = initial.expect.property;
+  const equals = input({ maxLength: 4000, value: initial?.expect?.equals !== undefined && typeof initial.expect.equals === 'string' ? initial.expect.equals : '' });
+  const toggle = select([['true', '成立'], ['false', '不成立']]);
+  toggle.value = initial?.expect?.equals === false ? 'false' : 'true';
+  const elementBox = el('div', { className: 'stack' }, ...picker.controls);
+  const valueBox = field('预期内容', equals);
+  const boolBox = field('预期结果', toggle);
+  const sync = () => {
+    const window = targetKind.value === 'window';
+    elementBox.hidden = window;
+    const wanted = property.value || initial?.expect?.property;
+    property.replaceChildren(...(window
+      ? [el('option', { value: 'exists' }, '存在'), el('option', { value: 'title' }, '标题')]
+      : [el('option', { value: 'exists' }, '存在'), el('option', { value: 'visible' }, '可见'),
+        el('option', { value: 'text' }, '文本'), el('option', { value: 'value' }, '值')]));
+    if (wanted && [...property.options].some(option => option.value === wanted)) property.value = wanted;
+    const bool = property.value === 'exists' || property.value === 'visible';
+    boolBox.hidden = !bool;
+    valueBox.hidden = bool;
+  };
+  targetKind.onchange = sync;
+  property.onchange = sync;
+  sync();
+  return {
+    controls: [field('断言目标', targetKind), elementBox, field('属性', property), boolBox, valueBox],
+    value() {
+      const bool = property.value === 'exists' || property.value === 'visible';
+      return assertCheck({
+        target: targetKind.value === 'window' ? { kind: 'window' } : picker.value(),
+        property: property.value,
+        equals: bool ? toggle.value === 'true' : equals.value,
+      });
+    },
+  };
+}
+
+function v2AssertDialog(step) {
+  const fields = v2AssertFields(step.check);
+  openDialog('编辑断言', fields.controls, '应用', () =>
+    v2Edit({ kind: 'update', id: step.id, patch: { check: fields.value() } }));
+}
+
+function v2CheckpointDialog(step) {
+  openDialog('人工检查点（只读）', [
+    infoList([
+      ['触发步骤', step.triggerStepId],
+      ['原因', step.reason],
+      ['恢复条件', checkLabel(step.resume?.check)],
+      ['等待上限', duration(step.timeoutMs)],
+      ['恢复作用域', v2ScopeText(step.resume?.scope)],
+    ], 'meta-grid'),
+    muted('密码不进入 flow，也不由工作台读取；回放时由操作者在目标界面完成授权。'),
+  ]);
+}
+
+function v2GapDialog(step) {
+  const kind = select([['wait', '转为等待'], ['manual_checkpoint', '转为人工检查点']]);
+  const fields = v2ScopeFields(step.scope);
+  const timeout = el('input', { type: 'number', min: '1000', max: '1800000', step: '1000', value: '15000' });
+  const trigger = v2Steps()[Math.max(0, v2Steps().findIndex(entry => entry.id === step.id) - 1)];
+  openDialog(`处理缺口 · ${step.code}`, [
+    muted('缺口没有可回放的作用域，运行前必须转成等待或人工检查点。'),
+    field('转换方式', kind), ...fields.controls, field('超时（毫秒）', timeout),
+    kind.value === 'manual_checkpoint'
+      ? muted(`触发步骤沿用前一步 ${trigger?.id ?? '（无）'}；恢复条件为窗口存在。`)
+      : undefined,
+  ], '转换', async () => {
+    const scope = fields.value();
+    const timeoutMs = Number(timeout.value);
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 1800000) {
+      throw new Error('超时需为 1000–1800000 毫秒。');
+    }
+    const next = kind.value === 'wait'
+      ? {
+        id: step.id, kind: 'wait', scope, timeoutMs,
+        check: scope.kind === 'app' ? { kind: 'app_running', equals: true } : { kind: 'window_exists', equals: true },
+      }
+      : {
+        id: step.id, kind: 'manual_checkpoint', scope, reason: 'secure_input',
+        triggerStepId: trigger?.id ?? step.id,
+        resume: { scope, check: { kind: 'window_exists', equals: true } }, timeoutMs,
+      };
+    const result = await api('v2/replace', { session: state.session.id, id: step.id, step: next });
+    state.v2 = result;
+    state.v2Report = null;
+    renderV2();
+    renderTimeline();
+    status('缺口已转换，仍需复核并保存。', 'success');
+  });
+}
+
+function v2InsertDialog() {
+  const anchor = v2SelectedStep() ?? v2Steps().at(-1);
+  const anchorScope = anchor && anchor.kind !== 'gap' ? anchor.scope : undefined;
+  const kind = select([...V2_INSERT_KINDS.entries()]);
+  const app = input({ value: anchorScope?.app ?? '', maxLength: 256, placeholder: 'com.apple.TextEdit' });
+  const title = input({ value: anchorScope?.kind === 'window' ? anchorScope.windowTitle : '', maxLength: 256 });
+  const key = input({ value: anchorScope?.kind === 'window' ? anchorScope.windowKey : '', maxLength: 64 });
+  const titleBox = field('窗口标题', title);
+  const keyBox = field('windowKey', key);
+  const timeout = el('input', { type: 'number', min: '1000', max: '1800000', step: '1000', value: '15000' });
+  const timeoutBox = field('等待超时（毫秒）', timeout);
+  const picker = locatorFields(anchor?.target);
+  const targetBox = el('div', { className: 'stack' }, ...picker.controls);
+  const assertFields = v2AssertFields(undefined);
+  const assertBox = el('div', { className: 'stack' }, ...assertFields.controls);
+  const sync = () => {
+    const appScope = kind.value === 'launch_app' || kind.value === 'activate_app';
+    titleBox.hidden = appScope;
+    keyBox.hidden = appScope;
+    targetBox.hidden = !['click', 'type'].includes(kind.value);
+    assertBox.hidden = kind.value !== 'assert';
+    timeoutBox.hidden = kind.value !== 'wait';
+  };
+  kind.onchange = sync;
+  sync();
+  const scopeValue = () => {
+    if (!app.value.trim()) throw new Error('填写 App 标识。');
+    if (kind.value === 'launch_app' || kind.value === 'activate_app') {
+      return { kind: 'app', app: app.value.trim() };
+    }
+    if (!title.value.trim() || !key.value.trim()) throw new Error('窗口步骤需要窗口标题与 windowKey。');
+    return { kind: 'window', app: app.value.trim(), windowTitle: title.value.trim(), windowKey: key.value.trim() };
+  };
+  openDialog('插入步骤', [
+    field('类型', kind), field('App 标识', app), titleBox, keyBox,
+    targetBox, assertBox, timeoutBox,
+    muted(anchor ? `插入到 ${anchor.id} 之后。` : '插入到流程末尾。'),
+  ], '插入', async () => {
+    const index = anchor ? v2Steps().findIndex(entry => entry.id === anchor.id) + 1 : v2Steps().length;
+    if (kind.value === 'assert') {
+      if (!anchor || anchor.kind === 'gap') throw new Error('断言要接在一个有作用域的步骤之后。');
+      return v2Edit({ kind: 'assert', afterStepId: anchor.id, check: assertFields.value() });
+    }
+    const timeoutMs = Number(timeout.value);
+    if (kind.value === 'wait' && (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 1800000)) {
+      throw new Error('超时需为 1000–1800000 毫秒。');
+    }
+    const step = stepTemplate(kind.value, {
+      id: id(kind.value), scope: scopeValue(),
+      target: ['click', 'type'].includes(kind.value) ? picker.value() : undefined,
+      timeoutMs,
+    });
+    return v2Edit({ kind: 'insert', index, step });
+  });
+}
+
+function v2SelectedStep() {
+  return state.v2Selected ? v2Step(state.v2Selected) : undefined;
+}
+
 function render() {
   const focus = document.activeElement?.id;
   renderSummary();
@@ -580,6 +1198,7 @@ function render() {
   renderTimeline();
   renderInspector();
   renderDraft();
+  renderV2();
   if (focus && !dialog.open) $(focus)?.focus({ preventScroll: true });
 }
 

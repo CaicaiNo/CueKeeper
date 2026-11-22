@@ -321,3 +321,196 @@ export function shellSummary(action) {
     : action.argv.map(part => /\s/.test(part) ? JSON.stringify(part) : part).join(' ');
   return { command, cwd: action.cwd ?? '输入目录', privilege };
 }
+
+// --- Version 2 timeline editing -------------------------------------------------
+// These helpers only turn a v2 step into words and build the payloads the P2
+// `EditOp` contract accepts. The server owns every mutation, undo/redo, the
+// diff and revision writes; nothing here edits a flow in place.
+
+const waitKindLabels = {
+  window_exists: '窗口存在', element_enabled: '元素可用', element: '元素状态',
+  window: '窗口属性', app_running: '应用运行中', app_installed: '应用已安装',
+};
+
+/** One window/app/surface scope as the editor groups and filters it. */
+export function scopeKey(scope) {
+  if (!scope) return 'gap';
+  if (scope.kind === 'window') return `window:${scope.app}:${scope.windowKey}`;
+  if (scope.kind === 'app') return `app:${scope.app}`;
+  return `surface:${scope.surface}:${scope.app ?? ''}:${scope.windowKey ?? ''}`;
+}
+
+export function v2TargetLabel(target) {
+  if (!target) return '';
+  if (target.kind === 'window') return '窗口';
+  if (target.kind === 'point') return `坐标 (${target.point?.join(', ')})`;
+  return [target.role, target.name, target.path?.join(' › '),
+    target.index === undefined ? '' : `[${target.index}]`]
+    .filter(value => value !== undefined && value !== '').join(' · ');
+}
+
+export function expectLabel(expect) {
+  if (!expect) return '';
+  if (expect.property === 'exists') return `存在 = ${expect.equals ? '成立' : '不成立'}`;
+  if (expect.property === 'visible') return `可见 = ${expect.equals ? '成立' : '不成立'}`;
+  if (expect.property === 'screenshot') return '截图比对';
+  if (expect.equals !== undefined) return `${expect.property} = ${expect.equals}`;
+  if (expect.contains !== undefined) return `${expect.property} 包含 ${expect.contains}`;
+  if (expect.matches !== undefined) return `${expect.property} 匹配 ${expect.matches}`;
+  return expect.property ?? '';
+}
+
+/** A wait or assertion condition in one readable line. */
+export function checkLabel(check) {
+  if (!check) return '—';
+  if (check.expect) {
+    const target = check.target
+      ? (check.target.kind === 'window' ? '窗口' : v2TargetLabel(check.target))
+      : '';
+    const label = check.kind ? `${waitKindLabels[check.kind] ?? check.kind} · ` : '';
+    return `${label}${target}${target ? ' · ' : ''}${expectLabel(check.expect)}`;
+  }
+  if (check.equals !== undefined) {
+    return `${waitKindLabels[check.kind] ?? check.kind} = ${check.equals ? '成立' : '不成立'}`;
+  }
+  return waitKindLabels[check.kind] ?? check.kind;
+}
+
+/** The timeline's one-line description of a v2 step. */
+export function v2StepLabel(step, appName = id => id) {
+  if (!step) return '';
+  switch (step.kind) {
+    case 'click': {
+      const prefix = step.button === 'right' ? '右键'
+        : step.count === 2 ? '双击' : step.count === 3 ? '三击' : '点击';
+      return `${prefix} · ${v2TargetLabel(step.target)}`;
+    }
+    case 'type': return 'text' in step
+      ? `输入 “${step.text.length > 60 ? `${step.text.slice(0, 60)}…` : step.text}”`
+      : `输入参数 ${step.input}`;
+    case 'key': return `快捷键 ${[...(step.modifiers ?? []), step.key].join('+')}`;
+    case 'scroll': return `滚轮 ${v2TargetLabel(step.target)}`;
+    case 'drag': return `拖拽 ${v2TargetLabel(step.from)} → ${v2TargetLabel(step.to)}`;
+    case 'hover': return `悬停 · ${v2TargetLabel(step.target)} · ${step.durationMs} ms`;
+    case 'paste': return step.source.kind === 'copy'
+      ? `粘贴 · 复制 ${step.source.stepId}`
+      : `粘贴 · 参数 ${step.source.input}`;
+    case 'wait': return `等待 · ${checkLabel(step.check)}`;
+    case 'assert': return `断言 · ${checkLabel(step.check)}`;
+    case 'launch_app': return `启动 ${appName(step.scope.app)}`;
+    case 'activate_app': return `激活 ${appName(step.scope.app)}`;
+    case 'focus_window': return isWindowScope(step.scope) ? `聚焦 ${step.scope.windowTitle}` : '聚焦窗口';
+    case 'open_system_surface': return `打开 ${SURFACE_LABELS[step.scope.surface] ?? step.scope.surface}`;
+    case 'surface_press': return `操作 ${SURFACE_LABELS[step.scope.surface] ?? step.scope.surface}`;
+    case 'manual_checkpoint': return `人工检查点 · 触发 ${step.triggerStepId}`;
+    case 'gap': return `缺口 · ${step.code}`;
+    default: return KIND_LABELS[step.kind] ?? step.kind;
+  }
+}
+
+/** The steps whose target the editor can repoint. */
+export const V2_TARGET_KINDS = new Set(['click', 'type', 'scroll', 'drag', 'hover', 'paste']);
+/** The steps the P2 insert operation accepts. */
+export const V2_INSERT_KINDS = new Map([
+  ['wait', '等待'], ['assert', '断言'], ['click', '点击'], ['type', '输入'],
+  ['key', '快捷键'], ['launch_app', '启动应用'], ['activate_app', '激活应用'], ['focus_window', '聚焦窗口'],
+]);
+/** The steps a duplicate can insert again. */
+export const V2_COPYABLE_KINDS = new Set([
+  'click', 'type', 'key', 'wait', 'assert', 'launch_app', 'activate_app', 'focus_window',
+]);
+
+const isWindowScope = scope => Boolean(scope) && scope.kind === 'window';
+
+/** Distinct scopes in flow order, for the timeline's scope filter. */
+export function scopeOptions(flow, appName = id => id) {
+  const seen = new Map();
+  for (const step of flow?.steps ?? []) {
+    if (step.kind === 'gap' || !step.scope) continue;
+    const key = scopeKey(step.scope);
+    if (!seen.has(key)) seen.set(key, scopeDescription(step.scope, appName));
+  }
+  return [...seen.entries()].map(([key, label]) => ({ key, label }));
+}
+
+export function filterStepsByScope(flow, key) {
+  const steps = flow?.steps ?? [];
+  return key ? steps.filter(step => scopeKey(step.kind === 'gap' ? undefined : step.scope) === key) : steps;
+}
+
+/** Added/removed/moved/modified lines for the save panel. */
+export function diffSummary(diff) {
+  if (!diff) return { changed: false, lines: [] };
+  const lines = [];
+  if (diff.added.length) lines.push(`新增 ${diff.added.map(item => item.id).join('、')}`);
+  if (diff.removed.length) lines.push(`删除 ${diff.removed.map(item => item.id).join('、')}`);
+  if (diff.moved.length) {
+    lines.push(`移动 ${diff.moved.map(item => `${item.id} ${item.from}→${item.to}`).join('、')}`);
+  }
+  if (diff.orderChanged && !diff.moved.length) lines.push('步骤顺序变化');
+  if (diff.modified.length) {
+    lines.push(`修改 ${diff.modified.map(item => `${item.id}（${item.fields.join(' / ')}）`).join('、')}`);
+  }
+  if (diff.flowFields.length) lines.push(`flow 字段 ${diff.flowFields.join('、')}`);
+  return { changed: Boolean(diff.changed ?? lines.length), lines };
+}
+
+/** A run report's entries keyed by step id, so the timeline can mark each step. */
+export function statusMap(report) {
+  const map = new Map();
+  for (const entry of report?.entries ?? []) map.set(entry.id, entry);
+  return map;
+}
+
+/**
+ * Build an assertion from the dialog. `target` is a window marker or an element
+ * locator; text/value assertions carry exactly one comparator.
+ */
+export function assertCheck({ target, property, equals, contains, matches, normalize }) {
+  if (!target) throw new Error('断言需要目标元素或窗口。');
+  const comparator = matches !== undefined ? { matches }
+    : contains !== undefined ? { contains }
+      : { equals: property === 'exists' || property === 'visible' ? Boolean(equals) : String(equals ?? '') };
+  if (!['exists', 'visible', 'text', 'value', 'title', 'screenshot'].includes(property)) {
+    throw new Error('未知的断言属性。');
+  }
+  return {
+    target,
+    expect: {
+      property,
+      ...(property === 'exists' || property === 'visible' ? { equals: Boolean(equals) } : comparator),
+      ...(normalize ? { normalize } : {}),
+    },
+  };
+}
+
+/**
+ * Build a complete insert step. Target and app/window fields come from the
+ * dialog; ids come from the page because the engine only validates uniqueness.
+ */
+export function stepTemplate(kind, { id, scope, target, key = 'tab', modifiers = [], timeoutMs = 15000 }) {
+  if (!id) throw new Error('步骤需要 id。');
+  if (!scope) throw new Error('步骤需要作用域。');
+  switch (kind) {
+    case 'click':
+      if (!target) throw new Error('点击步骤需要元素定位器。');
+      return { id, kind, scope, target };
+    case 'type':
+      if (!target) throw new Error('输入步骤需要元素定位器。');
+      return { id, kind, scope, target, text: '输入文本' };
+    case 'key':
+      return { id, kind, scope, key, ...(modifiers.length ? { modifiers } : {}) };
+    case 'wait':
+      if (scope.kind === 'app') return { id, kind, scope, check: { kind: 'app_running', equals: true }, timeoutMs };
+      return { id, kind, scope, check: { kind: 'window_exists', equals: true }, timeoutMs };
+    case 'launch_app':
+    case 'activate_app':
+      if (scope.kind !== 'app') throw new Error('启动与激活需要 App 作用域。');
+      return { id, kind, scope };
+    case 'focus_window':
+      if (scope.kind !== 'window') throw new Error('聚焦窗口需要窗口作用域。');
+      return { id, kind, scope };
+    default:
+      throw new Error(`${kind} 不能从时间线插入。`);
+  }
+}

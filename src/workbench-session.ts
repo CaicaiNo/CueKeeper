@@ -3,11 +3,11 @@ import { readdir, realpath, stat } from 'node:fs/promises';
 import { extname, isAbsolute, join, relative, sep } from 'node:path';
 import { reportCheck } from './contracts.js';
 import type { Action, Report } from './contracts.js';
-import { reportV2Check } from './contracts-v2.js';
+import { flowV2Check, reportV2Check } from './contracts-v2.js';
 import type { FlowV2, ReportV2, Scope, StepV2 } from './contracts-v2.js';
 import { readJson } from './files.js';
 import { hashFlow, plan } from './flow.js';
-import { hashFlowV2, parseFlowDocument, scopeKey } from './flow-v2.js';
+import { hashFlowV2, isFlowV2, parseFlowDocument, scopeKey, validateFlowV2 } from './flow-v2.js';
 import { object, parseSnapshot } from './locator.js';
 import { pickCandidates } from './pick.js';
 import type { PickCandidate } from './pick.js';
@@ -124,6 +124,22 @@ async function newestRecording(directory: string): Promise<string | undefined> {
   return dated[0].name;
 }
 
+/**
+ * A recording with a capture gap is still opened: the gap is exactly what the
+ * operator has to convert into a wait or a manual checkpoint in the workbench.
+ * Every other semantic fault is refused at import, and saving revalidates.
+ */
+function parseFlowDocumentOrGaps(input: unknown) {
+  if (!isFlowV2(input)) return parseFlowDocument(input);
+  if (!flowV2Check.Check(input)) {
+    const first = [...flowV2Check.Errors(input)][0];
+    throw new Error(`Invalid flow version 2 ${first?.path ?? ''}: ${first?.message ?? 'schema mismatch'}`);
+  }
+  const flow = input as FlowV2;
+  if (!flow.steps.some(step => step.kind === 'gap')) validateFlowV2(flow);
+  return { version: 2 as const, flow };
+}
+
 export async function loadSession(path: string) {
   const directory = await realpath(path);
   if (!(await stat(directory)).isDirectory()) throw new Error('Select a run directory');
@@ -132,15 +148,20 @@ export async function loadSession(path: string) {
       .map(name => readArtifact(directory, name)),
   );
   let source = primary ?? recorded;
+  let flowPath = primary !== undefined ? join(directory, 'flow.json')
+    : recorded !== undefined ? join(directory, 'recorded.flow.json') : undefined;
   if (source === undefined) {
     const oneKey = await newestRecording(directory);
     if (oneKey === undefined) {
       throw new Error('The selected directory needs flow.json, recorded.flow.json, or a recording-*.flow.json file');
     }
     source = await readArtifact(directory, oneKey);
+    flowPath = join(directory, oneKey);
   }
-  const parsed = parseFlowDocument(source);
-  if (parsed.version === 2) return loadV2Session(directory, parsed.flow, rawReport, rawActions, rawLifecycle);
+  const parsed = parseFlowDocumentOrGaps(source);
+  if (parsed.version === 2) {
+    return loadV2Session(directory, parsed.flow, rawReport, rawActions, rawLifecycle, flowPath as string);
+  }
   const flow = parsed.flow;
   const planned = plan(flow);
   let report: Report | undefined;
@@ -256,6 +277,7 @@ async function loadV2Session(
   rawReport: unknown,
   rawActions: unknown,
   rawLifecycle: unknown,
+  flowPath: string,
 ) {
   let report: ReportV2 | undefined;
   if (rawReport !== undefined) {
@@ -362,6 +384,8 @@ async function loadV2Session(
       startedAt: fromCapture ? undefined : report?.startedAt,
       hasSnapshot: false, snapshotAppPath: undefined, pathConflict: false,
       shell: { reachable: 0, definitions: 0, privileged: 0 },
+      // The recording the editor loaded; a revision is written next to it.
+      flowPath,
     },
   };
 }

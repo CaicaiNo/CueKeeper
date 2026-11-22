@@ -1,17 +1,20 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
+import { lstat, mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { listApps } from './app-catalog.js';
 import { appIconPng } from './apps.js';
 import { loadBaseline } from './assertion.js';
 import { fixtureAppPath, offlineDesktop, withDesktop } from './desktop.js';
 import { readJson, writeNew } from './files.js';
 import { hashFlow, plan } from './flow.js';
-import { isFlowV2 } from './flow-v2.js';
-import type { FlowV2 } from './contracts-v2.js';
+import { dryRunFlowV2, hashFlowV2, isFlowV2 } from './flow-v2.js';
+import type { FlowV2, StepV2 } from './contracts-v2.js';
 import { Fault, object } from './locator.js';
 import { crop, decodePng, encodePng } from './png.js';
 import { runFlow } from './run.js';
@@ -24,6 +27,8 @@ import { keepConfirmedSetup } from './setup.js';
 import { parseLibraryItem, parseTestItem, resolveSecrets } from './test-item.js';
 import { workbenchAssets } from './workbench-assets.js';
 import { loadSession, sameTarget } from './workbench-session.js';
+import { EditError, loadEditableFlow } from './workbench-edit.js';
+import type { EditableFlowV2, EditOp } from './workbench-edit.js';
 import { confirmWaitCandidate } from './wait-candidates.js';
 import type { WaitCandidate } from './wait-candidates.js';
 
@@ -123,19 +128,122 @@ function planHash(sessionId: string, flowSha256: string, steps: unknown, capture
     .digest('hex');
 }
 
+/** Runtime values for a live v2 replay, one string per declared parameter. */
+function inputValues(names: readonly string[], raw: unknown): Record<string, string> {
+  const source = raw === undefined ? {} : object(raw);
+  const values: Record<string, string> = {};
+  for (const name of names) {
+    const value = source[name];
+    if (typeof value !== 'string' || value.length === 0 || value.length > 4000) {
+      throw new Error(`Input ${name} needs a value before a live replay`);
+    }
+    values[name] = value;
+  }
+  return values;
+}
+
+/** The v2 report a `run` subprocess printed as its last JSON line. */
+function cliReport(stdout: string, stderr = ''): unknown {
+  const detail = stderr.trim().split('\n').at(-1);
+  const suffix = detail ? `: ${detail}` : '';
+  const line = stdout.trim().split('\n').filter(Boolean).at(-1);
+  if (!line) throw new Error(`The replay process printed no report${suffix}`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line) as unknown;
+  } catch {
+    throw new Error(`The replay process did not print a JSON report${suffix}`);
+  }
+  const envelope = object(parsed);
+  if (envelope.data === undefined) throw new Error(`The replay process printed an unexpected report${suffix}`);
+  return envelope.data;
+}
+
 export async function startWorkbench(options: {
   directory?: string; port: number; library?: string; allowLive: boolean;
   allowShell?: boolean; allowSudo?: boolean; signal: AbortSignal;
+  /** The CLI used by a live v2 replay; tests point it at a stub. */
+  cliPath?: string;
 }) {
   let session = options.directory ? await loadSession(options.directory) : undefined;
+  // A v2 session keeps its editing state in this server process; the P2 engine
+  // owns mutations, undo/redo, validation, the diff and revision writes.
+  const openEditor = async (loaded: Awaited<ReturnType<typeof loadSession>> | undefined) => {
+    if (!loaded || loaded.view.version !== 2) return undefined;
+    const flowPath = (loaded.view as { flowPath?: string }).flowPath;
+    if (!flowPath) throw new Error('The version 2 session has no recording path');
+    return loadEditableFlow(flowPath);
+  };
+  let editable = await openEditor(session);
   const library = resolve(options.library ?? join(homedir(), '.cuekeeper', 'behaviors'));
   const allowLive = options.allowLive && process.platform === 'darwin';
   const allowShell = options.allowShell ?? false;
   const allowSudo = options.allowSudo ?? false;
   const tokens = new Map<string, ConfirmationToken>();
+  const cliPath = options.cliPath ?? fileURLToPath(new URL('./cli.js', import.meta.url));
   let running = false;
   let currentRun: AbortController | undefined;
+  let currentChild: ChildProcess | undefined;
+  let childStopped = false;
   let origin: string;
+
+  /** The editing snapshot the page renders after every v2 call. */
+  function v2View() {
+    if (!editable) return undefined;
+    const flow = editable.flow;
+    const saved = editable.savedRevisions;
+    return {
+      flowPath: editable.source.path,
+      originalSha256: editable.source.sha256,
+      originalFlowSha256: editable.source.flowSha256,
+      flow,
+      diff: editable.diff(),
+      // Dirty means "differs from the last saved revision"; with no revision
+      // yet it means "differs from the recording".
+      dirty: saved.length
+        ? saved.at(-1)!.flowSha256 !== hashFlowV2(flow)
+        : hashFlowV2(flow) !== editable.source.flowSha256,
+      validation: editable.validate(),
+      canUndo: editable.canUndo,
+      canRedo: editable.canRedo,
+      saved: saved.map(revision => ({
+        path: revision.path,
+        createdAt: revision.createdAt,
+        flowSha256: revision.flowSha256,
+        changed: revision.diff.changed,
+      })),
+    };
+  }
+
+  function sessionView(loaded: NonNullable<typeof session>) {
+    const view = { ...loaded.view } as Record<string, unknown>;
+    const editor = v2View();
+    if (editor) view.v2 = editor;
+    return view;
+  }
+
+  function runCli(args: string[], cwd: string) {
+    return new Promise<{ code: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string }>(
+      (resolveRun, rejectRun) => {
+        const child = spawn(process.execPath, [cliPath, ...args], {
+          cwd, stdio: ['ignore', 'pipe', 'pipe'], env: process.env,
+        });
+        currentChild = child;
+        let stdout = '';
+        let stderr = '';
+        child.stdout?.on('data', chunk => { stdout += String(chunk); });
+        child.stderr?.on('data', chunk => { stderr += String(chunk); });
+        child.once('error', error => {
+          currentChild = undefined;
+          rejectRun(error);
+        });
+        child.once('close', (code, signal) => {
+          currentChild = undefined;
+          resolveRun({ code, signal, stdout, stderr });
+        });
+      },
+    );
+  }
 
   function libraryEntry(item: Awaited<ReturnType<typeof parseLibraryItem>>) {
     const shells = item.behavior.steps.filter(step => step.kind === 'shell');
@@ -196,7 +304,8 @@ export async function startWorkbench(options: {
     const data = await readBody(request);
     if (path === '/api/state') {
       return send(response, 200, {
-        session: session?.view, allowLive, allowShell, allowSudo, library: await listLibrary(),
+        session: session ? sessionView(session) : undefined,
+        allowLive, allowShell, allowSudo, library: await listLibrary(),
       });
     }
     if (path === '/api/apps') return send(response, 200, { apps: await listApps() });
@@ -206,10 +315,19 @@ export async function startWorkbench(options: {
       const path = data.directory.trim();
       const imported = await loadSession(path.startsWith('~/') ? join(homedir(), path.slice(2)) : path);
       if (running) throw new Error('A test is running');
+      const nextEditable = await openEditor(imported);
       session = imported;
-      return send(response, 200, session.view);
+      editable = nextEditable;
+      return send(response, 200, sessionView(imported));
     }
     if (path === '/api/stop') {
+      // A live v2 replay is a CLI child process; stopping it signals the CLI so
+      // its report still records which step was interrupted.
+      if (currentChild) {
+        childStopped = true;
+        currentChild.kill('SIGINT');
+        return send(response, 200, { stopped: true });
+      }
       // Stop is bound to the server run, not to a session snapshot.
       if (!currentRun) return send(response, 200, { stopped: false });
       currentRun.abort(new Error('Stopped from the workbench'));
@@ -239,12 +357,120 @@ export async function startWorkbench(options: {
         output, steps: next.steps.length, candidate: candidate.id, ready: candidate.ready,
       });
     }
-    // Editing, saving and replay all still depend on the v1 single-window
-    // contract. A v2 session is review-only until the cross-app runner lands.
+    // Version 2 is edited and replayed through the P2 engine: every mutation is
+    // one EditOp, a revision is written next to the recording and the original
+    // file is only ever read. The v1 single-window path below is untouched.
     if (isFlowV2(activeFlow)) {
+      if (!editable) return send(response, 409, { error: 'Reload the current session' });
+      if (path === '/api/v2/edit') {
+        if (running) return send(response, 409, { error: 'A test is running' });
+        if (data.op === null || typeof data.op !== 'object' || Array.isArray(data.op)) {
+          throw new Error('An edit needs one operation');
+        }
+        const result = editable.apply(data.op as EditOp);
+        if (!result.ok) {
+          return send(response, 400, {
+            error: result.error.code, message: result.error.message, detail: result.error,
+          });
+        }
+        return send(response, 200, v2View());
+      }
+      if (path === '/api/v2/replace') {
+        if (running) return send(response, 409, { error: 'A test is running' });
+        if (typeof data.id !== 'string' || data.step === null || typeof data.step !== 'object') {
+          throw new Error('Replacing a gap needs its step id and the new step');
+        }
+        try {
+          editable.replaceStep(data.id, data.step as StepV2);
+        } catch (error) {
+          if (error instanceof EditError) {
+            return send(response, 400, { error: error.code, message: error.message, detail: error.toDetail() });
+          }
+          throw error;
+        }
+        return send(response, 200, v2View());
+      }
+      if (path === '/api/v2/undo' || path === '/api/v2/redo') {
+        if (running) return send(response, 409, { error: 'A test is running' });
+        const changed = path === '/api/v2/undo' ? editable.undo() : editable.redo();
+        if (!changed) {
+          return send(response, 409, {
+            error: path === '/api/v2/undo' ? 'NOTHING_TO_UNDO' : 'NOTHING_TO_REDO',
+          });
+        }
+        return send(response, 200, v2View());
+      }
+      if (path === '/api/save') {
+        if (running) return send(response, 409, { error: 'A test is running' });
+        let revision;
+        try {
+          revision = await editable.saveRevision();
+        } catch (error) {
+          if (error instanceof EditError) {
+            return send(response, 400, { error: error.code, message: error.message, detail: error.toDetail() });
+          }
+          throw error;
+        }
+        // Saving never rewrites the recording; the revision is a sibling file.
+        return send(response, 201, {
+          output: revision.path, createdAt: revision.createdAt, flowSha256: revision.flowSha256,
+          originalSha256: editable.source.sha256, diff: revision.diff, v2: v2View(),
+        });
+      }
+      if (path === '/api/run') {
+        if (running) throw new Error('A test is already running');
+        if (data.mode !== 'dry-run' && data.mode !== 'live') throw new Error('Choose a dry run or a live replay');
+        const flow = editable.flow;
+        const gaps = flow.steps.filter(step => step.kind === 'gap');
+        if (gaps.length) {
+          return send(response, 400, {
+            error: 'GAP_UNRESOLVED',
+            message: `Resolve the capture gap at ${gaps[0].id} before running; a gap has no replayable scope`,
+            detail: { stepId: gaps[0].id, stepIds: gaps.map(step => step.id) },
+          });
+        }
+        const validation = editable.validate();
+        if (!validation.ok) {
+          const first = validation.errors[0];
+          return send(response, 400, { error: first.code, message: first.message, detail: first });
+        }
+        // A dry run reports the structural scope plan without opening a window.
+        if (data.mode === 'dry-run') return send(response, 200, { ...dryRunFlowV2(flow), stopped: false });
+        if (!allowLive || data.confirm !== true) {
+          throw new Error('Live replay requires --allow-live-replay and explicit confirmation');
+        }
+        const saved = editable.savedRevisions.at(-1);
+        if (!saved || saved.flowSha256 !== hashFlowV2(flow)) {
+          throw new Error('Save the edited flow before a live replay');
+        }
+        const inputs = (flow.inputs ?? []).length
+          ? inputValues(flow.inputs as string[], data.inputs)
+          : undefined;
+        const args = ['run', saved.path, '--foreground', '--headed', '--json'];
+        let inputsFile: string | undefined;
+        if (inputs) {
+          // Values stay out of the flow: they travel to the CLI as a private,
+          // short-lived file and are removed once the replay exits.
+          inputsFile = join(tmpdir(), `cuekeeper-workbench-inputs-${randomUUID()}.json`);
+          await writeFile(inputsFile, `${JSON.stringify(inputs)}\n`, { mode: 0o600 });
+          args.push('--inputs', inputsFile);
+        }
+        childStopped = false;
+        running = true;
+        try {
+          const result = await runCli(args, current.directory);
+          const report = cliReport(result.stdout, result.stderr);
+          return send(response, 200, {
+            ...(report as object), exitCode: result.code, signal: result.signal, stopped: childStopped,
+          });
+        } finally {
+          running = false;
+          if (inputsFile) await unlink(inputsFile).catch(() => {});
+        }
+      }
       return send(response, 400, {
-        error: 'UNSUPPORTED_FLOW_VERSION: a flow version 2 session is read-only in the workbench; ' +
-          'editing and replay arrive with the cross-app runner',
+        error: 'UNSUPPORTED_FLOW_VERSION',
+        message: 'A version 2 session supports edit, undo/redo, save and run endpoints',
       });
     }
     if (path === '/api/library') {
