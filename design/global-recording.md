@@ -46,9 +46,9 @@ v1 的 `flowSchema` 和 `reportSchema` 都是 `version: 1` 的封闭对象。全
 | 条件等待 | `wait` 允许 `window` 或 `app` scope。`check` 可为 `{ kind: "window_exists", equals }`、`{ kind: "element_enabled", target, equals }`、既有的安全元素条件，或 App scope 下的 `{ kind: "app_running" \| "app_installed", equals }`。进程退出用 `app_running: false` 的等值比较。`timeoutMs` 默认 15 秒，上限 30 分钟 |
 | 人工检查点 | `manual_checkpoint` 包含 `id`、触发块的 `scope`（窗口）、`triggerStepId`、`reason: "secure_input"`、`resume: { scope, check }` 和 `timeoutMs`。触发步紧邻检查点，且作用域一致。`resume` 用同一套只读条件，由录制结果提出或由工作台确认。占位未确认或未填恢复条件时，作为缺口阻塞实时回放 |
 | P3 与缺口 | `open_system_surface`、`surface_press` 使用 `surface`。`surface_press` 的 selector 按 surface 分支校验，例如 Dock 的 `bundleId`、App 菜单的标识路径。`gap` 只保存 `id`、`kind`、`code`，不包含原始事件。存在尚未处理的缺口时整条 flow 在产生副作用前被拒绝 |
-| `Intent` | 沿用 HAOC-99 顶层注释模型。每个已确认注释保存 `id`、`action`、该动作的封闭 `params` 与连续的 `sourceStepIds`。编译出的计划项继承原始区间的起止作用域和效果约束。单个计划不接受重叠的替换区间，源步骤或参数编辑后重新确认 |
+| `Intent` | 沿用 HAOC-99 顶层注释模型。每个可执行注释保存 `id`、`action`、封闭的 `params`、连续的 `sourceStepIds`、`equivalence`、`skippedUiStepIds` 和 `observableEffects`。跳过的界面步骤必须是来源区间的有序子集。`observableEffects` 由适配器定义，包含作用域及可验证条件，例如 Installer 打开指定 pkg。可执行的 `equivalence` 限于 `same_ui` 和 `same_end_state`。编译后的计划项继承原始区间的起止作用域。替换区间不得重叠，区间、参数、类别或效果变更后重新确认 |
 | 引用规则 | `app` 为已解析的 bundle ID。`windowKey` 在 flow 内唯一绑定 App，同键后续可携带新标题作为显示名。首次绑定使用首次实际需要时的精确标题。`appPaths` 每个 bundle ID 最多一条 macOS 绝对 `.app` 路径，且必须被该 flow 引用。`inputs` 保存参数名，不保存值。引用必须存在，`copy.stepId` 必须指向已出现的合规复制步。解析器另校验作用域、动作和 P2/P3 能力组合 |
-| `Report` | `version: 2` 并保留 `flowId`、`flowSha256`、`startedAt`、`mode`、`status` 和顺序 `entries`。每个 action entry 带 `scope`，可带 `phase`、经验证的语义来源、`delivery` 与错误码。身份验证按 App 记录，移除单数 `appIdentity`。缺口、全局验证失败可以没有作用域。报告不含运行时 PID、绝对 App 路径或输入原文 |
+| `Report` | `version: 2` 并保留 `flowId`、`flowSha256`、`startedAt`、`mode`、`status` 和顺序 `entries`。每个 action entry 带 `scope`，可带 `phase`、经验证的语义来源、`delivery` 与错误码。语义结果含 `intentId`、`sourceStepIds`、实际采用的 `equivalence`、实际跳过的 `skippedUiStepIds` 与效果核验结果。回退时按原始步骤记结果，并保留未采用的候选及原因。身份验证按 App 记录，移除单数 `appIdentity`。缺口、全局验证失败可以没有作用域。报告不含运行时 PID、绝对 App 路径或输入原文 |
 
 最小跨 App 样例，前两个窗口标题均来自待回放的测试夹具。
 
@@ -124,7 +124,19 @@ any failure/cancel → Stop → Release
 
 **IME。** `type` 将已绑定的文本走 Unicode 注入。全局默认回放不查询或切换 TIS，不保存或还原录制时输入法。物理键仍有输入法差异，优先使用可验证的按键语义或 committed text。无法确认 IME 的提交结果时仅产生待填写输入或 `IME_COMMIT_UNVERIFIED` 缺口，禁止把拼音候选串当作最终文字。参见 `docs/ime.md`。
 
-**语义执行计划。** 用 HAOC-99 的确定性规则按 App、窗口、AX role/label、按键序列和可观察结果识别候选。来源证据含糊、区间存在不相关的输入或授权检查点时保留原始计划。工作台展示候选动作、参数、副作用和覆盖的全部原始步骤。用户可确认、拒绝或编辑参数后再确认。正常回放在确认位置编译为一个基础动作，工作台另可选择原始计划。两种计划都以原始 `steps` 为真相源，使用同一 scope 和副作用验证。报告记录原始步区间、所选动作、验证结果与回退原因。仅能证明动作尚未修改状态、原区间还可安全执行时才回退。
+### 语义 intent 准入
+
+用 HAOC-99 的确定性规则按 App、窗口、AX role/label、按键序列和可观察结果识别连续步骤。以用例观察到的窗口、对话框、提示、选项、授权、进度和可验证副作用判定等价。可观察结果与观察顺序都是准入条件。安装或卸载成功等最终结果本身不足以证明等价。
+
+| 类别 | 可观察行为 | 准入 |
+| --- | --- | --- |
+| `same_ui` | 保留同一目标与用例可观察的窗口、对话框、提示、状态转移和结果。可用稳定动作代替双击、快捷键等手势 | 默认准入，已确认且运行前复验通过的候选可进入默认 `prefer` 计划。工作台可选择原始计划。若用例检查被替代的手势反馈，保留原始步骤 |
+| `same_end_state` | 有可验证的同一终态，跳过了菜单、编辑框等可见步骤 | 仅用于准备步骤，或测试员明确接受跳过的非验证步骤。工作台必须逐项展示「将跳过 N 个界面步骤」，由用户对该候选显式确认。覆盖界面断言、授权检查点或流程必需的观察点时拒绝替换 |
+| `different_behavior` | 改变被测流程，或绕开授权、许可、安装选项、确认或进度。即使最后文件与进程状态一致，行为仍有差别 | 录制回放拒绝此类别，确认为何种 intent 均不能改变准入。未来如需无界面任务，应由用户单独声明为 headless 动作，使用独立于录制回放的入口 |
+
+类别取自已验证的动作及其适配器路径，由编译器复核。工作台展示参数、类别、可观察副作用和完整原始步骤。未确认、缺少必要证据、包含不相关输入或标为 `different_behavior` 的建议保留原始计划。导入文件若要求执行 `different_behavior`，在任何桌面调用前报告 `INTENT_EQUIVALENCE_REJECTED`。禁止通过改类别绕过校验。
+
+回放以原始 `steps` 为真相源。只有在已证明替代动作尚未送达输入或改变状态、原区间仍能安全执行且与已确认参数一致时，允许按已声明的回退策略重放原始区间。已发生或无法排除副作用时停在当前 intent。
 
 ## 4. 系统动作与 HAOC-99
 
@@ -135,12 +147,20 @@ any failure/cancel → Stop → Release
 | `open_system_surface` | 声明 Dock、App 菜单栏、系统状态项或 Spotlight。适配器验证实际可访问且 owner 一致。可见或可按其语义打开时执行，失败即停 |
 | `surface_press` | Dock 图标按 bundle ID，App 菜单按唯一菜单路径，系统状态项按经过验证的标识，Spotlight 应用结果按 bundle ID。名称只可作为待确认的唯一匹配。索引与屏幕位置留在临时命中阶段 |
 
-系统导航基础动作属于 `steps`。例如，P3 的 Dock `surface_press` 可提出 `launch_app` intent，展开仍看到原始 Dock 操作。HAOC-99 的 `open_app` 和 `switch_app` 分别映射到 `launch_app` 和 `activate_app`。另一个优先纵切是 `rename_file`。后续候选包括 `download_file`、`open_file`、`open_url`、`type_text`、`delete_file`、`install_pkg`、`uninstall_app`。其中安装与卸载仍需保留授权检查点，首轮用通用步骤完成。各候选须先定义作用域、输入来源和可观察结果。
+系统导航基础动作属于 `steps`。P3 的 Dock `surface_press` 可提出 `launch_app` intent，前提是通过 `same_ui` 核验。HAOC-99 的 `open_app` 和 `switch_app` 分别映射到 `launch_app` 和 `activate_app`。首批另验证 `open_file` 打开 pkg 与 `rename_file`。`download_file`、`open_url`、`type_text`、`delete_file` 仍是待评估候选，须先定义作用域、输入来源、类别和可观察结果。
+
+本节与 §3 的准入规则是 HAOC-99 共享编译器的前置约束。HAOC-99 现有 `covers` 对应 v2 的 `sourceStepIds`，两种 flow 的执行都保留连续区间与原始计划。实现前须同步 HAOC-99 的语义动作设计、目录和 `rename_file` 纵切，使两种 flow 使用同一准入和报告口径。
+
+### 打开 pkg、安装与卸载
+
+- 用例从双击 pkg 后出现的 Installer 窗口继续时，`open_file` 可用 `open <pkg>` 或 `open -a Installer <pkg>` 替换双击，类别为 `same_ui`。执行前验证同一个 pkg 和实际解析的 Installer 身份，执行后验证前台 Installer 打开了该 pkg，并接上相同的交互步骤。命令退出码不足以通过核验。若用例检查 Finder 双击反馈、文件关联本身或其他入口特有行为，保留该原始步骤。[Apple Launch Services](https://developer.apple.com/documentation/coreservices/launch_services) · [Apple 命令行指南](https://developer.apple.com/library/archive/documentation/OpenSource/Conceptual/ShellScripting/CommandLInePrimer/CommandLine.html)
+- 安装路径禁止以 `installer -pkg` 替换 Installer GUI。它属于 `different_behavior`，会绕开用例要观察的许可、安装位置、选项、管理员授权和进度等界面。首轮保留实际出现的安装器步骤、人工授权及条件等待。`install_pkg` 默认不进入 intent 目录。
+- 卸载路径禁止以 `rm -rf` 替换 Finder 移到废纸篓或卸载器操作。它属于 `different_behavior`，会跳过确认、授权和应用自身的清理流程。首轮保留 Finder 动作、卸载器 GUI、授权检查点和结果断言。`uninstall_app` 默认不进入 intent 目录。
 
 ### `rename_file(path, oldName, newName)` 纵切
 
 1. **识别。** 从下载完成记录与 Finder 实际选中项确认被下载的文件。识别同一 Finder 窗口内「右键文件 → 重命名菜单项 → 同行编辑 → 提交」的连续区间。菜单 role、已支持的本地化 label、编辑框归属和回车提交都要一致。完整保存原区间和 locator，下载是独立的前置步骤。
-2. **绑定。** `path` 来自实际下载目录中的受信测试路径。`oldName` 取本次下载项与 Finder 选择共同证明的名称，包括系统分配的 `pkg (1).pkg`。重名靠下载项与文件身份关联，无法关联时提示确认，禁止按文件名后缀猜测。`newName` 来自经确认的重命名输入或运行时参数。工作台展示实际旧、新路径，改参数要重新确认。
+2. **绑定与确认。** `path` 来自实际下载目录中的受信测试路径。`oldName` 取本次下载项与 Finder 选择共同证明的名称，包括系统分配的 `pkg (1).pkg`。重名靠下载项与文件身份关联，无法关联时保留原始计划。`newName` 来自经确认的重命名输入或运行时参数。将该动作标为 `same_end_state`，列出实际旧、新路径。对上面的四步示例，显示「将跳过 4 个界面步骤」及对应的右键、菜单选择、编辑和提交。用户确认后才采用。若用例验证原重命名界面，保留原始步骤。
 3. **执行。** 校验源项仍是该目录中的已验证下载文件，目标名合法且目标未被占用。使用能够绑定该文件且保证不覆盖的直接文件重命名，或经验证满足相同约束的 Finder AX 重命名。拒绝越出指定目录、跟随不可信链接、使用管理员凭据或在源身份不明时继续。
 4. **验证与回退。** 验证新路径存在且身份延续、旧路径消失。未执行且原始 steps 仍能唯一作用于同一个下载文件时，允许回退并记录原因。目标冲突、可能已经改名或事后校验失败时停止在该 intent，报告原始区间以及已知状态。自动测试分别用同名副本和占用目标验证有效重命名与零误改。
 
@@ -149,6 +169,7 @@ any failure/cancel → Stop → Release
 - 元素/文本断言和 `wait` 从该步窗口的 AX 树读取，secure 或无法安全读取时禁止比较。窗口级 v2 `check.target` 使用 `{ kind: "window" }`，窗口选择完全来自 scope。仅 `exists` 可用 App scope 查询该 App 的普通窗口是否存在。窗口 scope 下 `exists: false` 需要完整、可信清单和不含歧义的身份，已验证消失的绑定窗口可以判为不存在。核对失败或清单不完整时阻塞。标题断言在已绑定窗口上比较实际标题，录制标题只是后续显示标签。
 - 截图断言先核对窗口身份与 region，再在内存中裁剪和比较。基线必须是显式提供的测试区域，默认报告只保留比较结论和差异统计。证据需单独开启，只允许可验证为安全的裁剪区域。当前使用临时全帧 PNG 的驱动路径不能用于 v2，缺少内存捕获能力时返回 `ASSERTION_CAPTURE_FAILED`。截图断言只支持普通窗口。
 - 按时间顺序写 report。第一个失败的断言为 `failed`，缺少准备条件、隐私拒绝和焦点冲突为 `blocked`，其后步骤标为 `skipped`。入口预检的失败在桌面操作前报告，同时给出涉及的步骤 ID。报告只保留安全的作用域标签、阶段、错误码与比较结果。文本断言的原文、实际内容及未过滤的驱动错误均不随报告输出。
+- 采用 intent 时报告实际执行的类别、跳过的界面步骤和副作用核验。走原始计划时记录原始步骤的结果。候选拒绝或回退可附原因，但不能把候选类别计为已采用，也不能把已执行的原始界面步骤记为跳过。
 
 | 码 | 终止点与含义 |
 | --- | --- |
@@ -160,6 +181,7 @@ any failure/cancel → Stop → Release
 | `SECURE_INPUT` / `PRIVACY_REDACTED` / `INPUT_REQUIRED` | 未计划的 secure 事件或对 secure 控件的自动操作、敏感或未经确认的元数据被遮蔽、缺少运行时测试输入 |
 | `MANUAL_CHECKPOINT_REQUIRED` / `MANUAL_CHECKPOINT_CANCELLED` / `MANUAL_CHECKPOINT_TIMEOUT` | 缺少交接能力、操作者取消或拒绝、或到期仍未获得确认且验证恢复条件 |
 | `CLIPBOARD_CHANGED` / `CLIPBOARD_SOURCE_UNVERIFIED` | 粘贴所依赖的剪贴板版本已改变，或无法确认有效复制来源 |
+| `INTENT_EQUIVALENCE_REJECTED` | 待执行 intent 的类别与适配器、原始区间或可观察效果不符。预检在桌面调用前终止 |
 | `SEMANTIC_PRECONDITION_FAILED` / `SEMANTIC_RESULT_UNVERIFIED` | intent 参数或副作用前提不满足，或执行结果无法验证。报告附回退资格与原始区间 |
 | `CAPTURE_GAP` / `UNSUPPORTED_FLOW_VERSION` | Flow 有待处理的缺口，或当前入口不支持该版本。均在桌面调用前停止 |
 | `WAIT_TIMEOUT` / `ASSERTION_FALSE` / `ASSERTION_CAPTURE_FAILED` | 等待条件超时、可信的观测结果不匹配、截图目标或安全捕获路径不可用 |
@@ -188,7 +210,7 @@ any failure/cancel → Stop → Release
 3. **窗口与焦点。** 假驱动记录 launch、focus、snapshot、dispatch 调用序列，并检验最终 App/窗口的可见状态。覆盖同名窗口、路径错误、应用缺失、进程重启、标题变更后仍绑定原窗口、同名替换被拒绝。注入启动超时、人工切走和可能已投递的错误，断言停在原步骤、后续未发输入，且不重复投递。
 4. **输入与安全。** 验证多作用域使用同一运行时文本参数时仍命中各自控件，Unicode 文本完整，默认 TIS 调用数为零。验证跨 App 复制后只粘贴当前可信数据，模拟外部剪贴板更新后无 `Cmd+V`。检查 secure、Token、私聊标题样本从 flow、报告、快照、标准输出和临时产物中均不可检索。
 5. **断言与工作台。** 在两个 App 放入同名控件和同名窗口，验证正负存在断言、文本与窗口 region 始终绑定正确 scope。断言失败后没有下一个 App 的动作。工作台筛选/折叠保留全局序号，过期哈希不能关联报告。截图能力不足时确认没有临时全帧 PNG。
-6. **系统语义。** 假 Dock 变更位置和顺序但保留 bundle ID，断言仍选择对应 App。校验错误 owner、重复菜单名称、Spotlight 不支持时不发动作。校验 intent 确认前后 `steps` 深比较相等，来源区间连续且完整，可能已有副作用时调用轨迹没有回退动作。
+6. **系统语义与准入。** 假 Dock 改变位置与顺序，断言仍选中相同 bundle ID。`same_ui` 打开 pkg 后核对同一包的 Installer 窗口，随后仍经过相同的 GUI 观测和授权。`same_end_state` 重命名前必须展示将跳过的步骤，拒绝后执行原步骤，确认后仅修改目标副本。断言 intent 前后 `steps` 深比较相等，来源区间连续，报告所记类别与实际执行一致。伪标为 `same_ui` 的无界面安装或卸载必须在投递前被拒绝。可能已有副作用时不得再次投递原区间。
 7. **安装周期与交接。** 假清单依次出现浏览器下载完成、Installer sheet、secure 边界、安装完成、App 首次出现、卸载器和 App 消失。分别验证等待推进、超时、未知条件和地址正确绑定。向测试夹具混入假密码，断言 raw event、flow、report、日志和截图产物均无该值，确认后只执行原检查点之后的步骤。拒绝或超时后比较每个 App 的投递轨迹，后续为空。
 
 ### 实机验收计划
@@ -205,9 +227,9 @@ any failure/cancel → Stop → Release
 | 顺序 | 录制与回放 | 可观察的通过条件 |
 | --- | --- | --- |
 | 1. 浏览器下载 pkg | 浏览器窗口里的地址栏 `type(input)`、导航、下载和下载完成 `wait` | 下载项完成，预期 pkg 在指定下载目录可唯一定位 |
-| 2. 打开 pkg | Finder 窗口里的文件双击并等待 Installer 窗口。浏览器下载列表入口使用浏览器窗口 scope 与同一后置条件。P3 加测打开前重命名，随后按已验证的新文件身份继续 | 打开的是预期 pkg，Installer 的新窗口由自己的 owner 和窗口键确认。重命名变体仅改所选副本，原区间可展开 |
+| 2. 打开 pkg | Finder 或浏览器下载列表双击文件。P3 对照验证 `same_ui` 的 `open_file`，另加测经确认的 `same_end_state` 重命名 | 原始与替换计划打开同一个 pkg 的 Installer UI。重命名仅改所选副本，工作台和报告可展开核对跳过的步骤 |
 | 3. 继续并安装 | Installer 主窗口或已验证 sheet 中的点击。遇管理员授权插入人工检查点 | 用户亲自在授权界面完成，敏感区间从捕获和回放输入中隔离。后续安装状态可安全读取 |
 | 4. 等待完成 | 等安装完成界面或可点击的完成按钮，再核对预期 App 已安装。若用例关闭 Installer，另等进程退出 | 等待期间只有观察。安装完成与进程退出通过各自条件确认，超时保留已经到达的作用域与步骤 |
 | 5. 启动并登录 | 启动已确认的 bundle，等待进程和主页，向指定字段输入测试地址。登录密码沿用人工检查点 | App 窗口和地址字段正确，登录后的主页可见 |
 | 6. 验证功能 | 被测 App 窗口内通用输入、等待与断言 | 断言能证明用例中声明的界面或数据变化，首个失败可定位到窗口与步骤 |
-| 7. 删除并卸载 | Finder 窗口选择确切测试包安装出的 App。卸载器独立进程或 sheet 按实际归属建 scope。再次请求密码时复用人工检查点。启动台仅在相应系统 surface 已通过 P3 验证时作为替代入口 | 确认卸载器完成，并通过预期路径和安装身份核实 App 移除，活跃进程退出。报告中两次授权按对应步骤出现，无密码原文 |
+| 7. 删除并卸载 | 保留 Finder 对确切测试 App 的移到废纸篓操作和卸载器 GUI。为独立进程或 sheet 按实际归属建 scope。再次请求密码时复用人工检查点 | 确认卸载器 UI 完成、预期 App 移除且活跃进程退出。报告按发生位置列出授权检查点，卸载路径仍覆盖确认和清理流程 |
