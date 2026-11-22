@@ -370,7 +370,7 @@ const assetRole = T.Union([
   T.Literal('snapshot'), T.Literal('file'), T.Literal('video'), T.Literal('filmstrip'),
 ]);
 const manifestAsset = object({
-  path: T.String({ minLength: 1, maxLength: 256 }),
+  path: T.String({ minLength: 1, maxLength: 512 }),
   entryId: T.Optional(T.String({ minLength: 1, maxLength: 196 })),
   role: assetRole,
   bytes: T.Integer({ minimum: 0 }),
@@ -380,7 +380,7 @@ export const manifestSchema = object({
   flowId: id,
   flowSha256: digest,
   reportStartedAt: timestamp,
-  files: T.Record(T.String({ minLength: 1, maxLength: 256 }), manifestFile),
+  files: T.Record(T.String({ minLength: 1, maxLength: 512 }), manifestFile),
   assets: T.Array(manifestAsset, { maxItems: 10_000 }),
   video: T.Optional(videoArtifactSchema),
 });

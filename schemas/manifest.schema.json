@@ -52,7 +52,7 @@
         "properties": {
           "path": {
             "minLength": 1,
-            "maxLength": 256,
+            "maxLength": 512,
             "type": "string"
           },
           "entryId": {
