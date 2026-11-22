@@ -41,7 +41,7 @@ struct RecordingPointerTests {
                 print(String(decoding: line, as: UTF8.self))
             }
         }
-        let count = cases.count + (try testSequences(emitTrace: emitTrace)) + testHover()
+        let count = cases.count + (try testSequences(emitTrace: emitTrace)) + testHover() + testGlobalClickEvidence()
         if !emitTrace { print("Recording pointer: \(count)/\(count) passed") }
     }
 
@@ -159,6 +159,100 @@ struct RecordingPointerTests {
             precondition(drags.count == expectedDrags, "Unexpected drags for \(scenario.name)")
         }
         return cases.count + testDrags()
+    }
+
+    private static func testGlobalClickEvidence() -> Int {
+        let finderPID: Int32 = 198
+        let finderWindow = 1234
+        let finder: [String: Any] = [
+            "app": "com.apple.finder", "pid": Int(finderPID), "windowNumber": finderWindow,
+            "windowTitle": "Downloads", "role": "AXRow", "name": "Example.pkg", "pressable": true,
+        ]
+        let finderTarget = GlobalPointerTarget(eventWindow: finderWindow, liveWindow: finderWindow,
+                                               destination: finderPID, predatesFocus: false)
+        precondition(finderTarget.canReadAX)
+        let finderEvidence = GlobalPointerEvidence(owner: finder, focusGeneration: 3, secureEvidence: [],
+                                                    targetMatches: finderTarget.matches(ownerPID: finderPID),
+                                                    isFocused: true, axOwnerMatches: true)
+        let start: UInt64 = 10_000_000_000
+        var lag = GlobalCaptureLag()
+        func click(_ pointer: inout RecordingPointer, at ms: UInt64, seen: Int, number: Int64 = 1,
+                   count: Int64 = 1, button: Int64 = 0, evidence: GlobalPointerEvidence) -> [String: Any] {
+            let point = CGPoint(x: 135, y: 165)
+            let down = PointerSample(timestamp: start + ms * 1_000_000, location: point,
+                                     eventNumber: number, clickState: count)
+            let up = PointerSample(timestamp: down.timestamp + 10_000_000, location: point,
+                                   eventNumber: number, clickState: count)
+            let observedAt = start + UInt64(seen) * 1_000_000
+            precondition(!lag.shouldReport(isKeyDown: false, timestamp: down.timestamp, now: observedAt))
+            precondition(!lag.shouldReport(isKeyDown: false, timestamp: up.timestamp, now: observedAt))
+            precondition(pointer.press(down, button: button) == .awaitingRelease)
+            let (reason, click, _) = pointer.release(up)
+            guard reason == .accepted, let click, let t = click.elapsedMilliseconds(since: start) else {
+                preconditionFailure("Expected the press and release to make a click")
+            }
+            return click.payload(t: t, seen: seen, evidence: evidence)
+        }
+
+        // A callback processed 1.9 s after the click keeps its complete owner and input evidence.
+        var pointer = RecordingPointer()
+        let delayed = click(&pointer, at: 100, seen: 2_000, evidence: finderEvidence)
+        precondition(delayed["kind"] as? String == "click" && delayed["decision"] as? String == "record")
+        precondition(delayed["gapCode"] == nil && delayed["point"] as? [Int] == [135, 165])
+        precondition(delayed["button"] as? String == "left" && delayed["count"] as? Int == 1)
+        precondition((delayed["owner"] as? NSDictionary)?.isEqual(to: finder) == true)
+
+        // The second click arrives after the live hit changed. Quartz still
+        // names Finder, so the point survives without taking another window's AX data.
+        let queuedTarget = GlobalPointerTarget(eventWindow: finderWindow, liveWindow: 5678,
+                                               destination: finderPID, predatesFocus: false)
+        precondition(queuedTarget.window == finderWindow && !queuedTarget.canReadAX)
+        var pointOwner = finder
+        pointOwner["role"] = nil
+        pointOwner["name"] = nil
+        pointOwner["pressable"] = false
+        let pointEvidence = GlobalPointerEvidence(owner: pointOwner, focusGeneration: 3, secureEvidence: [],
+                                                   targetMatches: queuedTarget.matches(ownerPID: finderPID),
+                                                   isFocused: true, axOwnerMatches: nil)
+        let second = click(&pointer, at: 240, seen: 3_100, number: 2, count: 2, evidence: pointEvidence)
+        let doubleClick = [delayed, second]
+        precondition(doubleClick.map { $0["t"] as? Int } == [100, 240])
+        precondition(doubleClick.map { $0["count"] as? Int } == [1, 2])
+        precondition(doubleClick.allSatisfy { $0["decision"] as? String == "record" && $0["gapCode"] == nil })
+        precondition((second["owner"] as? NSDictionary)?.isEqual(to: pointOwner) == true)
+
+        // With no event window and a newer focus observation, the live hit
+        // cannot identify the original click. The gap keeps its coordinates.
+        let missing = GlobalPointerTarget(eventWindow: nil, liveWindow: 5678, destination: nil, predatesFocus: true)
+        precondition(missing.window == nil)
+        let missingEvidence = GlobalPointerEvidence(owner: ["pressable": false], focusGeneration: 4, secureEvidence: [],
+                                                     targetMatches: missing.matches(ownerPID: finderPID),
+                                                     isFocused: false, axOwnerMatches: nil)
+        let gap = click(&pointer, at: 400, seen: 3_800, number: 3, button: 1, evidence: missingEvidence)
+        precondition(gap["kind"] as? String == "click" && gap["decision"] as? String == "gap")
+        precondition(gap["gapCode"] as? String == "CAPTURE_SCOPE_UNVERIFIED")
+        precondition(gap["point"] as? [Int] == [135, 165] && gap["button"] as? String == "right")
+        let missingOwner = gap["owner"] as? [String: Any]
+        precondition(gap["count"] as? Int == 1 && missingOwner?["app"] == nil)
+        precondition(missingOwner?["pid"] == nil && missingOwner?["windowNumber"] == nil)
+
+        let conflicting = GlobalPointerTarget(eventWindow: finderWindow, liveWindow: finderWindow,
+                                                destination: 23, predatesFocus: false)
+        let conflictingEvidence = GlobalPointerEvidence(owner: finder, focusGeneration: 3, secureEvidence: [],
+                                                         targetMatches: conflicting.matches(ownerPID: finderPID),
+                                                         isFocused: true, axOwnerMatches: nil)
+        precondition(conflictingEvidence.fields(forClick: true)["gapCode"] as? String == "CAPTURE_SCOPE_UNVERIFIED")
+        let conflictingAX = GlobalPointerEvidence(owner: finder, focusGeneration: 3, secureEvidence: [],
+                                                   targetMatches: true, isFocused: true, axOwnerMatches: false)
+        precondition(conflictingAX.fields(forClick: true)["gapCode"] as? String == "CAPTURE_SCOPE_UNVERIFIED")
+
+        let secure = GlobalPointerEvidence(owner: pointOwner, focusGeneration: 3,
+                                            secureEvidence: ["system_secure_input"], targetMatches: true,
+                                            isFocused: true, axOwnerMatches: nil)
+        precondition(secure.fields(forClick: true)["gapCode"] as? String == "SECURE_INPUT")
+        precondition(lag.shouldReport(isKeyDown: true, timestamp: start, now: start + 4_000_000_000))
+        precondition(!lag.shouldReport(isKeyDown: true, timestamp: start, now: start + 4_100_000_000))
+        return 7
     }
 
     /// Drag sampling, endpoints and duration are asserted directly: a wrong
