@@ -971,40 +971,76 @@
                 ]
               },
               "target": {
-                "additionalProperties": false,
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "const": "element",
-                    "type": "string"
+                "anyOf": [
+                  {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "const": "element",
+                        "type": "string"
+                      },
+                      "role": {
+                        "minLength": 1,
+                        "maxLength": 256,
+                        "type": "string"
+                      },
+                      "name": {
+                        "maxLength": 256,
+                        "type": "string"
+                      },
+                      "path": {
+                        "minItems": 1,
+                        "maxItems": 51,
+                        "type": "array",
+                        "items": {
+                          "minLength": 1,
+                          "maxLength": 256,
+                          "type": "string"
+                        }
+                      },
+                      "index": {
+                        "minimum": 0,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "role"
+                    ]
                   },
-                  "role": {
-                    "minLength": 1,
-                    "maxLength": 256,
-                    "type": "string"
-                  },
-                  "name": {
-                    "maxLength": 256,
-                    "type": "string"
-                  },
-                  "path": {
-                    "minItems": 1,
-                    "maxItems": 51,
-                    "type": "array",
-                    "items": {
-                      "minLength": 1,
-                      "maxLength": 256,
-                      "type": "string"
-                    }
-                  },
-                  "index": {
-                    "minimum": 0,
-                    "type": "integer"
+                  {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "const": "point",
+                        "type": "string"
+                      },
+                      "point": {
+                        "type": "array",
+                        "items": [
+                          {
+                            "minimum": -100000,
+                            "maximum": 100000,
+                            "type": "integer"
+                          },
+                          {
+                            "minimum": -100000,
+                            "maximum": 100000,
+                            "type": "integer"
+                          }
+                        ],
+                        "additionalItems": false,
+                        "minItems": 2,
+                        "maxItems": 2
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "point"
+                    ]
                   }
-                },
-                "required": [
-                  "kind",
-                  "role"
                 ]
               },
               "count": {

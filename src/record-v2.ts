@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { defaultCheckpointTimeoutMs, flowV2Check } from './contracts-v2.js';
@@ -31,6 +32,8 @@ const dragCenterTolerance = 4;
 const dragPathLimit = 64;
 const clickTextFallbackMs = 5000;
 const maxWindowBindings = 64;
+/** One retry for a window-tree read: a slow window can finish just past its budget. */
+const snapshotRetryMs = 100;
 
 const editable = new Set(['textfield', 'textbox', 'textarea', 'searchfield', 'combobox']);
 const bundleIdPattern = /^[A-Za-z0-9][A-Za-z0-9-]*(?:\.[A-Za-z0-9][A-Za-z0-9-]*)+$/;
@@ -68,13 +71,22 @@ type WindowBinding = {
 };
 
 type StepDraft = Record<string, unknown> & { kind: StepV2['kind'] };
+/** A recorded click target: the element under the pointer, or its raw point. */
+type ClickTarget = ElementLocator | { kind: 'point'; point: Point };
 
 function nearPoint(a: Point, b: Point) {
   return Math.abs(a[0] - b[0]) <= multiClickDistance && Math.abs(a[1] - b[1]) <= multiClickDistance;
 }
 
-function locatorKey(locator: ElementLocator) {
+function locatorKey(locator: ClickTarget) {
   return JSON.stringify(locator);
+}
+
+/** The AX role/name the helper read under the pointer, when it is usable. */
+function nativeLabel(value: unknown) {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed && trimmed.length <= 256 ? trimmed : undefined;
 }
 
 function clampDelta(value: number) {
@@ -256,23 +268,31 @@ export class GlobalRecording {
     }
     if (!this.claim(event, binding)) return;
     this.ensureScope(binding);
-    const snapshot = await this.snapshot(binding, event);
-    if (!snapshot) return;
-    const hit = this.hit(snapshot, event.point);
-    if (!hit) {
-      this.pushGap('CAPTURE_SCOPE_UNVERIFIED');
-      return;
-    }
-    if (hit.node.secure) {
-      this.enterSecure();
-      return;
-    }
-    const locator = toLocator(snapshot, hit);
     const scope = this.windowScope(binding);
     const button = event.button ?? 'left';
     const count = Math.max(1, Math.min(3, event.count ?? 1));
-    if (button === 'left' && hit.node.ref && editable.has(hit.node.role)) {
-      this.textAnchor = { at: event.t, scope: scopeKey(scope), locator };
+    // The window tree is the normal evidence for a click target; the click
+    // itself survives when that read fails, because its owner and point are
+    // already recorded. A click never disappears into a capture gap here.
+    const snapshot = await this.snapshot(binding, event, { gapOnFailure: false });
+    let target: ClickTarget;
+    if (snapshot) {
+      const hit = this.hit(snapshot, event.point);
+      if (!hit) {
+        this.pushGap('CAPTURE_SCOPE_UNVERIFIED');
+        return;
+      }
+      if (hit.node.secure) {
+        this.enterSecure();
+        return;
+      }
+      const locator = toLocator(snapshot, hit);
+      target = locator;
+      if (button === 'left' && hit.node.ref && editable.has(hit.node.role)) {
+        this.textAnchor = { at: event.t, scope: scopeKey(scope), locator };
+      }
+    } else {
+      target = this.nativeTarget(event);
     }
     const previous = this.lastClick;
     if (count > 1 && previous && previous.index === this.steps.length - 1 && previous.button === 'left' &&
@@ -286,16 +306,35 @@ export class GlobalRecording {
       }
     }
     this.push({
-      kind: 'click', scope, target: locator,
+      kind: 'click', scope, target,
       ...(count > 1 ? { count } : {}),
       ...(button === 'right' ? { button } : {}),
     });
     if (this.steps.length && this.steps[this.steps.length - 1].kind === 'click') {
       this.lastClick = {
         at: event.t, point: event.point, index: this.steps.length - 1,
-        scope: scopeKey(scope), locator: locatorKey(locator), button,
+        scope: scopeKey(scope), locator: locatorKey(target), button,
       };
     }
+  }
+
+  /**
+   * The target a click keeps when its window tree could not be read. The AX
+   * role the helper saw under the pointer is the stronger evidence; without it
+   * the recorded point stays, marked by a warning the workbench shows. Replaying
+   * a point needs physical input and an element target edited in first.
+   */
+  private nativeTarget(event: Extract<CaptureEvent, { kind: 'click' }>): ClickTarget {
+    const role = nativeLabel(event.owner?.role);
+    if (role) {
+      const name = nativeLabel(event.owner?.name);
+      this.warn('NATIVE_ELEMENT_FALLBACK',
+        'A click was kept from the helper\'s element evidence because reading its window tree failed');
+      return { kind: 'element', role, ...(name ? { name } : {}) };
+    }
+    this.warn('NATIVE_POINT_FALLBACK',
+      'A click was kept at its screen point because reading its window tree failed; edit it into an element before replay');
+    return { kind: 'point', point: event.point };
   }
 
   private async onScroll(event: Extract<CaptureEvent, { kind: 'scroll' }>) {
@@ -674,27 +713,46 @@ export class GlobalRecording {
       Math.abs(bounds.y + bounds.height / 2 - point[1]) <= dragCenterTolerance;
   }
 
-  private async snapshot(binding: WindowBinding, event: CaptureEvent): Promise<Snapshot | undefined> {
-    if (this.now() - event.seen > staleCaptureMs) {
-      this.pushGap('STALE_CAPTURE');
-      return undefined;
-    }
-    try {
-      const snapshot = await this.read({
-        app: binding.app, pid: binding.pid, windowNumber: binding.windowNumber,
-        windowTitle: binding.title,
-        ...(binding.processInstance === undefined ? {} : { processInstance: binding.processInstance }),
-      });
+  /**
+   * Reads the window tree for one event. A failed or late read is retried once
+   * after a short backoff, because a window with many items can finish just
+   * outside its first budget. When it still fails the caller decides: every
+   * input except a click becomes a `gap`, and a click keeps its own evidence.
+   */
+  private async snapshot(
+    binding: WindowBinding, event: CaptureEvent, { gapOnFailure = true } = {},
+  ): Promise<Snapshot | undefined> {
+    let stale = false;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (attempt > 0) await sleep(snapshotRetryMs);
+      // A read that already missed the budget cannot be improved by reading
+      // again: the budget only shrinks, so a late event stops immediately.
       if (this.now() - event.seen > staleCaptureMs) {
-        this.pushGap('STALE_CAPTURE');
-        return undefined;
+        stale = true;
+        break;
       }
-      return snapshot;
-    } catch {
-      this.warn('STALE_CAPTURE', 'An accessibility read for a capture event failed; the step is a gap');
-      this.pushGap('STALE_CAPTURE');
-      return undefined;
+      try {
+        const snapshot = await this.read({
+          app: binding.app, pid: binding.pid, windowNumber: binding.windowNumber,
+          windowTitle: binding.title,
+          ...(binding.processInstance === undefined ? {} : { processInstance: binding.processInstance }),
+        });
+        if (this.now() - event.seen > staleCaptureMs) {
+          stale = true;
+          break;
+        }
+        return snapshot;
+      } catch {
+        // Retried once below.
+      }
     }
+    if (gapOnFailure) {
+      this.warn('STALE_CAPTURE', stale
+        ? 'An accessibility read missed its capture budget; the step is a gap'
+        : 'An accessibility read for a capture event failed; the step is a gap');
+      this.pushGap('STALE_CAPTURE');
+    }
+    return undefined;
   }
 
   private pushGap(code: CaptureGapCode) {

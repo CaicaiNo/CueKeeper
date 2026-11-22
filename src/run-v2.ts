@@ -246,7 +246,22 @@ class StepRunner {
         await this.resolver.focusAfter(step.scope);
         return {};
       case 'click':
-        return this.windowStep(step.scope, async (_binding, snapshot) => {
+        return this.windowStep(step.scope, async (binding, snapshot) => {
+          // A recorded point is the fallback for a click whose window tree could
+          // not name the element. It stays replayable as physical input; an
+          // out-of-window point is refused instead of clicked somewhere else.
+          if (step.target.kind === 'point') {
+            const point = step.target.point as Point;
+            if (!contains(snapshot!.tree.bounds, point)) {
+              throw new Fault('UNSAFE_POINT',
+                'A recorded click point is outside the bound window; edit the step to an element target');
+            }
+            const delivery = await this.desktop.clickPoint(snapshot!, this.targetOf(binding), point, {
+              ...(step.count === undefined ? {} : { count: step.count as 1 | 2 | 3 }),
+              ...(step.button === undefined ? {} : { button: step.button }),
+            });
+            return delivery === undefined ? {} : { delivery };
+          }
           const { node } = actionable(snapshot!, step.target as ElementLocator);
           const delivery = await this.desktop.click(node.ref!, {
             ...(step.count === undefined ? {} : { count: step.count as 1 | 2 | 3 }),
