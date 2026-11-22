@@ -1285,6 +1285,8 @@ test('record --global writes a v2 flow with scopes and no typed content', { skip
   // The click's own element evidence and its anchor carry the first text; only
   // the TextEdit window needs one fallback read.
   assert.equal(run.commands.filter(command => command.startsWith('snapshot')).length, 1);
+  // The same number is reported as the recording's accessibility cost.
+  assert.equal(run.response.data.snapshotReads, 1);
 });
 
 test('record --global keeps a partial flow when the helper stops after an event', { skip: process.platform !== 'darwin' }, t => {

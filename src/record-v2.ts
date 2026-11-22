@@ -276,6 +276,7 @@ export class GlobalRecording {
   private maxCachedWindows: number;
   /** Window ids in least-recently-used order, so the cache stays bounded. */
   private cacheOrder: string[] = [];
+  private snapshotReads = 0;
   private truncated = false;
   private inputCount = 0;
 
@@ -293,6 +294,15 @@ export class GlobalRecording {
 
   get stepCount() {
     return this.steps.length;
+  }
+
+  /**
+   * How many window trees this recording actually read. Reused trees are not
+   * counted, so this number is the recording's accessibility cost and the
+   * evidence that a window was read once.
+   */
+  get snapshotReadCount() {
+    return this.snapshotReads;
   }
 
   get hasGaps() {
@@ -1234,6 +1244,7 @@ export class GlobalRecording {
     }
     if (cached) this.dropTree(binding);
     let snapshot: Snapshot;
+    this.snapshotReads += 1;
     try {
       snapshot = await this.read(this.windowFor(binding));
     } catch (error) {
@@ -1421,6 +1432,8 @@ export interface GlobalCaptureResult {
   failure?: Fault;
   /** Explicit lifecycle facts, for `lifecycle.json` next to the flow. */
   lifecycle: LifecycleEvent[];
+  /** How many window trees the recording read; reused trees are not counted. */
+  snapshotReads: number;
 }
 
 function indicatorConfirmed(value: unknown) {
@@ -1606,5 +1619,6 @@ export async function recordGlobal(
     partial: Boolean(failure),
     ...(failure ? { failure } : {}),
     lifecycle: recording.lifecycle,
+    snapshotReads: recording.snapshotReadCount,
   };
 }

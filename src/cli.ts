@@ -772,6 +772,7 @@ async function main() {
       const workbench = output ? undefined : `cuekeeper workbench ${displayRecordingsDirectory()}`;
       const data = {
         version: 2, output: saved, flowId: result.flow.id, actions: result.flow.steps.length,
+        snapshotReads: result.snapshotReads,
         ...(result.lifecycle.length ? { lifecycle: result.lifecycle.length } : {}),
         ...(workbench ? { workbench } : {}),
         ...(inputSource ? { inputSource } : {}),
@@ -779,6 +780,9 @@ async function main() {
         ...(result.warnings.length ? { warnings: result.warnings } : {}),
       };
       const lines = [`Saved ${result.flow.steps.length} global steps to ${saved}${result.partial ? ' (partial flow)' : ''}`];
+      // The recording's accessibility cost: a window is read once, so this stays
+      // small even when the flow has hundreds of steps.
+      lines.push(`窗口树读取 ${result.snapshotReads} 次`);
       if (result.lifecycle.length) {
         lines.push(`记录了 ${result.lifecycle.length} 个下载/安装事件：工作台会据此提出候选等待`);
       }
