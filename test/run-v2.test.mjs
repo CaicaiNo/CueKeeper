@@ -934,6 +934,58 @@ test('a recorded point outside the bound window is refused instead of clicked', 
   assert.equal(entry(report, 'open-pkg').code, 'UNSAFE_POINT');
   assert.deepEqual(callsOf(world.world, 'clickPoint'), []);
 });
+
+/** One Finder-style window: an item label whose name sits in its value. */
+function finderItemsWorld(t, items) {
+  return finderWorld(t, {
+    windows: [{
+      id: 'w-99', app: finderApp, pid: 700, title: 'cuekeeper-demo',
+      data: {
+        complete: true,
+        window: { id: 'w-99', title: 'cuekeeper-demo' },
+        tree: {
+          role: 'window', name: 'cuekeeper-demo', bounds: { x: 100, y: 100, width: 800, height: 600 },
+          children: [{ role: 'outline', bounds: { x: 110, y: 130, width: 780, height: 500 }, children: items }],
+        },
+      },
+    }],
+  });
+}
+
+function fileClickFlow(target) {
+  return parseFlowV2({
+    version: 2, id: 'finder-file-click', name: 'Finder file click',
+    appPaths: { [finderApp]: finderPath },
+    steps: [{
+      id: 'open-file', kind: 'click', count: 2,
+      scope: { kind: 'window', app: finderApp, windowKey: 'finder', windowTitle: 'cuekeeper-demo' },
+      target,
+    }],
+  });
+}
+
+test('an unnamed element target is refused instead of clicking a look-alike', async t => {
+  const { world, run } = finderItemsWorld(t, [{
+    role: 'textfield', ref_id: '@w99:e1', bounds: { x: 120, y: 150, width: 600, height: 40 }, states: [],
+  }]);
+  const report = await run(fileClickFlow({ kind: 'element', role: 'textfield', name: '' }));
+  assert.equal(entry(report, 'open-file').status, 'failed');
+  assert.equal(entry(report, 'open-file').code, 'AMBIGUOUS');
+  // The single unnamed textfield is exactly what a silent click would have hit.
+  assert.deepEqual(callsOf(world, 'click'), []);
+});
+
+test('a file target named by an item label value is found and clicked', async t => {
+  const { world, run } = finderItemsWorld(t, [{
+    role: 'row', bounds: { x: 110, y: 140, width: 780, height: 24 }, children: [{
+      role: 'statictext', value: 'manifest.json', ref_id: '@w99:e1',
+      bounds: { x: 140, y: 142, width: 200, height: 20 }, states: [],
+    }],
+  }]);
+  const report = await run(fileClickFlow({ kind: 'element', role: 'statictext', name: 'manifest.json' }));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w99:e1']]);
+});
 // --- Deferred path preflight (HAOC-119) ---------------------------------------
 // A flow that installs the app before it uses it cannot fail before that
 // install. The pin is still proven at the first real use, and an existing path

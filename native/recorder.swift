@@ -298,6 +298,7 @@ final class Capture {
             stackPid != nil && stackPid == focusPid
         var axOwnerMatches: Bool?
         var role: String?
+        var hitRole: String?
         var subrole: String?
         var name: String?
         var windowTitle = isFocused ? (focusTitle ?? stackTitle) : stackTitle
@@ -313,10 +314,14 @@ final class Capture {
                     axOwnerMatches = elementPid == stackPid
                 }
                 if axOwnerMatches == true {
-                    role = axString(hit, kAXRoleAttribute as String)
+                    // The click names the file or item it landed on. The raw role
+                    // stays available because a secure control is recognised by
+                    // the element under the pointer, not by its named ancestor.
+                    hitRole = axString(hit, kAXRoleAttribute as String)
                     subrole = axString(hit, kAXSubroleAttribute as String)
-                    let title = axString(hit, kAXTitleAttribute as String)
-                    name = title?.isEmpty == false ? title : axString(hit, kAXDescriptionAttribute as String)
+                    let identity = pointerIdentity(hit)
+                    role = identity?.role ?? hitRole
+                    name = identity?.name
                     if windowTitle?.isEmpty != false, let axWindow = axElement(hit, kAXWindowAttribute as String) {
                         windowTitle = axString(axWindow, kAXTitleAttribute as String) ?? windowTitle
                     }
@@ -338,9 +343,53 @@ final class Capture {
         if IsSecureEventInputEnabled() { secureEvidence.append("system_secure_input") }
         // A protected control can receive input before the system-wide flag is
         // set; both are evidence, and neither reads the control's value.
-        if secureControl(role: role, subrole: subrole) { secureEvidence.append("secure_control") }
+        if secureControl(role: hitRole, subrole: subrole) { secureEvidence.append("secure_control") }
         return GlobalPointerEvidence(owner: owner, focusGeneration: focusGeneration, secureEvidence: secureEvidence,
                                      targetMatches: targetMatches, isFocused: isFocused, axOwnerMatches: axOwnerMatches)
+    }
+
+    /**
+     * The element under the pointer with the nearest named item above it. Finder
+     * names a file on an enclosing cell or row, or on the static text label
+     * named by its value; the field under the pointer is often anonymous.
+     */
+    private func pointerIdentity(_ hit: AXUIElement) -> PointerIdentity? {
+        let role = axString(hit, kAXRoleAttribute as String)
+        let element = PointerElement(role: role, name: pointerName(hit, role: role))
+        // The common case is a named hit; do not touch its ancestry then.
+        if let name = element.name, !name.isEmpty {
+            return PointerIdentityResolver.resolve(hit: element, ancestors: [])
+        }
+        var ancestors: [PointerElement] = []
+        var node = axElement(hit, kAXParentAttribute as String)
+        var depth = 0
+        while let current = node, depth < 6 {
+            let parentRole = axString(current, kAXRoleAttribute as String)
+            // A window or application title is a scope, never a target.
+            if parentRole == "AXWindow" || parentRole == "AXApplication" { break }
+            let ancestor = PointerElement(role: parentRole, name: pointerName(current, role: parentRole))
+            ancestors.append(ancestor)
+            if let name = ancestor.name, !name.isEmpty,
+               let role = ancestor.role, PointerIdentityResolver.itemRoles.contains(role) {
+                break
+            }
+            node = axElement(current, kAXParentAttribute as String)
+            depth += 1
+        }
+        return PointerIdentityResolver.resolve(hit: element, ancestors: ancestors)
+    }
+
+    /** What an element names itself by; a static text label uses its value. */
+    private func pointerName(_ element: AXUIElement, role: String?) -> String? {
+        if let title = axString(element, kAXTitleAttribute as String), !title.isEmpty { return title }
+        if let description = axString(element, kAXDescriptionAttribute as String), !description.isEmpty {
+            return description
+        }
+        if role == "AXStaticText" || role == "AXText",
+           let value = axString(element, kAXValueAttribute as String), !value.isEmpty {
+            return value
+        }
+        return nil
     }
 
     private func livePointerEvidence(point: NSPoint) -> [String: Any] {

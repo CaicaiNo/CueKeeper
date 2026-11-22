@@ -101,6 +101,20 @@ function actionable(snapshot: Snapshot, locator: ElementLocator): { node: Node }
   return found;
 }
 
+/**
+ * A click target without a name proves nothing: the recording saw an element it
+ * could not address, so any same-role element in the window would satisfy it.
+ * Refusing here is what keeps an unnamed AXTextField from being clicked
+ * silently; the step must be edited into a named element first.
+ */
+function addressable(locator: ElementLocator): ElementLocator {
+  if (locator.name === '') {
+    throw new Fault('AMBIGUOUS',
+      'A recorded element target has no name; edit the step into a named element before replay');
+  }
+  return locator;
+}
+
 function dragEndpoint(snapshot: Snapshot, locator: ElementLocator): DragEndpoint {
   const { node } = resolve(snapshot, locator);
   if (!node.ref) throw new Fault('UNSAFE_TARGET', 'Drag endpoint has no action reference');
@@ -279,7 +293,7 @@ class StepRunner {
             });
             return delivery === undefined ? {} : { delivery };
           }
-          const { node } = actionable(snapshot!, step.target as ElementLocator);
+          const { node } = actionable(snapshot!, addressable(step.target as ElementLocator));
           const delivery = await this.desktop.click(node.ref!, {
             ...(step.count === undefined ? {} : { count: step.count as 1 | 2 | 3 }),
             ...(step.button === undefined ? {} : { button: step.button }),

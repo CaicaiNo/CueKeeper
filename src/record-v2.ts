@@ -7,12 +7,18 @@ import type { FlowV2, StepV2, WindowScope } from './contracts-v2.js';
 import { parseCaptureEvent } from './capture-protocol.js';
 import type { CaptureEvent, CaptureFocus, CaptureGapCode } from './capture-protocol.js';
 import type { Desktop } from './desktop.js';
+import {
+  ElectronAccessibilityGuard, electronAccessibilityCode, electronAccessibilityHint,
+  electronAccessibilityUnverifiedCode,
+} from './electron-accessibility.js';
 import { scopeKey, validateFlowV2 } from './flow-v2.js';
 import type { InputSource } from './ime.js';
 import type { ElementLocator } from './contracts.js';
 import { defaultLifecyclePollMs, LifecycleWatcher } from './lifecycle.js';
 import type { LifecycleObservation, LifecycleWatchOptions } from './lifecycle.js';
-import { Fault, contains, flatten, hitTest, object, toLocator } from './locator.js';
+import {
+  clickIdentity, contains, Fault, flatten, hitTest, object, resolve, toLocator,
+} from './locator.js';
 import type { Located, Point, Snapshot } from './locator.js';
 import type { LifecycleEvent } from './wait-candidates.js';
 
@@ -109,6 +115,16 @@ function nativeLabel(value: unknown) {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   return trimmed && trimmed.length <= 256 ? trimmed : undefined;
+}
+
+/**
+ * The helper reports AX roles ("AXTextField") while the window snapshot names
+ * the same element in lower case ("textfield"). Only the snapshot vocabulary is
+ * re-addressable at replay, so a native fallback target is converted into it.
+ */
+function snapshotRole(role: string) {
+  const stripped = role.startsWith('AX') ? role.slice(2) : role;
+  return /^[A-Za-z][A-Za-z0-9]*$/.test(stripped) ? stripped.toLowerCase() : role;
 }
 
 function clampDelta(value: number) {
@@ -407,27 +423,36 @@ export class GlobalRecording {
       return;
     }
     const hitRole = nativeLabel(event.owner?.role);
-    let target: ClickTarget;
-    if (hitRole) {
-      // The helper already hit-tested this click with AXUIElementCopyElementAtPosition,
-      // so the element under the pointer needs no window-tree read.
-      const hitName = nativeLabel(event.owner?.name);
-      target = { kind: 'element', role: bareRole(hitRole), ...(hitName ? { name: hitName } : {}) };
-      const field = focusedTarget(event.focus);
-      if (field && !editableRole(hitRole) && contains(focusBounds(event.focus), event.point)) {
+    const hitName = nativeLabel(event.owner?.name);
+    const field = focusedTarget(event.focus);
+    if (field) this.rememberFocus(this.focusKey(binding, event.focusGeneration), field);
+    const fieldHit = !!field && !editableRole(hitRole) && contains(focusBounds(event.focus), event.point);
+    // A Finder click names the file or folder it landed on, not the anonymous
+    // text field under the pointer, so Finder keeps the window-tree identity
+    // path when the helper could not name anything. Every other click the
+    // helper already hit-tested with AXUIElementCopyElementAtPosition needs no
+    // tree read at all.
+    const needsTree = !hitRole || (event.owner?.app === 'com.apple.finder' && !hitName && !fieldHit);
+    let target: ClickTarget | undefined;
+    if (!needsTree) {
+      if (fieldHit) {
         // Electron exposes its text surface as a container above the editable
         // control: the click landed in the focused field, so the field is the
         // target that actually replays.
         target = field;
         this.warn('FOCUSED_EDITABLE_TARGET',
           'A click landed inside the focused editable control and was bound to it, not to the container under the pointer');
+      } else if (hitName) {
+        target = { kind: 'element', role: bareRole(hitRole), name: hitName };
+      } else {
+        // The helper named only a container; the text event that follows proves
+        // the editable control and retargets this step, so no read is spent.
+        target = { kind: 'element', role: bareRole(hitRole) };
       }
-      if (field) this.rememberFocus(this.focusKey(binding, event.focusGeneration), field);
-      if (button === 'left' && target.kind === 'element' && editableRole(target.role)) {
-        this.textAnchor = { at: event.t, scope: scopeId, locator: target };
-      }
-    } else {
-      // Without element evidence the window tree is the only source for a target.
+    }
+    if (!target) {
+      // Evidence that cannot name the element is the only case that still needs
+      // the tree: a failed read keeps whatever the helper proved on its own.
       const snapshot = await this.snapshot(binding, { gapOnFailure: false });
       if (snapshot) {
         const hit = this.hit(snapshot, event.point);
@@ -442,25 +467,34 @@ export class GlobalRecording {
         // Electron editors expose their text surface as a group above the
         // editable control. When the click lands inside the focused editable
         // but the deepest hit is a container, the control is the replay target.
-        const field = editableRole(hit.node.role) ? undefined : this.focusedField(snapshot, event.point);
-        if (field?.node.secure) {
+        const treeField = editableRole(hit.node.role) ? undefined : this.focusedField(snapshot, event.point);
+        if (treeField?.node.secure) {
           this.enterSecure();
           return;
         }
-        const chosen = field ?? hit;
-        const locator = toLocator(snapshot, chosen);
-        if (field) {
+        const identity = treeField ? undefined : clickIdentity(snapshot.tree, hit);
+        const chosen = identity ?? treeField;
+        if (treeField) {
           this.warn('FOCUSED_EDITABLE_TARGET',
             'A click landed inside the focused editable control and was bound to it, not to the container under the pointer');
         }
-        target = locator;
-        if (button === 'left' && chosen.node.ref && editableRole(locator.role)) {
-          this.textAnchor = { at: event.t, scope: scopeId, locator };
-          this.rememberFocus(this.focusKey(binding, event.focusGeneration), locator);
+        if (chosen) {
+          target = toLocator(snapshot, chosen);
+          if (button === 'left' && chosen.node.ref && editableRole(target.role)) {
+            this.rememberFocus(this.focusKey(binding, event.focusGeneration), target);
+          }
+        } else {
+          // The tree cannot name what the pointer hit. The helper's own element
+          // evidence is the remaining proof of identity; without it the click
+          // keeps its point and says so.
+          target = this.evidenceTarget(event) ?? this.untargetedClick(event);
         }
       } else {
         target = this.nativeTarget(event);
       }
+    }
+    if (button === 'left' && target.kind === 'element' && editableRole(target.role)) {
+      this.textAnchor = { at: event.t, scope: scopeId, locator: { ...target, role: bareRole(target.role) } };
     }
     const previous = this.lastClick;
     if (count > 1 && previous && previous.index === this.steps.length - 1 && previous.button === 'left' &&
@@ -487,14 +521,44 @@ export class GlobalRecording {
   }
 
   /**
-   * The target a click keeps when it has no element evidence and its window
-   * tree could not be read. The point stays, marked by a warning the workbench
-   * shows. Replaying a point needs physical input and an element target edited
-   * in first.
+   * The element target the helper's own AX evidence names. A role alone would
+   * match every look-alike in the window, so only evidence that carries a name
+   * becomes an element; everything else stays a point.
+   */
+  private evidenceTarget(event: Extract<CaptureEvent, { kind: 'click' }>): ClickTarget | undefined {
+    const role = nativeLabel(event.owner?.role);
+    const name = nativeLabel(event.owner?.name);
+    if (!role || !name) return undefined;
+    this.warn('NATIVE_ELEMENT_FALLBACK',
+      'A click was kept from the helper\'s element evidence because the window tree did not name the element');
+    return { kind: 'element', role: snapshotRole(role), name };
+  }
+
+  /**
+   * The target a click keeps when its window tree could not be read. Named
+   * element evidence is the strongest remaining proof; without it the click
+   * keeps its point, marked by a warning the workbench shows.
    */
   private nativeTarget(event: Extract<CaptureEvent, { kind: 'click' }>): ClickTarget {
+    const target = this.evidenceTarget(event);
+    if (target) return target;
+    const role = nativeLabel(event.owner?.role);
+    if (role) return this.untargetedClick(event);
     this.warn('NATIVE_POINT_FALLBACK',
       'A click was kept at its screen point because the helper had no element evidence and reading its window tree failed; edit it into an element before replay');
+    return { kind: 'point', point: event.point };
+  }
+
+  /**
+   * A click with no proven element identity. Keeping the role alone would make
+   * the step click whichever same-role element happens to be there, so the point
+   * stays and the warning says the step still needs a target.
+   */
+  private untargetedClick(event: Extract<CaptureEvent, { kind: 'click' }>): ClickTarget {
+    const file = event.owner?.app === 'com.apple.finder';
+    this.warn(file ? 'UNTARGETED_FILE_CLICK' : 'UNTARGETED_ELEMENT_CLICK', file
+      ? 'A Finder click hit no named file item; it is kept at its screen point and must be edited into a named element before replay'
+      : 'A click hit no named element; it is kept at its screen point and must be edited into a named element before replay');
     return { kind: 'point', point: event.point };
   }
 
@@ -855,8 +919,11 @@ export class GlobalRecording {
     if (!click || click.button !== 'left' || click.scope !== scope) return;
     if (click.index !== this.steps.length - 1 || at - click.at > clickTextFallbackMs) return;
     const step = this.steps[click.index];
-    if (step?.kind !== 'click' || step.target.kind !== 'element') return;
-    if (editableRole(step.target.role)) return;
+    if (step?.kind !== 'click') return;
+    // A named editable target is already correct; an unnamed container or a
+    // point fallback (the tree read failed, so no name was available) is what
+    // the following text can prove.
+    if (step.target.kind === 'element' && editableRole(step.target.role)) return;
     if (!contains(field.node.bounds, click.point)) return;
     const target = toLocator(snapshot, field);
     (step as { target: ElementLocator }).target = target;
@@ -1180,6 +1247,31 @@ export async function recordGlobal(
     window => desktop.snapshotWindow(`w-${window.windowNumber}`, window.windowTitle, snapshotTimeoutMs),
     { exclude },
   );
+  // Every Electron app/window is classified once, when the recording first
+  // reaches it. A disabled editor stops the session before its first step is
+  // recorded; the steps captured so far stay as a partial flow.
+  const accessibilityGuard = new ElectronAccessibilityGuard({
+    read: window => desktop.snapshotWindow(`w-${window.windowNumber}`, window.windowTitle, 1200),
+  });
+  const accessibilityKinds = new Set(['focus', 'click']);
+  async function checkAccessibility(event: CaptureEvent) {
+    if (!accessibilityKinds.has(event.kind)) return;
+    if (event.secure || event.decision === 'gap') return;
+    const owner = event.owner;
+    if (!owner?.app || !owner.pid || !owner.windowNumber) return;
+    if (exclude.includes(owner.app)) return;
+    const verdict = await accessibilityGuard.inspect({
+      app: owner.app, pid: owner.pid, windowNumber: owner.windowNumber, windowTitle: owner.windowTitle,
+    });
+    if (verdict === 'disabled') {
+      throw new Fault(electronAccessibilityCode, electronAccessibilityHint(owner.app));
+    }
+    if (verdict === 'unverified') {
+      recording.warn(electronAccessibilityUnverifiedCode,
+        'Electron 窗口里既没有编辑器控件，也没有无障碍占位提示（例如欢迎页/设置页），' +
+        '无法确认无障碍模式；该窗口继续录制。');
+    }
+  }
   if (options.inputSource && !options.inputSource.ascii) {
     recording.warn('IME_ACTIVE',
       `录制开始时输入源为「${options.inputSource.name}」，物理按键可能被改写成带分隔符的文本。全局录制只保存参数名，建议切到 ABC/U.S.`);
@@ -1255,7 +1347,9 @@ export async function recordGlobal(
         recording.endBursts();
         continue;
       }
-      await recording.add(parseCaptureEvent(data));
+      const event = parseCaptureEvent(data);
+      await checkAccessibility(event);
+      await recording.add(event);
     }
 
     const code = await completion;

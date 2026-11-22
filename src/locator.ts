@@ -104,10 +104,87 @@ export function flatten(tree: Node): Located[] {
   return entries;
 }
 
-function matches(tree: Node, locator: ElementLocator): Located[] {
+/** Roles that hold items rather than content: a list, outline or collection. */
+const itemContainers = new Set([
+  'row', 'cell', 'listitem', 'outlineitem', 'outlinerow', 'treeitem', 'table', 'list', 'outline', 'grid',
+]);
+
+/** Roles that can stand for the clicked item itself, not for a wrapper. */
+const itemRoles = new Set([
+  'row', 'cell', 'listitem', 'outlineitem', 'outlinerow', 'treeitem', 'statictext', 'text', 'image', 'link',
+]);
+
+/**
+ * Item roles whose value is the visible label, not typed content. An editable
+ * field's value is content and never becomes a target name.
+ */
+const labelValueRoles = new Set(['statictext', 'text']);
+
+/**
+ * The name an element can be re-addressed by. An item label carries its name in
+ * the value instead of a title (Finder shows a file name that way), so a value
+ * counts only inside a row, cell or other item: a document's text content never
+ * becomes a recorded target name.
+ */
+function nameOf(node: Node, item: boolean): string {
+  const name = node.name;
+  if (name !== undefined && name.trim() !== '') return name;
+  if (!item || !labelValueRoles.has(node.role)) return '';
+  const value = (node.value ?? node.text ?? '').trim();
+  return value === '' || value.length > 256 ? '' : value;
+}
+
+/**
+ * The name every node in one tree is addressed by. Recording a target and
+ * matching it at replay share this single rule, so an item label named by its
+ * value is both recorded and found again.
+ */
+export function elementNames(tree: Node): Map<Node, string> {
+  const names = new Map<Node, string>();
+  function visit(node: Node, item: boolean) {
+    const withinItem = item || itemContainers.has(node.role);
+    names.set(node, nameOf(node, withinItem));
+    for (const child of node.children) visit(child, withinItem);
+  }
+  visit(tree, false);
+  return names;
+}
+
+/** Root-first ancestors of one node; undefined when it is not in the tree. */
+function ancestry(tree: Node, target: Node): Node[] | undefined {
+  if (tree === target) return [];
+  for (const child of tree.children) {
+    const chain = ancestry(child, target);
+    if (chain) return [tree, ...chain];
+  }
+  return undefined;
+}
+
+/**
+ * The element a recorded click should name. Finder nests a file under a cell or
+ * row and labels it with a static text beside the icon, while the innermost
+ * element under the pointer is often an unnamed text field. A click keeps its
+ * deepest named element and climbs only through item roles, so a wrapper such
+ * as a toolbar or a group never becomes the target. `undefined` means the click
+ * has no proven identity and must stay a point.
+ */
+export function clickIdentity(tree: Node, hit: Located): Located | undefined {
+  const names = elementNames(tree);
+  if (names.get(hit.node)) return hit;
+  const chain = ancestry(tree, hit.node);
+  if (!chain) return undefined;
+  for (let index = chain.length - 1; index >= 0; index -= 1) {
+    const node = chain[index];
+    if (!itemRoles.has(node.role) || !names.get(node)) continue;
+    return { node, path: [...chain.slice(0, index + 1).map(parent => parent.role), node.role] };
+  }
+  return undefined;
+}
+
+function matches(tree: Node, locator: ElementLocator, names = elementNames(tree)): Located[] {
   return flatten(tree).filter(entry =>
     entry.node.role === locator.role &&
-    (locator.name === undefined || (entry.node.name ?? '') === locator.name) &&
+    (locator.name === undefined || (names.get(entry.node) ?? '') === locator.name) &&
     (locator.path === undefined ||
       (locator.path.length === entry.path.length && locator.path.every((role, index) => role === entry.path[index]))),
   );
@@ -126,11 +203,12 @@ export function resolve(snapshot: Snapshot, locator: ElementLocator): Located {
 }
 
 export function toLocator(snapshot: Snapshot, entry: Located): ElementLocator {
-  const locator: ElementLocator = { kind: 'element', role: entry.node.role, name: entry.node.name ?? '' };
+  const names = elementNames(snapshot.tree);
+  const locator: ElementLocator = { kind: 'element', role: entry.node.role, name: names.get(entry.node) ?? '' };
   // Prefer a unique role/name. A role path or explicit index is needed for repeated controls.
-  if (matches(snapshot.tree, locator).length > 1) {
+  if (matches(snapshot.tree, locator, names).length > 1) {
     locator.path = entry.path;
-    const candidates = matches(snapshot.tree, locator);
+    const candidates = matches(snapshot.tree, locator, names);
     if (candidates.length > 1) {
       locator.index = candidates.findIndex(candidate => candidate.node === entry.node);
     }
