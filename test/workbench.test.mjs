@@ -158,6 +158,23 @@ test('legacy recordings import with no timestamps; foreign reports and action in
   await assert.rejects(loadSession(directory), /current flowId/);
 });
 
+test('one-key recordings open by their timestamped name, newest first', async t => {
+  const { root, flow } = await fixture(t);
+  const directory = join(root, 'recordings');
+  await mkdir(directory);
+  await writeJson(join(directory, 'recording-20260101T000000Z.flow.json'), { ...flow, name: 'Older recording' });
+  await writeJson(join(directory, 'recording-20260102T000000Z.flow.json'), flow);
+  const session = await loadSession(directory);
+  // The newest recording in the shared directory is the one opened.
+  assert.equal(session.flow.name, flow.name);
+  assert.equal(session.view.name, flow.name);
+  assert.deepEqual(session.view.timeline.map(row => row.action.kind), plan(flow).map(step => step.action.kind));
+
+  const empty = join(root, 'empty');
+  await mkdir(empty);
+  await assert.rejects(loadSession(empty), /recording-\*\.flow\.json/);
+});
+
 test('repicking in the workbench writes a snapshot locator that the saved test replays', async t => {
   const { root, directory } = await fixture(t);
   const cancellation = new AbortController();

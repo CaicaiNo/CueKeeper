@@ -49,10 +49,24 @@ pnpm test
 
 ```sh
 pnpm build:recorder
+node dist/cli.js record
+```
+
+不带 `--app`、`--window`、`--out` 时是「一键开始」：先倒计时 3 秒（`--countdown` 可调，`0` 表示不等待），提示切到要录制的 App 窗口；倒计时结束读取当前前台窗口，用窗口属主应用的 bundle ID 和精确窗口标题作为流程目标。录制结束（`Ctrl+Option+X` 提前结束，或 `--seconds` 超时）后，流程写到 `~/.cuekeeper/recordings/recording-<UTC 时间戳>.flow.json`，终端打印绝对路径和查看命令：
+
+```sh
+cuekeeper workbench ~/.cuekeeper/recordings
+```
+
+工作台会打开该目录里最新的 `recording-*.flow.json`。显式参数仍然可用，作为脚本或固定目标的进阶用法：
+
+```sh
 mkdir -p out/demo
 node dist/cli.js record --app com.apple.TextEdit --window "无标题" --out out/demo/recorded.flow.json --seconds 30
-# 指定安装副本时加 --app-path "/Applications/TextEdit.app"
+# 只给 --app 时录该 App 的前台窗口；指定安装副本时加 --app-path "/Applications/TextEdit.app"
 ```
+
+`--seconds` 默认 25（范围 1–90）。倒计时结束时没有前台窗口报 `WINDOW_NOT_FOUND`，无法确认窗口所属应用的 bundle ID 报 `APP_NOT_FOUND`。当前仍是单窗口录制：切到其他 App 后，那些窗口的输入会被跳过；跨 App 全局录制见 HAOC-108。
 
 回放与报告。下面的离线命令使用仓库自带样本，不需要桌面权限，可直接验证安装：
 
@@ -112,7 +126,7 @@ pnpm build
 node dist/cli.js workbench /path/to/run-directory
 ```
 
-也可以省略目录，进入工作台后用「导入运行目录」选择。目录必须有 `flow.json` 或 `recorded.flow.json`。可同时放入以下文件。
+也可以省略目录，进入工作台后用「导入运行目录」选择。目录必须有 `flow.json` 或 `recorded.flow.json`；只有 `record` 默认生成的 `recording-*.flow.json` 时，工作台打开其中最新的一份。可同时放入以下文件。
 
 | 文件 | 工作台用途 |
 | --- | --- |
@@ -180,7 +194,7 @@ node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --selec
 | `doctor [--json]` | 只读自检：Node 运行时、文件完整性、agent-desktop 版本、录制器与辅助功能/输入监控权限；末行为下一步 |
 | `--version` | 打印版本，发布包还带构建提交 |
 | `flow validate <flow.json\|test.json>` | 检查 v1 结构、ID、行为引用和参数绑定；v2 则校验每步 scope、windowKey 绑定、appPaths/inputs/intent 引用，含缺口时拒绝 |
-| `record --app <bundle-id> --window <精确标题> --out <flow.json> [--app-path <路径>]` | 录制目标窗口，显示计时 HUD，支持 `--no-indicator`、`--sound` 与显式开启剪贴板文本的 `--clipboard` |
+| `record [--app <bundle-id>] [--window <精确标题>] [--out <flow.json>] [--app-path <路径>] [--countdown 3]` | 默认倒计时后录制当前前台窗口，流程写入 `~/.cuekeeper/recordings`；显式参数优先。显示计时 HUD，支持 `--no-indicator`、`--sound` 与显式开启剪贴板文本的 `--clipboard` |
 | `pick --app <bundle-id> --window <精确标题> [--app-path <路径>] [--select <ref>] [--snapshot <snapshot.json>]` | 只读快照，按可交互元素优先列出候选，或输出可写入 flow 的定位器 |
 | `run <flow.json> --dry-run` | 用当前窗口解析定位器；纯 Shell 流程无需快照 |
 | `run <flow-v2.json> --dry-run [--report <report-v2.json>]` | 输出 v2 结构计划，按步骤 scope 标记 `resolved`；不启动、聚焦或输入。v2 实时回放待跨 App 调度器接入 |

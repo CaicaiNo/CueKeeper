@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { realpath, stat } from 'node:fs/promises';
+import { readdir, realpath, stat } from 'node:fs/promises';
 import { extname, isAbsolute, join, relative, sep } from 'node:path';
 import { reportCheck } from './contracts.js';
 import type { Action, Report } from './contracts.js';
@@ -104,6 +104,25 @@ function readLabel(value: unknown, fallback: string) {
   return value;
 }
 
+/**
+ * The newest one-key recording in a shared recordings directory. `record`
+ * without `--out` writes `recording-<timestamp>.flow.json` next to earlier
+ * recordings, so opening that directory has to pick one deterministically
+ * instead of demanding the fixed `flow.json` name.
+ */
+async function newestRecording(directory: string): Promise<string | undefined> {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const names = entries
+    .filter(entry => entry.isFile() && /^recording-.+\.flow\.json$/i.test(entry.name))
+    .map(entry => entry.name);
+  if (!names.length) return undefined;
+  const dated = await Promise.all(names.map(async name => ({
+    name, at: (await stat(join(directory, name))).mtimeMs,
+  })));
+  dated.sort((a, b) => b.at - a.at || b.name.localeCompare(a.name));
+  return dated[0].name;
+}
+
 export async function loadSession(path: string) {
   const directory = await realpath(path);
   if (!(await stat(directory)).isDirectory()) throw new Error('Select a run directory');
@@ -111,11 +130,15 @@ export async function loadSession(path: string) {
     ['flow.json', 'recorded.flow.json', 'report.json', 'actions.json', 'snapshot.json']
       .map(name => readArtifact(directory, name)),
   );
-  if (primary === undefined && recorded === undefined) {
-    throw new Error('The selected directory needs flow.json or recorded.flow.json');
+  let source = primary ?? recorded;
+  if (source === undefined) {
+    const oneKey = await newestRecording(directory);
+    if (oneKey === undefined) {
+      throw new Error('The selected directory needs flow.json, recorded.flow.json, or a recording-*.flow.json file');
+    }
+    source = await readArtifact(directory, oneKey);
   }
-  const document = primary === undefined ? recorded : primary;
-  const parsed = parseFlowDocument(document);
+  const parsed = parseFlowDocument(source);
   if (parsed.version === 2) return loadV2Session(directory, parsed.flow, rawReport, rawActions);
   const flow = parsed.flow;
   const planned = plan(flow);

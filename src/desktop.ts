@@ -12,6 +12,18 @@ export interface WindowInfo {
   title: string;
   /** PID the driver reports for the window owner, when it exposes one. */
   processInstance?: number;
+  /** Owner PID the driver reports for the window, when it exposes one. */
+  pid?: number;
+  /** Whether the window is its app's front window; absent means unproven. */
+  isFocused?: boolean;
+}
+
+/** One running application from the driver's app inventory. */
+export interface RunningApp {
+  /** The process the app owns windows through; the join key to WindowInfo.pid. */
+  pid: number;
+  bundleId?: string;
+  name?: string;
 }
 
 export interface ClickOptions {
@@ -75,6 +87,8 @@ export interface Desktop {
   listWindows(app: string, timeoutMs?: number): Promise<WindowInfo[]>;
   /** Read-only inventory without an app filter, for identity cross-checks. */
   listAllWindows(timeoutMs?: number): Promise<WindowInfo[]>;
+  /** Read-only application inventory, for mapping a window's owner PID to a bundle ID. */
+  listApps(timeoutMs?: number): Promise<RunningApp[]>;
   /** Window-only calls; no bundle ID is resolved by the driver. */
   snapshotWindow(windowId: string, title: string, timeoutMs?: number): Promise<Snapshot>;
   focusWindow(windowId: string, timeoutMs?: number): Promise<void>;
@@ -100,6 +114,11 @@ function isCommandTimeout(error: unknown) {
   return error instanceof Fault && (error.code === 'TIMEOUT' || error.code === 'COMMAND_TIMEOUT');
 }
 
+function positiveInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value :
+    typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : undefined;
+}
+
 function windowList(data: unknown): WindowInfo[] {
   if (!Array.isArray(data)) throw new Fault('BAD_RESPONSE', 'Expected a window inventory');
   return data.map(object).map(window => {
@@ -107,14 +126,35 @@ function windowList(data: unknown): WindowInfo[] {
       throw new Fault('BAD_RESPONSE', 'Missing or invalid window ID');
     }
     const raw = window.process_instance ?? window.processInstance;
-    const processInstance = typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0 ? raw :
-      typeof raw === 'string' && /^\d+$/.test(raw) ? Number(raw) : undefined;
+    const processInstance = positiveInteger(raw);
+    const pid = positiveInteger(window.pid);
     return {
       id: window.id,
       title: typeof window.title === 'string' ? window.title : '',
       ...(processInstance === undefined ? {} : { processInstance }),
+      ...(pid === undefined ? {} : { pid }),
+      ...(typeof window.is_focused === 'boolean' ? { isFocused: window.is_focused } : {}),
     };
   });
+}
+
+function appList(data: unknown): RunningApp[] {
+  const inventory = object(data);
+  if (!Array.isArray(inventory.apps)) throw new Fault('BAD_RESPONSE', 'Expected an application inventory');
+  const apps: RunningApp[] = [];
+  for (const item of inventory.apps) {
+    const app = object(item);
+    const pid = positiveInteger(app.pid);
+    // An entry without a process ID cannot be joined to a window; skip it
+    // rather than failing the whole inventory on a partial record.
+    if (pid === undefined) continue;
+    apps.push({
+      pid,
+      ...(typeof app.bundle_id === 'string' && app.bundle_id ? { bundleId: app.bundle_id } : {}),
+      ...(typeof app.name === 'string' && app.name ? { name: app.name } : {}),
+    });
+  }
+  return apps;
 }
 
 function delivery(result: Record<string, unknown>): Delivery | undefined {
@@ -316,6 +356,11 @@ export async function withDesktop<T>(
           undefined, timeoutMs + 3000);
         return windowList(data);
       },
+      async listApps(timeoutMs = 3000) {
+        const data = await call('list-apps', ['--timeout-ms', String(timeoutMs)],
+          undefined, timeoutMs + 3000);
+        return appList(data);
+      },
       async snapshotWindow(windowId, title, timeoutMs = 3000) {
         const data = await call('snapshot', [
           '--include-bounds', '--max-depth', '50', '--timeout-ms', String(timeoutMs), '--window-id', windowId,
@@ -482,6 +527,9 @@ export function offlineDesktop(data: unknown, expected: Target): Desktop {
     },
     async listAllWindows() {
       return [{ id: snap.windowId, title: expected.window }];
+    },
+    async listApps() {
+      throw new Fault('WINDOW_MISMATCH', 'Offline fixtures do not include an application inventory');
     },
     async snapshotWindow(windowId, title) {
       if (windowId !== snap.windowId) {

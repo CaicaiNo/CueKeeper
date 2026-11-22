@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +18,7 @@ import { offlineDesktop, withDesktop } from '../dist/desktop.js';
 import { parseFlow, plan } from '../dist/flow.js';
 import { parseSnapshot, resolve } from '../dist/locator.js';
 import { Recording } from '../dist/record.js';
+import { recordingFileName } from '../dist/recording-output.js';
 import { packReport } from '../dist/report.js';
 import { runFlow } from '../dist/run.js';
 
@@ -104,9 +105,10 @@ else {
 // snapshots whichever window the app has in front. `frontWindow` models a
 // second app window that is in front of the target, and `windows` replaces the
 // whole inventory (for a title that is absent). `imeSource` is what the stubbed
-// input-source helper reports as the active source.
+// input-source helper reports as the active source. `apps` is the `list-apps`
+// inventory used by one-key recording, and `args` replaces the recording flags.
 function recordFixture(t, events, { captureExit = 0, flags = [], seconds = 1, ready = true,
-  missingWindowAtSnapshot, frontWindow, windows, imeSource = asciiSource } = {}) {
+  missingWindowAtSnapshot, frontWindow, windows, imeSource = asciiSource, apps = [], args, home } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-record-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const dist = join(dir, 'dist');
@@ -119,7 +121,9 @@ function recordFixture(t, events, { captureExit = 0, flags = [], seconds = 1, re
   symlinkSync(fileURLToPath(new URL('../node_modules/', import.meta.url)), join(dir, 'node_modules'), 'dir');
   const desktop = join(dir, 'desktop');
   const snapshotsLog = join(dir, 'snapshots.log');
+  const commandsLog = join(dir, 'commands.log');
   writeFileSync(snapshotsLog, '');
+  writeFileSync(commandsLog, '');
   const inventory = windows ?? [
     ...(frontWindow ? [{ id: 'w-2000', title: frontWindow }] : []),
     { id: fixture.data.window.id, title: fixture.target.window },
@@ -127,8 +131,10 @@ function recordFixture(t, events, { captureExit = 0, flags = [], seconds = 1, re
   writeFileSync(desktop, `#!/usr/bin/env node
 import { appendFileSync, readFileSync } from 'node:fs';
 const [command, ...args] = process.argv.slice(2);
+appendFileSync(${JSON.stringify(commandsLog)}, command + '\\n');
 const snapshot = ${JSON.stringify(fixture.data)};
 const windows = ${JSON.stringify(inventory)};
+const apps = ${JSON.stringify(apps)};
 function frontSnapshot() {
   if (windows.length <= 1) return snapshot;
   const doc = JSON.parse(${JSON.stringify(JSON.stringify(fixture.data))});
@@ -139,6 +145,7 @@ function frontSnapshot() {
 let data;
 if (command === 'version') data = { version: '1.3.1' };
 else if (command === 'list-windows') data = windows;
+else if (command === 'list-apps') data = { apps };
 else if (command === 'snapshot') {
   const windowArg = args.indexOf('--window-id');
   const windowId = windowArg < 0 ? null : args[windowArg + 1];
@@ -170,21 +177,25 @@ writeFileSync(1, messages.map((event, t) => JSON.stringify({ ...event, seen, t }
 process.exitCode = ${captureExit};
 `, { mode: 0o700 });
   const path = join(dir, 'recorded.flow.json');
+  const cliArgs = args ?? ['--app', fixture.target.app, '--window', fixture.target.window, '--out', path];
   const result = spawnSync(process.execPath, [join(dist, 'cli.js'), 'record',
-    '--app', fixture.target.app, '--window', fixture.target.window, '--out', path, '--seconds', String(seconds),
-    '--json', ...flags], {
+    ...cliArgs, '--seconds', String(seconds), '--json', ...flags], {
     env: {
       ...process.env,
+      ...(home ? { HOME: home } : {}),
       CUEKEEPER_AGENT_DESKTOP: desktop,
       CUEKEEPER_APP_IDENTITY: join(dir, 'identity'),
       CUEKEEPER_IME: imeStub(dir, imeSource),
       CUEKEEPER_IME_DIR: join(dir, 'ime-root'),
     },
-    encoding: 'utf8', timeout: 10000,
+    encoding: 'utf8', timeout: 15000,
   });
-  return { code: result.status, response: JSON.parse(result.stdout), stderr: result.stderr,
+  const response = JSON.parse(result.stdout);
+  const written = response?.data?.output ?? path;
+  return { code: result.status, response, stderr: result.stderr, output: written, dir,
     snapshotWindows: readFileSync(snapshotsLog, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)),
-    recorded: existsSync(path) ? parseFlow(JSON.parse(readFileSync(path, 'utf8'))) : undefined };
+    commands: readFileSync(commandsLog, 'utf8').trim().split('\n').filter(Boolean),
+    recorded: existsSync(written) ? parseFlow(JSON.parse(readFileSync(written, 'utf8'))) : undefined };
 }
 
 const captureClick = { kind: 'click', point: [135, 165] };
@@ -281,6 +292,133 @@ test('record CLI reports WINDOW_NOT_FOUND and reads no window when the title is 
     assert.equal(recorded, undefined);
     // The missing title must not fall back to snapshotting another window.
     assert.deepEqual(snapshotWindows, []);
+  });
+
+// One-key recording: the fake driver inventories a front window whose owner PID
+// joins to the running TextEdit app, exactly as agent-desktop reports it.
+const frontWindowInventory = [
+  { id: 'w-2000', title: 'Safari Start Page', pid: 9999, is_focused: false },
+  { id: fixture.data.window.id, title: fixture.target.window, pid: 4321, is_focused: true },
+];
+const runningApps = [{ name: 'TextEdit', bundle_id: fixture.target.app, pid: 4321 }];
+
+function recordingHome(t) {
+  const home = mkdtempSync(join(tmpdir(), 'cuekeeper-home-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  return home;
+}
+
+test('record CLI records the front window into the default recordings directory',
+  { skip: process.platform !== 'darwin' }, t => {
+    const home = recordingHome(t);
+    const { code, response, recorded, output, stderr, commands } = recordFixture(t, [captureClick], {
+      windows: frontWindowInventory, apps: runningApps, args: ['--countdown', '0'], home,
+    });
+    assert.equal(code, 0, stderr);
+    assert.equal(response.ok, true);
+    assert.equal(response.data.actions, 1);
+    // The target is the front window's exact title and its owner's bundle ID.
+    assert.deepEqual(recorded.target, { app: fixture.target.app, window: fixture.target.window });
+    assert.deepEqual(recorded.steps.map(step => step.kind), ['click']);
+    assert.equal(dirname(output), join(home, '.cuekeeper', 'recordings'));
+    assert.match(basename(output), /^recording-\d{8}T\d{6}Z\.flow\.json$/);
+    assert.equal(response.data.workbench, 'cuekeeper workbench ~/.cuekeeper/recordings');
+    assert.match(stderr, /立即读取当前前台窗口/);
+    assert.match(stderr, /开始录制前台窗口：com\.apple\.TextEdit · Cuekeeper-M1\.txt/);
+    assert.equal(commands.filter(command => command === 'list-apps').length, 1);
+  });
+
+test('record CLI waits for the countdown before reading the front window',
+  { skip: process.platform !== 'darwin' }, t => {
+    const home = recordingHome(t);
+    const started = Date.now();
+    const { code, stderr } = recordFixture(t, [captureClick], {
+      windows: frontWindowInventory, apps: runningApps, args: ['--countdown', '1'], home,
+    });
+    assert.equal(code, 0, stderr);
+    assert.match(stderr, /1 秒后开始录制，请切换到要录制的 App 窗口。/);
+    assert.ok(Date.now() - started >= 950, 'the countdown must actually wait');
+  });
+
+test('record CLI reports WINDOW_NOT_FOUND when no front window is focused',
+  { skip: process.platform !== 'darwin' }, t => {
+    const home = recordingHome(t);
+    const { code, response, output, stderr, snapshotWindows } = recordFixture(t, [captureClick], {
+      args: ['--countdown', '0'], home,
+    });
+    assert.equal(code, 1, stderr);
+    assert.equal(response.ok, false);
+    assert.equal(response.error.code, 'WINDOW_NOT_FOUND');
+    assert.match(response.error.message, /前台窗口/);
+    assert.deepEqual(snapshotWindows, []);
+    assert.equal(existsSync(output), false);
+    assert.equal(existsSync(join(home, '.cuekeeper', 'recordings')), true);
+  });
+
+test('record CLI reports APP_NOT_FOUND when the front window has no owning bundle ID',
+  { skip: process.platform !== 'darwin' }, t => {
+    const home = recordingHome(t);
+    const { code, response, recorded } = recordFixture(t, [captureClick], {
+      windows: frontWindowInventory, apps: [{ name: 'Other', bundle_id: 'com.example.other', pid: 777 }],
+      args: ['--countdown', '0'], home,
+    });
+    assert.equal(code, 1);
+    assert.equal(response.ok, false);
+    assert.equal(response.error.code, 'APP_NOT_FOUND');
+    assert.equal(recorded, undefined);
+  });
+
+test('record CLI selects the focused window of an explicitly named app',
+  { skip: process.platform !== 'darwin' }, t => {
+    const home = recordingHome(t);
+    const { code, response, recorded, commands } = recordFixture(t, [captureClick], {
+      windows: frontWindowInventory, apps: runningApps,
+      args: ['--app', fixture.target.app, '--countdown', '0'], home,
+    });
+    assert.equal(code, 0);
+    assert.deepEqual(recorded.target, { app: fixture.target.app, window: fixture.target.window });
+    // The bundle ID came from the flag, so the app inventory is never read.
+    assert.equal(commands.includes('list-apps'), false);
+
+    const missing = recordFixture(t, [captureClick], {
+      windows: [{ id: 'w-2000', title: 'Safari Start Page', pid: 9999 }],
+      args: ['--app', fixture.target.app, '--countdown', '0'], home,
+    });
+    assert.equal(missing.code, 1);
+    assert.equal(missing.response.error.code, 'WINDOW_NOT_FOUND');
+  });
+
+test('record CLI keeps explicit --app/--window/--out authoritative and skips detection',
+  { skip: process.platform !== 'darwin' }, t => {
+    const home = recordingHome(t);
+    const { code, response, recorded, output, stderr, commands, dir } = recordFixture(t, [captureClick], { home });
+    assert.equal(code, 0);
+    assert.equal(output, join(dir, 'recorded.flow.json'));
+    assert.deepEqual(recorded.target, { app: fixture.target.app, window: fixture.target.window });
+    assert.equal(commands.includes('list-apps'), false);
+    assert.doesNotMatch(stderr, /秒后开始录制|立即读取当前前台窗口/);
+    assert.equal(response.data.workbench, undefined);
+    assert.equal(existsSync(join(home, '.cuekeeper')), false);
+  });
+
+test('record CLI suffixes a taken default recording name instead of overwriting',
+  { skip: process.platform !== 'darwin' }, t => {
+    const home = recordingHome(t);
+    const directory = join(home, '.cuekeeper', 'recordings');
+    mkdirSync(directory, { recursive: true });
+    // Occupy the name the run may pick now or on the next few second ticks.
+    for (let offset = 0; offset < 30; offset++) {
+      writeFileSync(join(directory, recordingFileName(new Date(Date.now() + offset * 1000))),
+        '{"taken":true}');
+    }
+    const { code, response, output } = recordFixture(t, [captureClick], {
+      windows: frontWindowInventory, apps: runningApps, args: ['--countdown', '0'], home,
+    });
+    assert.equal(code, 0);
+    assert.match(basename(output), /-2\.flow\.json$/);
+    const occupied = join(directory, `${basename(output).replace(/-2\.flow\.json$/, '')}.flow.json`);
+    assert.equal(readFileSync(occupied, 'utf8'), '{"taken":true}');
+    assert.equal(response.data.actions, 1);
   });
 
 test('record CLI keeps a single click that activates the target and saves across app switches',

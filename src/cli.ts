@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { dirname, resolve } from 'node:path';
-import { realpath } from 'node:fs/promises';
+import { mkdir, realpath } from 'node:fs/promises';
 import { discoverAssets } from './assets.js';
+import { countdown, detectTarget } from './auto-target.js';
 import { capturePreflight, diagnose, formatDoctor, preflightFault } from './doctor.js';
 import { buildInfo, versionLine } from './version.js';
 import { BatchError, batchExitCode, bindRows, readData, resolveBatchSecrets, runBatch } from './batch.js';
 import { AppIdentitySession, IdentityFault } from './app-identity.js';
-import { captureTargetCheck } from './contracts.js';
+import { appPathPattern, captureTargetCheck } from './contracts.js';
 import type { Target } from './contracts.js';
 import { fixtureAppPath, offlineDesktop, withDesktop } from './desktop.js';
 import { ensureNew, readJson, writeNew } from './files.js';
@@ -24,6 +25,7 @@ import type { Snapshot } from './locator.js';
 import { pickCandidates, selectCandidate } from './pick.js';
 import type { PickCandidate } from './pick.js';
 import { record } from './record.js';
+import { displayRecordingsDirectory, recordingFileName, recordingsDirectory, writeRecording } from './recording-output.js';
 import { packReport } from './report.js';
 import { blockedShellReport, runFlow } from './run.js';
 import type { ShellRunOptions } from './run.js';
@@ -52,7 +54,8 @@ const help = `Cuekeeper ${buildInfo().version}
   cuekeeper ime unlock --run <run-id> [--json]
   cuekeeper workbench [run-directory] [--port <port>] [--library <directory>] [--allow-live-replay] [--allow-shell] [--allow-sudo]
   cuekeeper pick --app <bundle-id> --window <title> [--app-path <path>] [--select <ref>] [--snapshot <snapshot.json>] [--json]
-  cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--app-path <path>] [--seconds 25] [--clipboard] [--no-indicator] [--sound] [--trace-clicks] [--json]
+  cuekeeper record [--seconds 25] [--countdown 3] [--no-indicator] [--sound] [--clipboard] [--trace-clicks] [--json]
+  cuekeeper record --app <bundle-id> [--window <title>] [--out <flow.json>] [--app-path <path>] [--seconds 25] [--countdown 0] [--json]
   cuekeeper report pack <report.json> --flow <flow.json> --out <report.zip> [--assets <dir>] [--no-upload] [--queue <dir>] [--config <upload.json>] [--json]
   cuekeeper report upload [--queue <dir>] [--retry-paused] [--json]
   cuekeeper serve --config <server.json> --data <dir> [--host <host>] [--port <port>] [--json]
@@ -592,24 +595,47 @@ async function main() {
         ...common, app: { type: 'string' }, window: { type: 'string' },
         'app-path': { type: 'string' },
         out: { type: 'string' }, seconds: { type: 'string', default: '25' },
+        countdown: { type: 'string', default: '3' },
         'no-indicator': { type: 'boolean' }, sound: { type: 'boolean' },
         'trace-clicks': { type: 'boolean' }, clipboard: { type: 'boolean' },
       },
     });
-    const target = {
-      app: values.app, window: values.window,
-      ...(values['app-path'] ? { appPath: values['app-path'] } : {}),
-    } as Target;
-    if (!captureTargetCheck.Check(target) || !/^[a-z\d][a-z\d.-]*\.[a-z\d][a-z\d-]*$/i.test(target.app)) {
-      throw new Error('Specify --app with a bundle ID and --window with an exact window title');
-    }
-    const output = requireString(values.out, '--out');
     const seconds = Number(values.seconds);
     if (!Number.isInteger(seconds) || seconds < 1 || seconds > 90) throw new Error('--seconds must be an integer from 1 to 90');
+    const countdownSeconds = Number(values.countdown);
+    if (!Number.isInteger(countdownSeconds) || countdownSeconds < 0 || countdownSeconds > 60) {
+      throw new Error('--countdown must be an integer from 0 to 60');
+    }
+    const app = values.app;
+    const window = values.window;
+    const appPath = values['app-path'];
+    if (window !== undefined && !window) throw new Error('--window must be a nonempty window title');
+    if (window && !app) throw new Error('--window needs --app with a bundle ID. Omit both to record the current front window');
+    if (appPath && !app) throw new Error('--app-path needs --app with a bundle ID');
+    if (app && !/^[a-z\d][a-z\d.-]*\.[a-z\d][a-z\d-]*$/i.test(app)) {
+      throw new Error('--app must be a bundle ID such as com.apple.TextEdit');
+    }
+    if (appPath && !new RegExp(appPathPattern).test(appPath)) {
+      throw new Error('--app-path must be an absolute path to an app bundle');
+    }
+    // A target pinned by the user is recorded as given; anything less is
+    // resolved from the front window after the countdown.
+    const explicitTarget: Target | undefined = app && window
+      ? { app, window, ...(appPath ? { appPath } : {}) }
+      : undefined;
+    if (explicitTarget && !captureTargetCheck.Check(explicitTarget)) {
+      throw new Error('--window must be a nonempty window title no longer than 256 characters');
+    }
     macOnly();
     const preflight = preflightFault(await capturePreflight());
     if (preflight) throw preflight;
-    await ensureNew(output);
+    const output = values.out ? resolve(values.out) : undefined;
+    const directory = output ? undefined : recordingsDirectory();
+    if (output) {
+      await ensureNew(output);
+    } else {
+      await mkdir(directory!, { recursive: true, mode: 0o700 });
+    }
     // The input source is read before capture; a Chinese IME rewrites physical
     // keys into candidate text, which the recorder cannot undo.
     const inputSource = await detectInputSource(nativeImeBackend());
@@ -620,19 +646,34 @@ async function main() {
     const options = { seconds, indicator: !values['no-indicator'], sound: values.sound ?? false,
       traceClicks: values['trace-clicks'] ?? false, clipboard: values.clipboard ?? false,
       ...(inputSource ? { inputSource } : {}) };
-    const { flow, warnings, partial, failure } = await withDesktop({ headed: false, signal },
-      desktop => record(desktop, target, options, signal));
-    await writeNew(output, JSON.stringify(flow, null, 2) + '\n');
-    const data = { output, flowId: flow.id, actions: flow.steps.length,
+    const { flow, warnings, partial, failure } = await withDesktop({ headed: false, signal }, async desktop => {
+      let target = explicitTarget;
+      if (!target) {
+        await countdown(countdownSeconds, line => process.stderr.write(`${line}\n`), signal);
+        const detected = await detectTarget(desktop, { ...(app ? { app } : {}) });
+        target = { ...detected, ...(appPath ? { appPath } : {}) };
+        process.stderr.write(`开始录制前台窗口：${target.app} · ${target.window}\n`);
+      }
+      return record(desktop, target, options, signal);
+    });
+    const contents = JSON.stringify(flow, null, 2) + '\n';
+    const saved = output ?? await writeRecording(directory!, recordingFileName(new Date()), contents);
+    if (output) await writeNew(output, contents);
+    // Without an explicit --out the flow lands among other one-key recordings,
+    // so point at the directory the workbench opens directly.
+    const workbench = output ? undefined : `cuekeeper workbench ${displayRecordingsDirectory()}`;
+    const data = { output: saved, flowId: flow.id, actions: flow.steps.length,
+      ...(workbench ? { workbench } : {}),
       ...(inputSource ? { inputSource } : {}),
       ...(partial ? { partial: true } : {}), ...(warnings.length ? { warnings } : {}) };
-    const message = `Saved ${flow.steps.length} actions to ${output}${partial ? ' (partial flow)' : ''}`;
+    const lines = [`Saved ${flow.steps.length} actions to ${saved}${partial ? ' (partial flow)' : ''}`];
+    if (workbench) lines.push(workbench);
     const fault = failure ?? (partial ? new Fault('PARTIAL_RECORDING', 'Some input was skipped') : undefined);
     if (fault && machine) {
       console.log(JSON.stringify({ ok: false, data, error: { code: fault.code, message: fault.message } }));
       process.exitCode = fault.code === 'INTERRUPTED' ? 130 : 1;
     } else {
-      const details = [message, ...warnings.map(warning => warning.message), ...(fault ? [fault.message] : [])];
+      const details = [...lines, ...warnings.map(warning => warning.message), ...(fault ? [fault.message] : [])];
       success(data, details.join('\n'), !fault ? 0 : fault.code === 'INTERRUPTED' ? 130 : 1);
     }
     return;
