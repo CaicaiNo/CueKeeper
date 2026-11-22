@@ -445,9 +445,10 @@ export class GlobalRecording {
       } else if (hitName) {
         target = { kind: 'element', role: bareRole(hitRole), name: hitName };
       } else {
-        // The helper named only a container; the text event that follows proves
-        // the editable control and retargets this step, so no read is spent.
-        target = { kind: 'element', role: bareRole(hitRole) };
+        // The helper named only a container and a role alone cannot be resolved
+        // again, so the click keeps its point; the text event that follows
+        // replaces it with the editable control it proves.
+        target = this.untargetedClick(event);
       }
     }
     if (!target) {
@@ -899,8 +900,10 @@ export class GlobalRecording {
     if (!click || click.button !== 'left' || click.scope !== scope) return;
     if (click.index !== this.steps.length - 1 || event.t - click.at > clickTextFallbackMs) return;
     const step = this.steps[click.index];
-    if (step?.kind !== 'click' || step.target.kind !== 'element') return;
-    if (editableRole(step.target.role)) return;
+    if (step?.kind !== 'click') return;
+    // A named editable control is already the right target; a point or a named
+    // container still describes the surface above the field the text proved.
+    if (step.target.kind === 'element' && editableRole(step.target.role)) return;
     if (!contains(focusBounds(event.focus), click.point)) return;
     (step as { target: ElementLocator }).target = target;
     click.locator = locatorKey(target);
