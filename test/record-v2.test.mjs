@@ -224,6 +224,94 @@ test('an unreadable window snapshot becomes a gap instead of a guessed step', as
   assert.ok(flow.steps.some(step => step.kind === 'gap' && step.code === 'STALE_CAPTURE'));
 });
 
+// A double-click on a package in Finder's Downloads: the pointer evidence names
+// the window and point, but reading that window's tree during the Installer
+// hand-off fails. The click must stay a step, not become the empty gap run the
+// user reported.
+test('a click whose window tree cannot be read keeps its point and its count', async () => {
+  const data = fixture('finder-downloads-pkg-click');
+  const recording = new GlobalRecording(readerFor(data, { failWindow: 11 }), { now: () => NOW });
+  for (const event of data.events) await recording.add(parseCaptureEvent(event));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
+  assert.deepEqual(flow.steps[0].target, { kind: 'point', point: [420, 300] });
+  assert.equal(flow.steps[0].count, 2);
+  assert.equal(flow.steps[0].scope.windowTitle, 'Downloads');
+  assert.equal(flowV2Check.Check(flow), true);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'NATIVE_POINT_FALLBACK'));
+  // No STALE_CAPTURE gap is left behind by the failed read.
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'STALE_CAPTURE'), false);
+  // The point step is a normal, editable flow step: it parses and validates.
+  const parsed = parseFlowV2(flow);
+  assert.equal(parsed.steps[0].target.kind, 'point');
+});
+
+test('a click the helper saw on an element keeps that element when the tree read fails', async () => {
+  const data = fixture('finder-downloads-pkg-click');
+  const events = data.events.map(event => event.kind !== 'click' ? event : {
+    ...event,
+    owner: { ...event.owner, role: 'AXImage', name: 'Install Test.pkg' },
+  });
+  const recording = new GlobalRecording(readerFor(data, { failWindow: 11 }), { now: () => NOW });
+  for (const event of events) await recording.add(parseCaptureEvent(event));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
+  assert.deepEqual(flow.steps[0].target, {
+    kind: 'element', role: 'AXImage', name: 'Install Test.pkg',
+  });
+  assert.equal(flow.steps[0].count, 2);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'NATIVE_ELEMENT_FALLBACK'));
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+
+  // An element fallback without a name still records the role alone.
+  const anonymous = data.events.map(event => event.kind !== 'click' ? event : {
+    ...event, owner: { ...event.owner, role: 'AXImage' },
+  });
+  const second = new GlobalRecording(readerFor(data, { failWindow: 11 }), { now: () => NOW });
+  for (const event of anonymous) await second.add(parseCaptureEvent(event));
+  assert.deepEqual(second.finish().steps[0].target, { kind: 'element', role: 'AXImage' });
+});
+
+test('a window tree read that fails once is retried before a fallback is used', async () => {
+  const data = fixture('finder-downloads-pkg-click');
+  let reads = 0;
+  const recording = new GlobalRecording(async window => {
+    reads += 1;
+    if (reads === 1) throw new Error('snapshot unavailable');
+    return structuredClone(data.snapshots[String(window.windowNumber)]);
+  }, { now: () => NOW });
+  for (const event of data.events) await recording.add(parseCaptureEvent(event));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
+  // The retry read the real tree, so the step names the element it hit.
+  assert.equal(flow.steps[0].target.kind, 'element');
+  assert.equal(flow.steps[0].target.role, 'image');
+  assert.equal(flow.steps[0].target.name, 'Install Test.pkg');
+  assert.equal(flow.steps[0].count, 2);
+  assert.equal(recording.captureWarnings.some(warning => warning.code.startsWith('NATIVE_')), false);
+  assert.equal(reads, 3);
+});
+
+test('a click that already missed its budget keeps a point target, not a gap', async () => {
+  const data = fixture('finder-downloads-pkg-click');
+  const recording = new GlobalRecording(readerFor(data), { now: () => NOW + 5000 });
+  for (const event of data.events) await recording.add(parseCaptureEvent(event));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
+  assert.equal(flow.steps[0].target.kind, 'point');
+});
+
+test('a small list view still records the clicked element rather than a fallback', async () => {
+  const data = fixture('two-apps-three-windows');
+  const recording = new GlobalRecording(readerFor(data), { now: () => NOW });
+  await recording.add(parseCaptureEvent(data.events[0]));
+  const flow = recording.finish();
+  assert.equal(flow.steps[0].kind, 'click');
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'textfield', name: 'Search' });
+  assert.equal(recording.captureWarnings.some(warning => warning.code.startsWith('NATIVE_')), false);
+});
+
+
 test('excluded apps are dropped before their window is read', async () => {
   const data = fixture('queue-overflow');
   let reads = 0;

@@ -33,8 +33,19 @@ const element = object({
   index: T.Optional(T.Integer({ minimum: 0 })),
 });
 
-// P2 rejects the raw-coordinate locator: a global flow must stay bound to a
-// scope and an element, never to a screen position.
+// A click may keep a screen point as its target when the window tree could not
+// name the element under the pointer. It stays a window-scoped, editable step:
+// replay delivers it only as physical input, and the workbench can turn it into
+// an element target. Every other input step still requires an element.
+const clickPoint = T.Tuple([
+  T.Integer({ minimum: -100_000, maximum: 100_000 }),
+  T.Integer({ minimum: -100_000, maximum: 100_000 }),
+]);
+const pointTarget = object({ kind: T.Literal('point'), point: clickPoint });
+const clickTarget = T.Union([element, pointTarget]);
+
+// The raw-coordinate locator is refused everywhere else: a global flow stays
+// bound to a scope and an element, and only a recorded click may fall back.
 const windowScope = object({
   kind: T.Literal('window'), app: bundleId, windowKey, windowTitle: label,
 });
@@ -140,7 +151,7 @@ const stepId = { id };
 
 const clickStep = object({
   ...stepId, kind: T.Literal('click'), scope: windowScope, focusAfter,
-  target: element, count: clickCount, button: clickButton,
+  target: clickTarget, count: clickCount, button: clickButton,
 });
 // `text` is an explicit literal; `input` names a runtime parameter. A step has
 // exactly one of them, which the two closed variants enforce.
