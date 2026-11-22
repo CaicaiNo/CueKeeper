@@ -4,7 +4,7 @@ import {
   deleteCondition, id, makeBehavior, retargetCondition, sameTarget, scopeDescription, scrollLabel, setupDraft,
   shellDraft, shellSummary, dragSummary, undoCondition, visibleRows, locatorDetail, targetLabel,
   V2_COPYABLE_KINDS, V2_INSERT_KINDS, V2_TARGET_KINDS, assertCheck, checkLabel, diffSummary,
-  filterStepsByScope, scopeKey, scopeOptions, statusMap, stepTemplate, v2StepLabel,
+  filterStepsByScope, scopeKey, scopeOptions, statusMap, stepTemplate, stepTiming, v2StepLabel,
   checkpointWaitFacts, pickCandidateLabel,
 } from './model.js';
 import { createAppPicker } from './picker.js';
@@ -56,6 +56,13 @@ function kindChip(action) {
 
 const duration = ms => ms === undefined ? '—' : ms >= 1000 ? `${(ms / 1000).toFixed(2)} s` : `${ms} ms`;
 const timestamp = ms => ms === undefined ? '—' : `+${(ms / 1000).toFixed(2)} s`;
+/** The wait before a step, read from the two recorded step times. */
+const gapLabel = timing => timing?.sinceMs === undefined
+  ? (timing ? '第一个动作' : '未记录')
+  : `+${(timing.sinceMs / 1000).toFixed(2)} s`;
+const gapTitle = timing => timing?.sinceMs === undefined
+  ? (timing ? '录制的第一个动作' : '未记录时间')
+  : `距上一步 ${gapLabel(timing)}`;
 const actionTarget = action => action.target ?? action.check?.target;
 const isCompatible = row => state.session?.version === 1 && sameTarget(row, state.session.target);
 
@@ -237,7 +244,7 @@ function renderSummary() {
     infoList([['时长', duration(session.durationMs)], ['动作', session.timeline.length],
       ['应用', apps.size], [session.version === 2 ? '作用域' : '窗口',
         session.version === 2 ? groups.size : windows.size]], 'session-stats'),
-    muted(timing ?? '原始录制缺少时间数据'),
+    muted(timing ?? '未记录时间'),
     session.startedAt ? el('time', { className: 'muted', dateTime: session.startedAt },
       session.startedAt.slice(0, 19).replace('T', ' ') + ' UTC') : undefined,
   ].filter(Boolean));
@@ -387,6 +394,9 @@ function renderTimeline() {
   }
   const groupSteps = new Map((state.session?.scopeGroups ?? []).map(group => [group.key, group.stepIds.length]));
   const v2Statuses = statusMap(state.v2Report);
+  // Gaps come from the whole recording, not the filtered view, so a step's
+  // interval never depends on which rows happen to be visible.
+  const timing = stepTiming(getRows());
   const nodes = [];
   let lastGroup;
   for (const row of rows) {
@@ -416,7 +426,7 @@ function renderTimeline() {
       onclick: () => { state.focused = row.id; state.tab = 'actions'; render(); },
     },
     el('span', { className: 'time' },
-      el('span', { className: 'time-value' }, timestamp(row.atMs)),
+      el('span', { className: 'time-value', title: gapTitle(timing.get(row.id)) }, timestamp(row.atMs)),
       el('span', { className: 'step-id', title: `步骤 ${row.id}` }, row.id)),
     kindChip(row.action),
     el('span', { className: 'row-description' }, el('strong', {}, actionLabel(row.action)),
@@ -523,6 +533,7 @@ function renderInspector() {
   const ignored = state.ignored.has(row.id);
   const editable = !ignored && isCompatible(row);
   const target = actionTarget(row.action);
+  const recordedAt = stepTiming(getRows()).get(row.id);
   panel.replaceChildren(el('div', { className: 'stack-list' },
     el('h3', { className: 'inspector-heading' },
       el('span', { className: 'step-id badge badge-ghost badge-sm', title: '步骤 id' }, row.id), actionLabel(row.action)),
@@ -548,7 +559,9 @@ function renderInspector() {
         ['等待上限', duration(row.action.timeoutMs)],
       ] : []),
       ...(target ? [['定位器', locatorDetail(target)]] : []),
-      ['时间', timestamp(row.atMs)], ['耗时', duration(row.durationMs)],
+      ['时间', timestamp(row.atMs)],
+      ...(recordedAt ? [['距上一步', gapLabel(recordedAt)]] : []),
+      ['耗时', duration(row.durationMs)],
     ], 'meta-grid'),
     isCompatible(row) ? undefined : muted('该动作属于另一窗口，只能在时间线复盘。'),
     row.action.kind === 'manual_checkpoint'
@@ -1261,7 +1274,7 @@ function v2InsertDialog() {
     const step = stepTemplate(kind.value, {
       id: id(kind.value), scope: scopeValue(),
       target: ['click', 'type'].includes(kind.value) ? picker.value() : undefined,
-      timeoutMs,
+      timeoutMs, atMs: anchor?.atMs,
     });
     return v2Edit({ kind: 'insert', index, step });
   });

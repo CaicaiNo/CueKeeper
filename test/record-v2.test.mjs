@@ -67,6 +67,17 @@ test('one recording spans two apps and three windows with one scope per step', a
   assert.ok(!json.includes('Zq-two'));
 });
 
+test('every recorded step carries the time it happened, counted from the first step', async () => {
+  const flow = (await recordFixture('two-apps-three-windows')).finish();
+  // Fixture events: click 100, text 200+260 (one burst), focus 400, text 500,
+  // focus 700, text 800, focus 1000, key 1100. The first retained step is the
+  // recording's zero, and a merged burst keeps its first character's time.
+  assert.deepEqual(flow.steps.map(step => step.atMs), [0, 100, 300, 400, 600, 700, 900, 1000]);
+  assert.equal(flowV2Check.Check(flow), true);
+  // The time survives the trip through the parser the workbench uses.
+  assert.deepEqual(parseFlowV2(flow).steps.map(step => step.atMs), [0, 100, 300, 400, 600, 700, 900, 1000]);
+});
+
 test('same-title windows stay distinct and a retitled window keeps its key', async () => {
   const flow = (await recordFixture('same-title-windows')).finish();
   const keys = flow.steps
@@ -222,6 +233,9 @@ test('a system dialog after a package double-click is captured once without requ
     id: 's2', kind: 'manual_checkpoint', scope: flow.steps[0].scope, triggerStepId: 's1', reason: 'system_dialog',
     resume: { scope: flow.steps[0].scope, check: { kind: 'window_exists', equals: true } },
     timeoutMs: 120_000,
+    // Times run from the first retained step: the click at t=100 is the
+    // recording's zero, so the dialog at t=280 is 180 ms in.
+    atMs: 180,
   });
   assert.equal(flow.steps[2].scope.windowKey, flow.steps[0].scope.windowKey);
   // Both clicks share the one tree this window was read as; the dialog never
@@ -236,7 +250,7 @@ test('an already visible system dialog without a trigger leaves a gap', async ()
     kind: 'system_dialog', visible: true, t: 0, seen: NOW, focusGeneration: 0, secure: false,
   }));
   const flow = recording.finish();
-  assert.deepEqual(flow.steps, [{ id: 's1', kind: 'gap', code: 'CAPTURE_SCOPE_UNVERIFIED' }]);
+  assert.deepEqual(flow.steps, [{ id: 's1', atMs: 0, kind: 'gap', code: 'CAPTURE_SCOPE_UNVERIFIED' }]);
   assert.throws(() => parseFlowV2(flow), { code: 'CAPTURE_GAP' });
 });
 

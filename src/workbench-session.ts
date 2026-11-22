@@ -334,6 +334,10 @@ async function loadV2Session(
   const timeline = await Promise.all(flow.steps.map(async (step, index): Promise<TimelineAction> => {
     const info = metadata.get(step.id);
     const timing = report?.entries[index];
+    // A recording without actions.json still knows when each step happened: the
+    // step itself carries the time it was recorded at. A run report's `atMs` is
+    // execution time and wins over it, because a replay is what is being shown.
+    const recordedAt = readTime(step.atMs);
     const image = info?.thumbnail;
     let thumbnail: string | undefined;
     if (image !== undefined) {
@@ -355,7 +359,7 @@ async function loadV2Session(
       id: step.id, action: step, scope, scopeGroup: key,
       groupStart: groups.at(-1)!.stepIds.length === 1,
       ...scopeRowTarget(scope), thumbnail,
-      atMs: fromCapture ? readTime(info?.atMs) : timing?.atMs,
+      atMs: fromCapture ? readTime(info?.atMs) : timing?.atMs ?? recordedAt,
       durationMs: fromCapture ? readTime(info?.durationMs) : timing?.durationMs,
     };
   }));
@@ -386,9 +390,13 @@ async function loadV2Session(
     if ('focusAfter' in step && step.focusAfter) appIds.add(step.focusAfter.app);
   }
   const completeTimings = timeline.every(row => row.atMs !== undefined && row.durationMs !== undefined);
+  const recordedTimes = timeline.map(row => row.atMs).filter((at): at is number => at !== undefined);
   const durationMs = fromCapture
     ? captureDuration ?? (completeTimings ? Math.max(...timeline.map(row => row.atMs! + row.durationMs!)) : undefined)
-    : report ? Math.max(...report.entries.map(entry => entry.atMs + entry.durationMs)) : undefined;
+    : report ? Math.max(...report.entries.map(entry => entry.atMs + entry.durationMs))
+      // A recording has no durations, only when each step happened; the last
+      // step's time is how long the recording ran.
+      : recordedTimes.length ? Math.max(...recordedTimes) : undefined;
   const apps = await describeApps([...appIds]);
   return {
     directory, flow, images, snapshot: undefined,
@@ -397,7 +405,7 @@ async function loadV2Session(
       appPaths: flow.appPaths ?? {},
       timeline, scopeGroups: groups, candidates: [], durationMs,
       waitCandidates,
-      timingSource: fromCapture ? 'capture' : report?.mode,
+      timingSource: fromCapture ? 'capture' : report?.mode ?? (recordedTimes.length ? 'capture' : undefined),
       startedAt: fromCapture ? undefined : report?.startedAt,
       hasSnapshot: false, snapshotAppPath: undefined, pathConflict: false,
       shell: { reachable: 0, definitions: 0, privileged: 0 },

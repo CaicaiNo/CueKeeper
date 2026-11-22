@@ -279,6 +279,12 @@ export class GlobalRecording {
   private snapshotReads = 0;
   private truncated = false;
   private inputCount = 0;
+  /** The event being consumed; every step it produces is stamped with its time. */
+  private eventAt = 0;
+  /** The first retained step's event time; step times are relative to it. */
+  private firstStepAt?: number;
+  /** The last step time written, so the timeline never reads backwards. */
+  private lastStepAt = 0;
 
   constructor(private read: WindowReader, options: GlobalRecordingOptions = {}) {
     this.exclude = new Set(options.exclude ?? []);
@@ -348,6 +354,7 @@ export class GlobalRecording {
    * manual checkpoint and every piece of content inside it is discarded.
    */
   async add(event: CaptureEvent): Promise<void> {
+    this.eventAt = event.t;
     if (event.kind === 'system_dialog') {
       if (event.visible === this.systemDialogVisible) return;
       this.systemDialogVisible = event.visible;
@@ -858,7 +865,7 @@ export class GlobalRecording {
     this.endBursts();
     const input = `input_${++this.inputCount}`;
     this.inputs.add(input);
-    this.push({ kind: 'type', scope, target, input });
+    this.push({ kind: 'type', scope, target, input }, at);
     if (!this.steps.length || this.steps[this.steps.length - 1].kind !== 'type') return;
     this.textBurst = {
       at, scope: scopeId, locator: locatorId, target,
@@ -1375,12 +1382,29 @@ export class GlobalRecording {
     this.push({ kind: 'gap', code });
   }
 
-  private push(step: StepDraft) {
+  private push(step: StepDraft, at = this.eventAt) {
     if (this.steps.length >= this.stepLimit) {
       this.truncated = true;
       return;
     }
-    this.steps.push({ id: `s${this.steps.length + 1}`, ...step } as unknown as StepV2);
+    this.steps.push({
+      id: `s${this.steps.length + 1}`,
+      atMs: this.stepTime(at),
+      ...step,
+    } as unknown as StepV2);
+  }
+
+  /**
+   * A step's time is milliseconds from the recording's first step, so the
+   * timeline reads from zero no matter how long the helper took to prove the
+   * first window. It never runs backwards: a burst that settles late keeps the
+   * time of the event it belongs to.
+   */
+  private stepTime(at: number) {
+    const first = this.firstStepAt ??= at;
+    const atMs = Math.max(this.lastStepAt, Math.round(at - first));
+    this.lastStepAt = atMs;
+    return atMs;
   }
 
   /**

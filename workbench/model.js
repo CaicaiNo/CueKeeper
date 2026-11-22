@@ -519,6 +519,25 @@ export function statusMap(report) {
   return map;
 }
 
+/**
+ * Each timed row's place in the recording and the gap since the previous timed
+ * row. An untimed row is skipped rather than guessed at, so a gap always spans
+ * two steps that were actually recorded with a time.
+ */
+export function stepTiming(rows) {
+  const timing = new Map();
+  let previous;
+  for (const row of rows) {
+    if (row.atMs === undefined) continue;
+    timing.set(row.id, {
+      atMs: row.atMs,
+      sinceMs: previous === undefined ? undefined : row.atMs - previous,
+    });
+    previous = row.atMs;
+  }
+  return timing;
+}
+
 /** One candidate in the v2 "pick from the current window" dialog. */
 export function pickCandidateLabel(candidate) {
   const frame = candidate.bounds
@@ -564,7 +583,16 @@ export function assertCheck({ target, property, equals, contains, matches, norma
  * Build a complete insert step. Target and app/window fields come from the
  * dialog; ids come from the page because the engine only validates uniqueness.
  */
-export function stepTemplate(kind, { id, scope, target, key = 'tab', modifiers = [], timeoutMs = 15000 }) {
+export function stepTemplate(kind, {
+  id, scope, target, key = 'tab', modifiers = [], timeoutMs = 15000, atMs,
+}) {
+  const step = stepBody(kind, { id, scope, target, key, modifiers, timeoutMs });
+  // A step inserted next to an existing one keeps that step's recorded time, so
+  // the timeline stays in order; a fresh flow without times stays untimed.
+  return atMs === undefined ? step : { ...step, atMs };
+}
+
+function stepBody(kind, { id, scope, target, key = 'tab', modifiers = [], timeoutMs = 15000 }) {
   if (!id) throw new Error('步骤需要 id。');
   if (!scope) throw new Error('步骤需要作用域。');
   switch (kind) {
