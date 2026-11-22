@@ -236,9 +236,10 @@ const surfacePress = object({
   ...stepId, kind: T.Literal('surface_press'), scope: surfaceScope,
   selector: T.Union([dockItem, menuItem, statusItem, spotlightResult]),
 });
+const checkpointReason = T.Union([T.Literal('secure_input'), T.Literal('system_dialog')]);
 const manualCheckpoint = object({
   ...stepId, kind: T.Literal('manual_checkpoint'), scope: windowScope,
-  triggerStepId: id, reason: T.Literal('secure_input'),
+  triggerStepId: id, reason: checkpointReason,
   resume: object({ scope: windowScope, check: windowWaitCheck }),
   timeoutMs: checkpointTimeout,
 });
@@ -317,7 +318,7 @@ const fallbackResult = object({
 // parameter, and how a manual checkpoint was resolved.
 const textMode = T.Union([T.Literal('literal'), T.Literal('input')]);
 const checkpointResult = object({
-  reason: T.Literal('secure_input'),
+  reason: checkpointReason,
   triggerStepId: id,
   confirmedBy: T.Optional(T.Literal('operator')),
   timeoutMs: T.Optional(T.Integer({ minimum: 1_000, maximum: maxWaitTimeoutMs })),

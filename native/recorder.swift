@@ -4,6 +4,33 @@ import Carbon
 import CoreGraphics
 import Foundation
 
+private enum SystemDialog {
+    private static let host = "com.apple.CoreServicesUIAgent"
+
+    static func owns(_ application: NSRunningApplication) -> Bool {
+        application.bundleIdentifier == host &&
+            application.bundleURL?.path.hasPrefix("/System/Library/") == true
+    }
+
+    // The host can display dialogs without becoming the frontmost application.
+    // Quartz supplies owner and bounds without reading the dialog's contents.
+    static func isVisible() -> Bool? {
+        let owners = Set(NSRunningApplication.runningApplications(withBundleIdentifier: host)
+            .filter { owns($0) }.map { $0.processIdentifier })
+        if owners.isEmpty { return false }
+        guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                      kCGNullWindowID) as? [[String: Any]] else { return nil }
+        return windows.contains { window in
+            guard let pid = (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+                  owners.contains(pid),
+                  let bounds = window[kCGWindowBounds as String] as? NSDictionary,
+                  let rect = CGRect(dictionaryRepresentation: bounds) else { return false }
+            let alpha = (window[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1
+            return rect.width > 1 && rect.height > 1 && alpha > 0
+        }
+    }
+}
+
 // Recording observes input downstream of a separate filter for its two session controls.
 @MainActor
 final class Capture {
@@ -52,6 +79,7 @@ final class Capture {
     // The pointer evidence frozen on mouse-down; release uses it unchanged.
     private var pendingPointEvidence: GlobalPointerEvidence?
     private var captureLag = GlobalCaptureLag()
+    private var systemDialogVisible = false
 
     private var eventLimit: Int { global ? 20_000 : 1000 }
 
@@ -193,7 +221,9 @@ final class Capture {
 
     @discardableResult
     private func refreshGlobalFocus() -> NSRunningApplication? {
+        guard !systemDialogVisible else { return nil }
         guard let frontmost = NSWorkspace.shared.frontmostApplication else { return nil }
+        guard !SystemDialog.owns(frontmost) else { return nil }
         targetIsFrontmost = true
         targetWasFrontmost = true
         let instance = launchMillis(frontmost)
@@ -209,6 +239,21 @@ final class Capture {
                   title: window?.title, instance: instance,
                   report: pausedAt == nil && stopReleaseDeadline == nil)
         return frontmost
+    }
+
+    private func refreshSystemDialog() {
+        // Finish an in-flight pointer action first. It may be what opened
+        // the dialog, even if its button-up is still in the event queue.
+        guard global, started != nil, !stopped, pausedAt == nil, stopReleaseDeadline == nil,
+              pendingPointEvidence == nil, let visible = SystemDialog.isVisible(),
+              visible != systemDialogVisible else { return }
+        systemDialogVisible = visible
+        hover.reset()
+        emit([
+            "kind": "system_dialog", "visible": visible,
+            "t": elapsedMs(), "seen": wallClockMs(), "focusGeneration": focusGeneration,
+            "secure": IsSecureEventInputEnabled(),
+        ])
     }
 
     private func wallClockMs() -> Int {
@@ -447,6 +492,7 @@ final class Capture {
                                     "hotkeysFiltered": true, "global": global]
         ready["identity"] = identity
         emit(ready)
+        refreshSystemDialog()
         refreshFocus()
     }
 
@@ -557,6 +603,7 @@ final class Capture {
             CGEvent.tapEnable(tap: tap, enable: true)
         }
         flushPauseBoundary()
+        refreshSystemDialog()
         refreshFocus()
         flushHover()
         if targetIsFrontmost && pausedAt == nil { checkSecureInput() }
@@ -618,6 +665,13 @@ final class Capture {
     }
 
     func receive(_ type: CGEventType, _ event: CGEvent) {
+        switch type {
+        case .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel:
+            refreshSystemDialog()
+        default:
+            break
+        }
+        guard !systemDialogVisible else { return }
         if global, started != nil, !stopped, stopReleaseDeadline == nil, pausedAt == nil,
            captureLag.shouldReport(isKeyDown: type == .keyDown, timestamp: event.timestamp,
                                    now: DispatchTime.now().uptimeNanoseconds) {
@@ -948,6 +1002,9 @@ final class Capture {
         default:
             break
         }
+        if eventKind == .up {
+            refreshSystemDialog()
+        }
     }
 
     private func modifierNames(_ flags: CGEventFlags) -> [String] {
@@ -999,7 +1056,7 @@ final class Capture {
     /// Called from the session timer: a pointer that stopped moving sends no
     /// further samples, so its dwell would otherwise never be reported.
     private func flushHover() {
-        guard started != nil, !stopped, stopReleaseDeadline == nil, pausedAt == nil,
+        guard !systemDialogVisible, started != nil, !stopped, stopReleaseDeadline == nil, pausedAt == nil,
               targetIsFrontmost, let primary = NSScreen.screens.first else {
             hover.reset()
             return
@@ -1124,6 +1181,11 @@ struct RecorderCommand {
         // starts no tap, reads no accessibility tree and needs no TCC grant.
         if args.count == 2, args[1] == "--secure-state" {
             print("{\"secure\":\(IsSecureEventInputEnabled())}")
+            exit(0)
+        }
+        if args.count == 2, args[1] == "--system-dialog-state" {
+            guard let visible = SystemDialog.isVisible() else { exit(1) }
+            print("{\"visible\":\(visible)}")
             exit(0)
         }
         let global = args.count >= 2 && args[1] == "--global"

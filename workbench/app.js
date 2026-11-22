@@ -152,7 +152,8 @@ function actionLabel(action) {
     case 'open_system_surface':
       return `打开 ${SURFACE_LABELS[action.scope.surface] ?? action.scope.surface}`;
     case 'surface_press': return `操作 ${SURFACE_LABELS[action.scope.surface] ?? action.scope.surface} · ${action.selector.kind}`;
-    case 'manual_checkpoint': return `人工检查点 · ${action.reason} · 触发 ${action.triggerStepId}`;
+    case 'manual_checkpoint':
+      return `人工检查点 · ${action.reason === 'system_dialog' ? 'macOS 系统弹框' : '安全输入'} · 触发 ${action.triggerStepId}`;
     case 'gap': return `缺口 · ${action.code}`;
     case 'shell': return `Shell · ${short(shellSummary(action).command)}`;
     default: return action.kind;
@@ -520,8 +521,10 @@ function renderInspector() {
     ], 'meta-grid'),
     isCompatible(row) ? undefined : muted('该动作属于另一窗口，只能在时间线复盘。'),
     row.action.kind === 'manual_checkpoint'
-      ? muted('回放时请在目标界面由操作者完成授权或输入密码，随后在运行终端输入 continue 独立确认；' +
-        'CueKeeper 不读取密码，超时或取消即停在这里，后续步骤不执行。')
+      ? muted(row.action.reason === 'system_dialog'
+        ? '回放时先检测系统弹框。请在桌面上处理弹框，再回到运行终端输入 continue。'
+        : '回放时请在目标界面由操作者完成授权或输入密码，随后在运行终端输入 continue 独立确认；' +
+          'CueKeeper 不读取密码，超时或取消即停在这里，后续步骤不执行。')
       : undefined,
     el('div', { className: 'actions' },
       button('加入测试项', () => addAction(row.action), { icon: 'listPlus', disabled: !editable }),

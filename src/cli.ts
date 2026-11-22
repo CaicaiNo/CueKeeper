@@ -28,7 +28,7 @@ import { record } from './record.js';
 import { recordGlobal } from './record-v2.js';
 import { displayRecordingsDirectory, recordingFileName, recordingsDirectory, writeRecording } from './recording-output.js';
 import { packReport } from './report.js';
-import { nativeSecureInputProbe, terminalCheckpointChannel } from './manual-checkpoint.js';
+import { nativeSecureInputProbe, nativeSystemDialogProbe, terminalCheckpointChannel } from './manual-checkpoint.js';
 import { blockedShellReport, runFlow } from './run.js';
 import type { ShellRunOptions } from './run.js';
 import { runFlowV2 } from './run-v2.js';
@@ -469,6 +469,7 @@ async function main() {
           ...(inputs ? { inputs } : {}),
           checkpoints: terminalCheckpointChannel(),
           secureInputActive: nativeSecureInputProbe(),
+          systemDialogVisible: nativeSystemDialogProbe(),
         }));
       if (values.report) await writeNew(values.report, JSON.stringify(report, null, 2) + '\n');
       const details = report.entries.map(entry =>
