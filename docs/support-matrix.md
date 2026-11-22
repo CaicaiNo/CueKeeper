@@ -112,7 +112,7 @@ Shell 的完整约束见 [Shell 步骤设计](shell-steps.md) 与 [Root 步骤�
 | --- | --- | --- |
 | `HEADED_REQUIRED` | 双击、三击或坐标类输入（单击 / 右键 / 滚轮）没有 `--headed` | 否，直接失败 |
 | `NOT_FOUND` | 目标元素在绑定的窗口里不存在 | 否，不会落到别的控件 |
-| `UNSAFE_POINT` | 坐标落在目标窗口之外，或固定应用路径的流程使用坐标输入 | 否，不会点/滚到前台窗口 |
+| `UNSAFE_POINT` | 坐标落在目标窗口之外，或固定应用路径的流程使用坐标输入，或 v2 dry-run 的流程里仍有 `target.kind: "point"` 的点击 | 否，不会点/滚到前台窗口 |
 | `UNSAFE_TARGET` | 目标控件是安全控件或没有可执行 ref | 否 |
 | `UNSUPPORTED_CLICK_COUNT` | 右键带 `count > 1`，或内部传入 2/3 以外的连击数 | 否；规划期或适配器直接拒绝 |
 | `UNSUPPORTED_SCROLL` | 适配器收到双轴为 0 的滚动（规划期已先拒绝） | 否 |
@@ -126,7 +126,7 @@ Shell 的完整约束见 [Shell 步骤设计](shell-steps.md) 与 [Root 步骤�
 | `UNTARGETED_POINT` | 固定应用路径的录制里，坐标点击 / 滚动 / 悬停无法绑定到元素 | 是（录制警告） |
 | `UNTARGETED_HOVER` | 固定应用路径的录制里，悬停落点无法绑定到元素 | 是（录制警告） |
 | `UNTARGETED_FILE_CLICK` | 全局录制里 Finder 的点击没命中任何有名字的文件项，改记坐标 | 是（录制警告），回放前需改成有名字的元素 |
-| `UNTARGETED_ELEMENT_CLICK` | 全局录制里点击没命中任何有名字的元素，改记坐标 | 是（录制警告），回放前需改成有名字的元素 |
+| `UNTARGETED_ELEMENT_CLICK` | 全局录制里点击没命中任何有名字的元素（含只命中窗口根的空白点击），改记坐标 | 是（录制警告），回放前需改成有名字的元素，dry-run 以 `UNSAFE_POINT` 拒绝 |
 | `HOVER_UNRESOLVED` | 悬停的元素目标没有 bounds，无法算出回放坐标 | 否，直接失败 |
 | `CLIPBOARD_UNSUPPORTED_TYPE` | 开启剪贴板录制，但 clipboard 不是纯文本 | 是（录制警告，保留快捷键） |
 | `CLIPBOARD_TOO_LARGE` | 剪贴板文本超过 4000 字符 | 是（录制警告，保留快捷键） |

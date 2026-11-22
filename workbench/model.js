@@ -346,7 +346,9 @@ export function scopeKey(scope) {
 export function v2TargetLabel(target) {
   if (!target) return '';
   if (target.kind === 'window') return '窗口';
-  if (target.kind === 'point') return `坐标 (${target.point?.join(', ')})`;
+  // A raw point is a last-resort target: replay cannot prove it still names the
+  // same control, so the timeline says so instead of showing a bare coordinate.
+  if (target.kind === 'point') return `坐标回放 · 需确认 (${target.point?.join(', ')})`;
   // A role alone is not a target: showing the window title or the bare role
   // here would claim an identity the recording never proved.
   const name = typeof target.name === 'string' && target.name.trim() ? target.name : '未知目标';
