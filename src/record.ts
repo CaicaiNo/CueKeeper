@@ -448,7 +448,12 @@ export async function record(
     if (!instance || !bundlePath) throw new Fault('APP_NOT_FOUND', 'The selected copy is not running');
     bound = { pid: instance.pid, bundlePath };
   } else {
-    initial = await desktop.snapshot(target);
+    // Resolve the target window by exact title instead of trusting whichever
+    // window the app has in front: with several windows open (Safari) or focus
+    // sitting in another app, the driver's default pick is a different window
+    // and the title check below would report a mismatch. A title that is absent
+    // stays WINDOW_NOT_FOUND rather than reading the wrong window first.
+    initial = await desktop.snapshot(target, 5000, undefined, true);
   }
   const windowNumber = /^w-([1-9]\d*)$/.exec(initial.windowId)?.[1];
   if (!windowNumber) throw new Fault('WINDOW_ID', 'Capture requires a macOS window number');

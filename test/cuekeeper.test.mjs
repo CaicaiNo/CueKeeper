@@ -74,8 +74,12 @@ test('secure input cannot be added to a flow', () => {
 });
 
 // Exercise the real CLI and output writer without invoking either live macOS executable.
+// The driver resolves a window by title only when asked to; otherwise it
+// snapshots whichever window the app has in front. `frontWindow` models a
+// second app window that is in front of the target, and `windows` replaces the
+// whole inventory (for a title that is absent).
 function recordFixture(t, events, { captureExit = 0, flags = [], seconds = 1, ready = true,
-  missingWindowAtSnapshot } = {}) {
+  missingWindowAtSnapshot, frontWindow, windows } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-record-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const dist = join(dir, 'dist');
@@ -86,20 +90,37 @@ function recordFixture(t, events, { captureExit = 0, flags = [], seconds = 1, re
   symlinkSync(fileURLToPath(new URL('../node_modules/', import.meta.url)), join(dir, 'node_modules'), 'dir');
   const desktop = join(dir, 'desktop');
   const snapshotsLog = join(dir, 'snapshots.log');
+  writeFileSync(snapshotsLog, '');
+  const inventory = windows ?? [
+    ...(frontWindow ? [{ id: 'w-2000', title: frontWindow }] : []),
+    { id: fixture.data.window.id, title: fixture.target.window },
+  ];
   writeFileSync(desktop, `#!/usr/bin/env node
 import { appendFileSync, readFileSync } from 'node:fs';
 const [command, ...args] = process.argv.slice(2);
-if (command === 'snapshot') {
+const snapshot = ${JSON.stringify(fixture.data)};
+const windows = ${JSON.stringify(inventory)};
+function frontSnapshot() {
+  if (windows.length <= 1) return snapshot;
+  const doc = JSON.parse(${JSON.stringify(JSON.stringify(fixture.data))});
+  doc.window.id = windows[0].id;
+  doc.window.title = windows[0].title;
+  return doc;
+}
+let data;
+if (command === 'version') data = { version: '1.3.1' };
+else if (command === 'list-windows') data = windows;
+else if (command === 'snapshot') {
   const windowArg = args.indexOf('--window-id');
-  appendFileSync(${JSON.stringify(snapshotsLog)}, JSON.stringify(windowArg < 0 ? null : args[windowArg + 1]) + '\\n');
+  const windowId = windowArg < 0 ? null : args[windowArg + 1];
+  appendFileSync(${JSON.stringify(snapshotsLog)}, JSON.stringify(windowId) + '\\n');
   const snapshotNumber = readFileSync(${JSON.stringify(snapshotsLog)}, 'utf8').trimEnd().split('\\n').length;
   if (snapshotNumber === ${JSON.stringify(missingWindowAtSnapshot)}) {
     console.log(JSON.stringify({ version: '2.6', command, ok: false, error: { code: 'WINDOW_NOT_FOUND' } }));
     process.exit(1);
   }
-}
-const snapshots = ${JSON.stringify(fixture.data)};
-const data = command === 'version' ? { version: '1.3.1' } : snapshots;
+  data = windowId === null || windowId === windows[0].id ? frontSnapshot() : snapshot;
+} else data = snapshot;
 console.log(JSON.stringify({ version: '2.6', command, ok: true, data }));
 `, { mode: 0o700 });
   const indicator = flags.includes('--no-indicator') ? false : {
@@ -127,7 +148,7 @@ process.exitCode = ${captureExit};
     encoding: 'utf8', timeout: 10000,
   });
   return { code: result.status, response: JSON.parse(result.stdout), stderr: result.stderr,
-    snapshotWindows: readFileSync(snapshotsLog, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line)),
+    snapshotWindows: readFileSync(snapshotsLog, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)),
     recorded: existsSync(path) ? parseFlow(JSON.parse(readFileSync(path, 'utf8'))) : undefined };
 }
 
@@ -172,7 +193,33 @@ test('record CLI preserves the captured prefix when the target window is lost',
     assert.equal(response.error.code, 'WINDOW_NOT_FOUND');
     assert.equal(response.data.partial, true);
     assert.deepEqual(recorded.steps.map(step => step.kind), ['click']);
-    assert.deepEqual(snapshotWindows, [null, fixture.data.window.id, fixture.data.window.id]);
+    assert.deepEqual(snapshotWindows, [fixture.data.window.id, fixture.data.window.id, fixture.data.window.id]);
+  });
+
+test('record CLI resolves the target window by exact title when another window is in front',
+  { skip: process.platform !== 'darwin' }, t => {
+    const { code, response, recorded, snapshotWindows } = recordFixture(t, [
+      captureClick, captureClick,
+    ], { frontWindow: 'Safari Start Page' });
+    assert.equal(code, 0, JSON.stringify(response));
+    assert.equal(response.ok, true);
+    assert.deepEqual(recorded.steps.map(step => step.kind), ['click', 'click']);
+    // Every read goes to the window whose title matched, never to the front one.
+    assert.deepEqual(snapshotWindows,
+      [fixture.data.window.id, fixture.data.window.id, fixture.data.window.id]);
+  });
+
+test('record CLI reports WINDOW_NOT_FOUND and reads no window when the title is absent',
+  { skip: process.platform !== 'darwin' }, t => {
+    const { code, response, recorded, snapshotWindows } = recordFixture(t, [captureClick], {
+      windows: [{ id: 'w-2000', title: 'Safari Start Page' }],
+    });
+    assert.equal(code, 1);
+    assert.equal(response.ok, false);
+    assert.equal(response.error.code, 'WINDOW_NOT_FOUND');
+    assert.equal(recorded, undefined);
+    // The missing title must not fall back to snapshotting another window.
+    assert.deepEqual(snapshotWindows, []);
   });
 
 test('record CLI keeps a single click that activates the target and saves across app switches',
@@ -191,7 +238,7 @@ test('record CLI keeps a single click that activates the target and saves across
     assert.equal(response.data.partial, undefined);
     assert.deepEqual(response.data.warnings.map(warning => warning.code), ['FOCUS_CHANGED']);
     assert.deepEqual(recorded.steps.map(step => step.kind), ['click', 'type', 'key']);
-    assert.deepEqual(snapshotWindows, [null, fixture.data.window.id, null, null]);
+    assert.deepEqual(snapshotWindows, [fixture.data.window.id, fixture.data.window.id, null, null]);
     assert.equal(recorded.steps[1].text, 'Cuekeeper M1');
     assert.deepEqual(recorded.steps[2].modifiers, ['meta']);
     assert.equal(recorded.steps[2].key, 's');
@@ -215,7 +262,7 @@ test('record CLI binds a drag from the tree read at pickup and saves one drag st
     }]);
     // One read for the initial window and one at pickup; the drop itself reuses
     // the pickup tree so a moved file cannot be bound twice.
-    assert.deepEqual(snapshotWindows, [null, fixture.data.window.id]);
+    assert.deepEqual(snapshotWindows, [fixture.data.window.id, fixture.data.window.id]);
   });
 
 test('record CLI refuses a modifier drag instead of replaying it as a plain drag',
