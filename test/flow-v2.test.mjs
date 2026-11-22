@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { reportV2Check } from '../dist/contracts-v2.js';
+import { flowV2Check, reportV2Check } from '../dist/contracts-v2.js';
 import { hashFlow } from '../dist/flow.js';
 import {
   dryRunFlowV2, hashFlowV2, parseFlowV2, planFlowV2, pointTargetSteps, scopeLabel,
@@ -131,6 +131,27 @@ test('the v2 example validates and reports its scopes', () => {
   const retitled = globalFlow();
   retitled.steps.find(step => step.id === 'type-note').scope.windowKey = 'notes';
   assert.equal(parseFlowV2(retitled).steps[6].scope.windowTitle, 'QA Draft');
+});
+
+test('a step time is optional, never negative, and leaves older flows valid', () => {
+  const untimed = crossApp();
+  assert.equal(untimed.steps.some(step => 'atMs' in step), false);
+  assert.equal(flowV2Check.Check(untimed), true);
+
+  const timed = structuredClone(untimed);
+  timed.steps.forEach((step, index) => { step.atMs = index * 620; });
+  assert.equal(flowV2Check.Check(timed), true);
+  assert.deepEqual(parseFlowV2(timed).steps.map(step => step.atMs), [0, 620, 1240]);
+  // The published schema carries the field, so a hand-written flow is not a
+  // special case the workbench has to guess at.
+  assert.equal(schema('flow-v2').properties.steps.items.anyOf[0].properties.atMs.minimum, 0);
+
+  const negative = structuredClone(timed);
+  negative.steps[1].atMs = -1;
+  assert.equal(flowV2Check.Check(negative), false);
+  const fraction = structuredClone(timed);
+  fraction.steps[1].atMs = 12.5;
+  assert.equal(flowV2Check.Check(fraction), false);
 });
 
 test('a v2 dry run resolves every scope without starting the desktop driver', t => {

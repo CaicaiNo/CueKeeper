@@ -821,7 +821,10 @@ export class EditableFlowV2 {
           stepId: id,
         });
       }
-      draft.steps[index] = { ...clone(step), id } as StepV2;
+      // A resolved gap keeps the time it was recorded at.
+      draft.steps[index] = {
+        ...clone(step), id, ...(current.atMs === undefined ? {} : { atMs: current.atMs }),
+      } as StepV2;
       return clone(draft);
     });
   }
@@ -847,6 +850,8 @@ export class EditableFlowV2 {
         kind: 'assert',
         scope: clone(scope),
         check: clone(check),
+        // An assertion is proven at the moment its anchor was recorded.
+        ...(anchor.atMs === undefined ? {} : { atMs: anchor.atMs }),
       } as unknown as StepV2;
       insertInto(draft, index + 1, step);
       return clone(draft);

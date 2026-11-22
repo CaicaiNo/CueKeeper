@@ -12,7 +12,8 @@ import { startWorkbench } from '../dist/workbench.js';
 import { pickWindowCandidates } from '../dist/workbench-pick.js';
 import {
   assertCheck, checkLabel, checkpointWaitFacts, diffSummary, dragSummary, filterStepsByScope, locatorDetail,
-  pickCandidateLabel, roleLabel, scopeKey, scopeOptions, statusMap, stepTemplate, targetLabel, v2StepLabel,
+  pickCandidateLabel, roleLabel, scopeKey, scopeOptions, statusMap, stepTemplate, stepTiming, targetLabel,
+  v2StepLabel,
 } from '../workbench/model.js';
 
 const examplePath = name => new URL(`../examples/${name}.json`, import.meta.url);
@@ -137,6 +138,52 @@ test('copying a step inserts a new id and leaves every recorded id in place', as
   // The original steps keep the ids the recording wrote; only the copy is new.
   assert.deepEqual(copied.flow.steps.filter(step => step.id !== 'type-address-copy').map(step => step.id),
     flow.steps.map(step => step.id));
+});
+
+test('a recording without a report shows the times its own steps were recorded at', async t => {
+  const { root, directory, flow } = await fixture(t);
+  // A plain recording writes flow.json only: no report.json, no actions.json.
+  const timed = { ...flow, steps: flow.steps.map((step, index) => ({ ...step, atMs: index * 620 })) };
+  await writeFile(join(directory, 'flow.json'), JSON.stringify(timed));
+  const { post } = await server(t, { root });
+  const session = await post('import', { directory });
+  assert.equal(session.timingSource, 'capture');
+  assert.deepEqual(session.timeline.map(row => row.atMs), timed.steps.map(step => step.atMs));
+  // The recording ran until its last step; it has no per-step durations.
+  assert.equal(session.durationMs, (timed.steps.length - 1) * 620);
+  assert.deepEqual(session.timeline.map(row => row.durationMs), timed.steps.map(() => undefined));
+
+  // The older recording without times still opens; it just has nothing to show.
+  await writeFile(join(directory, 'flow.json'), JSON.stringify(flow));
+  const untimed = await post('import', { directory });
+  assert.equal(untimed.timingSource, undefined);
+  assert.equal(untimed.timeline.every(row => row.atMs === undefined), true);
+  assert.equal(untimed.durationMs, undefined);
+});
+
+test('an edit keeps the recorded time of the edited step, the copy and the new assertion', async t => {
+  const { root, directory, flow } = await fixture(t);
+  const timed = { ...flow, steps: flow.steps.map((step, index) => ({ ...step, atMs: index * 620 })) };
+  await writeFile(join(directory, 'flow.json'), JSON.stringify(timed));
+  const { post } = await server(t, { root });
+  const session = await post('import', { directory });
+
+  const edited = await edit(post, session, { kind: 'update', id: 'type-address', patch: { text: 'ck.test' } });
+  assert.equal(stepOf(edited.flow, 'type-address').atMs, 1240);
+
+  const copied = await edit(post, session, {
+    kind: 'insert', index: 3,
+    step: { ...structuredClone(stepOf(edited.flow, 'type-address')), id: 'type-address-copy' },
+  });
+  assert.equal(stepOf(copied.flow, 'type-address-copy').atMs, 1240);
+
+  const asserted = await edit(post, session, {
+    kind: 'assert', afterStepId: 'wait-browser',
+    check: { target: { kind: 'window' }, expect: { property: 'exists', equals: true } },
+  });
+  const added = asserted.flow.steps.find(step => step.kind === 'assert' && step.id.startsWith('assert-'));
+  assert.equal(added.atMs, 620);
+  assert.equal(asserted.validation.ok, true);
 });
 
 test('saving writes a sibling revision, keeps the recording bytes and a live run shells out to the CLI', async t => {
@@ -412,6 +459,21 @@ test('v2 timeline helpers describe steps, scopes, diffs and build EditOp payload
     { id: 'key-2', kind: 'key', scope, key: 'tab' });
   assert.throws(() => stepTemplate('launch_app', { id: 'launch-2', scope }), /App 作用域/);
   assert.throws(() => stepTemplate('click', { id: 'click-2', scope }), /元素定位器/);
+  // An inserted step keeps the recorded time of the step it follows; without a
+  // time it stays untimed instead of inventing one.
+  assert.equal(stepTemplate('key', { id: 'key-3', scope, atMs: 620 }).atMs, 620);
+  assert.equal(stepTemplate('key', { id: 'key-4', scope }).atMs, undefined);
+
+  // The timeline reads a step's time and the wait before it; an untimed row is
+  // skipped rather than adding a gap it never measured.
+  const timing = stepTiming([
+    { id: 's1', atMs: 0 }, { id: 's2' }, { id: 's3', atMs: 620 }, { id: 's4', atMs: 1860 },
+  ]);
+  assert.deepEqual([...timing.entries()], [
+    ['s1', { atMs: 0, sinceMs: undefined }],
+    ['s3', { atMs: 620, sinceMs: 620 }],
+    ['s4', { atMs: 1860, sinceMs: 1240 }],
+  ]);
 });
 
 // --- Picking a live target -----------------------------------------------------

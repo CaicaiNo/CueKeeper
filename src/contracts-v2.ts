@@ -171,53 +171,57 @@ const keyName = T.String({
 const modifiers = T.Optional(T.Array(T.Union([
   T.Literal('meta'), T.Literal('ctrl'), T.Literal('alt'), T.Literal('shift'),
 ]), { uniqueItems: true, maxItems: 4 }));
-const stepId = { id };
+// A recorded step may carry when it happened, in milliseconds from the
+// recording's first step. It is display evidence for the workbench only: replay
+// ignores it, and a hand-written or older flow without it stays valid.
+const stepAtMs = T.Optional(T.Integer({ minimum: 0 }));
+const stepBase = { id, atMs: stepAtMs };
 
 const clickStep = object({
-  ...stepId, kind: T.Literal('click'), scope: windowScope, focusAfter,
+  ...stepBase, kind: T.Literal('click'), scope: windowScope, focusAfter,
   target: clickTarget, count: clickCount, button: clickButton,
 });
 // `text` is an explicit literal; `input` names a runtime parameter. A step has
 // exactly one of them, which the two closed variants enforce.
 const typeStep = T.Union([
   object({
-    ...stepId, kind: T.Literal('type'), scope: windowScope, focusAfter,
+    ...stepBase, kind: T.Literal('type'), scope: windowScope, focusAfter,
     target: element, text: T.String({ minLength: 1, maxLength: 4000 }), ime: T.Optional(T.Boolean()),
   }),
   object({
-    ...stepId, kind: T.Literal('type'), scope: windowScope, focusAfter,
+    ...stepBase, kind: T.Literal('type'), scope: windowScope, focusAfter,
     target: element, input: parameterName, ime: T.Optional(T.Boolean()),
   }),
 ]);
 const keyStep = object({
-  ...stepId, kind: T.Literal('key'), scope: windowScope, focusAfter,
+  ...stepBase, kind: T.Literal('key'), scope: windowScope, focusAfter,
   key: keyName, modifiers,
 });
 const scrollStep = T.Union([
   object({
-    ...stepId, kind: T.Literal('scroll'), scope: windowScope, focusAfter,
+    ...stepBase, kind: T.Literal('scroll'), scope: windowScope, focusAfter,
     target: element, deltaX: scrollDelta, deltaY: scrollDelta, durationMs: scrollDuration,
   }),
   object({
-    ...stepId, kind: T.Literal('scroll'), scope: windowScope, focusAfter,
+    ...stepBase, kind: T.Literal('scroll'), scope: windowScope, focusAfter,
     target: element, direction: T.Union([
       T.Literal('up'), T.Literal('down'), T.Literal('left'), T.Literal('right'),
     ]), amount: T.Integer({ minimum: 1, maximum: 1000 }), durationMs: scrollDuration,
   }),
 ]);
 const dragStep = object({
-  ...stepId, kind: T.Literal('drag'), scope: windowScope, focusAfter,
+  ...stepBase, kind: T.Literal('drag'), scope: windowScope, focusAfter,
   from: element, to: element, durationMs: T.Integer({ minimum: 0, maximum: 60_000 }),
   path: T.Optional(T.Array(dragPoint, { maxItems: 64 })), button: clickButton,
 });
 const hoverStep = object({
-  ...stepId, kind: T.Literal('hover'), scope: windowScope, focusAfter,
+  ...stepBase, kind: T.Literal('hover'), scope: windowScope, focusAfter,
   target: element, durationMs: T.Integer({ minimum: 0, maximum: 60_000 }),
 });
 // Paste never embeds clipboard content in v2: it names the earlier copy step or
 // a runtime input parameter.
 const pasteStep = object({
-  ...stepId, kind: T.Literal('paste'), scope: windowScope, focusAfter,
+  ...stepBase, kind: T.Literal('paste'), scope: windowScope, focusAfter,
   target: element,
   source: T.Union([
     object({ kind: T.Literal('copy'), stepId: id }),
@@ -226,33 +230,33 @@ const pasteStep = object({
 });
 const waitStep = T.Union([
   object({
-    ...stepId, kind: T.Literal('wait'), scope: windowScope, focusAfter,
+    ...stepBase, kind: T.Literal('wait'), scope: windowScope, focusAfter,
     check: windowWaitCheck, timeoutMs: waitTimeout,
   }),
   object({
-    ...stepId, kind: T.Literal('wait'), scope: appScope, focusAfter,
+    ...stepBase, kind: T.Literal('wait'), scope: appScope, focusAfter,
     check: appWaitCheck, timeoutMs: waitTimeout,
   }),
   object({
-    ...stepId, kind: T.Literal('wait'), scope: fileScope,
+    ...stepBase, kind: T.Literal('wait'), scope: fileScope,
     check: fileWaitCheck, timeoutMs: waitTimeout,
   }),
 ]);
 const assertStep = T.Union([
-  object({ ...stepId, kind: T.Literal('assert'), scope: windowScope, check: assertCheck }),
-  object({ ...stepId, kind: T.Literal('assert'), scope: appScope, check: appAssertCheck }),
+  object({ ...stepBase, kind: T.Literal('assert'), scope: windowScope, check: assertCheck }),
+  object({ ...stepBase, kind: T.Literal('assert'), scope: appScope, check: appAssertCheck }),
 ]);
 const launchApp = object({
-  ...stepId, kind: T.Literal('launch_app'), scope: appScope, focusAfter,
+  ...stepBase, kind: T.Literal('launch_app'), scope: appScope, focusAfter,
 });
 const activateApp = object({
-  ...stepId, kind: T.Literal('activate_app'), scope: appScope, focusAfter,
+  ...stepBase, kind: T.Literal('activate_app'), scope: appScope, focusAfter,
 });
 const focusWindow = object({
-  ...stepId, kind: T.Literal('focus_window'), scope: windowScope,
+  ...stepBase, kind: T.Literal('focus_window'), scope: windowScope,
 });
 const openSystemSurface = object({
-  ...stepId, kind: T.Literal('open_system_surface'), scope: surfaceScope, focusAfter,
+  ...stepBase, kind: T.Literal('open_system_surface'), scope: surfaceScope, focusAfter,
 });
 // A surface press selects by meaning, never by position: a Dock icon by bundle
 // ID, a menu item by its unique path, a status item by a verified identifier.
@@ -261,12 +265,12 @@ const menuItem = object({ kind: T.Literal('menu_item'), path: T.Array(label, { m
 const statusItem = object({ kind: T.Literal('status_item'), identifier: label });
 const spotlightResult = object({ kind: T.Literal('spotlight_result'), bundleId });
 const surfacePress = object({
-  ...stepId, kind: T.Literal('surface_press'), scope: surfaceScope,
+  ...stepBase, kind: T.Literal('surface_press'), scope: surfaceScope,
   selector: T.Union([dockItem, menuItem, statusItem, spotlightResult]),
 });
 const checkpointReason = T.Union([T.Literal('secure_input'), T.Literal('system_dialog')]);
 const manualCheckpoint = object({
-  ...stepId, kind: T.Literal('manual_checkpoint'), scope: windowScope,
+  ...stepBase, kind: T.Literal('manual_checkpoint'), scope: windowScope,
   triggerStepId: id, reason: checkpointReason,
   resume: object({ scope: windowScope, check: windowWaitCheck }),
   timeoutMs: checkpointTimeout,
@@ -276,7 +280,7 @@ const gapCodes = T.Union([
   T.Literal('CROSS_SCOPE_GESTURE'), T.Literal('PRIVACY_REDACTED'),
   T.Literal('SECURE_INPUT'), T.Literal('IME_COMMIT_UNVERIFIED'), T.Literal('CAPTURE_GAP'),
 ]);
-const gapStep = object({ ...stepId, kind: T.Literal('gap'), code: gapCodes });
+const gapStep = object({ ...stepBase, kind: T.Literal('gap'), code: gapCodes });
 
 const step = T.Union([
   clickStep, typeStep, keyStep, scrollStep, dragStep, hoverStep, pasteStep,

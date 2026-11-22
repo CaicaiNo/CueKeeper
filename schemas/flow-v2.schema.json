@@ -944,6 +944,10 @@
                 "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
                 "type": "string"
               },
+              "atMs": {
+                "minimum": 0,
+                "type": "integer"
+              },
               "kind": {
                 "const": "click",
                 "type": "string"
@@ -1136,6 +1140,10 @@
                     "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
                     "type": "string"
                   },
+                  "atMs": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
                   "kind": {
                     "const": "type",
                     "type": "string"
@@ -1281,6 +1289,10 @@
                   "id": {
                     "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
                     "type": "string"
+                  },
+                  "atMs": {
+                    "minimum": 0,
+                    "type": "integer"
                   },
                   "kind": {
                     "const": "type",
@@ -1429,6 +1441,10 @@
                 "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
                 "type": "string"
               },
+              "atMs": {
+                "minimum": 0,
+                "type": "integer"
+              },
               "kind": {
                 "const": "key",
                 "type": "string"
@@ -1559,6 +1575,10 @@
                   "id": {
                     "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
                     "type": "string"
+                  },
+                  "atMs": {
+                    "minimum": 0,
+                    "type": "integer"
                   },
                   "kind": {
                     "const": "scroll",
@@ -1713,6 +1733,10 @@
                   "id": {
                     "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
                     "type": "string"
+                  },
+                  "atMs": {
+                    "minimum": 0,
+                    "type": "integer"
                   },
                   "kind": {
                     "const": "scroll",
@@ -1884,6 +1908,10 @@
               "id": {
                 "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
                 "type": "string"
+              },
+              "atMs": {
+                "minimum": 0,
+                "type": "integer"
               },
               "kind": {
                 "const": "drag",
@@ -2096,6 +2124,10 @@
                 "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
                 "type": "string"
               },
+              "atMs": {
+                "minimum": 0,
+                "type": "integer"
+              },
               "kind": {
                 "const": "hover",
                 "type": "string"
@@ -2238,6 +2270,10 @@
               "id": {
                 "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
                 "type": "string"
+              },
+              "atMs": {
+                "minimum": 0,
+                "type": "integer"
               },
               "kind": {
                 "const": "paste",
@@ -2418,6 +2454,10 @@
                   "id": {
                     "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
                     "type": "string"
+                  },
+                  "atMs": {
+                    "minimum": 0,
+                    "type": "integer"
                   },
                   "kind": {
                     "const": "wait",
@@ -3086,6 +3126,10 @@
                     "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
                     "type": "string"
                   },
+                  "atMs": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
                   "kind": {
                     "const": "wait",
                     "type": "string"
@@ -3219,6 +3263,10 @@
                     "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
                     "type": "string"
                   },
+                  "atMs": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
                   "kind": {
                     "const": "wait",
                     "type": "string"
@@ -3346,6 +3394,10 @@
                   "id": {
                     "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
                     "type": "string"
+                  },
+                  "atMs": {
+                    "minimum": 0,
+                    "type": "integer"
                   },
                   "kind": {
                     "const": "assert",
@@ -3967,6 +4019,10 @@
                     "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
                     "type": "string"
                   },
+                  "atMs": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
                   "kind": {
                     "const": "assert",
                     "type": "string"
@@ -4046,6 +4102,10 @@
               "id": {
                 "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
                 "type": "string"
+              },
+              "atMs": {
+                "minimum": 0,
+                "type": "integer"
               },
               "kind": {
                 "const": "launch_app",
@@ -4135,6 +4195,10 @@
                 "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
                 "type": "string"
               },
+              "atMs": {
+                "minimum": 0,
+                "type": "integer"
+              },
               "kind": {
                 "const": "activate_app",
                 "type": "string"
@@ -4223,6 +4287,10 @@
                 "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
                 "type": "string"
               },
+              "atMs": {
+                "minimum": 0,
+                "type": "integer"
+              },
               "kind": {
                 "const": "focus_window",
                 "type": "string"
@@ -4270,6 +4338,10 @@
               "id": {
                 "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
                 "type": "string"
+              },
+              "atMs": {
+                "minimum": 0,
+                "type": "integer"
               },
               "kind": {
                 "const": "open_system_surface",
@@ -4431,6 +4503,10 @@
               "id": {
                 "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
                 "type": "string"
+              },
+              "atMs": {
+                "minimum": 0,
+                "type": "integer"
               },
               "kind": {
                 "const": "surface_press",
@@ -4625,6 +4701,10 @@
               "id": {
                 "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
                 "type": "string"
+              },
+              "atMs": {
+                "minimum": 0,
+                "type": "integer"
               },
               "kind": {
                 "const": "manual_checkpoint",
@@ -5298,6 +5378,10 @@
               "id": {
                 "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
                 "type": "string"
+              },
+              "atMs": {
+                "minimum": 0,
+                "type": "integer"
               },
               "kind": {
                 "const": "gap",
