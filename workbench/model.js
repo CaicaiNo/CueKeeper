@@ -29,6 +29,9 @@ export function scopeDescription(scope, appName = id => id) {
   if (!scope) return '缺口';
   if (scope.kind === 'window') return `${appName(scope.app)} · ${scope.windowTitle}`;
   if (scope.kind === 'app') return `${appName(scope.app)} · 应用`;
+  if (scope.kind === 'file') {
+    return `文件 · ${scope.name ?? `*${scope.suffix}`}（${scope.directory}）`;
+  }
   return [SURFACE_LABELS[scope.surface] ?? scope.surface,
     scope.app ? appName(scope.app) : '', scope.windowTitle ?? ''].filter(Boolean).join(' · ');
 }

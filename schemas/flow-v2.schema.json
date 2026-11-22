@@ -247,6 +247,64 @@
                           ]
                         }
                       ]
+                    },
+                    {
+                      "anyOf": [
+                        {
+                          "additionalProperties": false,
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "const": "file",
+                              "type": "string"
+                            },
+                            "directory": {
+                              "minLength": 1,
+                              "maxLength": 4096,
+                              "pattern": "^(?![\\s\\S]*[\\u0000-\\u001f\\u007f])(?:/(?!/)[\\s\\S]+|[A-Za-z]:[/\\\\][^/\\\\][\\s\\S]*|\\\\\\\\(?![?.]\\\\)[^/\\\\]+\\\\[^/\\\\]+\\\\[^/\\\\][\\s\\S]*)$",
+                              "type": "string"
+                            },
+                            "name": {
+                              "minLength": 1,
+                              "maxLength": 255,
+                              "pattern": "^[^/\\\\]+$",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "directory",
+                            "name"
+                          ]
+                        },
+                        {
+                          "additionalProperties": false,
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "const": "file",
+                              "type": "string"
+                            },
+                            "directory": {
+                              "minLength": 1,
+                              "maxLength": 4096,
+                              "pattern": "^(?![\\s\\S]*[\\u0000-\\u001f\\u007f])(?:/(?!/)[\\s\\S]+|[A-Za-z]:[/\\\\][^/\\\\][\\s\\S]*|\\\\\\\\(?![?.]\\\\)[^/\\\\]+\\\\[^/\\\\]+\\\\[^/\\\\][\\s\\S]*)$",
+                              "type": "string"
+                            },
+                            "suffix": {
+                              "minLength": 1,
+                              "maxLength": 255,
+                              "pattern": "^[^/\\\\]+$",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "directory",
+                            "suffix"
+                          ]
+                        }
+                      ]
                     }
                   ]
                 },
@@ -3099,6 +3157,130 @@
                         "required": [
                           "kind",
                           "equals"
+                        ]
+                      }
+                    ]
+                  },
+                  "timeoutMs": {
+                    "minimum": 1000,
+                    "maximum": 1800000,
+                    "default": 15000,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "id",
+                  "kind",
+                  "scope",
+                  "check"
+                ]
+              },
+              {
+                "additionalProperties": false,
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "wait",
+                    "type": "string"
+                  },
+                  "scope": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": false,
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "const": "file",
+                            "type": "string"
+                          },
+                          "directory": {
+                            "minLength": 1,
+                            "maxLength": 4096,
+                            "pattern": "^(?![\\s\\S]*[\\u0000-\\u001f\\u007f])(?:/(?!/)[\\s\\S]+|[A-Za-z]:[/\\\\][^/\\\\][\\s\\S]*|\\\\\\\\(?![?.]\\\\)[^/\\\\]+\\\\[^/\\\\]+\\\\[^/\\\\][\\s\\S]*)$",
+                            "type": "string"
+                          },
+                          "name": {
+                            "minLength": 1,
+                            "maxLength": 255,
+                            "pattern": "^[^/\\\\]+$",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "directory",
+                          "name"
+                        ]
+                      },
+                      {
+                        "additionalProperties": false,
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "const": "file",
+                            "type": "string"
+                          },
+                          "directory": {
+                            "minLength": 1,
+                            "maxLength": 4096,
+                            "pattern": "^(?![\\s\\S]*[\\u0000-\\u001f\\u007f])(?:/(?!/)[\\s\\S]+|[A-Za-z]:[/\\\\][^/\\\\][\\s\\S]*|\\\\\\\\(?![?.]\\\\)[^/\\\\]+\\\\[^/\\\\]+\\\\[^/\\\\][\\s\\S]*)$",
+                            "type": "string"
+                          },
+                          "suffix": {
+                            "minLength": 1,
+                            "maxLength": 255,
+                            "pattern": "^[^/\\\\]+$",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "directory",
+                          "suffix"
+                        ]
+                      }
+                    ]
+                  },
+                  "check": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": false,
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "const": "file_exists",
+                            "type": "string"
+                          },
+                          "equals": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "equals"
+                        ]
+                      },
+                      {
+                        "additionalProperties": false,
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "const": "file_stable",
+                            "type": "string"
+                          },
+                          "quietMs": {
+                            "minimum": 100,
+                            "maximum": 60000,
+                            "default": 1000,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "kind"
                         ]
                       }
                     ]

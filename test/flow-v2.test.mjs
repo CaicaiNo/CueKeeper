@@ -347,7 +347,53 @@ test('the workbench labels every v2 scope kind for the timeline', () => {
     kind: 'surface', surface: 'app_context_menu', app: 'com.apple.finder',
     windowKey: 'files', windowTitle: 'QA Files',
   }, name), '上下文菜单 · Finder · QA Files');
+  assert.equal(scopeDescription({
+    kind: 'file', directory: '/Users/qa/Downloads', name: 'App.pkg',
+  }, name), '文件 · App.pkg（/Users/qa/Downloads）');
+  assert.equal(scopeDescription({
+    kind: 'file', directory: '/Users/qa/Downloads', suffix: '.pkg',
+  }, name), '文件 · *.pkg（/Users/qa/Downloads）');
   assert.equal(scopeDescription(undefined, name), '缺口');
+});
+
+test('a v2 file wait is a closed contract that only a wait may use', () => {
+  const withWait = step => parseFlowV2({
+    version: 2, id: 'file-wait', name: 'File wait', steps: [step],
+  });
+  const fileWaits = [
+    {
+      id: 'wait-file', kind: 'wait', timeoutMs: 5000,
+      scope: { kind: 'file', directory: '/Users/qa/Downloads', name: 'App.pkg' },
+      check: { kind: 'file_stable', quietMs: 500 },
+    },
+    {
+      id: 'wait-file', kind: 'wait', timeoutMs: 5000,
+      scope: { kind: 'file', directory: '/Users/qa/Downloads', suffix: '.pkg' },
+      check: { kind: 'file_exists', equals: true },
+    },
+  ];
+  for (const step of fileWaits) assert.deepEqual(withWait(step).steps[0], step);
+
+  // Name and suffix are alternatives, a file check needs a file scope, and the
+  // quiet window stays inside its published bounds.
+  for (const step of [
+    { ...fileWaits[0], scope: { kind: 'file', directory: '/Users/qa/Downloads', name: 'a.pkg', suffix: '.pkg' } },
+    { ...fileWaits[0], scope: { kind: 'file', directory: '/Users/qa/Downloads' } },
+    { ...fileWaits[0], check: { kind: 'file_stable', quietMs: 50 } },
+    { ...fileWaits[0], check: { kind: 'app_installed', equals: true } },
+    { ...fileWaits[0], kind: 'click', target: { kind: 'element', role: 'button' } },
+    { ...fileWaits[0], scope: { kind: 'file', directory: '/Users/qa/Downloads', name: 'a/b.pkg' } },
+  ]) {
+    assert.throws(() => withWait(step), /Invalid flow version 2/);
+  }
+
+  // The dry run and the published schema both carry the file scope.
+  const flow = withWait(fileWaits[0]);
+  assert.deepEqual(planFlowV2(flow)[0].scope, fileWaits[0].scope);
+  assert.match(scopeLabel(fileWaits[0].scope), /App\.pkg/);
+  const published = JSON.stringify(schema('flow-v2'));
+  assert.match(published, /"file_stable"/);
+  assert.match(published, /"file_exists"/);
 });
 
 test('the workbench loads a v2 timeline by scope and stays read-only', async t => {

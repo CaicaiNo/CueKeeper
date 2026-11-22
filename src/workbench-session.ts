@@ -37,17 +37,24 @@ type TimelineAction = {
 
 type ScopeGroup = {
   key: string;
-  kind: 'window' | 'app' | 'surface' | 'gap';
+  kind: 'window' | 'app' | 'surface' | 'file' | 'gap';
   app?: string;
   window?: string;
   surface?: string;
+  /** File scope: the watched file name (exact or `*suffix`). */
+  file?: string;
   stepIds: string[];
 };
+
+function fileNameOf(scope: Extract<Scope, { kind: 'file' }>): string {
+  return 'name' in scope ? scope.name : `*${scope.suffix}`;
+}
 
 function scopeRowTarget(scope: Scope | undefined): { app: string; window: string } {
   if (!scope) return { app: '', window: '' };
   if (scope.kind === 'window') return { app: scope.app, window: scope.windowTitle };
   if (scope.kind === 'app') return { app: scope.app, window: '' };
+  if (scope.kind === 'file') return { app: '', window: fileNameOf(scope) };
   const app = scope.surface === 'app_menu_bar' || scope.surface === 'app_context_menu'
     ? scope.app : '';
   const window = scope.surface === 'app_context_menu' ? scope.windowTitle : scope.surface;
@@ -60,6 +67,7 @@ function scopeGroupOf(scope: Scope | undefined, key: string, stepId: string): Sc
     return { key, kind: 'window', app: scope.app, window: scope.windowTitle, stepIds: [stepId] };
   }
   if (scope.kind === 'app') return { key, kind: 'app', app: scope.app, stepIds: [stepId] };
+  if (scope.kind === 'file') return { key, kind: 'file', file: fileNameOf(scope), stepIds: [stepId] };
   return {
     key, kind: 'surface', surface: scope.surface, stepIds: [stepId],
     ...(scope.surface === 'app_menu_bar' || scope.surface === 'app_context_menu'
@@ -339,7 +347,9 @@ async function loadV2Session(
   for (const step of flow.steps) {
     if (step.kind === 'gap') continue;
     const scope = step.scope;
-    if (scope.kind === 'surface') {
+    if (scope.kind === 'file') {
+      // A file wait names no app.
+    } else if (scope.kind === 'surface') {
       if (scope.surface === 'app_menu_bar' || scope.surface === 'app_context_menu') appIds.add(scope.app);
     } else {
       appIds.add(scope.app);

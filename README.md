@@ -132,12 +132,12 @@ node dist/cli.js workbench /path/to/run-directory
 | --- | --- |
 | `report.json` | 校验与 flow 配对，显示回放或离线运行时间 |
 | `actions.json` | 提供录制时间、应用、窗口和缩略图索引 |
-| `lifecycle.json` | 提供下载、安装、卸载事件，用于提出待确认的 `wait` 候选 |
+| `lifecycle.json` | 提供下载、安装、卸载事件，用于提出待确认的 `wait` 候选；`record --global` 会在有事件时自动写 |
 | `snapshot.json` | 提供同一目标窗口的 agent-desktop 2.6 快照，支持重新拾取和离线运行 |
 
 `actions.json` 使用 `{"version":1,"flowId":"…","durationMs":1800,"actions":[{"id":"step-1","atMs":240,"durationMs":35,"thumbnail":"images/step-1.png"}]}`。动作 ID 使用流程的展开 ID。可选的 `app` 和 `window` 默认取自 flow。旧录制缺少时间或图片时，工作台会显示现有的数据。v1 测试项仍绑定一个目标窗口，其他应用或窗口的动作可筛选和复盘。
 
-v2 会话可从 `lifecycle.json` 的下载、安装、卸载事件提出候选等待，在「前置条件」区逐个确认后写入 `flow.with-waits.json`，并保留原 `flow.json`。事件没有位置或时间证据时不提候选，空闲段不会被当作等待条件。等待执行、安装/下载证据与错误码见 [条件等待](docs/waiting.md)。
+v2 会话可从 `lifecycle.json` 的下载、安装、卸载事件提出候选等待，在「前置条件」区逐个确认后写入 `flow.with-waits.json`，并保留原 `flow.json`。事件没有位置或时间证据时不提候选，空闲段不会被当作等待条件。`record --global` 默认在录制期间只读观察 `~/Downloads` 与 `~/Applications`、`/Applications`，把下载完成、安装、卸载写成 `lifecycle.json`（`--no-lifecycle` 关闭；目录可用 `CUEKEEPER_LIFECYCLE_DOWNLOAD_DIRS`、`CUEKEEPER_LIFECYCLE_APP_DIRS` 指定），每条事件带 `afterStepId`，因此无需手写。下载完成会提出等待文件本身（`file_stable`）的候选，不依赖下载界面元素。等待执行、安装/下载证据与错误码见 [条件等待](docs/waiting.md)。
 
 在时间线勾选动作并「合并为行为」。可将输入提取为 `string` 或 `secret` 参数。行为库保存在 `~/.cuekeeper/behaviors`，可用 `--library <directory>` 切换。引用在草稿中保留行为标识，复制会为草稿生成独立定义。也可直接加入动作、添加断言或修改定位器，然后在草稿中调整顺序。
 
@@ -179,7 +179,7 @@ node dist/cli.js run /path/to/root.flow.json --allow-shell --allow-sudo --non-in
 
 不录制也能把动作绑定到目标控件。`pick` 只读取窗口快照，不点击、不抢焦点，也不改变前台窗口。
 
-同一应用装有多份副本时，`record` 与 `pick` 的 `--app-path` 指定其中一个。录制只在握手确认窗口 owner 的 PID、进程启动标识和规范 `bundleURL` 后写入该路径；回放按路径锁定实例，之后只用窗口 ID 发送输入，不再按 bundle ID 或全局前台猜测。路径失效返回 `APP_PATH_INVALID`，路径不符或同标识多实例返回 `APP_AMBIGUOUS`，固定路径流程中的裸坐标返回 `UNSAFE_POINT`。
+同一应用装有多份副本时，`record` 与 `pick` 的 `--app-path` 指定其中一个。录制只在握手确认窗口 owner 的 PID、进程启动标识和规范 `bundleURL` 后写入该路径；回放按路径锁定实例，之后只用窗口 ID 发送输入，不再按 bundle ID 或全局前台猜测。路径失效返回 `APP_PATH_INVALID`，路径不符或同标识多实例返回 `APP_AMBIGUOUS`，固定路径流程中的裸坐标返回 `UNSAFE_POINT`。若流程先安装、后使用该 App，pin 路径在启动时还不存在也不会提前失败：该 App 的预检延后到首次真正使用（`launch_app`、`activate_app`、`focus_window`、窗口输入/断言），安装完成后在该路径重新核对 bundle ID 才继续；首次使用时仍不存在就在该步返回 `APP_PATH_INVALID`，不会改绑同 bundle 的其他副本。
 
 ```sh
 node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --json
@@ -198,6 +198,7 @@ node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --selec
 | `--version` | 打印版本，发布包还带构建提交 |
 | `flow validate <flow.json\|test.json>` | 检查 v1 结构、ID、行为引用和参数绑定；v2 则校验每步 scope、windowKey 绑定、appPaths/inputs/intent 引用，含缺口时拒绝 |
 | `record [--app <bundle-id>] [--window <精确标题>] [--out <flow.json>] [--app-path <路径>] [--countdown 3]` | 默认倒计时后录制当前前台窗口，流程写入 `~/.cuekeeper/recordings`；显式参数优先。显示计时 HUD，支持 `--no-indicator`、`--sound` 与显式开启剪贴板文本的 `--clipboard` |
+| `record --global [--max-seconds 600] [--out <flow.json>] [--exclude <bundle-ids>] [--no-lifecycle]` | 跨 App 全局录制，生成 v2 flow；录制期间只读观察下载与安装，把生命周期事件写入 flow 同目录的 `lifecycle.json`（`--no-lifecycle` 关闭） |
 | `pick --app <bundle-id> --window <精确标题> [--app-path <路径>] [--select <ref>] [--snapshot <snapshot.json>]` | 只读快照，按可交互元素优先列出候选，或输出可写入 flow 的定位器 |
 | `run <flow.json> --dry-run` | 用当前窗口解析定位器；纯 Shell 流程无需快照 |
 | `run <flow-v2.json> --dry-run [--report <report-v2.json>]` | 输出 v2 结构计划，按步骤 scope 标记 `resolved`；不启动、聚焦或输入 |

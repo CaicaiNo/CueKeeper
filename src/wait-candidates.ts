@@ -10,8 +10,8 @@ import { Fault } from './locator.js';
 // the user confirms it.
 
 export const lifecycleKinds = [
-  'download_completed', 'installer_shown', 'install_completed',
-  'app_appeared', 'uninstaller_shown', 'app_disappeared',
+  'download_completed', 'installer_shown', 'install_completed', 'app_appeared',
+  'uninstaller_shown', 'uninstall_completed', 'app_disappeared',
 ] as const;
 export type LifecycleKind = typeof lifecycleKinds[number];
 
@@ -121,9 +121,30 @@ function reasonOf(event: LifecycleEvent, detail?: string) {
       return `App 首次出现${detail ? `（${detail}）` : ''}：等待它的窗口或安装证据，再执行后续操作。`;
     case 'uninstaller_shown':
       return '卸载器界面出现：等待该卸载器窗口存在后再继续操作。';
+    case 'uninstall_completed':
+      return `卸载完成${detail ? `（${detail}）` : ''}：用固定路径的 App bundle 消失证明移除；进程退出单独不算卸载完成。`;
     case 'app_disappeared':
       return 'App 已移除：等待 bundle 消失；进程退出单独不算卸载完成。';
   }
+}
+
+/**
+ * The file wait a completed download becomes. The event named the finished file,
+ * so the candidate can wait on the file itself instead of the download UI. A
+ * path that is not an absolute directory/file pair cannot become a step.
+ */
+function downloadWaitStep(event: LifecycleEvent, id: string): StepV2 | undefined {
+  if (!event.path) return undefined;
+  const slash = event.path.lastIndexOf('/');
+  if (slash <= 0) return undefined;
+  const directory = event.path.slice(0, slash);
+  const name = event.path.slice(slash + 1);
+  if (!name || directory.split('/').includes('..')) return undefined;
+  return {
+    id, kind: 'wait',
+    scope: { kind: 'file', directory, name },
+    check: { kind: 'file_stable' },
+  } as StepV2;
 }
 
 /** The window scope the flow already binds for an app, nearest the insertion point. */
@@ -152,10 +173,17 @@ function waitStepFor(
   const app = event.app;
   switch (event.kind) {
     case 'download_completed': {
-      // A completed download is not a wait condition by itself: the flow has no
-      // file or download-UI check, and inventing one would be a guess. The
-      // candidate stays open until the user chooses the completion control.
-      return { reason: reasonOf(event), ready: false };
+      const step = downloadWaitStep(event, id);
+      if (!step) {
+        // Without the finished file's path there is no evidence to wait on;
+        // the candidate stays open until the user chooses a condition.
+        return { reason: reasonOf(event), ready: false };
+      }
+      return {
+        reason: `下载完成${event.path ? `（${event.path.split('/').at(-1)}）` : ''}：` +
+          '等待下载目录中该文件写入稳定（file_stable），不依赖下载界面元素。',
+        ready: true, step,
+      };
     }
     case 'install_completed': {
       if (!app) return { reason: reasonOf(event), ready: false };
@@ -182,7 +210,8 @@ function waitStepFor(
           } as StepV2,
       };
     }
-    case 'app_disappeared': {
+    case 'app_disappeared':
+    case 'uninstall_completed': {
       if (!app) return { reason: reasonOf(event), ready: false };
       return {
         reason: reasonOf(event),

@@ -49,17 +49,24 @@ const events = [
   { at: 50, kind: 'app_disappeared', app: targetApp, afterStepId: 'type-name' },
 ];
 
-test('lifecycle events become confirmed waits, and the download event asks for a condition', () => {
+test('lifecycle events become confirmed waits; a named download waits on its file', () => {
   const flow = candidateFlow();
   const candidates = proposeWaitCandidates(flow, parseLifecycleDocument({ version: 1, events }));
 
   assert.deepEqual(candidates.map(candidate => [candidate.eventKind, candidate.afterStepId, candidate.ready, candidate.step?.kind]), [
-    ['download_completed', 'download', false, undefined],
+    ['download_completed', 'download', true, 'wait'],
     ['install_completed', 'download', true, 'wait'],
     ['app_appeared', 'download', true, 'wait'],
     ['uninstaller_shown', 'type-name', true, 'wait'],
     ['app_disappeared', 'type-name', true, 'wait'],
   ]);
+
+  // A completed download names its file, so the candidate waits on the file
+  // itself: no download-UI element and no hand-written condition.
+  assert.deepEqual(candidates[0].step.scope, {
+    kind: 'file', directory: '/Users/qa/Downloads', name: 'CuekeeperTest.pkg',
+  });
+  assert.deepEqual(candidates[0].step.check, { kind: 'file_stable' });
 
   const installed = candidates[1].step;
   assert.deepEqual(installed.scope, { kind: 'app', app: targetApp });
@@ -72,6 +79,26 @@ test('lifecycle events become confirmed waits, and the download event asks for a
   assert.deepEqual(candidates[3].step.check, { kind: 'app_running', equals: true });
   assert.deepEqual(candidates[4].step.check, { kind: 'app_installed', equals: false });
   assert.match(candidates[0].reason, /下载完成/);
+
+  // A download event without the finished file has no evidence to wait on: the
+  // candidate stays open instead of guessing a UI condition.
+  const withoutPath = proposeWaitCandidates(flow, [
+    { at: 10, kind: 'download_completed', app: web, afterStepId: 'download' },
+  ]);
+  assert.equal(withoutPath[0].ready, false);
+  assert.equal(withoutPath[0].step, undefined);
+});
+
+test('an uninstall_completed event becomes the same removal wait as app_disappeared', () => {
+  const flow = candidateFlow();
+  const candidates = proposeWaitCandidates(flow, parseLifecycleDocument({
+    version: 1,
+    events: [{ at: 10, kind: 'uninstall_completed', app: targetApp, afterStepId: 'type-name' }],
+  }));
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].ready, true);
+  assert.deepEqual(candidates[0].step.check, { kind: 'app_installed', equals: false });
+  assert.match(candidates[0].reason, /卸载完成/);
 });
 
 test('an idle stretch and an unplaceable event never become a candidate', () => {
@@ -145,14 +172,23 @@ test('confirming a candidate inserts one validated wait after the named step', (
   assert.deepEqual(withExisting.steps.map(step => step.id).slice(-2),
     ['type-name', 'wait-app-disappeared-1']);
 
-  assert.throws(() => confirmWaitCandidate(flow, candidates[0]), error => {
-    assert.equal(error.code, 'WAIT_CANDIDATE_INCOMPLETE');
-    return true;
-  });
   assert.throws(() => confirmWaitCandidate(flow, { ...candidates[1], afterStepId: 'gone' }), error => {
     assert.equal(error.code, 'WAIT_CANDIDATE_STALE');
     return true;
   });
+  // A download whose finished file is unknown cannot be inserted: the wait has
+  // no evidence yet, so confirming it is refused instead of guessed.
+  const open = proposeWaitCandidates(flow, [
+    { at: 10, kind: 'download_completed', afterStepId: 'download' },
+  ])[0];
+  assert.throws(() => confirmWaitCandidate(flow, open), error => {
+    assert.equal(error.code, 'WAIT_CANDIDATE_INCOMPLETE');
+    return true;
+  });
+  // The confirmed download candidate's file wait validates against the contract.
+  const withFile = confirmWaitCandidate(flow, candidates[0]);
+  assert.deepEqual(withFile.steps[3].scope,
+    { kind: 'file', directory: '/Users/qa/Downloads', name: 'CuekeeperTest.pkg' });
 });
 
 test('the workbench exposes lifecycle candidates and writes a confirmed copy without replaying', async t => {
@@ -161,12 +197,18 @@ test('the workbench exposes lifecycle candidates and writes a confirmed copy wit
   const directory = join(root, 'run');
   mkdirSync(directory);
   writeFileSync(join(directory, 'flow.json'), JSON.stringify(candidateFlow()));
-  writeFileSync(join(directory, 'lifecycle.json'), JSON.stringify({ version: 1, events }));
+  // The last event names no finished file, so its candidate still needs a
+  // user-chosen condition; every other event is ready to confirm.
+  writeFileSync(join(directory, 'lifecycle.json'), JSON.stringify({
+    version: 1,
+    events: [...events, { at: 60, kind: 'download_completed', app: web, afterStepId: 'type-name' }],
+  }));
 
   const session = await loadSession(directory);
   assert.equal(session.view.version, 2);
   assert.deepEqual(session.view.waitCandidates.map(candidate => candidate.eventKind), [
-    'download_completed', 'install_completed', 'app_appeared', 'uninstaller_shown', 'app_disappeared',
+    'download_completed', 'install_completed', 'app_appeared', 'uninstaller_shown',
+    'app_disappeared', 'download_completed',
   ]);
 
   const cancellation = new AbortController();
@@ -185,11 +227,23 @@ test('the workbench exposes lifecycle candidates and writes a confirmed copy wit
   const imported = await post('import', { directory });
   assert.equal(imported.status, 200, JSON.stringify(imported.body));
   const ready = imported.body.waitCandidates.find(candidate => candidate.eventKind === 'install_completed');
-  const pending = imported.body.waitCandidates.find(candidate => candidate.eventKind === 'download_completed');
+  const download = imported.body.waitCandidates.find(candidate =>
+    candidate.eventKind === 'download_completed' && candidate.ready);
+  const pending = imported.body.waitCandidates.filter(candidate =>
+    candidate.eventKind === 'download_completed' && !candidate.ready);
 
-  const incomplete = await post('wait-candidate', { session: imported.body.id, candidate: pending.id });
+  assert.equal(pending.length, 1);
+  const incomplete = await post('wait-candidate', { session: imported.body.id, candidate: pending[0].id });
   assert.equal(incomplete.status, 400);
   assert.match(incomplete.body.error, /WAIT_CANDIDATE_INCOMPLETE/);
+
+  // A recorded download becomes a file wait without any hand-written condition.
+  const withFile = await post('wait-candidate', { session: imported.body.id, candidate: download.id });
+  assert.equal(withFile.status, 201, JSON.stringify(withFile.body));
+  const fileFlow = JSON.parse(readFileSync(withFile.body.output, 'utf8'));
+  const inserted = fileFlow.steps.find(step => step.scope?.kind === 'file');
+  assert.deepEqual(inserted.scope, { kind: 'file', directory: '/Users/qa/Downloads', name: 'CuekeeperTest.pkg' });
+  assert.deepEqual(inserted.check, { kind: 'file_stable' });
 
   const confirmed = await post('wait-candidate', { session: imported.body.id, candidate: ready.id });
   assert.equal(confirmed.status, 201, JSON.stringify(confirmed.body));
@@ -200,5 +254,5 @@ test('the workbench exposes lifecycle candidates and writes a confirmed copy wit
   // The reviewed flow.json is not rewritten; the confirmed copy is a sibling.
   const original = JSON.parse(readFileSync(join(directory, 'flow.json'), 'utf8'));
   assert.equal(original.steps.length, 4);
-  assert.ok(confirmed.body.output.endsWith('flow.with-waits.json'));
+  assert.ok(confirmed.body.output.endsWith('flow.with-waits-2.json'));
 });

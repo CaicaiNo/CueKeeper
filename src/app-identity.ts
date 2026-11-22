@@ -224,6 +224,8 @@ export class AppIdentitySession {
   /** Set once a window of the bound instance was read or focused. */
   private checked = false;
   private offline = false;
+  /** The pinned path was absent at preflight and is validated at first use. */
+  private deferredPath = false;
 
   constructor(target: Target, deps: IdentityDeps = {}) {
     this.target = target;
@@ -252,17 +254,24 @@ export class AppIdentitySession {
    * Validates the configured copy on disk before any command can focus or
    * launch something. Offline runs skip the live platform check so a flow
    * captured on another machine still imports and resolves.
+   *
+   * `allowMissingPath` defers a pin whose path is absent: a flow that installs
+   * the app before it uses it cannot fail before that install. Every other
+   * problem (path shape, an existing path holding another bundle) still stops
+   * here. A deferred pin is re-validated at first use by `ensurePathBound`.
    */
-  async preflight(options: { offline?: boolean } = {}): Promise<void> {
+  async preflight(
+    options: { offline?: boolean; allowMissingPath?: boolean } = {},
+  ): Promise<'verified' | 'missing'> {
     this.offline = options.offline === true;
-    if (this.mode === 'legacy_bundle_id') return;
+    if (this.mode === 'legacy_bundle_id') return 'verified';
     const path = this.target.appPath!;
     const shape = classifyAppPath(path);
     if (!shape) {
       throw this.fault('APP_PATH_INVALID', 'invalid_bundle_path',
         '选中的应用路径已失效或应用标识已变更，请重新选择副本并保存。');
     }
-    if (this.offline) return;
+    if (this.offline) return 'verified';
     if (shape !== 'posix' && this.platform !== 'win32') {
       throw this.fault('UNSUPPORTED_PLATFORM', 'unsupported_path_platform',
         '该应用路径属于另一平台。本机可验证流程或使用离线快照。');
@@ -276,6 +285,10 @@ export class AppIdentitySession {
       const info = await this.stat(canonical);
       if (!info.isDirectory()) throw new Error('Not a directory');
     } catch {
+      if (options.allowMissingPath) {
+        this.deferredPath = true;
+        return 'missing';
+      }
       throw this.fault('APP_PATH_INVALID', 'invalid_bundle_path',
         '选中的应用路径已失效或应用标识已变更，请重新选择副本并保存。');
     }
@@ -298,6 +311,20 @@ export class AppIdentitySession {
         '选中的应用路径已失效或应用标识已变更，请重新选择副本并保存。');
     }
     this.canonicalPath = canonical;
+    this.deferredPath = false;
+    return 'verified';
+  }
+
+  /**
+   * Re-runs a deferred path pin at the first real use of the app. A path that
+   * is still absent stops there with `APP_PATH_INVALID`; an install is accepted
+   * only at that exact path with the expected bundle identifier, so another
+   * copy of the same bundle never stands in for it.
+   */
+  async ensurePathBound(): Promise<void> {
+    if (this.mode !== 'bundle_path' || this.canonicalPath || !this.deferredPath) return;
+    this.deferredPath = false;
+    await this.preflight();
   }
 
   /** Offline reports never claim a live instance was verified. */
@@ -316,6 +343,8 @@ export class AppIdentitySession {
    */
   async bindInstances(desktop: Desktop | undefined): Promise<void> {
     if (this.offline) return;
+    // A pin deferred at preflight is proven here, at the first real use.
+    await this.ensurePathBound();
     if (this.mode === 'bundle_path') return this.bindPath();
     return this.bindLegacy(desktop);
   }
@@ -602,6 +631,7 @@ export class AppIdentitySession {
 
   /** Launches the selected copy by file URL and re-reads PID, marker and URL. */
   private async launch(activate: boolean, timeoutMs: number) {
+    await this.ensurePathBound();
     if (!this.canonicalPath) throw new Fault('IDENTITY_DEPENDENCY', 'App identity preflight did not run', true);
     await this.probe.open(this.canonicalPath, activate);
     const deadline = performance.now() + timeoutMs;
