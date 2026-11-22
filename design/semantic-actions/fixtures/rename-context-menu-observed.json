@@ -1,0 +1,70 @@
+{
+  "fixture": "rename-context-menu-observed",
+  "description": "右键 alpha.txt → 菜单「重命名」→ 输入 beta.txt → Return；旁车记录了菜单路径",
+  "flow": {
+    "version": 1,
+    "id": "fixture-rename-context-menu-observed",
+    "name": "Downloads",
+    "target": {
+      "app": "com.apple.finder",
+      "window": "Downloads"
+    },
+    "steps": [
+      {
+        "id": "step-1",
+        "kind": "click",
+        "target": {
+          "kind": "element",
+          "role": "row",
+          "name": "alpha.txt",
+          "path": ["window", "outline"]
+        },
+        "button": "right"
+      },
+      {
+        "id": "step-2",
+        "kind": "type",
+        "target": {
+          "kind": "element",
+          "role": "textfield",
+          "name": "alpha",
+          "path": ["window", "outline", "row"]
+        },
+        "text": "beta.txt"
+      },
+      {
+        "id": "step-3",
+        "kind": "key",
+        "key": "return"
+      }
+    ]
+  },
+  "observations": {
+    "version": 1,
+    "observations": [
+      {
+        "kind": "menu",
+        "app": "com.apple.finder",
+        "source": "context-menu",
+        "afterStep": "step-1",
+        "beforeStep": "step-2",
+        "items": ["重命名"]
+      }
+    ]
+  },
+  "expect": {
+    "intents": [
+      {
+        "action": "rename_file",
+        "covers": ["step-1", "step-2", "step-3"],
+        "params": {
+          "oldName": "alpha.txt",
+          "newName": "beta.txt"
+        },
+        "state": "proposed",
+        "confidence": "high",
+        "rule": "finder.rename.context-menu"
+      }
+    ]
+  }
+}

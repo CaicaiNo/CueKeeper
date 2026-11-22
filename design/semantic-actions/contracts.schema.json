@@ -1,0 +1,627 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CueKeeper semantic action contracts (HAOC-99 proposal)",
+  "description": "Additive flow.intents and report.intents definitions. Not generated yet; schemas/schema-diff.json describes how to fold these into the v1 schemas.",
+  "definitions": {
+    "stepId": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
+    },
+    "label": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "fileName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[^/\\u0000-\\u001f\\u007f]+$"
+    },
+    "state": {
+      "type": "string",
+      "enum": ["proposed", "confirmed", "rejected"]
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["high", "medium"]
+    },
+    "rule": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:\\.[a-z0-9-]+)+$"
+    },
+    "fallbackMode": {
+      "type": "string",
+      "enum": ["none", "raw"]
+    },
+    "elementRef": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "role": {
+          "$ref": "#/definitions/label"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "path": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 51,
+          "items": {
+            "$ref": "#/definitions/label"
+          }
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": ["role"]
+    },
+    "renameFileParams": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "oldName": {
+          "$ref": "#/definitions/fileName"
+        },
+        "newName": {
+          "$ref": "#/definitions/fileName"
+        }
+      },
+      "required": ["oldName", "newName"]
+    },
+    "openFileParams": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/fileName"
+        }
+      },
+      "required": ["name"]
+    },
+    "saveFileParams": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "closeWindowParams": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "window": {
+          "$ref": "#/definitions/label"
+        }
+      },
+      "required": ["window"]
+    },
+    "switchTabParams": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "title": {
+          "$ref": "#/definitions/label"
+        }
+      },
+      "required": ["title"]
+    },
+    "selectMenuParams": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/definitions/label"
+          }
+        }
+      },
+      "required": ["path"]
+    },
+    "copyPasteParams": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/definitions/elementRef"
+        },
+        "destination": {
+          "$ref": "#/definitions/elementRef"
+        }
+      },
+      "required": ["source", "destination"]
+    },
+    "typeIntoParams": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "target": {
+          "$ref": "#/definitions/elementRef"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "selectAll": {
+          "type": "boolean"
+        }
+      },
+      "required": ["target", "text"]
+    },
+    "intentRenameFile": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/stepId"
+        },
+        "action": {
+          "const": "rename_file",
+          "type": "string"
+        },
+        "covers": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/definitions/stepId"
+          }
+        },
+        "params": {
+          "$ref": "#/definitions/renameFileParams"
+        },
+        "state": {
+          "$ref": "#/definitions/state"
+        },
+        "confidence": {
+          "$ref": "#/definitions/confidence"
+        },
+        "rule": {
+          "$ref": "#/definitions/rule"
+        },
+        "fallback": {
+          "$ref": "#/definitions/fallbackMode"
+        }
+      },
+      "required": ["id", "action", "covers", "params", "state", "confidence", "rule"]
+    },
+    "intentOpenFile": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/stepId"
+        },
+        "action": {
+          "const": "open_file",
+          "type": "string"
+        },
+        "covers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/definitions/stepId"
+          }
+        },
+        "params": {
+          "$ref": "#/definitions/openFileParams"
+        },
+        "state": {
+          "$ref": "#/definitions/state"
+        },
+        "confidence": {
+          "$ref": "#/definitions/confidence"
+        },
+        "rule": {
+          "$ref": "#/definitions/rule"
+        },
+        "fallback": {
+          "$ref": "#/definitions/fallbackMode"
+        }
+      },
+      "required": ["id", "action", "covers", "params", "state", "confidence", "rule"]
+    },
+    "intentSaveFile": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/stepId"
+        },
+        "action": {
+          "const": "save_file",
+          "type": "string"
+        },
+        "covers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/definitions/stepId"
+          }
+        },
+        "params": {
+          "$ref": "#/definitions/saveFileParams"
+        },
+        "state": {
+          "$ref": "#/definitions/state"
+        },
+        "confidence": {
+          "$ref": "#/definitions/confidence"
+        },
+        "rule": {
+          "$ref": "#/definitions/rule"
+        },
+        "fallback": {
+          "$ref": "#/definitions/fallbackMode"
+        }
+      },
+      "required": ["id", "action", "covers", "params", "state", "confidence", "rule"]
+    },
+    "intentCloseWindow": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/stepId"
+        },
+        "action": {
+          "const": "close_window",
+          "type": "string"
+        },
+        "covers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/definitions/stepId"
+          }
+        },
+        "params": {
+          "$ref": "#/definitions/closeWindowParams"
+        },
+        "state": {
+          "$ref": "#/definitions/state"
+        },
+        "confidence": {
+          "$ref": "#/definitions/confidence"
+        },
+        "rule": {
+          "$ref": "#/definitions/rule"
+        },
+        "fallback": {
+          "$ref": "#/definitions/fallbackMode"
+        }
+      },
+      "required": ["id", "action", "covers", "params", "state", "confidence", "rule"]
+    },
+    "intentSwitchTab": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/stepId"
+        },
+        "action": {
+          "const": "switch_tab",
+          "type": "string"
+        },
+        "covers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/definitions/stepId"
+          }
+        },
+        "params": {
+          "$ref": "#/definitions/switchTabParams"
+        },
+        "state": {
+          "$ref": "#/definitions/state"
+        },
+        "confidence": {
+          "$ref": "#/definitions/confidence"
+        },
+        "rule": {
+          "$ref": "#/definitions/rule"
+        },
+        "fallback": {
+          "$ref": "#/definitions/fallbackMode"
+        }
+      },
+      "required": ["id", "action", "covers", "params", "state", "confidence", "rule"]
+    },
+    "intentSelectMenu": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/stepId"
+        },
+        "action": {
+          "const": "select_menu",
+          "type": "string"
+        },
+        "covers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/definitions/stepId"
+          }
+        },
+        "params": {
+          "$ref": "#/definitions/selectMenuParams"
+        },
+        "state": {
+          "$ref": "#/definitions/state"
+        },
+        "confidence": {
+          "$ref": "#/definitions/confidence"
+        },
+        "rule": {
+          "$ref": "#/definitions/rule"
+        },
+        "fallback": {
+          "$ref": "#/definitions/fallbackMode"
+        }
+      },
+      "required": ["id", "action", "covers", "params", "state", "confidence", "rule"]
+    },
+    "intentCopyPaste": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/stepId"
+        },
+        "action": {
+          "const": "copy_paste",
+          "type": "string"
+        },
+        "covers": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/definitions/stepId"
+          }
+        },
+        "params": {
+          "$ref": "#/definitions/copyPasteParams"
+        },
+        "state": {
+          "$ref": "#/definitions/state"
+        },
+        "confidence": {
+          "$ref": "#/definitions/confidence"
+        },
+        "rule": {
+          "$ref": "#/definitions/rule"
+        },
+        "fallback": {
+          "$ref": "#/definitions/fallbackMode"
+        }
+      },
+      "required": ["id", "action", "covers", "params", "state", "confidence", "rule"]
+    },
+    "intentTypeInto": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/stepId"
+        },
+        "action": {
+          "const": "type_into",
+          "type": "string"
+        },
+        "covers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/definitions/stepId"
+          }
+        },
+        "params": {
+          "$ref": "#/definitions/typeIntoParams"
+        },
+        "state": {
+          "$ref": "#/definitions/state"
+        },
+        "confidence": {
+          "$ref": "#/definitions/confidence"
+        },
+        "rule": {
+          "$ref": "#/definitions/rule"
+        },
+        "fallback": {
+          "$ref": "#/definitions/fallbackMode"
+        }
+      },
+      "required": ["id", "action", "covers", "params", "state", "confidence", "rule"]
+    },
+    "intent": {
+      "oneOf": [
+        {
+          "$ref": "#/definitions/intentRenameFile"
+        },
+        {
+          "$ref": "#/definitions/intentOpenFile"
+        },
+        {
+          "$ref": "#/definitions/intentSaveFile"
+        },
+        {
+          "$ref": "#/definitions/intentCloseWindow"
+        },
+        {
+          "$ref": "#/definitions/intentSwitchTab"
+        },
+        {
+          "$ref": "#/definitions/intentSelectMenu"
+        },
+        {
+          "$ref": "#/definitions/intentCopyPaste"
+        },
+        {
+          "$ref": "#/definitions/intentTypeInto"
+        }
+      ]
+    },
+    "actionName": {
+      "type": "string",
+      "enum": [
+        "rename_file",
+        "open_file",
+        "save_file",
+        "close_window",
+        "switch_tab",
+        "select_menu",
+        "copy_paste",
+        "type_into"
+      ]
+    },
+    "reportIntent": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/stepId"
+        },
+        "action": {
+          "$ref": "#/definitions/actionName"
+        },
+        "covers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/definitions/stepId"
+          }
+        },
+        "execution": {
+          "type": "string",
+          "enum": ["intent", "raw"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["passed", "failed", "blocked", "skipped"]
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "message": {
+          "type": "string"
+        },
+        "delivery": {
+          "type": "string",
+          "enum": [
+            "delivered_verified",
+            "delivered_unverified",
+            "delivery_uncertain",
+            "not_delivered",
+            "unknown"
+          ]
+        },
+        "atMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fallback": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "to": {
+              "const": "raw",
+              "type": "string"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          },
+          "required": ["to", "reason"]
+        }
+      },
+      "required": ["id", "action", "covers", "execution", "status", "atMs", "durationMs"]
+    },
+    "menuObservation": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "menu",
+          "type": "string"
+        },
+        "app": {
+          "$ref": "#/definitions/label"
+        },
+        "source": {
+          "type": "string",
+          "enum": ["context-menu", "menu-bar"]
+        },
+        "afterStep": {
+          "$ref": "#/definitions/stepId"
+        },
+        "beforeStep": {
+          "$ref": "#/definitions/stepId"
+        },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/definitions/label"
+          }
+        }
+      },
+      "required": ["kind", "app", "source", "afterStep", "beforeStep", "items"]
+    },
+    "observationsFile": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "version": {
+          "const": 1,
+          "type": "number"
+        },
+        "observations": {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "$ref": "#/definitions/menuObservation"
+          }
+        }
+      },
+      "required": ["version", "observations"]
+    }
+  }
+}

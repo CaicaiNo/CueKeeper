@@ -1,0 +1,51 @@
+{
+  "fixture": "rename-wrong-app",
+  "description": "TextEdit 里的相似手势（点击文本区 → Return → 输入 → Return）不是重命名",
+  "flow": {
+    "version": 1,
+    "id": "fixture-rename-wrong-app",
+    "name": "Untitled",
+    "target": {
+      "app": "com.apple.TextEdit",
+      "window": "Untitled"
+    },
+    "steps": [
+      {
+        "id": "step-1",
+        "kind": "click",
+        "target": {
+          "kind": "element",
+          "role": "textarea",
+          "name": "body",
+          "path": ["window", "textarea"]
+        }
+      },
+      {
+        "id": "step-2",
+        "kind": "key",
+        "key": "return"
+      },
+      {
+        "id": "step-3",
+        "kind": "type",
+        "target": {
+          "kind": "element",
+          "role": "textarea",
+          "name": "body",
+          "path": ["window", "textarea"]
+        },
+        "text": "b"
+      },
+      {
+        "id": "step-4",
+        "kind": "key",
+        "key": "return"
+      }
+    ]
+  },
+  "observations": null,
+  "expect": {
+    "intents": [],
+    "reason": "INTENT_UNSUPPORTED_APP"
+  }
+}

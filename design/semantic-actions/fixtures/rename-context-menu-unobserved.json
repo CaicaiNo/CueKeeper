@@ -1,0 +1,47 @@
+{
+  "fixture": "rename-context-menu-unobserved",
+  "description": "右键后直接出现输入步骤，但缺少菜单旁车；不猜测中间点了「重命名」",
+  "flow": {
+    "version": 1,
+    "id": "fixture-rename-context-menu-unobserved",
+    "name": "Downloads",
+    "target": {
+      "app": "com.apple.finder",
+      "window": "Downloads"
+    },
+    "steps": [
+      {
+        "id": "step-1",
+        "kind": "click",
+        "target": {
+          "kind": "element",
+          "role": "row",
+          "name": "alpha.txt",
+          "path": ["window", "outline"]
+        },
+        "button": "right"
+      },
+      {
+        "id": "step-2",
+        "kind": "type",
+        "target": {
+          "kind": "element",
+          "role": "textfield",
+          "name": "alpha",
+          "path": ["window", "outline", "row"]
+        },
+        "text": "beta.txt"
+      },
+      {
+        "id": "step-3",
+        "kind": "key",
+        "key": "return"
+      }
+    ]
+  },
+  "observations": null,
+  "expect": {
+    "intents": [],
+    "reason": "INTENT_EVIDENCE_MISSING"
+  }
+}

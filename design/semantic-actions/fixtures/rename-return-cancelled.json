@@ -1,0 +1,51 @@
+{
+  "fixture": "rename-return-cancelled",
+  "description": "输入新名后按 Escape 取消，不应产出建议",
+  "flow": {
+    "version": 1,
+    "id": "fixture-rename-return-cancelled",
+    "name": "Downloads",
+    "target": {
+      "app": "com.apple.finder",
+      "window": "Downloads"
+    },
+    "steps": [
+      {
+        "id": "step-1",
+        "kind": "click",
+        "target": {
+          "kind": "element",
+          "role": "row",
+          "name": "a.txt",
+          "path": ["window", "outline"]
+        }
+      },
+      {
+        "id": "step-2",
+        "kind": "key",
+        "key": "return"
+      },
+      {
+        "id": "step-3",
+        "kind": "type",
+        "target": {
+          "kind": "element",
+          "role": "textfield",
+          "name": "a",
+          "path": ["window", "outline", "row"]
+        },
+        "text": "b"
+      },
+      {
+        "id": "step-4",
+        "kind": "key",
+        "key": "escape"
+      }
+    ]
+  },
+  "observations": null,
+  "expect": {
+    "intents": [],
+    "reason": "INTENT_NO_PATTERN"
+  }
+}

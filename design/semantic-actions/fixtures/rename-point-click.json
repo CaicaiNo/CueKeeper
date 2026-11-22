@@ -1,0 +1,49 @@
+{
+  "fixture": "rename-point-click",
+  "description": "点击使用坐标定位器，无法证明点中的是文件行，不产出建议",
+  "flow": {
+    "version": 1,
+    "id": "fixture-rename-point-click",
+    "name": "Downloads",
+    "target": {
+      "app": "com.apple.finder",
+      "window": "Downloads"
+    },
+    "steps": [
+      {
+        "id": "step-1",
+        "kind": "click",
+        "target": {
+          "kind": "point",
+          "point": [420, 300]
+        }
+      },
+      {
+        "id": "step-2",
+        "kind": "key",
+        "key": "return"
+      },
+      {
+        "id": "step-3",
+        "kind": "type",
+        "target": {
+          "kind": "element",
+          "role": "textfield",
+          "name": "a",
+          "path": ["window", "outline", "row"]
+        },
+        "text": "b"
+      },
+      {
+        "id": "step-4",
+        "kind": "key",
+        "key": "return"
+      }
+    ]
+  },
+  "observations": null,
+  "expect": {
+    "intents": [],
+    "reason": "INTENT_NO_PATTERN"
+  }
+}

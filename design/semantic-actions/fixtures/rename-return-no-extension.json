@@ -1,0 +1,62 @@
+{
+  "fixture": "rename-return-no-extension",
+  "description": "Finder 列表视图：选中无扩展名条目 → Return → 输入 → Return",
+  "flow": {
+    "version": 1,
+    "id": "fixture-rename-return-no-extension",
+    "name": "Downloads",
+    "target": {
+      "app": "com.apple.finder",
+      "window": "Downloads"
+    },
+    "steps": [
+      {
+        "id": "step-1",
+        "kind": "click",
+        "target": {
+          "kind": "element",
+          "role": "row",
+          "name": "draft",
+          "path": ["window", "outline"]
+        }
+      },
+      {
+        "id": "step-2",
+        "kind": "key",
+        "key": "return"
+      },
+      {
+        "id": "step-3",
+        "kind": "type",
+        "target": {
+          "kind": "element",
+          "role": "textfield",
+          "name": "draft",
+          "path": ["window", "outline", "row"]
+        },
+        "text": "final"
+      },
+      {
+        "id": "step-4",
+        "kind": "key",
+        "key": "return"
+      }
+    ]
+  },
+  "observations": null,
+  "expect": {
+    "intents": [
+      {
+        "action": "rename_file",
+        "covers": ["step-1", "step-2", "step-3", "step-4"],
+        "params": {
+          "oldName": "draft",
+          "newName": "final"
+        },
+        "state": "proposed",
+        "confidence": "high",
+        "rule": "finder.rename.return"
+      }
+    ]
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "fixture": "intent-stale",
+  "description": "已确认意图的 covers 指向不存在的步骤；规划期必须拒绝，原始步骤仍完整",
+  "flow": {
+    "version": 1,
+    "id": "fixture-intent-stale",
+    "name": "Downloads",
+    "target": {
+      "app": "com.apple.finder",
+      "window": "Downloads"
+    },
+    "steps": [
+      {
+        "id": "step-1",
+        "kind": "click",
+        "target": {
+          "kind": "element",
+          "role": "row",
+          "name": "a.txt",
+          "path": ["window", "outline"]
+        }
+      },
+      {
+        "id": "step-2",
+        "kind": "key",
+        "key": "return"
+      },
+      {
+        "id": "step-3",
+        "kind": "type",
+        "target": {
+          "kind": "element",
+          "role": "textfield",
+          "name": "a",
+          "path": ["window", "outline", "row"]
+        },
+        "text": "b.txt"
+      },
+      {
+        "id": "step-4",
+        "kind": "key",
+        "key": "return"
+      }
+    ],
+    "intents": [
+      {
+        "id": "intent-1",
+        "action": "rename_file",
+        "covers": ["step-1", "step-9"],
+        "params": {
+          "oldName": "a.txt",
+          "newName": "b.txt"
+        },
+        "state": "confirmed",
+        "confidence": "high",
+        "rule": "finder.rename.return"
+      }
+    ]
+  },
+  "observations": null,
+  "expect": {
+    "error": "INTENT_STALE",
+    "reason": "covers references a step that does not exist"
+  }
+}

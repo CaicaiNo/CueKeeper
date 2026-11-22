@@ -1,0 +1,38 @@
+{
+  "schemas/flow.schema.json": [
+    {
+      "op": "test",
+      "path": "/properties/version/const",
+      "value": 1
+    },
+    {
+      "op": "add",
+      "path": "/properties/intents",
+      "value": {
+        "type": "array",
+        "maxItems": 200,
+        "items": {
+          "$ref": "../design/semantic-actions/contracts.schema.json#/definitions/intent"
+        }
+      }
+    }
+  ],
+  "schemas/report.schema.json": [
+    {
+      "op": "test",
+      "path": "/properties/version/const",
+      "value": 1
+    },
+    {
+      "op": "add",
+      "path": "/properties/intents",
+      "value": {
+        "type": "array",
+        "maxItems": 200,
+        "items": {
+          "$ref": "../design/semantic-actions/contracts.schema.json#/definitions/reportIntent"
+        }
+      }
+    }
+  ]
+}

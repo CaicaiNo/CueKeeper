@@ -1,0 +1,62 @@
+{
+  "fixture": "rename-return-extension-inferred",
+  "description": "原名 a.txt，内联框只选中基名 a，用户只输入 b；扩展名按 Finder 默认行为推断",
+  "flow": {
+    "version": 1,
+    "id": "fixture-rename-return-extension-inferred",
+    "name": "Downloads",
+    "target": {
+      "app": "com.apple.finder",
+      "window": "Downloads"
+    },
+    "steps": [
+      {
+        "id": "step-1",
+        "kind": "click",
+        "target": {
+          "kind": "element",
+          "role": "row",
+          "name": "a.txt",
+          "path": ["window", "outline"]
+        }
+      },
+      {
+        "id": "step-2",
+        "kind": "key",
+        "key": "return"
+      },
+      {
+        "id": "step-3",
+        "kind": "type",
+        "target": {
+          "kind": "element",
+          "role": "textfield",
+          "name": "a",
+          "path": ["window", "outline", "row"]
+        },
+        "text": "b"
+      },
+      {
+        "id": "step-4",
+        "kind": "key",
+        "key": "return"
+      }
+    ]
+  },
+  "observations": null,
+  "expect": {
+    "intents": [
+      {
+        "action": "rename_file",
+        "covers": ["step-1", "step-2", "step-3", "step-4"],
+        "params": {
+          "oldName": "a.txt",
+          "newName": "b.txt"
+        },
+        "state": "proposed",
+        "confidence": "medium",
+        "rule": "finder.rename.return"
+      }
+    ]
+  }
+}
