@@ -18,8 +18,9 @@ HAOC-82 · 风险说明 · 契约见 [Shell 步骤设计](shell-steps.md)
 
 交互式 root 通过 `sudo -A` 调用 `SUDO_ASKPASS` helper 弹出原生对话框：
 
-- 每个 root 步骤先执行 `sudo -A -k -v`：`-k` 忽略已缓存的凭据，`-v` 只校验身份、不执行任何命令；因此 `sudoers` 里只允许个别命令的策略不会被这条探测误拒。
-- 身份通过后，同一步骤再执行 `sudo -A -u root -- <程序> <参数…>`；正常的 `timestamp_timeout` 会复用刚建立的凭据，命令阶段不再弹框。
+- 每个 root 步骤只发起**一次** `sudo -A -k -u root -- <程序> <参数…>`：`-k` 忽略已缓存的凭据，因此每次 root 步骤都对应一次密码框；sudo 用刚拿到的凭据执行随后的命令，同一步骤内不再二次弹框。
+- 不使用 `sudo -A -k -v` 预检：macOS 在无 TTY 场景下不把 `-v` 校验过的 ticket 复用给下一次 sudo，会导致同一步骤弹两次密码框（HAOC-100）。
+- 是否弹框、授权结果如何，都从 askpass helper 的结果标记判断：`cancelled` / `timeout` / `unavailable` 是认证失败；`retry` 且退出非 0 是密码被拒；`provided` 表示命令已执行，退出码就是命令自己的。sudo 全程没问密码时（`NOPASSWD` 命中了精确命令，或账号根本没有 sudo 权限），再用一次不弹框的 `sudo -n -l -- <程序> <参数…>` 判断策略是否允许，据此把「命令已执行但退出非 0」与「账号无权 sudo」区分开。
 - 选择 `osascript` + `display dialog … with hidden answer` 而不是自编译的 `NSSecureTextField` helper：`osascript` 是系统自带、无需签名与分发，密码只经过 `osascript → helper → sudo` 的管道；代价是对话框外观由 Standard Additions 决定，且密码会短暂出现在这两段进程内存与管道中（不会落盘）。原生 helper 能提供更严格的 secure input，但需要签名、分发和额外的信任链，首版不做。
 - 密码不进入命令行参数、环境变量、报告、日志或临时文件。helper 的 stdout 是 `sudo` 读取密码的唯一通道；helper 只在私有目录（`0700`）里写不含密码的结果标记（`provided` / `retry` / `cancelled` / `timeout` / `unavailable`）。
 - 连续失败：`sudo` 会在密码错误后再次调用 helper。helper 第二次被调用时只追加 `retry` 并以失败退出，不再弹框；父进程据此把「密码错误」与「命令自己退出非零」区分开。
@@ -65,7 +66,7 @@ HAOC-82 · 风险说明 · 契约见 [Shell 步骤设计](shell-steps.md)
 | 命令被中断（`SIGINT` / 工作台「停止」） | `failed`，`SHELL_CANCELLED`，随后不再启动任何步骤。 |
 | 命令退出码不符 | `failed`，`SHELL_EXIT`，记录真实退出码。 |
 
-超时只约束命令阶段；对话框有独立的 60 秒上限，因此输入密码的耗时不会占用命令的执行预算。
+超时上限覆盖整个步骤：命令预算加上对话框上限（默认 60 秒）。对话框自己在 60 秒后放弃并报告 `SHELL_PRIVILEGE_CANCELLED`，所以输入密码的耗时不会挤掉命令的执行预算；最坏情况下（命令在授权后卡死）报告时间会比命令预算多出一个对话框上限。
 
 ## 本单未验证的部分
 

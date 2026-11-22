@@ -819,10 +819,11 @@ test('SIGINT cancels a running shell step, writes the report, and exits 130', as
 
 /**
  * A stand-in for the sudo front-end. It implements only the shapes CueKeeper
- * uses: `-A -k -v` (authenticate), `-A -u root -- cmd` (prompted command),
- * `-n -l -- cmd` (sudoers policy check) and `-n -k -u root -- cmd`. The
- * password lives in the test fixture config so the `ask` log can record only
- * whether it was accepted, never the value.
+ * uses: `-A -k -u root -- cmd` (prompted command), `-n -l -- cmd` (sudoers
+ * policy check) and `-n -k -u root -- cmd`. Like the real sudo, the prompted
+ * form consults askpass once and again after a rejection, unless a NOPASSWD
+ * rule covers the command. The password lives in the test fixture config so
+ * the `ask` log can record only whether it was accepted, never the value.
  */
 function fakeSudo(configPath) {
   return `
@@ -842,17 +843,13 @@ function ask() {
   }) + '\\n');
   return { exit: child.status, answer };
 }
-if (args.includes('-l')) process.exit(config.sudoersAllows ? 0 : 1);
-if (args.includes('-v')) {
-  if (ask().answer === config.password) process.exit(0);
-  ask();
-  process.exit(1);
-}
 const dashdash = args.indexOf('--');
 const command = args.slice(dashdash + 1);
-if (args.includes('-n')) {
-  if (!config.sudoersAllows) process.exit(1);
-} else if (config.askOnCommand) {
+// An account outside sudoers is denied before sudo ever asks for a password.
+if (!config.sudoersAllows) process.exit(1);
+// The -n -l form only consults the policy; it never runs the command.
+if (args.includes('-l')) process.exit(0);
+if (!args.includes('-n') && !config.noAsk) {
   if (ask().answer !== config.password) { ask(); process.exit(1); }
 }
 const result = spawnSync(command[0], command.slice(1), { stdio: 'inherit' });
@@ -869,19 +866,22 @@ async function rootFixture(t, options = {}) {
     log: join(root, 'sudo.log'),
     password: options.password ?? 'test-password-42',
     sudoersAllows: options.sudoersAllows ?? true,
-    askOnCommand: options.askOnCommand ?? false,
+    noAsk: options.noAsk ?? false,
   }));
   const sudo = join(root, 'fake-sudo.mjs');
   await writeFile(sudo, `#!${process.execPath}\n${fakeSudo(configPath)}`, { mode: 0o700 });
   await chmod(sudo, 0o700);
   const prompt = join(root, 'prompt.sh');
+  const promptLog = join(root, 'prompt.log');
   const answer = options.answer ?? 'ok:test-password-42';
-  await writeFile(prompt, answer === '' ? '#!/bin/sh\nexit 1\n' : `#!/bin/sh\nprintf '%s\\n' '${answer}'\n`,
-    { mode: 0o700 });
+  await writeFile(prompt, `#!/bin/sh\nprintf 'dialog\\n' >> '${promptLog}'\n` +
+    (answer === '' ? 'exit 1\n' : `printf '%s\\n' '${answer}'\n`),
+  { mode: 0o700 });
   await chmod(prompt, 0o700);
   const runner = createRootPrivilegeRunner({
     sudoPath: sudo, prompt, platform: options.platform ?? 'darwin',
-    allowSudoers: options.allowSudoers ?? true, promptTimeoutMs: 5000,
+    allowSudoers: options.allowSudoers ?? true,
+    promptTimeoutMs: options.promptTimeoutMs ?? 5000,
   });
   const log = join(root, 'sudo.log');
   const calls = async () => {
@@ -891,7 +891,15 @@ async function rootFixture(t, options = {}) {
       return [];
     }
   };
-  return { root, directory, runner, calls, sudo, prompt };
+  /** How many password dialogs the user actually saw. */
+  const dialogs = async () => {
+    try {
+      return (await readFile(promptLog, 'utf8')).trim().split('\n').filter(Boolean).length;
+    } catch {
+      return 0;
+    }
+  };
+  return { root, directory, runner, calls, dialogs, sudo, prompt };
 }
 
 const rootRequest = (root, directory, extra = {}) => ({
@@ -899,8 +907,8 @@ const rootRequest = (root, directory, extra = {}) => ({
   mode: 'prompt', timeoutMs: 5000, directory, ...extra,
 });
 
-test('the askpass dialog authenticates once, runs exact argv, and never stores the password', async t => {
-  const { root, directory, runner, calls } = await rootFixture(t);
+test('the askpass dialog authenticates once, runs exact argv in one sudo call, and never stores the password', async t => {
+  const { root, directory, runner, calls, dialogs } = await rootFixture(t);
   const marker = join(root, 'root-ran.json');
   const script = await nodeScript(root, 'root.mjs',
     `import { writeFileSync } from 'node:fs';
@@ -914,15 +922,18 @@ writeFileSync(process.env.ROOT_MARKER ?? ${JSON.stringify(marker)}, JSON.stringi
   assert.deepEqual(written.argv, ['a b', '--flag']);
   assert.equal(written.cwd, await realpath(root));
 
+  // One sudo invocation, so one dialog: the step never probes the credential
+  // with a separate `-v`, which prompted twice on macOS (HAOC-100).
+  assert.equal(await dialogs(), 1);
   const all = await calls();
   const entries = all.filter(entry => !entry.ask);
-  assert.deepEqual(entries[0].args, ['-A', '-k', '-v']);
-  assert.deepEqual(entries[1].args, ['-A', '-u', 'root', '--', process.execPath, script, 'a b', '--flag']);
-  assert.equal(entries[1].cwd, await realpath(root));
-  assert.equal(entries[1].askpass.endsWith('-run.sh'), true);
+  assert.equal(entries.length, 1);
+  assert.deepEqual(entries[0].args, ['-A', '-k', '-u', 'root', '--', process.execPath, script, 'a b', '--flag']);
+  assert.equal(entries[0].cwd, await realpath(root));
+  assert.equal(entries[0].askpass.endsWith('.sh'), true);
   assert.deepEqual(all.filter(entry => entry.ask).map(entry => entry.accepted), [true]);
 
-  // The password never reaches argv, the environment, the status files or the
+  // The password never reaches argv, the environment, the status file or the
   // report: the askpass pipe is its only path.
   const password = 'test-password-42';
   assert.doesNotMatch(JSON.stringify(entries), new RegExp(password));
@@ -931,13 +942,12 @@ writeFileSync(process.env.ROOT_MARKER ?? ${JSON.stringify(marker)}, JSON.stringi
     const content = await readFile(join(directory, name), 'utf8');
     assert.doesNotMatch(content, new RegExp(password), `${name} leaked the password`);
   }
-  // The cached ticket covers the command, so only the auth prompt ran.
   const statuses = (await readdir(directory)).filter(name => name.endsWith('.status'));
-  assert.deepEqual(statuses.map(name => name.endsWith('-auth.status')), [true]);
+  assert.deepEqual(statuses.length, 1);
   assert.equal((await readFile(join(directory, statuses[0]), 'utf8')).trim(), 'provided');
-  // The generated askpass helpers are valid POSIX sh and contain no password.
+  // The generated askpass helper is valid POSIX sh and contains no password.
   const helpers = (await readdir(directory)).filter(name => name.endsWith('.sh'));
-  assert.equal(helpers.length, 2);
+  assert.equal(helpers.length, 1);
   for (const name of helpers) {
     const check = spawnSync('/bin/sh', ['-n', join(directory, name)], { encoding: 'utf8' });
     assert.equal(check.status, 0, `${name}: ${check.stderr}`);
@@ -949,7 +959,7 @@ writeFileSync(process.env.ROOT_MARKER ?? ${JSON.stringify(marker)}, JSON.stringi
 
 test('a cancelled or timed-out dialog blocks the root step before any command runs', async t => {
   for (const [answer, outcome] of [['cancelled', 'cancelled'], ['timeout', 'timeout']]) {
-    const { root, directory, runner, calls } = await rootFixture(t, { answer });
+    const { root, directory, runner, calls, dialogs } = await rootFixture(t, { answer });
     const marker = join(root, `marker-${outcome}`);
     const result = await runner.runRoot(rootRequest(root, directory, {
       program: '/usr/bin/touch', args: [marker],
@@ -957,21 +967,24 @@ test('a cancelled or timed-out dialog blocks the root step before any command ru
     assert.equal(result.state, 'failed', JSON.stringify(result));
     assert.equal(result.authentication, outcome);
     assert.equal(existsSync(marker), false);
-    assert.deepEqual((await calls()).filter(entry => !entry.ask).map(entry => entry.args), [['-A', '-k', '-v']]);
+    assert.equal(await dialogs(), 1);
+    assert.deepEqual((await calls()).filter(entry => !entry.ask).map(entry => entry.args),
+      [['-A', '-k', '-u', 'root', '--', '/usr/bin/touch', marker]]);
   }
 });
 
 test('a rejected password is reported as SHELL_PRIVILEGE_REQUIRED and never retried into a command', async t => {
-  const { root, directory, runner, calls } = await rootFixture(t, { answer: 'ok:wrong-password' });
+  const { root, directory, runner, calls, dialogs } = await rootFixture(t, { answer: 'ok:wrong-password' });
   const marker = join(root, 'never');
   const result = await runner.runRoot(rootRequest(root, directory, {
     program: '/usr/bin/touch', args: [marker],
   }), signal);
   assert.equal(result.authentication, 'rejected');
   assert.equal(existsSync(marker), false);
+  assert.equal(await dialogs(), 1);
   const entries = await calls();
   assert.deepEqual(entries.filter(entry => entry.ask).map(entry => entry.accepted), [false, false]);
-  assert.equal((await readFile(join(directory, (await readdir(directory)).find(n => n.endsWith('-auth.status'))), 'utf8'))
+  assert.equal((await readFile(join(directory, (await readdir(directory)).find(n => n.endsWith('.status'))), 'utf8'))
     .trim().split('\n').join(','), 'provided,retry');
 });
 
@@ -985,15 +998,47 @@ test('a missing graphical session and a non-macOS host fail with a clear privile
     error => error.code === 'SHELL_PRIVILEGE_UNAVAILABLE' && /only available on macOS/.test(error.message));
 });
 
-test('a second password prompt keeps the command exit code instead of reporting a rejection', async t => {
-  const { root, directory, runner, calls } = await rootFixture(t, { askOnCommand: true });
+test('one dialog per root step keeps the command exit code instead of reporting a rejection', async t => {
+  const { root, directory, runner, calls, dialogs } = await rootFixture(t);
   const result = await runner.runRoot(rootRequest(root, directory, {
     program: process.execPath, args: ['-e', 'process.exit(5)'], timeoutMs: 10_000,
   }), signal);
   assert.equal(result.state, 'finished', JSON.stringify(result));
   assert.equal(result.exitCode, 5);
   assert.equal(result.authentication, undefined);
-  assert.deepEqual((await calls()).filter(entry => entry.ask).map(entry => entry.accepted), [true, true]);
+  assert.equal(await dialogs(), 1);
+  assert.deepEqual((await calls()).filter(entry => entry.ask).map(entry => entry.accepted), [true]);
+});
+
+test('a NOPASSWD rule runs the command without a dialog and its exit code stands', async t => {
+  const { root, directory, runner, calls, dialogs } = await rootFixture(t, { noAsk: true });
+  const result = await runner.runRoot(rootRequest(root, directory, {
+    program: process.execPath, args: ['-e', 'process.exit(7)'], timeoutMs: 10_000,
+  }), signal);
+  assert.equal(result.state, 'finished', JSON.stringify(result));
+  assert.equal(result.exitCode, 7);
+  assert.equal(await dialogs(), 0);
+  // The non-prompting policy check explains why no dialog appeared.
+  assert.deepEqual((await calls()).map(entry => entry.args), [
+    ['-A', '-k', '-u', 'root', '--', process.execPath, '-e', 'process.exit(7)'],
+    ['-n', '-l', '--', process.execPath, '-e', 'process.exit(7)'],
+  ]);
+});
+
+test('an account that may not use sudo is refused without a dialog or a command run', async t => {
+  const { root, directory, runner, calls, dialogs } = await rootFixture(t, { noAsk: true, sudoersAllows: false });
+  const marker = join(root, 'never');
+  const result = await runner.runRoot(rootRequest(root, directory, {
+    program: '/usr/bin/touch', args: [marker],
+  }), signal);
+  assert.equal(result.state, 'failed', JSON.stringify(result));
+  assert.equal(result.authentication, 'refused');
+  assert.equal(existsSync(marker), false);
+  assert.equal(await dialogs(), 0);
+  assert.deepEqual((await calls()).map(entry => entry.args), [
+    ['-A', '-k', '-u', 'root', '--', '/usr/bin/touch', marker],
+    ['-n', '-l', '--', '/usr/bin/touch', marker],
+  ]);
 });
 
 test('sudoers mode runs without a dialog and refuses an unauthorized command', async t => {
@@ -1019,10 +1064,10 @@ test('sudoers mode runs without a dialog and refuses an unauthorized command', a
 });
 
 test('a root command timeout reclaims the process group and skips the rest of the flow', async t => {
-  const { root, directory, runner } = await rootFixture(t);
+  const { root, directory, runner, dialogs } = await rootFixture(t, { promptTimeoutMs: 1000 });
   const after = join(root, 'after.txt');
   const flow = flowOf([
-    { id: 'slow-root', kind: 'shell', argv: ['/bin/sh', '-c', 'sleep 30'], privilege: 'root', timeoutMs: 300 },
+    { id: 'slow-root', kind: 'shell', argv: ['/bin/sh', '-c', 'sleep 30'], privilege: 'root', timeoutMs: 700 },
     { id: 'later', kind: 'shell', argv: ['/usr/bin/touch', after] },
   ]);
   const report = await runFlow(flow, undefined, {
@@ -1039,6 +1084,7 @@ test('a root command timeout reclaims the process group and skips the rest of th
   assert.equal(report.entries[1].status, 'skipped');
   assert.equal(existsSync(after), false);
   assert.equal(directory.length > 0, true);
+  assert.equal(await dialogs(), 1);
 });
 
 test('root steps appear as argv-only contract, report fields, and gate on --interactive', async t => {
