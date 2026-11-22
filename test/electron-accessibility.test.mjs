@@ -284,7 +284,8 @@ test('a Welcome page is unverified and the recording continues with a warning', 
     cliArgs: globalArgs(),
     electronApps: vsCode,
     snapshots: { 31: welcomeWindow() },
-    events: [electronEvent('click', 100)],
+    // The Open Folder button in the welcome page, so the step has a real target.
+    events: [electronEvent('click', 100, vsCode, { point: [150, 130] })],
   });
   assert.equal(run.code, 0, run.stderr + JSON.stringify(run.response));
   assert.deepEqual(JSON.parse(run.written).steps.map(step => step.kind), ['click']);
