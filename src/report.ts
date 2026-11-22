@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { zipSync, strToU8 } from 'fflate';
-import { reportCheck } from './contracts.js';
-import type { Flow, Report } from './contracts.js';
+import { manifestCheck, reportCheck } from './contracts.js';
+import type { Flow, Manifest, Report } from './contracts.js';
 import { hashFlow, plan } from './flow.js';
 import { flowHasShellDefinitions } from './shell.js';
 import { decorateAsset } from './assets.js';
@@ -112,6 +112,25 @@ function attachMedia(raw: RawAsset[], video: VideoArtifact | undefined, warn?: (
   return media.sort((left, right) => left.path.localeCompare(right.path));
 }
 
+/**
+ * `manifest.json` is the only index a reader trusts, so every declared file
+ * must exist with the declared byte count and SHA-256. Packing runs this on its
+ * own output, and packaging tools can reuse it on an edited archive.
+ */
+export function verifyManifestFiles(manifest: Manifest, contents: Record<string, Uint8Array>) {
+  for (const [path, entry] of Object.entries(manifest.files)) {
+    const bytes = contents[path];
+    if (!bytes) throw new Error(`Manifest lists a missing file: ${path}`);
+    if (bytes.length !== entry.bytes) throw new Error(`Manifest byte count does not match: ${path}`);
+    if (createHash('sha256').update(bytes).digest('hex') !== entry.sha256) {
+      throw new Error(`Manifest SHA-256 does not match: ${path}`);
+    }
+  }
+  for (const path of Object.keys(contents)) {
+    if (!(path in manifest.files)) throw new Error(`Manifest omits an archived file: ${path}`);
+  }
+}
+
 export function packReport(input: unknown, flow: Flow, options: PackOptions = {}): Uint8Array {
   // A packed report embeds the raw flow; shell steps may carry commands and
   // environment references that must not be published.
@@ -165,7 +184,7 @@ export function packReport(input: unknown, flow: Flow, options: PackOptions = {}
   };
   for (const asset of assets) files[`assets/${asset.path}`] = asset.bytes;
   for (const asset of media) files[asset.path] = asset.bytes;
-  const manifest = {
+  const manifest: Manifest = {
     version: 1,
     flowId: input.flowId,
     flowSha256: input.flowSha256,
@@ -181,6 +200,8 @@ export function packReport(input: unknown, flow: Flow, options: PackOptions = {}
     })),
     ...(options.video ? { video: options.video } : {}),
   };
+  if (!manifestCheck.Check(manifest)) throw new Error('Invalid manifest');
+  verifyManifestFiles(manifest, files);
   // A fixed timestamp keeps packing reproducible for the same report and assets.
   return zipSync({ ...files, 'manifest.json': json(manifest) }, { mtime: new Date(1980, 0, 1) });
 }

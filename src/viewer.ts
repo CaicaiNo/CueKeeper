@@ -130,6 +130,7 @@ function videoPanel(video: VideoArtifact | undefined) {
     <video id="sessionVideo" controls preload="metadata" playsinline
       data-offset-ms="${video.anchor.videoStartOffsetMs}" data-duration-ms="${video.durationMs}"
       src="${escapeHtml(mediaHref(video.path))}">浏览器不支持内嵌视频，可下载 ${escapeHtml(video.path)}。</video>
+    <p class="video-meta video-unrecorded" id="videoUnrecorded" hidden>该步骤发生在录制区间之外，没有画面</p>
     <p class="video-meta">${escapeHtml(`采样 ${video.sampling.thumbnail} · 块阈值 ${video.sampling.blockThreshold} · ${video.sampling.maxFps} fps 上限`)}${video.status === 'truncated' ? ' · 录制提前结束' : ''}</p>
     ${gaps}
   </div>
@@ -949,14 +950,21 @@ const script = `
       panel.hidden = panel.getAttribute('data-detail') !== id;
     });
     // Clicking a step seeks the optional session video to the moment it ran.
+    // Steps before the first kept sample or past the stop time are outside the
+    // recorded window: say so instead of clamping to a misleading frame.
     var player = document.getElementById('sessionVideo');
     var target = entryById(id);
     if (player && target) {
       var offset = Number(player.getAttribute('data-offset-ms')) || 0;
       var duration = Number(player.getAttribute('data-duration-ms')) || 0;
       var at = Number(target.getAttribute('data-at')) || 0;
-      var seconds = Math.max(0, Math.min(duration, at - offset)) / 1000;
-      try { player.currentTime = seconds; } catch (error) { /* unsupported media */ }
+      var relative = at - offset;
+      var unrecorded = relative < 0 || relative > duration;
+      var note = document.getElementById('videoUnrecorded');
+      if (note) note.hidden = !unrecorded;
+      if (!unrecorded) {
+        try { player.currentTime = relative / 1000; } catch (error) { /* unsupported media */ }
+      }
     }
     var detail = document.getElementById('detail');
     if (detail) detail.scrollTop = 0;

@@ -247,6 +247,10 @@
         "code": {
           "anyOf": [
             {
+              "const": "CAPTURE_DISABLED",
+              "type": "string"
+            },
+            {
               "const": "SCREEN_CAPTURE_NOT_AUTHORIZED",
               "type": "string"
             },
@@ -518,6 +522,10 @@
         },
         "code": {
           "anyOf": [
+            {
+              "const": "CAPTURE_DISABLED",
+              "type": "string"
+            },
             {
               "const": "SCREEN_CAPTURE_NOT_AUTHORIZED",
               "type": "string"

@@ -79,12 +79,13 @@ out/assets/logs/runner.log
 
 ## 会话视频（可选）
 
-运行可以用 `--video --report <run.json>` 额外录一段目标窗口的会话视频；`--video-mask x,y,w,h`（可重复，最多 16 个）把固定出现的敏感区域在编码前涂黑。采集器把电影写到报告旁的 `media/session.mp4`，元数据写到 `media/video.json`；`report pack` 会把它带进归档的 `media/`，并在 `manifest.json` 的 `video` 里记录编码、时长、track 时间刻度、与报告的锚点（`atMs` → PTS）和采样阈值。设计、体积实测与实现落点见 [会话视频：帧差采样 + VFR + 时间线对齐](session-video.md)。
+运行可以用 `--video --report <run.json>` 额外录一段目标窗口的会话视频；`--video-mask x,y,w,h`（可重复，最多 16 个）把固定出现的敏感区域在编码前涂黑。采集器把电影写到报告旁的 `media/session.mp4`，元数据写到 `media/video.json`；`report pack` 会把它带进归档的 `media/`，并在 `manifest.json` 的 `video` 里记录编码、时长、track 时间刻度、与报告的锚点（`atMs` → PTS，首个保留样本写 PTS 0）和采样阈值。`manifest.json` 的字段本身也有正式 schema（`schemas/manifest.schema.json`，随 `pnpm build` 检查漂移），打包时会核对每个文件的字节数与 SHA-256。设计、体积实测与实现落点见 [会话视频：帧差采样 + VFR + 时间线对齐](session-video.md)。
 
-- **默认关闭**，只在显式开启的运行里存在；`report.json` 不变，视频不参与通过/失败判断。
+- **默认关闭**，只在显式开启的运行里存在；`report.json` 不变，视频不参与通过/失败判断。**正式签名前真实采集入口也是关闭的**：需要本机设置 `CUEKEEPER_VIDEO_CAPTURE=1`，否则 `manifest.video` 记为 `skipped` / `CAPTURE_DISABLED`，运行照常继续；`cuekeeper-video --self-test` 的合成帧自检不受影响。
 - 没有视频的报告照旧打开，查看器显示「本报告未录制会话视频」；`status: "skipped"` 时显示封闭枚举的原因（例如未授权屏幕录制），不显示空播放器。
-- 有视频时查看器显示 `<video>` 面板；点时间线任一步会把视频 seek 到 `(atMs - videoStartOffsetMs)`，空闲段停在最后一帧。
+- 有视频时查看器显示 `<video>` 面板；点时间线任一步会把视频定位到 `(atMs - videoStartOffsetMs)`，空闲段停在最后一帧。**步骤早于首帧或晚于停止时刻时显示「该步骤发生在录制区间之外，没有画面」**，不会 clamp 到首帧/末帧冒充录到。
 - `media/` 超过 128 MB 给出警告，超过 512 MB 拒绝打包；`report pack --no-media` 显式剔除电影（`manifest.video` 一并省略）。
+- **上传包不含会话媒体**：`report pack` 入队前会另建一个去掉 `media/` 的上传包（`<out>.upload.zip`，路径见 `data.upload.bundle`），manifest 与查看器一并重建，不会留下悬空媒体引用；本地 ZIP 仍保留电影。
 - 运行中可暂停：`kill -USR1 <cuekeeper pid>` 暂停、`kill -USR2 <cuekeeper pid>` 继续。暂停期间画面停在最后一帧，`pausedMs` 记入 `manifest.video`，但不扣减 `durationMs`。
 - 采集失败不会留下半截文件：`.partial.mp4` 只在 `finishWriting` 成功后改名，编码失败会删除它并把原因写进 `manifest.video.code`。
 - ZIP 没有加密：谁拿到归档谁能看里面的视频，等于看到了目标窗口在那段时间里显示的一切。

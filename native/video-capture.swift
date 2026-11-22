@@ -10,6 +10,10 @@
 //   cuekeeper-video --self-test          (offline synthetic frames, no SCK)
 //   cuekeeper-video --capture --window-id 42 --out media/session.partial.mp4 ...
 //
+// `--capture` is closed unless CUEKEEPER_VIDEO_CAPTURE=1: the pre-signing build
+// ships only the synthetic self-test. `--preflight` never prompts for access and
+// requesting access is left to the user, never to the runner.
+//
 // Capture writes JSON lines to stdout: ready / sample / gap / paused / resumed /
 // finalized. The parent turns those into manifest.video; a `.partial.mp4` is
 // only renamed after finishWriting succeeds.
@@ -375,6 +379,53 @@ func assetInspection(_ url: URL) throws -> [String: Any] {
     ]
 }
 
+/// Coarse fingerprint of a decoded frame. Two decodes of the same sample match
+/// exactly; content that scrolled by more than a few pixels does not.
+func frameSignature(_ image: CGImage) -> Int {
+    let size = 16
+    let count = size * size * 4
+    let data = UnsafeMutablePointer<UInt8>.allocate(capacity: count)
+    defer { data.deallocate() }
+    data.initialize(repeating: 0, count: count)
+    guard let context = CGContext(
+        data: data, width: size, height: size, bitsPerComponent: 8, bytesPerRow: size * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+    ) else { return -1 }
+    context.interpolationQuality = .low
+    context.draw(image, in: CGRect(x: 0, y: 0, width: size, height: size))
+    var sum = 0
+    for index in 0..<(size * size) {
+        sum += Int(data[index * 4]) + Int(data[index * 4 + 1]) + Int(data[index * 4 + 2])
+    }
+    return sum
+}
+
+func seekSignature(_ url: URL, atMs: Int) throws -> Int {
+    let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+    generator.requestedTimeToleranceBefore = .zero
+    generator.requestedTimeToleranceAfter = .zero
+    let image = try generator.copyCGImage(
+        at: CMTime(value: CMTimeValue(atMs), timescale: 1000), actualTime: nil)
+    return frameSignature(image)
+}
+
+/// Two samples nine seconds apart: the first is held across most of the movie,
+/// and the two frames carry visibly different content.
+func encodeHoldScenario(url: URL, secondPtsMs: Int, stopMs: Int) throws {
+    try? FileManager.default.removeItem(at: url)
+    let width = 640
+    let height = 360
+    let writer = try VideoWriter(url: url, width: width, height: height, fps: 10)
+    guard let first = syntheticFrame(width: width, height: height, scroll: 0),
+          let second = syntheticFrame(width: width, height: height, scroll: 120) else {
+        throw WriterError.appendFailed("synthetic frame")
+    }
+    try writer.append(first, ptsMs: 0)
+    try writer.append(second, ptsMs: secondPtsMs)
+    _ = try writer.finish(stopMs: stopMs)
+}
+
 func selfTest() -> Int32 {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("cuekeeper-video-self-test-\(ProcessInfo.processInfo.processIdentifier)")
@@ -395,11 +446,22 @@ func selfTest() -> Int32 {
         let cfrBytes = (try FileManager.default.attributesOfItem(atPath: cfrURL.path)[.size] as? NSNumber)?.intValue ?? 0
         let cfrInfo = try assetInspection(cfrURL)
 
+        // Seeking inside a long hold must decode the picture that is held there,
+        // not merely some frame. The second sample only arrives at 9 s.
+        let holdURL = root.appendingPathComponent("hold.mp4")
+        try encodeHoldScenario(url: holdURL, secondPtsMs: 9000, stopMs: 10_000)
+        let firstSignature = try seekSignature(holdURL, atMs: 0)
+        let heldSignature = try seekSignature(holdURL, atMs: 4_500)
+        let laterSignature = try seekSignature(holdURL, atMs: 9_500)
+        let holdMatched = firstSignature == heldSignature
+        let laterDiffers = abs(laterSignature - firstSignature) > 200
+
         let staticFrames = staticInfo["samples"] as? Int ?? 0
         let staticDuration = staticInfo["durationMs"] as? Int ?? 0
         let ok = staticFrames == 2 && abs(staticDuration - 10_000) <= 200 &&
             staticInfo["seekedNearEnd"] as? Bool == true &&
             cfrInfo["samples"] as? Int == 100 && cfrBytes > 0 && staticBytes < cfrBytes &&
+            holdMatched && laterDiffers &&
             FileManager.default.fileExists(atPath: staticURL.path)
         emit([
             "kind": "self-test",
@@ -407,10 +469,13 @@ func selfTest() -> Int32 {
             "static": ["frames": staticFrames, "bytes": staticBytes, "durationMs": staticDuration],
             "cfr": ["frames": cfrInfo["samples"] as? Int ?? 0, "bytes": cfrBytes,
                     "durationMs": cfrInfo["durationMs"] as? Int ?? 0],
+            "hold": ["firstSignature": firstSignature, "heldSignature": heldSignature,
+                     "laterSignature": laterSignature],
             "checks": [
                 "two samples hold to the stop time",
                 "static movie is smaller than the CFR baseline",
-                "seek near the end returns a frame",
+                "seek inside a long hold returns the held picture",
+                "a sample after the hold returns different content",
                 "partial file is renamed only after finishWriting",
             ],
         ])
@@ -431,6 +496,9 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     private let masks: [CGRect]
     private let state = NSLock()
     private let sampleQueue = DispatchQueue(label: "ai.multica.cuekeeper.video.samples")
+    // One paired reading converts the monotonic host clock to wall time. PTS
+    // stay on the host clock, so an NTP jump cannot move a sample.
+    private let wallOffsetMs = Date().timeIntervalSince1970 * 1000 - hostMs()
 
     private var writer: VideoWriter?
     private var previous: [UInt8]?
@@ -668,6 +736,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         let code = failureCode
         let pausedMs = Int(pausedAccumMs.rounded())
         let stopPtsMs = ptsMs(atHost: stop)
+        let firstSampleWallMs = firstHostMs.map { Int((wallOffsetMs + $0).rounded()) }
         state.unlock()
 
         var payload: [String: Any] = [
@@ -677,10 +746,10 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
             "width": width,
             "height": height,
             "codec": "h264",
-            // Paused time is not part of the movie, but it is part of wall time.
-            "wallStartMs": Int(Date().timeIntervalSince1970 * 1000) - stopPtsMs - pausedMs,
             "pausedMs": pausedMs,
         ]
+        // PTS 0 is the first kept sample, so its wall time is the video anchor.
+        if let firstSampleWallMs { payload["firstSampleWallMs"] = firstSampleWallMs }
         if let code { payload["code"] = code; payload["truncatedAtMs"] = stopPtsMs }
         do {
             if let writer {
@@ -735,6 +804,13 @@ struct VideoCommand {
         case "--self-test":
             exit(selfTest())
         case "--capture":
+            // The pre-signing release keeps the real capture entry closed: the
+            // signed helper will be the only build that opens it. `--self-test`
+            // still works because it never touches ScreenCaptureKit.
+            guard ProcessInfo.processInfo.environment["CUEKEEPER_VIDEO_CAPTURE"] == "1" else {
+                emitError("CAPTURE_DISABLED", "Window capture is disabled until the helper is signed")
+                exit(2)
+            }
             guard let windowID = intFlag("--window-id", args), windowID > 0,
                   let out = flag("--out", args) else {
                 emitError("INPUT_ERROR", "capture needs --window-id and --out")

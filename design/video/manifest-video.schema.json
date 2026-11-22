@@ -18,6 +18,7 @@
     "code": {
       "description": "Present when status is truncated or skipped. Closed enum: no free-text reasons.",
       "enum": [
+        "CAPTURE_DISABLED",
         "SCREEN_CAPTURE_NOT_AUTHORIZED",
         "SCREEN_CAPTURE_LOST",
         "WINDOW_CLOSED",

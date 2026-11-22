@@ -96,6 +96,9 @@ function buildDocument(html) {
     [...videoMatch[1].matchAll(/data-([a-z-]+)="([^"]*)"/g)].map(match => [`data-${match[1]}`, match[2]]),
   )) : null;
   if (video) video.currentTime = 0;
+  const unrecordedMatch = /<p[^>]*id="videoUnrecorded"[^>]*>/.exec(html);
+  const videoUnrecorded = unrecordedMatch
+    ? new Element('p', unrecordedMatch[0].includes(' hidden') ? { hidden: '' } : {}) : null;
   const bodyMatch = /<body class="([^"]*)" data-report-key="([^"]*)" data-stream="([^"]*)" data-last-step="([^"]*)">/.exec(html);
   assert.ok(bodyMatch, 'body attributes');
   const system = {
@@ -113,12 +116,14 @@ function buildDocument(html) {
     detail: new Element('section'),
     video,
     sessionVideo: video,
+    videoUnrecorded,
   };
   const ids = {
     failedOnly: 'failedOnly', streamToggle: 'streamToggle', banner: 'banner', bannerExit: 'bannerExit',
     connState: 'connState', restore: 'restore', restoreAt: 'restoreAt',
     clearRestore: 'clearRestore', railEmpty: 'railEmpty', detail: 'detail',
     assertFailedOnly: 'assertFailedOnly', sessionVideo: 'sessionVideo',
+    videoUnrecorded: 'videoUnrecorded',
   };
   const document = {
     body: system.body,
@@ -299,4 +304,37 @@ test('selecting a step seeks the optional session video to its anchored moment',
   view.entries.find(entry => entry.getAttribute('data-step') === 'save').button.dispatch('click');
   assert.equal(view.system.video.currentTime, 2.5);
   assert.equal(view.system.video.getAttribute('data-duration-ms'), '10000');
+});
+
+test('steps outside the recorded window are marked as not recorded', () => {
+  const flow = parseFlow(example('textedit.flow'));
+  const report = structuredClone(example('textedit.report'));
+  report.entries[0].atMs = 0;
+  report.entries[1].atMs = 5000;
+  report.entries[2].atMs = 11_000;
+  const video = {
+    kind: 'video', status: 'complete', path: 'media/session.mp4', bytes: 2048,
+    durationMs: 10_000, frames: 3, codec: 'h264', container: 'mp4', width: 800, height: 600,
+    timebase: { timescale: 600, firstPtsMs: 0 },
+    anchor: { reportStartedAt: report.startedAt, videoStartOffsetMs: 500, method: 'host_clock' },
+    sampling: { thumbnail: '160x90', blockThreshold: 24, structuralBlocks: 4, maxFps: 10, churnMinIntervalMs: 500 },
+  };
+  const html = strFromU8(unzipSync(packReport(report, flow, {
+    video, media: [{ path: 'media/session.mp4', bytes: Buffer.alloc(2048, 1) }],
+  }))['index.html']);
+  const view = runViewer(html);
+
+  // atMs 0 is before PTS 0: the step has no picture.
+  assert.equal(view.system.videoUnrecorded.hidden, false);
+  assert.equal(view.system.video.currentTime, 0);
+
+  view.entries.find(entry => entry.getAttribute('data-step') === 'type-text').button.dispatch('click');
+  assert.equal(view.system.videoUnrecorded.hidden, true);
+  assert.equal(view.system.video.currentTime, 4.5);
+
+  // 11 s lands past the 10 s stop time; it stays unrecorded instead of clamping
+  // the player to the final frame and pretending the step was captured.
+  view.entries.find(entry => entry.getAttribute('data-step') === 'save').button.dispatch('click');
+  assert.equal(view.system.videoUnrecorded.hidden, false);
+  assert.equal(view.system.video.currentTime, 4.5);
 });

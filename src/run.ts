@@ -177,16 +177,21 @@ export async function runFlow(
     !shellSteps.some(step => hasShellSecrets(step.action)) &&
     !shellSteps.some(step => shellPrivilege(step.action) !== 'user');
   let shellTemp: string | undefined;
+  // `atMs` is measured from this monotonic zero. The wall reading is taken
+  // back-to-back with it and becomes report.startedAt, so the optional video
+  // anchor converts the report axis through one instant rather than through two
+  // independent Date.now() calls.
+  const started = performance.now();
+  const wallZeroMs = Date.now();
   const report: Report = {
     version: 1,
     flowId: flow.id,
     flowSha256: hashFlow(flow),
-    startedAt: new Date().toISOString(),
+    startedAt: new Date(wallZeroMs).toISOString(),
     mode: dryRun ? 'dry-run' : 'replay',
     status: 'passed',
     entries: [],
   };
-  const started = performance.now();
   const elapsed = () => Math.round(performance.now() - started);
 
   const identity = options.identity ?? new AppIdentitySession(flow.target);

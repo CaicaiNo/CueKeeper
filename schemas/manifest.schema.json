@@ -1,0 +1,697 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Cuekeeper manifest v1",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1,
+      "type": "number"
+    },
+    "flowId": {
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
+      "type": "string"
+    },
+    "flowSha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "reportStartedAt": {
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+      "type": "string"
+    },
+    "files": {
+      "type": "object",
+      "patternProperties": {
+        "^(.*)$": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "bytes": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sha256": {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "bytes",
+            "sha256"
+          ]
+        }
+      }
+    },
+    "assets": {
+      "maxItems": 10000,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "maxLength": 256,
+            "type": "string"
+          },
+          "entryId": {
+            "minLength": 1,
+            "maxLength": 196,
+            "type": "string"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "const": "screenshot-before",
+                "type": "string"
+              },
+              {
+                "const": "screenshot-after",
+                "type": "string"
+              },
+              {
+                "const": "screenshot",
+                "type": "string"
+              },
+              {
+                "const": "assertion-baseline",
+                "type": "string"
+              },
+              {
+                "const": "assertion-actual",
+                "type": "string"
+              },
+              {
+                "const": "log",
+                "type": "string"
+              },
+              {
+                "const": "snapshot",
+                "type": "string"
+              },
+              {
+                "const": "file",
+                "type": "string"
+              },
+              {
+                "const": "video",
+                "type": "string"
+              },
+              {
+                "const": "filmstrip",
+                "type": "string"
+              }
+            ]
+          },
+          "bytes": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path",
+          "role",
+          "bytes"
+        ]
+      }
+    },
+    "video": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "video",
+              "type": "string"
+            },
+            "status": {
+              "const": "complete",
+              "type": "string"
+            },
+            "path": {
+              "pattern": "^media/[A-Za-z0-9][A-Za-z0-9._-]{0,63}\\.mp4$",
+              "type": "string"
+            },
+            "bytes": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "durationMs": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "frames": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "codec": {
+              "anyOf": [
+                {
+                  "const": "h264",
+                  "type": "string"
+                },
+                {
+                  "const": "hevc",
+                  "type": "string"
+                }
+              ]
+            },
+            "container": {
+              "const": "mp4",
+              "type": "string"
+            },
+            "width": {
+              "minimum": 16,
+              "maximum": 4096,
+              "type": "integer"
+            },
+            "height": {
+              "minimum": 16,
+              "maximum": 4096,
+              "type": "integer"
+            },
+            "timebase": {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "timescale": {
+                  "minimum": 1,
+                  "maximum": 100000,
+                  "type": "integer"
+                },
+                "firstPtsMs": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "timescale",
+                "firstPtsMs"
+              ]
+            },
+            "anchor": {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "reportStartedAt": {
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+                  "type": "string"
+                },
+                "videoStartOffsetMs": {
+                  "minimum": -5000,
+                  "maximum": 60000,
+                  "type": "integer"
+                },
+                "method": {
+                  "const": "host_clock",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "reportStartedAt",
+                "videoStartOffsetMs",
+                "method"
+              ]
+            },
+            "sampling": {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "thumbnail": {
+                  "pattern": "^[0-9]{2,4}x[0-9]{2,4}$",
+                  "type": "string"
+                },
+                "blockThreshold": {
+                  "minimum": 1,
+                  "maximum": 255,
+                  "type": "integer"
+                },
+                "structuralBlocks": {
+                  "minimum": 1,
+                  "maximum": 10000,
+                  "type": "integer"
+                },
+                "maxFps": {
+                  "minimum": 1,
+                  "maximum": 30,
+                  "type": "integer"
+                },
+                "churnMinIntervalMs": {
+                  "minimum": 0,
+                  "maximum": 60000,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "thumbnail",
+                "blockThreshold",
+                "structuralBlocks",
+                "maxFps",
+                "churnMinIntervalMs"
+              ]
+            },
+            "gaps": {
+              "maxItems": 64,
+              "type": "array",
+              "items": {
+                "additionalProperties": false,
+                "type": "object",
+                "properties": {
+                  "fromMs": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "toMs": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "reason": {
+                    "anyOf": [
+                      {
+                        "const": "unchanged",
+                        "type": "string"
+                      },
+                      {
+                        "const": "window_not_drawing",
+                        "type": "string"
+                      },
+                      {
+                        "const": "paused",
+                        "type": "string"
+                      },
+                      {
+                        "const": "capture_stalled",
+                        "type": "string"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "fromMs",
+                  "toMs",
+                  "reason"
+                ]
+              }
+            },
+            "pausedMs": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maskedRegions": {
+              "maxItems": 16,
+              "type": "array",
+              "items": {
+                "additionalProperties": false,
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "y": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "width": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "height": {
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "x",
+                  "y",
+                  "width",
+                  "height"
+                ]
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "status",
+            "path",
+            "bytes",
+            "durationMs",
+            "frames",
+            "codec",
+            "container",
+            "width",
+            "height",
+            "timebase",
+            "anchor",
+            "sampling"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "video",
+              "type": "string"
+            },
+            "status": {
+              "const": "truncated",
+              "type": "string"
+            },
+            "code": {
+              "anyOf": [
+                {
+                  "const": "CAPTURE_DISABLED",
+                  "type": "string"
+                },
+                {
+                  "const": "SCREEN_CAPTURE_NOT_AUTHORIZED",
+                  "type": "string"
+                },
+                {
+                  "const": "SCREEN_CAPTURE_LOST",
+                  "type": "string"
+                },
+                {
+                  "const": "WINDOW_CLOSED",
+                  "type": "string"
+                },
+                {
+                  "const": "WINDOW_NOT_DRAWING",
+                  "type": "string"
+                },
+                {
+                  "const": "ENCODE_UNAVAILABLE",
+                  "type": "string"
+                },
+                {
+                  "const": "ENCODE_FAILED",
+                  "type": "string"
+                },
+                {
+                  "const": "DISK_FULL",
+                  "type": "string"
+                },
+                {
+                  "const": "TRUNCATED",
+                  "type": "string"
+                }
+              ]
+            },
+            "truncatedAtMs": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "path": {
+              "pattern": "^media/[A-Za-z0-9][A-Za-z0-9._-]{0,63}\\.mp4$",
+              "type": "string"
+            },
+            "bytes": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "durationMs": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "frames": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "codec": {
+              "anyOf": [
+                {
+                  "const": "h264",
+                  "type": "string"
+                },
+                {
+                  "const": "hevc",
+                  "type": "string"
+                }
+              ]
+            },
+            "container": {
+              "const": "mp4",
+              "type": "string"
+            },
+            "width": {
+              "minimum": 16,
+              "maximum": 4096,
+              "type": "integer"
+            },
+            "height": {
+              "minimum": 16,
+              "maximum": 4096,
+              "type": "integer"
+            },
+            "timebase": {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "timescale": {
+                  "minimum": 1,
+                  "maximum": 100000,
+                  "type": "integer"
+                },
+                "firstPtsMs": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "timescale",
+                "firstPtsMs"
+              ]
+            },
+            "anchor": {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "reportStartedAt": {
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+                  "type": "string"
+                },
+                "videoStartOffsetMs": {
+                  "minimum": -5000,
+                  "maximum": 60000,
+                  "type": "integer"
+                },
+                "method": {
+                  "const": "host_clock",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "reportStartedAt",
+                "videoStartOffsetMs",
+                "method"
+              ]
+            },
+            "sampling": {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "thumbnail": {
+                  "pattern": "^[0-9]{2,4}x[0-9]{2,4}$",
+                  "type": "string"
+                },
+                "blockThreshold": {
+                  "minimum": 1,
+                  "maximum": 255,
+                  "type": "integer"
+                },
+                "structuralBlocks": {
+                  "minimum": 1,
+                  "maximum": 10000,
+                  "type": "integer"
+                },
+                "maxFps": {
+                  "minimum": 1,
+                  "maximum": 30,
+                  "type": "integer"
+                },
+                "churnMinIntervalMs": {
+                  "minimum": 0,
+                  "maximum": 60000,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "thumbnail",
+                "blockThreshold",
+                "structuralBlocks",
+                "maxFps",
+                "churnMinIntervalMs"
+              ]
+            },
+            "gaps": {
+              "maxItems": 64,
+              "type": "array",
+              "items": {
+                "additionalProperties": false,
+                "type": "object",
+                "properties": {
+                  "fromMs": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "toMs": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "reason": {
+                    "anyOf": [
+                      {
+                        "const": "unchanged",
+                        "type": "string"
+                      },
+                      {
+                        "const": "window_not_drawing",
+                        "type": "string"
+                      },
+                      {
+                        "const": "paused",
+                        "type": "string"
+                      },
+                      {
+                        "const": "capture_stalled",
+                        "type": "string"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "fromMs",
+                  "toMs",
+                  "reason"
+                ]
+              }
+            },
+            "pausedMs": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maskedRegions": {
+              "maxItems": 16,
+              "type": "array",
+              "items": {
+                "additionalProperties": false,
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "y": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "width": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "height": {
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "x",
+                  "y",
+                  "width",
+                  "height"
+                ]
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "status",
+            "code",
+            "truncatedAtMs",
+            "path",
+            "bytes",
+            "durationMs",
+            "frames",
+            "codec",
+            "container",
+            "width",
+            "height",
+            "timebase",
+            "anchor",
+            "sampling"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "video",
+              "type": "string"
+            },
+            "status": {
+              "const": "skipped",
+              "type": "string"
+            },
+            "code": {
+              "anyOf": [
+                {
+                  "const": "CAPTURE_DISABLED",
+                  "type": "string"
+                },
+                {
+                  "const": "SCREEN_CAPTURE_NOT_AUTHORIZED",
+                  "type": "string"
+                },
+                {
+                  "const": "SCREEN_CAPTURE_LOST",
+                  "type": "string"
+                },
+                {
+                  "const": "WINDOW_CLOSED",
+                  "type": "string"
+                },
+                {
+                  "const": "WINDOW_NOT_DRAWING",
+                  "type": "string"
+                },
+                {
+                  "const": "ENCODE_UNAVAILABLE",
+                  "type": "string"
+                },
+                {
+                  "const": "ENCODE_FAILED",
+                  "type": "string"
+                },
+                {
+                  "const": "DISK_FULL",
+                  "type": "string"
+                },
+                {
+                  "const": "TRUNCATED",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "status",
+            "code"
+          ]
+        }
+      ]
+    }
+  },
+  "required": [
+    "version",
+    "flowId",
+    "flowSha256",
+    "reportStartedAt",
+    "files",
+    "assets"
+  ]
+}

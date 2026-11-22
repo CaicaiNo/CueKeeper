@@ -476,21 +476,39 @@ async function main() {
     const mediaBundle = values['no-media']
       ? { media: [], video: undefined }
       : await loadVideoArtifact(join(dirname(resolve(positionals[0])), 'media'));
-    const archive = packReport(input, parseFlow(rawFlow), {
+    const flow = parseFlow(rawFlow);
+    const archive = packReport(input, flow, {
       assets,
       media: mediaBundle.media,
       ...(mediaBundle.video ? { video: mediaBundle.video } : {}),
       onWarning: message => console.error(message),
     });
     await writeNew(output, archive);
-    let upload: { queued: boolean; queue?: string; id?: string; duplicate?: boolean; error?: string } | undefined;
+    let upload: {
+      queued: boolean; queue?: string; id?: string; duplicate?: boolean; error?: string; bundle?: string;
+    } | undefined;
     if (!values['no-upload']) {
       const queue = values.queue ?? defaultQueueDir(process.env);
       try {
         const config = await resolveUploadConfig({ env: process.env, configPath: values.config });
         if (config) {
-          const queued = await enqueueUpload({ queueDir: queue, config, bundlePath: output, bytes: archive });
-          upload = { queued: true, queue, id: queued.item.id, duplicate: queued.duplicate };
+          // Session media stays local. The queued bundle is rebuilt without
+          // media/, so manifest.video and the viewer player disappear with the
+          // movie instead of leaving a dangling reference in the uploaded ZIP.
+          let bundlePath = output;
+          let bundleBytes = archive;
+          if (mediaBundle.media.length) {
+            bundleBytes = packReport(input, flow, {
+              assets, onWarning: message => console.error(message),
+            });
+            bundlePath = output.replace(/\.zip$/i, '') + '.upload.zip';
+            await writeFile(bundlePath, bundleBytes, { mode: 0o600 });
+          }
+          const queued = await enqueueUpload({ queueDir: queue, config, bundlePath, bytes: bundleBytes });
+          upload = {
+            queued: true, queue, id: queued.item.id, duplicate: queued.duplicate,
+            ...(bundlePath === output ? {} : { bundle: bundlePath }),
+          };
         }
       } catch (error) {
         // The local ZIP is already published; report upload trouble separately.
@@ -499,7 +517,10 @@ async function main() {
     }
     const data = { output, bytes: archive.length, assets: assets.length, ...(upload ? { upload } : {}) };
     const details = [`Wrote ${output}`];
-    if (upload?.queued) details.push(`Queued upload ${upload.id}${upload.duplicate ? ' (already queued)' : ''}`);
+    if (upload?.queued) {
+      details.push(`Queued upload ${upload.id}${upload.duplicate ? ' (already queued)' : ''}`);
+      if (upload.bundle) details.push(`Upload bundle omits session media: ${upload.bundle}`);
+    }
     if (upload?.error) details.push(`Upload not queued: ${upload.error}`);
     success(data, details.join('\n'));
     return;

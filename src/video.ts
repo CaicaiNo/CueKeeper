@@ -13,6 +13,7 @@ const codec = T.Union([T.Literal('h264'), T.Literal('hevc')]);
  * free-text reasons are not part of the contract.
  */
 export const videoCodes = [
+  'CAPTURE_DISABLED',
   'SCREEN_CAPTURE_NOT_AUTHORIZED',
   'SCREEN_CAPTURE_LOST',
   'WINDOW_CLOSED',
@@ -25,10 +26,10 @@ export const videoCodes = [
 export type VideoCode = typeof videoCodes[number];
 
 const videoCode = T.Union([
-  T.Literal('SCREEN_CAPTURE_NOT_AUTHORIZED'), T.Literal('SCREEN_CAPTURE_LOST'),
-  T.Literal('WINDOW_CLOSED'), T.Literal('WINDOW_NOT_DRAWING'),
-  T.Literal('ENCODE_UNAVAILABLE'), T.Literal('ENCODE_FAILED'),
-  T.Literal('DISK_FULL'), T.Literal('TRUNCATED'),
+  T.Literal('CAPTURE_DISABLED'), T.Literal('SCREEN_CAPTURE_NOT_AUTHORIZED'),
+  T.Literal('SCREEN_CAPTURE_LOST'), T.Literal('WINDOW_CLOSED'),
+  T.Literal('WINDOW_NOT_DRAWING'), T.Literal('ENCODE_UNAVAILABLE'),
+  T.Literal('ENCODE_FAILED'), T.Literal('DISK_FULL'), T.Literal('TRUNCATED'),
 ]);
 
 export const videoGapReasons = ['unchanged', 'window_not_drawing', 'paused', 'capture_stalled'] as const;
@@ -172,6 +173,7 @@ export function normalizeGaps(gaps: VideoGap[]): VideoGap[] {
 }
 
 export const videoCodeLabels: Record<VideoCode, string> = {
+  CAPTURE_DISABLED: '正式签名前关闭了真实窗口采集；本轮不录制视频，结果不受影响',
   SCREEN_CAPTURE_NOT_AUTHORIZED: '未授权屏幕录制，未录制视频；本轮结果不受影响',
   SCREEN_CAPTURE_LOST: '录制中屏幕捕捉中断，已保留中断前的画面',
   WINDOW_CLOSED: '目标窗口已关闭，录制提前结束，已保留结束前的画面',

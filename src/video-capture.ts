@@ -32,7 +32,8 @@ export interface FinalizedPayload {
   width?: number;
   height?: number;
   codec?: 'h264' | 'hevc';
-  wallStartMs?: number;
+  /** Wall-clock time of the first kept sample, from the helper's host-clock offset. */
+  firstSampleWallMs?: number;
   truncatedAtMs?: number;
   pausedMs?: number;
 }
@@ -40,10 +41,16 @@ export interface FinalizedPayload {
 export interface VideoCaptureOptions {
   /** CGWindowID of the replay target (`w-123` or `123`); capture is window-scoped, never full screen. */
   windowId: number | string;
-  /** ISO timestamp of report.startedAt, copied into the anchor. */
+  /** ISO timestamp of report.startedAt, the zero of the report's `atMs` axis. */
   reportStartedAt: string;
   /** Directory receiving the movie and its sidecar. */
   mediaDir: string;
+  /**
+   * Real window capture stays closed until the release is signed. The operator
+   * opens it per machine with `CUEKEEPER_VIDEO_CAPTURE=1`; the synthetic
+   * `--self-test` path never goes through this gate.
+   */
+  allowCapture?: boolean;
   /** Override for tests; production uses the sibling `dist/cuekeeper-video`. */
   helper?: string;
   platform?: NodeJS.Platform;
@@ -178,11 +185,19 @@ export async function startVideoCapture(options: VideoCaptureOptions): Promise<V
   // other platform the feature fails closed instead of pretending to record.
   if (platform !== 'darwin') return failed('ENCODE_UNAVAILABLE');
 
+  // The pre-signing build has no operator-visible capture switch in the CLI or
+  // the workbench: the real entry is closed unless the machine opted in.
+  const allowCapture = options.allowCapture ?? env.CUEKEEPER_VIDEO_CAPTURE === '1';
+  if (!allowCapture) return failed('CAPTURE_DISABLED');
+  // The helper checks the same variable; keep an explicit `allowCapture` and
+  // the child environment from disagreeing.
+  const childEnv = { ...env, CUEKEEPER_VIDEO_CAPTURE: '1' };
+
   await mkdir(options.mediaDir, { recursive: true, mode: 0o700 });
 
   // Only CGPreflightScreenCaptureAccess is allowed here: it never shows a TCC
   // dialog. Requesting access is the user's explicit action, not the runner's.
-  const preflight = await runHelper(helper, ['--preflight'], options.preflightTimeoutMs ?? 5000, env);
+  const preflight = await runHelper(helper, ['--preflight'], options.preflightTimeoutMs ?? 5000, childEnv);
   if (preflight.code !== 0) return failed('ENCODE_UNAVAILABLE');
   let permission = false;
   try {
@@ -199,7 +214,6 @@ export async function startVideoCapture(options: VideoCaptureOptions): Promise<V
     '--capture',
     '--window-id', String(windowId),
     '--out', partialPath,
-    '--started-at', options.reportStartedAt,
     '--max-fps', String(sampling.maxFps),
   ];
   for (const mask of options.masks ?? []) {
@@ -207,7 +221,7 @@ export async function startVideoCapture(options: VideoCaptureOptions): Promise<V
   }
   let child: ChildProcess;
   try {
-    child = spawn(helper, args, { stdio: ['pipe', 'pipe', 'pipe'], env });
+    child = spawn(helper, args, { stdio: ['pipe', 'pipe', 'pipe'], env: childEnv });
   } catch {
     return failed('ENCODE_UNAVAILABLE');
   }
@@ -395,8 +409,9 @@ function gapReason(value: unknown): VideoGapReason {
 
 function codeFromPayload(payload: FinalizedPayload): VideoCode {
   const known: VideoCode[] = [
-    'SCREEN_CAPTURE_NOT_AUTHORIZED', 'SCREEN_CAPTURE_LOST', 'WINDOW_CLOSED',
-    'WINDOW_NOT_DRAWING', 'ENCODE_UNAVAILABLE', 'ENCODE_FAILED', 'DISK_FULL', 'TRUNCATED',
+    'CAPTURE_DISABLED', 'SCREEN_CAPTURE_NOT_AUTHORIZED', 'SCREEN_CAPTURE_LOST',
+    'WINDOW_CLOSED', 'WINDOW_NOT_DRAWING', 'ENCODE_UNAVAILABLE', 'ENCODE_FAILED',
+    'DISK_FULL', 'TRUNCATED',
   ];
   return payload.code && known.includes(payload.code) ? payload.code : 'TRUNCATED';
 }
@@ -433,11 +448,20 @@ async function buildArtifact(input: {
     await rm(finalPath, { force: true });
     return skippedVideo('ENCODE_FAILED');
   }
+  // PTS 0 is the first kept sample. The helper reports that sample's wall time
+  // from a single host-clock/wall-clock offset, so the anchor converts the
+  // report's monotonic `atMs` axis through one instant instead of guessing the
+  // start from the stop time. A movie without that instant cannot be anchored
+  // and is discarded rather than played out of sync.
+  const firstSampleWallMs = payload.firstSampleWallMs;
+  if (firstSampleWallMs === undefined || !Number.isFinite(firstSampleWallMs)) {
+    await rm(finalPath, { force: true });
+    return skippedVideo('ENCODE_FAILED');
+  }
   // videoStartOffsetMs is the report-relative time of video PTS 0:
   // videoPtsMs = entry.atMs - videoStartOffsetMs. Capture usually starts after
   // the report, so the value is positive; negative means it started earlier.
-  const wallStart = payload.wallStartMs ?? Date.now();
-  const offset = Math.min(60_000, Math.max(-5_000, Math.round(wallStart - input.reportStartedMs)));
+  const offset = Math.min(60_000, Math.max(-5_000, Math.round(firstSampleWallMs - input.reportStartedMs)));
   const gaps = normalizeGaps(input.gaps);
   const common = {
     kind: 'video' as const,

@@ -358,6 +358,33 @@ export const reportSchema = object({
   entries: T.Array(entry, { minItems: 1 }),
 });
 
+// manifest.json indexes one report ZIP. report.json stays v1: the archive index
+// is where the optional session video and its media file appear.
+const manifestFile = object({
+  bytes: T.Integer({ minimum: 0 }),
+  sha256: digest,
+});
+const assetRole = T.Union([
+  T.Literal('screenshot-before'), T.Literal('screenshot-after'), T.Literal('screenshot'),
+  T.Literal('assertion-baseline'), T.Literal('assertion-actual'), T.Literal('log'),
+  T.Literal('snapshot'), T.Literal('file'), T.Literal('video'), T.Literal('filmstrip'),
+]);
+const manifestAsset = object({
+  path: T.String({ minLength: 1, maxLength: 256 }),
+  entryId: T.Optional(T.String({ minLength: 1, maxLength: 196 })),
+  role: assetRole,
+  bytes: T.Integer({ minimum: 0 }),
+});
+export const manifestSchema = object({
+  version: T.Literal(1),
+  flowId: id,
+  flowSha256: digest,
+  reportStartedAt: timestamp,
+  files: T.Record(T.String({ minLength: 1, maxLength: 256 }), manifestFile),
+  assets: T.Array(manifestAsset, { maxItems: 10_000 }),
+  video: T.Optional(videoArtifactSchema),
+});
+
 // A batch summary indexes the completed rows of one data table. Each indexed
 // row points at an ordinary v1 report and its bound flow, which stay packable.
 const batchIssue = object({
@@ -403,10 +430,12 @@ export const schemas = {
   setup: object({ version: T.Literal(1), ...setup.properties }),
   report: reportSchema,
   batch: batchReportSchema,
+  manifest: manifestSchema,
   video: videoArtifactSchema,
 };
 export const flowCheck = TypeCompiler.Compile(flowSchema);
 export const reportCheck = TypeCompiler.Compile(reportSchema);
+export const manifestCheck = TypeCompiler.Compile(manifestSchema);
 export const batchReportCheck = TypeCompiler.Compile(batchReportSchema);
 export const captureTargetCheck = TypeCompiler.Compile(targetSchema);
 export const captureActionCheck = TypeCompiler.Compile(action);
@@ -427,6 +456,7 @@ export type AppIdentityReason =
   | 'identity_unproven' | 'instance_changed' | 'driver_target_unconfirmed'
   | 'fixture_path_mismatch' | 'untargeted_input';
 export type BatchReport = Static<typeof batchReportSchema>;
+export type Manifest = Static<typeof manifestSchema>;
 export type Entry = Static<typeof entry>;
 export type AssertCheck = Static<typeof assertCheck>;
 export type WindowTarget = Static<typeof windowTarget>;

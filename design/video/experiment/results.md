@@ -2,7 +2,7 @@
 
 两个独立程序，**都在内存里画合成画面**：不启动 App、不抓屏、不要任何 TCC 权限。结论用于 [会话视频设计](../../../docs/session-video.md)。
 
-- `encode-spike.swift`：CoreGraphics 画 1920×1080 的"窗口"，`AVAssetWriter` + VideoToolbox 编 H.264/HEVC，再回读校验 PTS、时长与精确 seek。
+- `encode-spike.swift`：CoreGraphics 画 1920×1080 的"窗口"，`AVAssetWriter` + VideoToolbox 编 H.264/HEVC，再回读校验 PTS、时长与指定时间点取帧。
 - `diff-spike.swift`：同一套合成画面，比较 160×90 缩略图的分块差，量出各种变化到底改了几块。
 
 ## 复现
@@ -67,35 +67,39 @@ swiftc -O diff-spike.swift   -o out/diff-spike   && ./out/diff-spike         # ~
 
 > H.264 对静态压缩很好，但"重复编码不动的一帧"仍要 ~0.9 KB。10 分钟纯静态 CFR 是 3.1–5.3 MB，VFR 是 58 KB。收益来自**不编码**，不是压缩率。
 
-阶段 1 的 PNG 胶片条对比（同一帧，CoreGraphics 导出）：1080p PNG **48 197 B**、JPEG q0.8 **275 007 B**（矢量感强的合成界面 PNG 更划算；真实密集文字/图片界面会更大）。所以 300 帧胶片条起步 ~15 MB，比同内容 H.264 视频大一个量级。
+胶片条（设计草案阶段 1）的对比（同一帧，CoreGraphics 导出）：1080p PNG **48 197 B**、JPEG q0.8 **275 007 B**（矢量感强的合成界面 PNG 更划算；真实密集文字/图片界面会更大）。所以 300 帧胶片条起步 ~15 MB，比同内容 H.264 视频大一个量级。
 
 ## 3. VFR 容器与 seek
 
-四个文件的 mp4 结构（直接解析 box，非 AVFoundation）：
+四个文件的 mp4 结构（直接解析 box，非 AVFoundation）。下表 `stts` 的 sample_delta 是 **track tick**，不是毫秒；track timescale 为 600，所以 60 tick = 100 ms：
 
 | 文件 | 样本 | `stts` | 时长 | track timescale |
 | --- | --- | --- | --- | --- |
-| `cfr-10fps-600s.mp4` | 6000 | 1 条 `(6000, 60 ms)` | 600.000 s | 600 |
-| `vfr-diff-driven-600s.mp4` | 281 | 2 条 `(1, 1200 ms)`、`(280, 60 ms)` | 600.000 s | 600 |
-| `still-vfr-600s.mp4` | 2 | 1 条 `(2, 599 900 ms)` | 600.000 s | 600 |
+| `cfr-10fps-600s.mp4` | 6000 | 1 条 `(6000, 60 tick = 100 ms)` | 600.000 s | 600 |
+| `vfr-diff-driven-600s.mp4` | 281 | 2 条 `(1, 1200 tick = 2000 ms)`、`(280, 60 tick = 100 ms)` | 600.000 s | 600 |
+| `still-vfr-600s.mp4` | 2 | 1 条 `(2, 359 940 tick = 599 900 ms)` | 600.000 s | 600 |
 | `vfr-governed-600s.mp4` | 1424 | 多变长条目 | 600.000 s | 600 |
+
+写入用的是 movie timescale 1000 的毫秒 PTS；落到 track 上会被量化到 1/600 s（≈1.67 ms）的整数格，误差最多半格（≈0.83 ms）。**不要读成"毫秒值是整数倍所以无损"**。
 
 回读（AVFoundation `AVAssetReader`，逐帧比对写入的 PTS）：
 
-| 场景 | `ptsMatch` | 精确 seek（tolerance 0） | 探针 |
+| 场景 | `ptsMatch` | 指定时间点可解码出图（tolerance 0） | 探针 |
 | --- | --- | --- | --- |
 | CFR 600 s | true（6000/6000） | 全部出帧 | 1 s / 20 s / 300 s / 599 s |
 | VFR diff-driven | true（281/281） | 全部出帧 | 1 s / 20 s / 300 s / 599 s（最后样本在 29.9 s） |
 | VFR 最坏情况 | true（1424/1424） | 全部出帧 | 1 s / 20 s / 60 s / 300 s / 590 s |
 | 纯静态 VFR（2 样本） | true（2/2） | 全部出帧 | 0 s / 200 s / 599 s（在 599.9 s 的 hold 里） |
 
-结论：MP4 只用 `stts` 表达变长帧即可，无需 `ctts`（关闭帧重排）；**单帧 hold 近 10 分钟仍能精确 seek**，不需要周期性补帧。
+结论：MP4 只用 `stts` 表达变长帧即可，无需 `ctts`（关闭帧重排）；**单帧 hold 近 10 分钟时，指定时间点仍能解出被 hold 的那一帧**，不需要周期性补帧。这只证明解码器行为，浏览器实际 seek 归 HAOC-76。
+
+本单的原生 `--self-test` 进一步把"出图"升级为"出对图"：用两帧内容明显不同的 10 s 片子（第二帧在 9 s 才出现），断言 4.5 s 与 0 s 解出的画面签名**完全一致**，9.5 s 的签名与它明显不同。
 
 ## 4. 踩到的坑（写进设计的实现约定）
 
 1. **PTS 必须严格递增且不能用浮点截断**：最初用 `Int64(t * 6 / 1000)` 把 0 ms 与 100 ms 都算成 0 tick，`append` 在第 5 帧报 `-11800/-16364`。改成"1 tick = 1 ms"的整数 PTS 后正常。
 2. **`endSession(atSourceTime:)` 要显式给停止时刻**。取"最后一帧 + 一帧时长"时，600 s 的片子被写成 30 s（`durationMs: 30000`）。
-3. **首帧一定是 PTS 0**。第一版 VFR 从第一处变化（2 s）才开始写，片子开头就有 2 s 空洞，精确 seek 到 1 s 直接失败。
+3. **首帧一定是 PTS 0**。第一版 VFR 从第一处变化（2 s）才开始写，片子开头就有 2 s 空洞，指定时间点取 1 s 的画面直接失败。
 4. **track timescale 与 movie timescale 不同**：本机两者是 600 与 1000。回读比较必须用秒，manifest 里要记录 `timebase.timescale`。
 5. **完全相同的一帧也花 ~0.9 KB**，与目标码率无关（800 kbps 时反而 1.03 KB）。
 
@@ -106,4 +110,4 @@ swiftc -O diff-spike.swift   -o out/diff-spike   && ./out/diff-spike         # ~
 - 接受：`video-complete`、`video-skipped`、`filmstrip-complete`、`filmstrip-skipped`。
 - 拒绝：缺 `anchor`；多出未知字段；`status: complete` 又带 `code`；`path` 不在 `media/` 下；`videoStartOffsetMs` 越界；`skipped` 无 `code`；`truncated` 无 `truncatedAtMs`；`maxFps: 60`；开放式的 `code` 字符串；`gaps` 超过 64 条。
 
-正式纳入时由 `src/contracts.ts`（TypeBox）生成并配 `test/` 单测，与其余 v1 schema 一样的流程。
+正式纳入由 `src/contracts.ts`（TypeBox）完成：`video` 生成 [schemas/video.schema.json](../../../schemas/video.schema.json)，manifest（既有 ZIP 字段 + 可选 `video`）生成 [schemas/manifest.schema.json](../../../schemas/manifest.schema.json)，两者都由 `pnpm build` 的 `schemas.mjs --check` 检查漂移，并由 `test/video.test.mjs` 覆盖 `complete` / `truncated` / `skipped` 的正反例与字节数、SHA-256 校验。

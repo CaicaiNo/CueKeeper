@@ -16,6 +16,7 @@
     "test:pointer": "sh scripts/test-recording-pointer.sh",
     "test:video": "sh scripts/test-video.sh",
     "build:recorder": "sh scripts/build-recorder.sh",
+    "build:video": "sh scripts/build-recorder.sh --video",
     "package": "node scripts/package.mjs"
   },
   "dependencies": {
