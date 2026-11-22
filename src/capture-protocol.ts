@@ -91,11 +91,14 @@ export type CaptureEvent =
   | (CaptureEventBase & { kind: 'text'; chars?: string; ime?: boolean })
   | (CaptureEventBase & { kind: 'key'; key: string; modifiers: CaptureModifier[] })
   | (CaptureEventBase & { kind: 'focus' })
+  | (CaptureEventBase & { kind: 'system_dialog'; visible: boolean })
   | (CaptureEventBase & { kind: 'gap'; gapCode: CaptureGapCode });
 
 export type CaptureEventKind = CaptureEvent['kind'];
 
-const kinds = new Set<CaptureEventKind>(['click', 'scroll', 'hover', 'drag', 'text', 'key', 'focus', 'gap']);
+const kinds = new Set<CaptureEventKind>([
+  'click', 'scroll', 'hover', 'drag', 'text', 'key', 'focus', 'system_dialog', 'gap',
+]);
 
 function fail(what: string): never {
   throw new Fault('CAPTURE_PROTOCOL', `Invalid global capture event: ${what}`);
@@ -200,6 +203,9 @@ export function parseCaptureEvent(value: unknown): CaptureEvent {
     ...(input.gapCode === undefined ? {} : { gapCode: gapCode(input.gapCode) }),
   };
   switch (kind as CaptureEventKind) {
+    case 'system_dialog':
+      if (typeof input.visible !== 'boolean') fail('system_dialog.visible must be a boolean');
+      return { t, seen, focusGeneration, secure: input.secure, kind: 'system_dialog', visible: input.visible };
     case 'click': {
       const count = optionalInteger(input.count, 'count', 1, 3);
       const button = input.button;

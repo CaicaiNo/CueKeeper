@@ -129,6 +129,7 @@ export class GlobalRecording {
   private lastGeneration = 0;
   private generationWindow = new Map<number, string>();
   private secureOpen = false;
+  private systemDialogVisible = false;
   private securityAgentWarned = false;
   private textBurst?: { at: number; scope: string; locator: string; snapshot: Snapshot };
   private scrollBurst?: {
@@ -204,6 +205,21 @@ export class GlobalRecording {
    * manual checkpoint and every piece of content inside it is discarded.
    */
   async add(event: CaptureEvent): Promise<void> {
+    if (event.kind === 'system_dialog') {
+      if (event.visible === this.systemDialogVisible) return;
+      this.systemDialogVisible = event.visible;
+      this.textAnchor = undefined;
+      this.endBursts();
+      if (event.visible) {
+        this.secureOpen = false;
+        this.warn('SYSTEM_DIALOG',
+          'A macOS system dialog was detected. Handle it at the manual checkpoint during replay.');
+        this.pushCheckpoint('system_dialog');
+      }
+      return;
+    }
+    if (this.systemDialogVisible) return;
+
     // The system authorization UI is evidence of a secure boundary even when the
     // system-wide flag has not caught up yet; its own window never becomes a scope.
     const secureBoundary = event.secure || event.owner?.securityAgent === true;
@@ -613,25 +629,21 @@ export class GlobalRecording {
   private closeSecure() {
     this.secureOpen = false;
     this.endBursts();
-    this.pushCheckpoint();
+    this.pushCheckpoint('secure_input');
   }
 
   /**
-   * A checkpoint must sit immediately after the step that opened the secure
-   * interval and share its window. Without such a trigger the interval cannot be
-   * replayed safely, so it stays an explicit `SECURE_INPUT` gap.
+   * A checkpoint shares the window of the preceding trigger step. An interval
+   * without a usable trigger stays visible as a capture gap.
    */
-  private pushCheckpoint() {
+  private pushCheckpoint(reason: Extract<StepV2, { kind: 'manual_checkpoint' }>['reason']) {
     const trigger = this.steps.at(-1);
-    if (!trigger) {
-      this.pushGap('SECURE_INPUT');
-      return;
-    }
     // Consecutive secure intervals merge: the previous checkpoint already ends
     // the run at this window, and no step was recorded in between.
-    if (trigger.kind === 'manual_checkpoint') return;
-    if (trigger.kind === 'gap' || !('scope' in trigger) || trigger.scope.kind !== 'window') {
-      this.pushGap('SECURE_INPUT');
+    if (trigger?.kind === 'manual_checkpoint' && reason === 'secure_input') return;
+    if (!trigger || !('scope' in trigger) || trigger.scope.kind !== 'window' ||
+        (reason === 'system_dialog' && trigger.kind !== 'click' && trigger.kind !== 'key')) {
+      this.pushGap(reason === 'secure_input' ? 'SECURE_INPUT' : 'CAPTURE_SCOPE_UNVERIFIED');
       return;
     }
     const scope = trigger.scope;
@@ -639,7 +651,7 @@ export class GlobalRecording {
       kind: 'manual_checkpoint',
       scope,
       triggerStepId: trigger.id,
-      reason: 'secure_input',
+      reason,
       resume: { scope, check: { kind: 'window_exists', equals: true } },
       timeoutMs: defaultCheckpointTimeoutMs,
     });

@@ -188,6 +188,9 @@ function validateSteps(flow: FlowV2, state: ScopeState, allowGaps = false) {
         fail(`${where}: triggerStepId must name the immediately preceding step`);
       }
       if (trigger.kind === 'gap') fail(`${where}: a gap cannot trigger a checkpoint`);
+      if (step.reason === 'system_dialog' && trigger.kind !== 'click' && trigger.kind !== 'key') {
+        fail(`${where}: a system dialog checkpoint requires a click or key trigger`);
+      }
       if (trigger.scope.kind !== 'window' ||
           trigger.scope.app !== step.scope.app || trigger.scope.windowKey !== step.scope.windowKey) {
         fail(`${where}: trigger step must share the checkpoint window scope`);

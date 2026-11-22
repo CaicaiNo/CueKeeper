@@ -55,6 +55,8 @@ export interface FlowV2RunOptions {
   checkpoints?: CheckpointChannel;
   /** System secure input probe; a hand-off cannot prove recovery without it. */
   secureInputActive?: () => Promise<boolean>;
+  /** Read-only visibility of supported macOS system dialogs. */
+  systemDialogVisible?: () => Promise<boolean>;
 }
 
 type StepOutcome = Omit<StepResult, 'status'> & { status?: 'passed' | 'failed' };
@@ -64,7 +66,7 @@ const blockingCodes = new Set([
   'AMBIGUOUS_TARGET', 'WINDOW_NOT_FOUND', 'WINDOW_CHANGED', 'FOCUS_INTERRUPTED',
   'IDENTITY_DEPENDENCY', 'RUN_BUSY', 'RUN_LEASE_FAILED', 'INPUT_MISSING',
   'SURFACE_UNSUPPORTED', 'MANUAL_CHECKPOINT_REQUIRED', 'MANUAL_CHECKPOINT_CANCELLED',
-  'MANUAL_CHECKPOINT_TIMEOUT', 'SECURE_INPUT', 'WAIT_UNSUPPORTED',
+  'MANUAL_CHECKPOINT_TIMEOUT', 'SECURE_INPUT', 'SYSTEM_DIALOG_VISIBLE', 'WAIT_UNSUPPORTED',
   'UNSAFE_POINT', 'UNSAFE_TARGET', 'DELIVERY_UNCERTAIN', 'LAUNCH_TIMEOUT',
   'COMMAND_TIMEOUT', 'TIMEOUT', 'DESKTOP_DEPENDENCY', 'UNSUPPORTED_PLATFORM',
   'DOWNLOAD_PATH_INVALID', 'DOWNLOAD_NOT_FOUND', 'DOWNLOAD_INCOMPLETE',
@@ -190,6 +192,7 @@ class StepRunner {
     baselineDir?: string;
     checkpoints?: CheckpointChannel;
     secureInputActive?: () => Promise<boolean>;
+    systemDialogVisible?: () => Promise<boolean>;
     /** True when a checkpoint in the flow makes secure-state proof mandatory. */
     requireSecureState: boolean;
   }) {}
@@ -209,7 +212,12 @@ class StepRunner {
       throw new Fault('UNSAFE_POINT', 'P2 replay does not accept recorded pointer paths');
     }
     // A password prompt the flow did not declare is an unknown secure interface.
-    if (inputKinds.has(step.kind)) await this.guardSecureInput();
+    if (inputKinds.has(step.kind)) {
+      await this.guardSecureInput();
+      if (await this.ctx.systemDialogVisible?.()) {
+        throw new Fault('SYSTEM_DIALOG_VISIBLE', 'A macOS system dialog is already visible before automatic input');
+      }
+    }
     const outcome = await this.dispatch(step);
     return { ...outcome, ...await this.handOff(step) };
   }
@@ -375,9 +383,7 @@ class StepRunner {
   }
 
   /**
-   * Blocks at a secure input checkpoint until the operator confirms the hand-off
-   * in the real interface and both the secure state and resume condition are
-   * proven. The checkpoint never receives, stores or reports a password.
+   * Waits for the operator and read-only evidence that the flow can resume.
    */
   private async checkpointStep(
     step: Extract<StepV2, { kind: 'manual_checkpoint' }>,
@@ -397,6 +403,7 @@ class StepRunner {
       triggerStepId: step.triggerStepId,
       scope: step.scope,
       timeoutMs: step.timeoutMs ?? defaultCheckpointTimeoutMs,
+      reason: step.reason,
     };
     const checkpoint: CheckpointMetadata = await runHandOff({
       request,
@@ -405,6 +412,7 @@ class StepRunner {
       timeoutMs: request.timeoutMs,
       probe: {
         secureInput: probe,
+        ...(this.ctx.systemDialogVisible ? { systemDialogVisible: this.ctx.systemDialogVisible } : {}),
         resume: () => this.resumeHolds(step),
       },
     });
@@ -703,6 +711,13 @@ export async function runFlowV2(input: FlowV2, options: FlowV2RunOptions): Promi
     return report.finish('blocked');
   }
 
+  const expectsSystemDialog = flow.steps.some(step => step.kind === 'manual_checkpoint' && step.reason === 'system_dialog');
+  const systemDialogVisible = expectsSystemDialog ? options.systemDialogVisible : undefined;
+  if (expectsSystemDialog && (!systemDialogVisible || !options.checkpoints || !options.secureInputActive)) {
+    return blockedReport(new Fault('MANUAL_CHECKPOINT_REQUIRED',
+      'A system dialog checkpoint needs an operator channel and native dialog and secure-state probes', true));
+  }
+
   // Path pinning and the identity helper are checked before any desktop call,
   // report artifact or lease file exists. A missing pinned path is deferred to
   // the app's first real use: the same flow may install it first. An existing
@@ -750,6 +765,7 @@ export async function runFlowV2(input: FlowV2, options: FlowV2RunOptions): Promi
     ...(options.baselineDir === undefined ? {} : { baselineDir: options.baselineDir }),
     ...(options.checkpoints === undefined ? {} : { checkpoints: options.checkpoints }),
     ...(options.secureInputActive === undefined ? {} : { secureInputActive: options.secureInputActive }),
+    ...(systemDialogVisible === undefined ? {} : { systemDialogVisible }),
     requireSecureState: flow.steps.some(step => step.kind === 'manual_checkpoint'),
   });
 

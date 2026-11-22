@@ -4664,8 +4664,16 @@
                 "type": "string"
               },
               "reason": {
-                "const": "secure_input",
-                "type": "string"
+                "anyOf": [
+                  {
+                    "const": "secure_input",
+                    "type": "string"
+                  },
+                  {
+                    "const": "system_dialog",
+                    "type": "string"
+                  }
+                ]
               },
               "resume": {
                 "additionalProperties": false,

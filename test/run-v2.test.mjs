@@ -285,6 +285,7 @@ function harness(t, options = {}) {
       ? {} : { launchTimeoutMs: overrides.launchTimeoutMs ?? options.launchTimeoutMs }),
     ...(overrides.checkpoints === undefined ? {} : { checkpoints: overrides.checkpoints }),
     ...(overrides.secureInputActive === undefined ? {} : { secureInputActive: overrides.secureInputActive }),
+    ...(overrides.systemDialogVisible === undefined ? {} : { systemDialogVisible: overrides.systemDialogVisible }),
   });
   return { dir, world, controller, run };
 }
@@ -743,7 +744,7 @@ test('P2 refuses raw coordinates, undeclared stages and missing input values', a
 });
 
 /** A window step, a secure input checkpoint, then a later window step. */
-function checkpointFlow(timeoutMs = 120_000) {
+function checkpointFlow(timeoutMs = 120_000, reason = 'secure_input') {
   return parseFlowV2({
     version: 2,
     id: 'secure-install',
@@ -758,7 +759,7 @@ function checkpointFlow(timeoutMs = 120_000) {
       },
       {
         id: 'auth', kind: 'manual_checkpoint', scope: notesScope, triggerStepId: 'install',
-        reason: 'secure_input',
+        reason,
         resume: { scope: notesScope, check: { kind: 'window_exists', equals: true } },
         timeoutMs,
       },
@@ -800,6 +801,44 @@ test('a checkpoint pauses, the operator confirms, and later steps run', async t 
   // parameter is typed after the hand-off.
   assert.deepEqual(callsOf(world.world, 'type'), [['type', '@w21:e1', 'draft text']]);
   assert.ok(reportV2Check.Check(report));
+});
+
+test('system dialog replay observes the trigger, waits for dismissal, then sends later input', async t => {
+  const world = harness(t);
+  let dismissed = false;
+  const report = await world.run(checkpointFlow(120_000, 'system_dialog'), {
+    checkpoints: {
+      async announce(request) {
+        assert.equal(request.reason, 'system_dialog');
+      },
+      async confirm() {
+        assert.deepEqual(callsOf(world.world, 'click'), [['click', '@w21:e9']]);
+        assert.deepEqual(callsOf(world.world, 'type'), []);
+        dismissed = true;
+        return 'continue';
+      },
+    },
+    secureInputActive: async () => false,
+    systemDialogVisible: async () => !dismissed && callsOf(world.world, 'click').length > 0,
+  });
+  assert.equal(report.status, 'passed');
+  assert.deepEqual(entry(report, 'auth').checkpoint, {
+    reason: 'system_dialog', triggerStepId: 'install', timeoutMs: 120_000, confirmedBy: 'operator',
+  });
+  assert.deepEqual(callsOf(world.world, 'type'), [['type', '@w21:e1', 'draft text']]);
+  assert.ok(reportV2Check.Check(report));
+});
+
+test('a pre-existing system dialog prevents the trigger from sending input', async t => {
+  const world = harness(t);
+  const report = await world.run(checkpointFlow(120_000, 'system_dialog'), {
+    checkpoints: operator().channel,
+    secureInputActive: async () => false,
+    systemDialogVisible: async () => true,
+  });
+  assert.equal(entry(report, 'install').code, 'SYSTEM_DIALOG_VISIBLE');
+  assert.equal(entry(report, 'auth').status, 'skipped');
+  assert.deepEqual(callsOf(world.world, 'click'), []);
 });
 
 test('a cancelled checkpoint blocks and sends no later step', async t => {

@@ -219,6 +219,8 @@ v2 实时回放需要显式 `--foreground`，因为它会跨 App 抢前台并注
 
 密码与系统授权界面不中止整条录制：连续 secure 区间折叠成一个 `manual_checkpoint`，区间内的按键、文本、截图和剪贴板一律丢弃，系统授权界面（Security Agent）不作为可回放的作用域。回放暂停后由操作者在真实界面完成授权或输入密码，再回到运行终端输入 `continue` 独立确认；CueKeeper 只验证系统 secure 状态已清除且 `resume` 的只读条件成立，默认等待 120 秒。取消、超时或无法证实恢复都会停在该检查点，后续步骤不执行，报告只记录检查点、触发步、恢复条件与结果。含检查点的 flow 需要交互式终端，`--json` 会在任何桌面操作前以 `MANUAL_CHECKPOINT_REQUIRED` 拒绝；secure 状态探测和录制一样来自 `pnpm build:recorder` 构建的 helper。密码、Keychain 内容和授权值不进入 flow、报告、日志或 argv。
 
+macOS 全局录制也会把 `CoreServicesUIAgent` 的可见弹框（包括由该系统进程显示的 Gatekeeper 安全提示）保存为人工检查点，原因是 `system_dialog`。例如从 Finder 双击 `.pkg` 后，录制会把弹框检查点放在该双击之后。回放先等待检测到弹框，操作者处理后在运行终端输入 `continue`，CueKeeper 确认弹框关闭、secure 状态清除且恢复条件成立后才继续。只记录弹框的出现与消失，弹框的文案和操作留在桌面界面。使用此功能需要重新构建录制 helper。
+
 默认在主屏显示边框和 HUD。窗口服务器确认面板后，HUD 显示「录制就绪」，终端在标准错误输出 `INDICATOR_READY`。录制时可切到飞书等其他应用，返回目标窗口后继续，已捕获的动作会保留。`Ctrl+Option+P` 暂停或继续，`Ctrl+Option+X` 停止并保存。可用 `--no-indicator` 关闭边框和 HUD，热键仍可用。
 
 批量执行用 `--data <rows.json>` 一次跑多行数据，格式见[参数化批量执行设计](docs/batch-run.md)。每行只覆盖列名指向的调用参数，其余沿用测试项；`--report <batch.json>` 写汇总，并在同级 `<batch.json>.rows/row-NNNNNN/` 保存逐行 v1 报告与绑定后的 flow，可直接用 `report pack` 单独打包：

@@ -5,8 +5,8 @@ import { join } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import test from 'node:test';
 import {
-  CheckpointFault, eventsCheckpointChannel, nativeSecureInputProbe, parseCheckpointWait, runHandOff,
-  terminalCheckpointChannel,
+  CheckpointFault, eventsCheckpointChannel, nativeSecureInputProbe, nativeSystemDialogProbe,
+  parseCheckpointWait, runHandOff, terminalCheckpointChannel,
 } from '../dist/manual-checkpoint.js';
 
 // Checkpoints are driven by fake channels and probes: no terminal, app or system
@@ -16,7 +16,7 @@ const scope = {
   kind: 'window', app: 'com.apple.installer', windowKey: 'installer', windowTitle: 'Install Test App',
 };
 const request = {
-  stepId: 's3', triggerStepId: 's2', scope, timeoutMs: 120_000,
+  stepId: 's3', triggerStepId: 's2', scope, timeoutMs: 120_000, reason: 'secure_input',
 };
 
 function channel(answer, log = []) {
@@ -71,6 +71,42 @@ test('an operator confirmation plus a cleared secure state resumes the run', asy
   assert.deepEqual(log, [['announce', 's3'], ['confirm']]);
   // The checkpoint metadata carries no content, only why and who confirmed.
   assert.deepEqual(Object.keys(result).sort(), ['confirmedBy', 'reason', 'timeoutMs', 'triggerStepId']);
+});
+
+test('an expected system dialog must appear before the operator can confirm', async () => {
+  const log = [];
+  await assert.rejects(runHandOff({
+    request: { ...request, reason: 'system_dialog' },
+    channel: channel('continue', log),
+    probe: {
+      async systemDialogVisible() { log.push(['read-dialog']); return false; },
+      async secureInput() { assert.fail('no resume checks before the dialog appears'); },
+      async resume() { assert.fail('no resume checks before the dialog appears'); },
+    },
+    signal: new AbortController().signal,
+    timeoutMs: 300,
+    pollMs: 100,
+    ...clock(),
+  }), { code: 'MANUAL_CHECKPOINT_TIMEOUT', message: /dialog did not appear/ });
+  assert.deepEqual(log, [['announce', 's3'], ['read-dialog'], ['read-dialog'], ['read-dialog']]);
+});
+
+test('confirmation cannot resume while the detected system dialog stays visible', async () => {
+  const log = [];
+  await assert.rejects(runHandOff({
+    request: { ...request, reason: 'system_dialog' },
+    channel: channel('continue', log),
+    probe: {
+      async systemDialogVisible() { return true; },
+      async secureInput() { return false; },
+      async resume() { assert.fail('no window resume check while the dialog is visible'); },
+    },
+    signal: new AbortController().signal,
+    timeoutMs: 300,
+    pollMs: 100,
+    ...clock(),
+  }), { code: 'MANUAL_CHECKPOINT_TIMEOUT', message: /dialog is still visible/ });
+  assert.deepEqual(log, [['announce', 's3'], ['confirm']]);
 });
 
 test('a cancel stops at the checkpoint with safe metadata', async () => {
@@ -217,4 +253,14 @@ test('the event channel ignores noise, accepts cancel and treats closed stdin as
   assert.equal(await cancel.confirm(request, new AbortController().signal), 'cancel');
   const closed = eventsCheckpointChannel({ input: Readable.from([]), output: sink });
   assert.equal(await closed.confirm(request, new AbortController().signal), 'cancel');
+});
+test('the native dialog probe passes the read-only flag and requires a visibility boolean', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-dialog-probe-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const executable = join(dir, 'helper');
+  writeFileSync(executable, '#!/bin/sh\n[ "$1" = --system-dialog-state ] || exit 2\nprintf \'{"visible":true}\\n\'\n');
+  chmodSync(executable, 0o700);
+  assert.equal(await nativeSystemDialogProbe(executable)(), true);
+  writeFileSync(executable, '#!/bin/sh\nprintf \'{"secure":false}\\n\'\n');
+  await assert.rejects(nativeSystemDialogProbe(executable)(), { code: 'SYSTEM_DIALOG_STATE_UNAVAILABLE' });
 });

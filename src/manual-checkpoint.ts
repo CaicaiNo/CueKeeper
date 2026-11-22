@@ -19,6 +19,7 @@ export interface CheckpointRequest {
   triggerStepId: string;
   scope: WindowScope;
   timeoutMs: number;
+  reason: CheckpointMetadata['reason'];
 }
 
 export type CheckpointAnswer = 'continue' | 'cancel';
@@ -34,6 +35,8 @@ export interface CheckpointChannel {
 export interface CheckpointProbe {
   /** True while macOS secure event input is active. */
   secureInput(): Promise<boolean>;
+  /** True while a supported macOS system dialog is visible. */
+  systemDialogVisible?(): Promise<boolean>;
   /** True when the flow's declared resume condition still holds. */
   resume(): Promise<boolean>;
 }
@@ -62,7 +65,7 @@ export class CheckpointFault extends Fault {
 }
 
 function metadata(request: CheckpointRequest, timeoutMs: number): CheckpointMetadata {
-  return { reason: 'secure_input', triggerStepId: request.triggerStepId, timeoutMs };
+  return { reason: request.reason, triggerStepId: request.triggerStepId, timeoutMs };
 }
 
 /** Waits for the operator's answer, bounded by the hand-off budget. */
@@ -108,9 +111,8 @@ function answerWithin(
 }
 
 /**
- * Pauses a run at a checkpoint. The operator must confirm even when macOS reuses
- * an existing authorization and no dialog appears; only after that confirmation
- * are the secure state and resume condition re-read.
+ * A system dialog checkpoint first proves the dialog appeared. Both checkpoint
+ * types require independent confirmation before checking the resume condition.
  */
 export async function runHandOff(options: HandOffOptions): Promise<CheckpointMetadata> {
   const { request, channel, probe, signal } = options;
@@ -119,18 +121,37 @@ export async function runHandOff(options: HandOffOptions): Promise<CheckpointMet
   const now = options.now ?? (() => performance.now());
   const wait = options.sleep ??
     ((ms: number, inner: AbortSignal) => sleep(ms, undefined, { signal: inner }).then(() => undefined));
-  const started = now();
-  const deadline = started + timeoutMs;
+  const deadline = now() + timeoutMs;
   let last = 'secure input is still active';
   const failure = () => new CheckpointFault(
     'MANUAL_CHECKPOINT_TIMEOUT',
     `Manual checkpoint ${request.stepId} could not be proven resumed within ${timeoutMs} ms: ${last}`,
     metadata(request, timeoutMs),
   );
+  const remaining = () => deadline - now();
+  const poll = async () => {
+    if (remaining() <= 0) throw failure();
+    await wait(Math.max(1, Math.min(pollMs, remaining())), signal);
+  };
 
   signal.throwIfAborted();
+  const dialogVisible = request.reason === 'system_dialog' ? probe.systemDialogVisible?.bind(probe) : undefined;
+  if (request.reason === 'system_dialog' && !dialogVisible) {
+    throw new CheckpointFault('MANUAL_CHECKPOINT_REQUIRED',
+      'A system dialog checkpoint needs the native dialog visibility probe', metadata(request, timeoutMs), true);
+  }
   await channel.announce(request);
-  const answer = await answerWithin(channel, request, signal, Math.max(1, timeoutMs));
+  if (dialogVisible) {
+    last = 'the expected macOS system dialog did not appear';
+    for (;;) {
+      signal.throwIfAborted();
+      if (remaining() <= 0) throw failure();
+      if (await dialogVisible()) break;
+      await poll();
+    }
+  }
+  if (remaining() <= 0) throw failure();
+  const answer = await answerWithin(channel, request, signal, Math.max(1, remaining()));
   if (answer === 'cancel') {
     throw new CheckpointFault(
       'MANUAL_CHECKPOINT_CANCELLED',
@@ -141,17 +162,21 @@ export async function runHandOff(options: HandOffOptions): Promise<CheckpointMet
 
   for (;;) {
     signal.throwIfAborted();
+    if (remaining() <= 0) throw failure();
     let secure = true;
     try {
       secure = await probe.secureInput();
+      if (secure) last = 'secure input is still active';
     } catch {
       // An unverifiable secure state never counts as cleared.
       secure = true;
       last = 'secure input state is unverifiable';
     }
-    if (!secure) {
+    if (!secure && dialogVisible && await dialogVisible()) {
+      last = 'the macOS system dialog is still visible';
+    } else if (!secure) {
       try {
-        if (await probe.resume()) {
+        if (await probe.resume() && remaining() > 0) {
           return { ...metadata(request, timeoutMs), confirmedBy: 'operator' };
         }
         last = 'the resume condition does not hold yet';
@@ -159,9 +184,7 @@ export async function runHandOff(options: HandOffOptions): Promise<CheckpointMet
         last = error instanceof Error ? error.message : 'the resume condition is unverifiable';
       }
     }
-    if (now() >= deadline) throw failure();
-    const remaining = deadline - now();
-    await wait(Math.max(1, Math.min(pollMs, remaining)), signal);
+    await poll();
   }
 }
 
@@ -178,10 +201,14 @@ export function terminalCheckpointChannel(options: {
   return {
     async announce(request) {
       const seconds = Math.round(request.timeoutMs / 1000);
+      const systemDialog = request.reason === 'system_dialog';
+      const label = systemDialog ? 'macOS 系统弹框' : '安全输入';
+      const instructions = systemDialog
+        ? '等待检测到系统弹框后，请在桌面上处理弹框，再回到此终端确认。'
+        : `请在目标界面完成授权或输入密码：${request.scope.app} · ${request.scope.windowTitle}\n完成后再回到此终端确认。`;
       output.write([
-        `人工检查点 ${request.stepId} · 安全输入（触发步骤 ${request.triggerStepId}）`,
-        `请在目标界面完成授权或输入密码：${request.scope.app} · ${request.scope.windowTitle}`,
-        'CueKeeper 不读取、不保存密码；完成后再回到此终端确认。',
+        `人工检查点 ${request.stepId} · ${label}（触发步骤 ${request.triggerStepId}）`,
+        instructions,
         `等待上限 ${seconds} 秒，超时或取消都会停在这里，后续步骤不执行。`,
         '',
       ].join('\n'));
@@ -302,21 +329,32 @@ export function captureHelperPath() {
  * capture session: it prints one JSON line and exits.
  */
 export function nativeSecureInputProbe(executable = captureHelperPath(), timeoutMs = 2_000) {
+  return nativeBooleanProbe(executable, timeoutMs, '--secure-state', 'secure',
+    'SECURE_STATE_UNAVAILABLE', 'system secure input state');
+}
+
+export function nativeSystemDialogProbe(executable = captureHelperPath(), timeoutMs = 2_000) {
+  return nativeBooleanProbe(executable, timeoutMs, '--system-dialog-state', 'visible',
+    'SYSTEM_DIALOG_STATE_UNAVAILABLE', 'macOS system dialog state');
+}
+
+function nativeBooleanProbe(
+  executable: string, timeoutMs: number, command: string, flag: string, code: string, description: string,
+) {
   return (): Promise<boolean> => new Promise<boolean>((resolve, reject) => {
-    execFile(executable, ['--secure-state'], { encoding: 'utf8', timeout: timeoutMs },
+    execFile(executable, [command], { encoding: 'utf8', timeout: timeoutMs },
       (error, stdout) => {
         if (error) {
-          reject(new Fault('SECURE_STATE_UNAVAILABLE',
-            'Could not read the system secure input state; rebuild the capture helper with pnpm build:recorder', true));
+          reject(new Fault(code,
+            `Could not read the ${description}; rebuild the capture helper with pnpm build:recorder`, true));
           return;
         }
         try {
-          const data = JSON.parse(stdout) as { secure?: unknown };
-          if (typeof data.secure !== 'boolean') throw new Error('missing secure flag');
-          resolve(data.secure);
+          const value: unknown = JSON.parse(stdout)[flag];
+          if (typeof value !== 'boolean') throw new Error('missing boolean flag');
+          resolve(value);
         } catch {
-          reject(new Fault('SECURE_STATE_UNAVAILABLE',
-            'The capture helper returned an invalid secure input state', true));
+          reject(new Fault(code, `The capture helper returned an invalid ${description}`, true));
         }
       });
   });

@@ -544,8 +544,16 @@
             "type": "object",
             "properties": {
               "reason": {
-                "const": "secure_input",
-                "type": "string"
+                "anyOf": [
+                  {
+                    "const": "secure_input",
+                    "type": "string"
+                  },
+                  {
+                    "const": "system_dialog",
+                    "type": "string"
+                  }
+                ]
               },
               "triggerStepId": {
                 "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",

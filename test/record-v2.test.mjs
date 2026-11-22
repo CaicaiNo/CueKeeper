@@ -193,6 +193,50 @@ test('a Security Agent window never becomes a scope, even before the secure flag
   assert.ok(!JSON.stringify(flow).includes(secret));
 });
 
+test('a system dialog after a package double-click is captured once without requiring dialog input', async () => {
+  const data = fixture('finder-downloads-pkg-click');
+  const owner = data.events[0].owner;
+  const readWindows = [];
+  const recording = new GlobalRecording(async window => {
+    readWindows.push(window.windowNumber);
+    return readerFor(data)(window);
+  }, { now: () => NOW });
+  const dialog = (visible, t) => ({
+    kind: 'system_dialog', visible, t, seen: NOW, focusGeneration: 1, secure: false,
+  });
+  for (const event of [
+    ...data.events,
+    dialog(true, 280),
+    dialog(true, 300),
+    { kind: 'text', chars: 'popup-text', t: 350, seen: NOW, focusGeneration: 1, secure: true,
+      owner: { app: 'com.apple.CoreServicesUIAgent', pid: 600, windowNumber: 12, windowTitle: 'Popup title' } },
+    dialog(false, 500),
+    { kind: 'key', key: 'escape', modifiers: [], t: 600, seen: NOW, focusGeneration: 1, secure: false, owner },
+  ]) await recording.add(parseCaptureEvent(event));
+
+  const flow = parseFlowV2(recording.finish());
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'manual_checkpoint', 'key']);
+  assert.equal(flow.steps[0].count, 2);
+  assert.deepEqual(flow.steps[1], {
+    id: 's2', kind: 'manual_checkpoint', scope: flow.steps[0].scope, triggerStepId: 's1', reason: 'system_dialog',
+    resume: { scope: flow.steps[0].scope, check: { kind: 'window_exists', equals: true } },
+    timeoutMs: 120_000,
+  });
+  assert.equal(flow.steps[2].scope.windowKey, flow.steps[0].scope.windowKey);
+  assert.deepEqual(readWindows, [11, 11]);
+  assert.doesNotMatch(JSON.stringify(flow), /CoreServicesUIAgent|Popup title|popup-text/);
+});
+
+test('an already visible system dialog without a trigger leaves a gap', async () => {
+  const recording = new GlobalRecording(async () => assert.fail('no window tree expected'));
+  await recording.add(parseCaptureEvent({
+    kind: 'system_dialog', visible: true, t: 0, seen: NOW, focusGeneration: 0, secure: false,
+  }));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps, [{ id: 's1', kind: 'gap', code: 'CAPTURE_SCOPE_UNVERIFIED' }]);
+  assert.throws(() => parseFlowV2(flow), { code: 'CAPTURE_GAP' });
+});
+
 test('occluded and first-mouse clicks become gaps; activation-only clicks navigate', async () => {
   const flow = (await recordFixture('unprovable-clicks')).finish();
   assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'gap', 'activate_app', 'gap']);
@@ -329,6 +373,9 @@ test('excluded apps are dropped before their window is read', async () => {
 
 test('capture protocol rejects a malformed global event', () => {
   assert.throws(() => parseCaptureEvent({ kind: 'click' }), { code: 'CAPTURE_PROTOCOL' });
+  assert.throws(() => parseCaptureEvent({
+    kind: 'system_dialog', t: 1, seen: 1, focusGeneration: 0, secure: false, visible: 'true',
+  }), { code: 'CAPTURE_PROTOCOL' });
   assert.throws(() => parseCaptureEvent({
     kind: 'gap', t: 1, seen: 1, focusGeneration: 0, secure: false, gapCode: 'NOPE',
   }), { code: 'CAPTURE_PROTOCOL' });
