@@ -35,7 +35,7 @@
 | `launch` | 可用 | 收绝对路径，或 System32 / Windows 目录下的裸名（`notepad`、`notepad.exe`）；**不收显示名** | 现有 flow 的 `app` 若写成路径，`list-windows --app` 就匹配不上，见 §4.6 |
 | `focus-window` | 可用但不可靠 | 受前台锁（foreground lock timeout）限制；探针在空载下 5/5 首次失败、5/5 第二次也失败 | `ensure: window_ready` 用 `focused.id` 断言，会报 `WINDOW_CHANGED`，属于误报 |
 | `click` | 无头可用 | 语义路径：Invoke / Toggle / SelectionItem / Legacy DoDefaultAction；`--headed` 才走物理点击 | 我们的 `click(ref)` 不变 |
-| `type` | **需 `--headed`** | 无头由 `SendInput` 实现，严格无头返回 `POLICY_DENIED`；headed 下经常 `delivered_unverified`（字段没有可读 Text selection） | 现有代码固定 `headed=false`，Windows 上必挂 |
+| `type` | **需 `--headed`** | 无头由 `SendInput` 实现，严格无头返回 `POLICY_DENIED`；headed 下经常 `delivered_unverified`（字段没有可读 Text selection） | HAOC-97 后 headed 回放已带 `--headed`；win32 无头路径仍会 `POLICY_DENIED`，W1 要求 win32 恒带 `--headed` |
 | `press` | 无头可用 | 永远是物理键盘输入；`--window-id` 可定向；非前台 App 的无头定向 press 会 fail closed；`meta`/`cmd` 是 Win 键 | 组合键语义与 macOS 不同，见 §4.5 |
 | `mouse-click --xy` | 需 `--headed` | 坐标是**物理像素**，适配器按 Per-Monitor V2 启动 | `clickPoint` 已要求 headed；坐标不能跨 DPI 复用 |
 | `get` / `is` | 可用 | `get --property text|value`；`is --property visible` | `snapshotProperty` 逻辑可复用 |
@@ -206,7 +206,7 @@ HUD 内容（边框 + 计时 + 暂停状态）沿用 macOS 的呈现，不需要
 
 | # | 风险 | 影响 | 处置 |
 | --- | --- | --- | --- |
-| R1 | 无头 `type` 被 `POLICY_DENIED` | 现有回放/录制在 Windows 上第一条输入就失败 | §6 第一优先修复；`type` 分平台 headed |
+| R1 | 无头 `type` 被 `POLICY_DENIED` | win32 无头回放的文本输入第一步失败（HAOC-97 后 headed 回放已带 `--headed`） | §6 第一优先修复；W1 在 win32 恒带 `--headed` |
 | R2 | `.cmd` shim 无法 `execFile` | Windows 上 provider 完全不可用 | 解析原生 exe；不退回 shell |
 | R3 | Chromium 冷启动 10–25s，首读 12 vs 165 节点 | 录制/回放误判"控件不存在" | 预热快照 + 预算放大 + `INCOMPLETE_TREE` 重试 |
 | R4 | UIPI：可读不可写 | 管理员应用"定位成功、动作全失败" | 提前 preflight；`PERM_DENIED` 升为依赖错误并给出同级终端提示 |
@@ -284,4 +284,4 @@ HUD 内容（边框 + 计时 + 暂停状态）沿用 macOS 的呈现，不需要
 - agent-desktop v1.3.1 仓库：`README.md`、`skills/agent-desktop-windows/SKILL.md`、`skills/agent-desktop-windows/references/{permissions-and-elevation,troubleshooting}.md`、`skills/agent-desktop/references/{commands-observation,commands-interaction,commands-system}.md`、`apps/docs/content/docs/platforms/windows.mdx`、`npm/lib/windows-bin.js`、`npm/package.json`、`probes/windows/FINDINGS.md`（行号 A1-2/A1-3/A9-2/A9-3/A16-11/A17-1/A17-4/A17-5/A18-2/A18-7/A19-8/A21-6/A23-6/A24-8/A24-16/A24-17）、`crates/windows/src/tree/{roles,states}.rs`。当前仓库固定的版本见 `src/desktop.ts` 的 `agentDesktopVersion`。
 - Windows 官方文档：`SetWindowsHookExW`、`LowLevelMouseProc`（安装线程上下文、消息循环、`LowLevelHooksTimeout`、静默移除、Raw Input 建议）、`SetWindowDisplayAffinity`（`WDA_EXCLUDEFROMCAPTURE`，Win10 2004+）、`Window Features`（分层窗口、`WS_EX_TRANSPARENT` 穿透、前景锁 `SetForegroundWindow` 限制）。
 - Node.js 官方文档：`child_process` 的 "Spawning .bat and .cmd files on Windows"（`.bat`/`.cmd` 不能用 `execFile` 启动）。
-- 本仓库代码事实：`src/desktop.ts`（`commandRunner`、`type` 的 `headed=false`、`ensure` 的 darwin 门槛、`snapshot` 预算）、`src/cli.ts`（`macOnly`、`--app` 正则）、`src/record.ts`（`w-<n>` 窗口号、1200ms 逐事件快照、`STALE_CAPTURE` 2s 判据、`[ -~]` 文本过滤）、`src/locator.ts`（`parseBounds`、`contains`、`hitTest`）、`native/*.swift`（采集协议与热键状态机）、`scripts/build-recorder.sh`、`.github/workflows/ci.yml`。
+- 本仓库代码事实：`src/desktop.ts`（`commandRunner`、`type` 的 headed 取值、`ensure` 的 darwin 门槛、`snapshot` 预算）、`src/cli.ts`（`macOnly`、`--app` 正则）、`src/record.ts`（`w-<n>` 窗口号、1200ms 逐事件快照、`STALE_CAPTURE` 2s 判据、`[ -~]` 文本过滤）、`src/locator.ts`（`parseBounds`、`contains`、`hitTest`）、`native/*.swift`（采集协议与热键状态机）、`scripts/build-recorder.sh`、`.github/workflows/ci.yml`。

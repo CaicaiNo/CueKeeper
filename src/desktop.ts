@@ -421,8 +421,11 @@ export async function withDesktop<T>(
           '--duration', String(durationMs), '--timeout-ms', String(timeout),
         ], undefined, true, timeout + 5000);
       },
-      // Keep text out of process arguments. Headed click does not require headed text injection.
-      type: (ref, input) => act('type', [ref, '--stdin'], input, false),
+      // Keep text out of process arguments. Headed replay uses headed text
+      // injection: Chromium web content rejects the headless AX text path
+      // (ACTION_FAILED) while native controls accept both. Headless replay
+      // keeps the original path.
+      type: (ref, input) => act('type', [ref, '--stdin'], input, options.headed),
       press: (combo, current) => act('press', [combo, '--window-id', current.windowId]),
     });
   } finally {
