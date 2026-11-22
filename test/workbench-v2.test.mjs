@@ -9,9 +9,10 @@ process.env.CUEKEEPER_APP_IDENTITY = '/nonexistent/cuekeeper-identity';
 import { flowV2Check } from '../dist/contracts-v2.js';
 import { hashFlowV2 } from '../dist/flow-v2.js';
 import { startWorkbench } from '../dist/workbench.js';
+import { pickWindowCandidates } from '../dist/workbench-pick.js';
 import {
-  assertCheck, checkLabel, diffSummary, filterStepsByScope, scopeKey, scopeOptions, statusMap,
-  stepTemplate, v2StepLabel,
+  assertCheck, checkLabel, checkpointWaitFacts, diffSummary, filterStepsByScope, pickCandidateLabel,
+  scopeKey, scopeOptions, statusMap, stepTemplate, v2StepLabel,
 } from '../workbench/model.js';
 
 const examplePath = name => new URL(`../examples/${name}.json`, import.meta.url);
@@ -190,6 +191,8 @@ test('saving writes a sibling revision, keeps the recording bytes and a live run
   assert.ok(argv.includes('--foreground'));
   assert.ok(argv.includes('--headed'));
   assert.ok(argv.includes('--json'));
+  // A flow without checkpoints keeps the human terminal channel.
+  assert.equal(argv.includes('--checkpoint-events'), false);
 
   process.env.CUEKEEPER_V2_STUB_STATUS = 'failed';
   const failed = await post('run', { session: session.id, mode: 'live', confirm: true });
@@ -300,4 +303,322 @@ test('v2 timeline helpers describe steps, scopes, diffs and build EditOp payload
     { id: 'key-2', kind: 'key', scope, key: 'tab' });
   assert.throws(() => stepTemplate('launch_app', { id: 'launch-2', scope }), /App 作用域/);
   assert.throws(() => stepTemplate('click', { id: 'click-2', scope }), /元素定位器/);
+});
+
+// --- Picking a live target -----------------------------------------------------
+// The fake desktop replaces the agent-desktop process: list one window, read one
+// fixture snapshot. No GUI, focus or input is involved.
+
+function fakeSnapshot(windowId) {
+  return {
+    windowId,
+    tree: {
+      role: 'window', name: 'Cuekeeper 测试页', states: [], secure: false,
+      bounds: { x: 0, y: 0, width: 900, height: 700 },
+      children: [
+        {
+          role: 'textfield', name: '地址与搜索', ref: '@fake:e1', states: [], secure: false,
+          bounds: { x: 20, y: 40, width: 400, height: 30 }, children: [],
+        },
+        {
+          role: 'button', name: '刷新', ref: '@fake:e2', states: [], secure: false,
+          bounds: { x: 430, y: 40, width: 60, height: 30 }, children: [],
+        },
+      ],
+    },
+  };
+}
+
+function fakeDesktop(list = [{ id: 'w-7', title: 'Cuekeeper 测试页' }]) {
+  const calls = [];
+  return {
+    calls,
+    async listWindows(app, timeoutMs) {
+      calls.push(['listWindows', app, timeoutMs]);
+      return list;
+    },
+    async snapshotWindow(windowId) {
+      calls.push(['snapshotWindow', windowId]);
+      return fakeSnapshot(windowId);
+    },
+  };
+}
+
+test('the v2 editor picks a target from the scoped window snapshot', async t => {
+  const { root, directory } = await fixture(t);
+  const desktop = fakeDesktop();
+  const { post } = await server(t, {
+    root, pickWindow: (scope, signal) => pickWindowCandidates(desktop, scope),
+  });
+  const session = await post('import', { directory });
+
+  // type-address is bound to the browser window; its scope selects the window.
+  const picked = await post('v2/pick', { session: session.id, stepId: 'type-address' });
+  assert.equal(picked.windowId, 'w-7');
+  assert.equal(picked.windowTitle, 'Cuekeeper 测试页');
+  assert.deepEqual(picked.scope.windowKey, 'browser');
+  assert.deepEqual(picked.candidates.map(candidate => candidate.role), ['textfield', 'button']);
+  const chosen = picked.candidates[1];
+  assert.equal(chosen.ref, '@fake:e2');
+  assert.deepEqual(chosen.path, ['window', 'button']);
+  assert.deepEqual(chosen.bounds, { x: 430, y: 40, width: 60, height: 30 });
+  assert.deepEqual(chosen.point, [460, 55]);
+  assert.deepEqual(chosen.locator, { kind: 'element', role: 'button', name: '刷新' });
+  assert.equal(desktop.calls[0][1], 'com.apple.Safari');
+
+  // Confirming a candidate is one EditOp; the step now names the element.
+  const updated = await edit(post, session, {
+    kind: 'update', id: 'type-address', patch: { target: chosen.locator },
+  });
+  assert.deepEqual(stepOf(updated.flow, 'type-address').target, chosen.locator);
+
+  // A coordinate target resolves to the element picked at that point.
+  const converted = await edit(post, session, {
+    kind: 'update', id: 'paste-address',
+    patch: { target: { kind: 'point', x: 12, y: 34, element: { role: 'textfield', name: '正文' } } },
+  });
+  assert.deepEqual(stepOf(converted.flow, 'paste-address').target,
+    { kind: 'element', role: 'textfield', name: '正文' });
+
+  // An app-scoped step has no window to read; the error is explicit.
+  const appScope = await post('v2/pick', { session: session.id, stepId: 'launch-browser' }, 400);
+  assert.equal(appScope.code, 'SCOPE_NOT_WINDOW');
+  assert.match(appScope.error, /window scope/);
+  const unknown = await post('v2/pick', { session: session.id, stepId: 'missing-step' }, 404);
+  assert.match(unknown.error, /No step missing-step/);
+});
+
+test('a closed window is an explicit pick error, never a silent old target', async t => {
+  const { root, directory } = await fixture(t);
+  const { post } = await server(t, {
+    root,
+    pickWindow: (scope, signal) => pickWindowCandidates(
+      fakeDesktop([{ id: 'w-9', title: '别的窗口' }]), scope),
+  });
+  const session = await post('import', { directory });
+  const missing = await post('v2/pick', { session: session.id, stepId: 'type-address' }, 400);
+  assert.equal(missing.code, 'WINDOW_NOT_FOUND');
+  assert.match(missing.error, /Cuekeeper 测试页/);
+  assert.match(missing.error, /别的窗口/);
+  // The failed pick changed nothing.
+  const state = await post('state', {});
+  assert.deepEqual(stepOf(state.session.v2.flow, 'type-address').target,
+    { kind: 'element', role: 'textfield', name: '地址与搜索' });
+});
+
+test('pick labels and checkpoint facts describe exactly what the page shows', () => {
+  assert.match(pickCandidateLabel({
+    interactive: true, locator: { kind: 'element', role: 'button', name: '刷新' },
+    bounds: { x: 430, y: 40, width: 60, height: 30 },
+  }), /^可交互 · button · 刷新 · 60 × 30 @ 430, 40$/);
+  assert.deepEqual(checkpointWaitFacts({
+    stepId: 'auth', triggerStepId: 'type-note', timeoutMs: 120_000,
+    scope: { kind: 'window', app: 'com.apple.TextEdit', windowKey: 'notes', windowTitle: 'QA Notes' },
+  }), [
+    ['当前步骤', 'auth'], ['触发步骤', 'type-note'],
+    ['App / 窗口', 'com.apple.TextEdit · QA Notes'], ['等待上限', '120 秒'],
+  ]);
+  assert.deepEqual(checkpointWaitFacts(undefined), []);
+});
+
+// --- Checkpoint runs -----------------------------------------------------------
+// The stub CLI announces the fixed marker on stderr and reads its answer from
+// stdin; the page only talks to the workbench API.
+
+async function checkpointFixture(t) {
+  const root = await mkdtemp(join(tmpdir(), 'cuekeeper-workbench-checkpoint-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const directory = join(root, 'run');
+  await mkdir(directory);
+  const windowScope = {
+    kind: 'window', app: 'com.apple.TextEdit', windowKey: 'notes', windowTitle: 'QA Notes',
+  };
+  await writeFile(join(directory, 'flow.json'), JSON.stringify({
+    version: 2, id: 'checkpoint-flow', name: '人工检查点流程',
+    appPaths: { 'com.apple.TextEdit': '/System/Applications/TextEdit.app' },
+    steps: [
+      {
+        id: 'wait-start', kind: 'wait', scope: windowScope,
+        check: { kind: 'window_exists', equals: true }, timeoutMs: 15000,
+      },
+      {
+        id: 'auth', kind: 'manual_checkpoint', scope: windowScope,
+        triggerStepId: 'wait-start', reason: 'secure_input',
+        resume: { scope: windowScope, check: { kind: 'window_exists', equals: true } },
+        timeoutMs: 60000,
+      },
+      {
+        id: 'wait-after', kind: 'wait', scope: windowScope,
+        check: { kind: 'window_exists', equals: true }, timeoutMs: 15000,
+      },
+    ],
+  }));
+  const argvFile = join(root, 'argv.json');
+  const stub = join(root, 'stub-checkpoint.mjs');
+  await writeFile(stub, [
+    "import { writeFile } from 'node:fs/promises';",
+    "import { createInterface } from 'node:readline';",
+    'const args = process.argv.slice(2);',
+    'await writeFile(process.env.CUEKEEPER_V2_STUB_ARGV, JSON.stringify(args));',
+    "const mode = process.env.CUEKEEPER_V2_STUB_MODE ?? 'marker';",
+    "const base = { version: 2, flowId: 'checkpoint-flow', flowSha256: 'a'.repeat(64),",
+    "  startedAt: new Date().toISOString(), mode: 'replay' };",
+    'const entry = (id, kind, status, extra = {}) => ({ id, kind, status, atMs: 0, durationMs: 1, ...extra });',
+    'const emit = (status, entries) => {',
+    '  const code = status === \'passed\' ? 0 : 1;',
+    '  process.stdout.write(JSON.stringify({ ok: code === 0, data: { ...base, status, entries } }) + "\\n",',
+    '    () => process.exit(code));',
+    '};',
+    'const passed = () => emit(\'passed\', [entry(\'wait-start\', \'wait\', \'passed\'),',
+    '  entry(\'auth\', \'manual_checkpoint\', \'passed\', { checkpoint: { reason: \'secure_input\',',
+    "    triggerStepId: 'wait-start', timeoutMs: 60000, confirmedBy: 'operator' } }),",
+    "  entry('wait-after', 'wait', 'passed')]);",
+    "if (mode === 'silent') {",
+    '  passed();',
+    '} else {',
+    "  process.stderr.write('CHECKPOINT_WAIT auth wait-start 60000\\n');",
+    "  if (mode === 'timeout') {",
+    '    setTimeout(() => emit(\'blocked\', [entry(\'wait-start\', \'wait\', \'passed\'),',
+    "      entry('auth', 'manual_checkpoint', 'failed', { code: 'MANUAL_CHECKPOINT_TIMEOUT',",
+    "        message: 'not confirmed' }), entry('wait-after', 'wait', 'skipped')]), 150);",
+    '  } else {',
+    '    const reader = createInterface({ input: process.stdin, terminal: false });',
+    '    reader.on(\'line\', line => {',
+    '      const answer = line.trim();',
+    "      if (answer !== 'continue' && answer !== 'cancel') return;",
+    '      reader.close();',
+    "      if (answer === 'continue') passed();",
+    '      else emit(\'blocked\', [entry(\'wait-start\', \'wait\', \'passed\'),',
+    "        entry('auth', 'manual_checkpoint', 'failed', { code: 'MANUAL_CHECKPOINT_CANCELLED',",
+    "          message: 'cancelled' }), entry('wait-after', 'wait', 'skipped')]);",
+    '    });',
+    '  }',
+    '}',
+    '',
+  ].join('\n'));
+  process.env.CUEKEEPER_V2_STUB_ARGV = argvFile;
+  t.after(() => {
+    delete process.env.CUEKEEPER_V2_STUB_ARGV;
+    delete process.env.CUEKEEPER_V2_STUB_MODE;
+  });
+  return { root, directory, stub, argvFile };
+}
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function waitForCheckpoint(post, sessionId, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const info = await post('run/status', { session: sessionId });
+    if (info.checkpoint) return info;
+    await sleep(25);
+  }
+  throw new Error('the replay never announced a checkpoint');
+}
+
+test('a checkpoint flow waits in the workbench and resumes when the page answers', async t => {
+  const { root, directory, stub, argvFile } = await checkpointFixture(t);
+  const { post } = await server(t, { root, cliPath: stub, allowLive: true });
+  const session = await post('import', { directory });
+  const saved = await post('save', { session: session.id }, 201);
+
+  const running = post('run', { session: session.id, mode: 'live', confirm: true });
+  const waiting = await waitForCheckpoint(post, session.id);
+  assert.equal(waiting.running, true);
+  assert.equal(waiting.checkpoint.stepId, 'auth');
+  assert.equal(waiting.checkpoint.triggerStepId, 'wait-start');
+  assert.equal(waiting.checkpoint.timeoutMs, 60000);
+  assert.deepEqual(waiting.checkpoint.scope, {
+    kind: 'window', app: 'com.apple.TextEdit', windowKey: 'notes', windowTitle: 'QA Notes',
+  });
+  assert.ok(waiting.checkpoint.deadline > Date.now());
+
+  const answered = await post('run/checkpoint', { session: session.id, answer: 'continue' });
+  assert.deepEqual(answered, { sent: true, answer: 'continue' });
+  const report = await running;
+  assert.equal(report.status, 'passed');
+  assert.equal(report.entries[1].checkpoint.confirmedBy, 'operator');
+  assert.equal(report.stopped, false);
+
+  const argv = JSON.parse(await readFile(argvFile, 'utf8'));
+  assert.equal(argv[0], 'run');
+  assert.equal(argv[1], saved.output);
+  assert.ok(argv.includes('--checkpoint-events'));
+  assert.ok(argv.includes('--foreground'));
+  assert.ok(argv.includes('--json'));
+
+  const after = await post('run/status', { session: session.id });
+  assert.equal(after.running, false);
+  assert.equal(after.checkpoint, undefined);
+});
+
+test('cancelling the checkpoint stops the run and skips later steps', async t => {
+  const { root, directory, stub } = await checkpointFixture(t);
+  const { post } = await server(t, { root, cliPath: stub, allowLive: true });
+  const session = await post('import', { directory });
+  await post('save', { session: session.id }, 201);
+
+  const running = post('run', { session: session.id, mode: 'live', confirm: true });
+  await waitForCheckpoint(post, session.id);
+  await post('run/checkpoint', { session: session.id, answer: 'cancel' });
+  const report = await running;
+  assert.equal(report.status, 'blocked');
+  assert.equal(report.entries[1].code, 'MANUAL_CHECKPOINT_CANCELLED');
+  assert.equal(report.entries[2].status, 'skipped');
+  assert.equal(statusMap(report).get('wait-after').status, 'skipped');
+
+  // The next report is already over; another answer is refused.
+  const late = await post('run/checkpoint', { session: session.id, answer: 'continue' }, 409);
+  assert.match(late.error, /No checkpoint run/);
+});
+
+test('an unanswered checkpoint times out and the report keeps the failure', async t => {
+  const { root, directory, stub } = await checkpointFixture(t);
+  process.env.CUEKEEPER_V2_STUB_MODE = 'timeout';
+  const { post } = await server(t, { root, cliPath: stub, allowLive: true });
+  const session = await post('import', { directory });
+  await post('save', { session: session.id }, 201);
+
+  const running = post('run', { session: session.id, mode: 'live', confirm: true });
+  await waitForCheckpoint(post, session.id);
+  const report = await running;
+  assert.equal(report.status, 'blocked');
+  assert.equal(report.entries[1].code, 'MANUAL_CHECKPOINT_TIMEOUT');
+  assert.equal(report.entries[2].status, 'skipped');
+  const after = await post('run/status', { session: session.id });
+  assert.equal(after.running, false);
+  assert.equal(after.checkpoint, undefined);
+});
+
+test('a checkpoint flow whose CLI never announces a wait finishes report-only', async t => {
+  const { root, directory, stub } = await checkpointFixture(t);
+  process.env.CUEKEEPER_V2_STUB_MODE = 'silent';
+  const { post } = await server(t, { root, cliPath: stub, allowLive: true });
+  const session = await post('import', { directory });
+  await post('save', { session: session.id }, 201);
+
+  const report = await post('run', { session: session.id, mode: 'live', confirm: true });
+  assert.equal(report.status, 'passed');
+  assert.equal(report.entries.length, 3);
+  const status = await post('run/status', { session: session.id });
+  assert.equal(status.running, false);
+  assert.equal(status.checkpoint, undefined);
+  const refused = await post('run/checkpoint', { session: session.id, answer: 'continue' }, 409);
+  assert.match(refused.error, /No checkpoint run/);
+});
+
+test('stop while a checkpoint waits cancels it instead of killing the report', async t => {
+  const { root, directory, stub } = await checkpointFixture(t);
+  const { post } = await server(t, { root, cliPath: stub, allowLive: true });
+  const session = await post('import', { directory });
+  await post('save', { session: session.id }, 201);
+
+  const running = post('run', { session: session.id, mode: 'live', confirm: true });
+  await waitForCheckpoint(post, session.id);
+  const stopped = await post('stop', {});
+  assert.equal(stopped.stopped, true);
+  const report = await running;
+  assert.equal(report.stopped, true);
+  assert.equal(report.entries[1].code, 'MANUAL_CHECKPOINT_CANCELLED');
+  assert.equal(report.entries[2].status, 'skipped');
 });

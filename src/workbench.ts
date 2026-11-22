@@ -14,7 +14,7 @@ import { fixtureAppPath, offlineDesktop, withDesktop } from './desktop.js';
 import { readJson, writeNew } from './files.js';
 import { hashFlow, plan } from './flow.js';
 import { dryRunFlowV2, hashFlowV2, isFlowV2 } from './flow-v2.js';
-import type { FlowV2, StepV2 } from './contracts-v2.js';
+import type { FlowV2, StepV2, WindowScope } from './contracts-v2.js';
 import { Fault, object } from './locator.js';
 import { crop, decodePng, encodePng } from './png.js';
 import { runFlow } from './run.js';
@@ -29,6 +29,9 @@ import { workbenchAssets } from './workbench-assets.js';
 import { loadSession, sameTarget } from './workbench-session.js';
 import { EditError, loadEditableFlow } from './workbench-edit.js';
 import type { EditableFlowV2, EditOp } from './workbench-edit.js';
+import { parseCheckpointWait } from './manual-checkpoint.js';
+import { pickWindowCandidates } from './workbench-pick.js';
+import type { WindowPickResult } from './workbench-pick.js';
 import { confirmWaitCandidate } from './wait-candidates.js';
 import type { WaitCandidate } from './wait-candidates.js';
 
@@ -159,11 +162,39 @@ function cliReport(stdout: string, stderr = ''): unknown {
   return envelope.data;
 }
 
+/** A checkpoint the CLI announced on stderr and the page may still answer. */
+interface CheckpointState {
+  stepId: string;
+  triggerStepId: string;
+  timeoutMs: number;
+  scope?: WindowScope;
+  /** Wall-clock budget the CLI applies to the hand-off. */
+  deadline: number;
+}
+
+interface CliRunResult {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+}
+
+interface CliRunHandle {
+  done: Promise<CliRunResult>;
+  /** Writes one answer line to the child's stdin; false when it is closed. */
+  write(line: string): boolean;
+}
+
 export async function startWorkbench(options: {
   directory?: string; port: number; library?: string; allowLive: boolean;
   allowShell?: boolean; allowSudo?: boolean; signal: AbortSignal;
   /** The CLI used by a live v2 replay; tests point it at a stub. */
   cliPath?: string;
+  /**
+   * The read-only window snapshot the v2 editor picks elements from; tests
+   * replace the live agent-desktop call with a fake desktop.
+   */
+  pickWindow?: (scope: WindowScope, signal: AbortSignal) => Promise<WindowPickResult>;
 }) {
   let session = options.directory ? await loadSession(options.directory) : undefined;
   // A v2 session keeps its editing state in this server process; the P2 engine
@@ -181,10 +212,17 @@ export async function startWorkbench(options: {
   const allowSudo = options.allowSudo ?? false;
   const tokens = new Map<string, ConfirmationToken>();
   const cliPath = options.cliPath ?? fileURLToPath(new URL('./cli.js', import.meta.url));
+  // A pick reads one window snapshot; it never focuses, captures or types.
+  const pickWindow = options.pickWindow ?? ((scope: WindowScope, signal: AbortSignal) =>
+    withDesktop({ headed: false, signal }, desktop => pickWindowCandidates(desktop, scope)));
   let running = false;
   let currentRun: AbortController | undefined;
   let currentChild: ChildProcess | undefined;
   let childStopped = false;
+  /** The checkpoint the waiting CLI child announced, while the page may answer. */
+  let checkpointWait: CheckpointState | undefined;
+  /** Writes one answer line to the CLI child's stdin; only set for a checkpoint run. */
+  let checkpointAnswer: ((line: string) => boolean) | undefined;
   let origin: string;
 
   /** The editing snapshot the page renders after every v2 call. */
@@ -222,27 +260,56 @@ export async function startWorkbench(options: {
     return view;
   }
 
-  function runCli(args: string[], cwd: string) {
-    return new Promise<{ code: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string }>(
-      (resolveRun, rejectRun) => {
-        const child = spawn(process.execPath, [cliPath, ...args], {
-          cwd, stdio: ['ignore', 'pipe', 'pipe'], env: process.env,
-        });
-        currentChild = child;
-        let stdout = '';
-        let stderr = '';
-        child.stdout?.on('data', chunk => { stdout += String(chunk); });
-        child.stderr?.on('data', chunk => { stderr += String(chunk); });
-        child.once('error', error => {
-          currentChild = undefined;
-          rejectRun(error);
-        });
-        child.once('close', (code, signal) => {
-          currentChild = undefined;
-          resolveRun({ code, signal, stdout, stderr });
-        });
+  /**
+   * Starts the replay CLI. A checkpoint run keeps stdin open so the page can
+   * answer with one `continue` or `cancel` line, and its stderr is also read
+   * line by line for the fixed CHECKPOINT_WAIT marker.
+   */
+  function startCli(args: string[], cwd: string, options: {
+    stdin?: boolean;
+    onStderrLine?: (line: string) => void;
+  } = {}): CliRunHandle {
+    let child: ChildProcess | undefined;
+    const done = new Promise<CliRunResult>((resolveRun, rejectRun) => {
+      child = spawn(process.execPath, [cliPath, ...args], {
+        cwd, stdio: [options.stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'], env: process.env,
+      });
+      currentChild = child;
+      let stdout = '';
+      let stderr = '';
+      let pending = '';
+      const readLine = (line: string) => {
+        if (options.onStderrLine && line) options.onStderrLine(line);
+      };
+      child.stdout?.on('data', chunk => { stdout += String(chunk); });
+      child.stderr?.on('data', chunk => {
+        const text = String(chunk);
+        stderr += text;
+        if (!options.onStderrLine) return;
+        pending += text;
+        const lines = pending.split('\n');
+        pending = lines.pop() ?? '';
+        for (const line of lines) readLine(line);
+      });
+      child.once('error', error => {
+        currentChild = undefined;
+        rejectRun(error);
+      });
+      child.once('close', (code, signal) => {
+        currentChild = undefined;
+        // A last line without a newline still carries its marker.
+        if (pending) readLine(pending);
+        resolveRun({ code, signal, stdout, stderr });
+      });
+    });
+    return {
+      done,
+      write(line) {
+        if (!child?.stdin?.writable) return false;
+        child.stdin.write(line);
+        return true;
       },
-    );
+    };
   }
 
   function libraryEntry(item: Awaited<ReturnType<typeof parseLibraryItem>>) {
@@ -322,10 +389,15 @@ export async function startWorkbench(options: {
     }
     if (path === '/api/stop') {
       // A live v2 replay is a CLI child process; stopping it signals the CLI so
-      // its report still records which step was interrupted.
+      // its report still records which step was interrupted. A waiting
+      // checkpoint ends with its own cancel answer so the report names it.
       if (currentChild) {
         childStopped = true;
-        currentChild.kill('SIGINT');
+        if (checkpointWait && checkpointAnswer?.('cancel\n')) {
+          checkpointWait = undefined;
+        } else {
+          currentChild.kill('SIGINT');
+        }
         return send(response, 200, { stopped: true });
       }
       // Stop is bound to the server run, not to a session snapshot.
@@ -362,6 +434,28 @@ export async function startWorkbench(options: {
     // file is only ever read. The v1 single-window path below is untouched.
     if (isFlowV2(activeFlow)) {
       if (!editable) return send(response, 409, { error: 'Reload the current session' });
+      // A pick reads the live window the step's scope names, so the page can
+      // replace a stale or coordinate target with the element under it.
+      if (path === '/api/v2/pick') {
+        if (running) return send(response, 409, { error: 'A test is running' });
+        if (typeof data.stepId !== 'string' || !data.stepId) throw new Error('Pick needs the step being edited');
+        const step = editable.flow.steps.find(entry => entry.id === data.stepId);
+        if (!step) {
+          return send(response, 404, { error: `No step ${data.stepId} in this flow`, code: 'UNKNOWN_STEP' });
+        }
+        const scope = (step as { scope?: unknown }).scope;
+        try {
+          return send(response, 200, {
+            stepId: step.id, scope, ...await pickWindow(scope as WindowScope, options.signal),
+          });
+        } catch (error) {
+          // The page shows the reason, so keep both the stable code and words.
+          if (error instanceof Fault) {
+            return send(response, 400, { error: error.message, code: error.code });
+          }
+          throw error;
+        }
+      }
       if (path === '/api/v2/edit') {
         if (running) return send(response, 409, { error: 'A test is running' });
         if (data.op === null || typeof data.op !== 'object' || Array.isArray(data.op)) {
@@ -443,10 +537,14 @@ export async function startWorkbench(options: {
         if (!saved || saved.flowSha256 !== hashFlowV2(flow)) {
           throw new Error('Save the edited flow before a live replay');
         }
+        const checkpoints = flow.steps.filter(step => step.kind === 'manual_checkpoint');
         const inputs = (flow.inputs ?? []).length
           ? inputValues(flow.inputs as string[], data.inputs)
           : undefined;
         const args = ['run', saved.path, '--foreground', '--headed', '--json'];
+        // A checkpoint flow uses the machine channel: the CLI announces the
+        // wait on stderr and reads one answer line from stdin.
+        if (checkpoints.length) args.push('--checkpoint-events');
         let inputsFile: string | undefined;
         if (inputs) {
           // Values stay out of the flow: they travel to the CLI as a private,
@@ -457,16 +555,55 @@ export async function startWorkbench(options: {
         }
         childStopped = false;
         running = true;
+        checkpointWait = undefined;
+        let handle: CliRunHandle | undefined;
         try {
-          const result = await runCli(args, current.directory);
+          handle = startCli(args, current.directory, checkpoints.length ? {
+            stdin: true,
+            onStderrLine: line => {
+              const event = parseCheckpointWait(line);
+              if (!event) return;
+              const step = flow.steps.find(entry => entry.id === event.stepId);
+              checkpointWait = {
+                ...event,
+                ...(step && step.kind !== 'gap' ? { scope: step.scope as WindowScope } : {}),
+                deadline: Date.now() + event.timeoutMs,
+              };
+            },
+          } : {});
+          if (checkpoints.length) checkpointAnswer = line => handle!.write(line);
+          const result = await handle.done;
           const report = cliReport(result.stdout, result.stderr);
           return send(response, 200, {
             ...(report as object), exitCode: result.code, signal: result.signal, stopped: childStopped,
           });
         } finally {
           running = false;
+          checkpointWait = undefined;
+          checkpointAnswer = undefined;
           if (inputsFile) await unlink(inputsFile).catch(() => {});
         }
+      }
+      // The page polls while /api/run is in flight: a waiting checkpoint is
+      // reported here instead of as a hard --json refusal.
+      if (path === '/api/run/status') {
+        return send(response, 200, { running, checkpoint: checkpointWait });
+      }
+      if (path === '/api/run/checkpoint') {
+        if (data.answer !== 'continue' && data.answer !== 'cancel') {
+          throw new Error('A checkpoint answer is continue or cancel');
+        }
+        if (!running || !checkpointAnswer) {
+          return send(response, 409, { error: 'No checkpoint run is waiting' });
+        }
+        if (!checkpointWait) {
+          return send(response, 409, { error: 'The run is not waiting for a checkpoint' });
+        }
+        if (!checkpointAnswer(`${data.answer}\n`)) {
+          return send(response, 409, { error: 'The replay process closed its input; reload the report' });
+        }
+        checkpointWait = undefined;
+        return send(response, 200, { sent: true, answer: data.answer });
       }
       return send(response, 400, {
         error: 'UNSUPPORTED_FLOW_VERSION',

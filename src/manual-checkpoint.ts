@@ -222,6 +222,75 @@ export function terminalCheckpointChannel(options: {
   };
 }
 
+/** The fixed stderr line the workbench parses while a checkpoint is waiting. */
+export const checkpointWaitMarker = 'CHECKPOINT_WAIT';
+
+export interface CheckpointWaitEvent {
+  stepId: string;
+  triggerStepId: string;
+  timeoutMs: number;
+}
+
+/** Parses one stderr line; anything else is not a checkpoint event. */
+export function parseCheckpointWait(line: string): CheckpointWaitEvent | undefined {
+  const match = /^CHECKPOINT_WAIT (\S+) (\S+) (\d+)$/.exec(line.trim());
+  if (!match) return undefined;
+  const timeoutMs = Number(match[3]);
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) return undefined;
+  return { stepId: match[1], triggerStepId: match[2], timeoutMs };
+}
+
+/**
+ * The machine channel a parent process (the workbench) drives. The announcement
+ * is the fixed stderr marker, so the page knows which step waits and for how
+ * long; the answer is one `continue` or `cancel` line on stdin. The channel
+ * carries no secret and never writes to stdout, leaving the `--json` report
+ * intact.
+ */
+export function eventsCheckpointChannel(options: {
+  input?: NodeJS.ReadableStream;
+  output?: NodeJS.WritableStream;
+} = {}): CheckpointChannel {
+  const input = options.input ?? process.stdin;
+  const output = options.output ?? process.stderr;
+  return {
+    async announce(request) {
+      output.write(`${checkpointWaitMarker} ${request.stepId} ${request.triggerStepId} ${request.timeoutMs}\n`);
+    },
+    confirm(request, signal) {
+      return new Promise<CheckpointAnswer>((resolve, reject) => {
+        const reader = createInterface({ input, terminal: false });
+        let settled = false;
+        const finish = (answer: CheckpointAnswer) => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener('abort', abort);
+          reader.close();
+          resolve(answer);
+        };
+        const abort = () => {
+          if (settled) return;
+          settled = true;
+          reader.close();
+          reject(signal.reason ?? new Error('checkpoint aborted'));
+        };
+        if (signal.aborted) {
+          abort();
+          return;
+        }
+        signal.addEventListener('abort', abort, { once: true });
+        reader.on('line', line => {
+          const token = line.trim().toLowerCase();
+          if (token === 'continue' || token === 'cancel') finish(token);
+        });
+        // A closed stdin has no parent to answer; treat it as a refusal, so the
+        // report ends with MANUAL_CHECKPOINT_CANCELLED instead of hanging.
+        reader.on('close', () => finish('cancel'));
+      });
+    },
+  };
+}
+
 /** The helper bundled next to the CLI, or an explicit override. */
 export function captureHelperPath() {
   return process.env.CUEKEEPER_RECORDER?.trim() ||
