@@ -31,12 +31,30 @@ HAOC-82 · 风险说明 · 契约见 [Shell 步骤设计](shell-steps.md)
 | 入口 | 允许条件 | 说明 |
 | --- | --- | --- |
 | CLI | `--allow-shell --allow-sudo --interactive` | `--interactive` 与 `--json` 互斥（`--dry-run` 预览除外），机器模式不静默降级。 |
+| CLI（Keychain） | `--allow-shell --allow-sudo --non-interactive` | 只从登录钥匙串读取已保存的管理员密码，不弹框；缺凭据时阻塞。 |
 | 工作台 | 启动参数 `--allow-shell --allow-sudo`，且运行确认 `confirm: true` + 一次性计划令牌 | 预览已展示完整命令、目录与权限；令牌绑定会话、flow 摘要与计划。 |
 | 非交互（CI） | `privilegeMode: "sudoers"` | 只走 `sudo -n`，不做任何弹框；未获授权时明确失败。 |
 
-`privilegeMode` 省略时是 `"prompt"`（每次弹框）。`"sudoers"` 需要管理员预装 `NOPASSWD` 策略，用于无人值守；本仓库在 HAOC-76 真机验收通过前把 `sudoers` 执行保持在禁用状态，任何尝试都以 `SHELL_PRIVILEGE_REQUIRED` 明确阻塞，不会回退到弹框。
+`privilegeMode` 省略时是 `"prompt"`（每次弹框）。`"sudoers"` 需要管理员预装 `NOPASSWD` 策略，用于无人值守；本仓库在 HAOC-76 真机验收通过前把 `sudoers` 执行保持在禁用状态，任何尝试都以 `SHELL_PRIVILEGE_REQUIRED` 明确阻塞，不会回退到弹框。`"keychain"` 见下一节。
 
 `sudoers` 模式在预检阶段执行 `sudo -n -l -- <程序> <参数…>`，只检查策略是否允许，不执行命令；未授权时该步骤在启动前就被阻塞。
+
+## Keychain 自动填充（无人值守 root）
+
+`privilegeMode: "keychain"` 或 CLI 的 `--non-interactive` 让 root 步骤从登录钥匙串读取管理员密码，全程不弹密码框。默认仍是每次弹框；Keychain 是显式开启的模式，flow 里写了 `sudoers` 时 `--non-interactive` 不会改写它。
+
+```sh
+cuekeeper sudo set      # 输入一次管理员密码，交给 security 自己的隐藏提示
+cuekeeper sudo status   # 只查元数据，不读取密码
+cuekeeper sudo clear    # 删除钥匙串项
+```
+
+- 保存的是**管理员密码本身**，等价于完整 root 权限。只用于可信、单人使用的机器；不要在多用户共享、远程或不受控的机器上启用。
+- 钥匙串项固定为服务 `com.cuekeeper.sudo`、账号 `$USER`，ACL 只信任 `/usr/bin/security`。`cuekeeper sudo set` 调用 `security add-generic-password -U -s com.cuekeeper.sudo -a "$USER" -T /usr/bin/security -w`：`-w` 放在最后且不带值，由 `security` 自己提示输入，密码不进入 argv、环境变量、文件、报告或日志。读取路径同样经 `security find-generic-password -w`，只把结果写进 sudo 的管道。
+- 修改管理员密码后必须重新执行 `cuekeeper sudo set`（旧密码会被 sudo 拒绝，步骤报 `SHELL_PRIVILEGE_REQUIRED`）；离职、转借或怀疑泄漏时执行 `cuekeeper sudo clear` 并轮换系统密码。
+- 首次读取（或钥匙串被锁定时）可能弹出一次系统 Keychain 授权框，选择「允许」即可；拒绝、取消、钥匙串里没有该项以及任何读取失败都统一报 `SUDO_CREDENTIAL_MISSING`，步骤 `blocked`，**不会**回退成密码框，也不会明文重试。
+- 不要把项同步到 iCloud 钥匙串、其他机器或团队共享；不要把它写进仓库、截图或报告。Keychain 项只存在于本机登录钥匙串。
+- 与 `sudoers` 的取舍：Keychain 配置更省事，但保存的是完整管理员密码，授权范围比一条 `NOPASSWD: /path/to/program` 宽得多。CI、共享主机和长期无人值守优先用 `sudoers`；个人可信工作站且需要手动维护时再用 Keychain。
 
 ## 锁屏、无 GUI 与 SSH
 
@@ -62,6 +80,7 @@ HAOC-82 · 风险说明 · 契约见 [Shell 步骤设计](shell-steps.md)
 | 密码错误 | `blocked`，`SHELL_PRIVILEGE_REQUIRED`；不重试弹框，不运行命令。 |
 | 账号无权使用 `sudo` | `blocked`，`SHELL_PRIVILEGE_REQUIRED`。 |
 | 无法显示对话框 | `blocked`，`SHELL_PRIVILEGE_UNAVAILABLE`。 |
+| Keychain 无凭据 / 读取被拒（`keychain` / `--non-interactive`） | `blocked`，`SUDO_CREDENTIAL_MISSING`；不弹框，不回退明文。 |
 | 命令超时 | `failed`，`SHELL_TIMEOUT`，`execution: "terminated"`，记录进程组回收状态。 |
 | 命令被中断（`SIGINT` / 工作台「停止」） | `failed`，`SHELL_CANCELLED`，随后不再启动任何步骤。 |
 | 命令退出码不符 | `failed`，`SHELL_EXIT`，记录真实退出码。 |
@@ -70,4 +89,4 @@ HAOC-82 · 风险说明 · 契约见 [Shell 步骤设计](shell-steps.md)
 
 ## 本单未验证的部分
 
-离线用例用假 `sudo` 与假 askpass 覆盖成功、取消、错误密码、超时、无 GUI、未授权和命令超时，从不调用真实 `sudo`、不弹系统密码框、不启动 GUI。真机弹框、锁屏 / SSH 行为、`sudoers` 实际授权与 root 进程回收列入 HAOC-76，需单独预约时间窗。
+离线用例用假 `sudo`、假 `security` 与假 askpass 覆盖成功、取消、错误密码、超时、无 GUI、未授权、Keychain 缺失 / 拒绝和命令超时，从不调用真实 `sudo` 或 `security`、不弹系统密码框、不启动 GUI、不读写真实钥匙串。真机弹框、锁屏 / SSH 行为、`sudoers` 实际授权、Keychain ACL 首次授权与 root 进程回收列入 HAOC-76 / HAOC-101 真机验收，需单独预约时间窗。`cuekeeper sudo set` 的真实写入由用户在自己的终端执行一次后确认。

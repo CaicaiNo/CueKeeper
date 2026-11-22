@@ -243,10 +243,11 @@ export function shellDraft(input = {}) {
     if (!argv.length || !argv[0]) throw new Error('填写要执行的程序。');
     if (argv.length > 65) throw new Error('参数最多 65 项。');
     if (argv.some(part => part.length > 4096 || part.includes('\u0000'))) throw new Error('参数过长或包含无效字符。');
-    const privilegeMode = input.privilegeMode === 'sudoers' ? 'sudoers' : 'prompt';
+    const privilegeMode = input.privilegeMode === 'sudoers' ? 'sudoers'
+      : input.privilegeMode === 'keychain' ? 'keychain' : 'prompt';
     return {
       kind: 'shell', argv, privilege: 'root',
-      ...(privilegeMode === 'sudoers' ? { privilegeMode } : {}),
+      ...(privilegeMode !== 'prompt' ? { privilegeMode } : {}),
       ...(cwd ? { cwd } : {}),
       ...(timeoutMs === 30000 ? {} : { timeoutMs }),
       ...(expectedExitCode ? { expectedExitCode } : {}),
@@ -295,7 +296,8 @@ export function shellSummary(action) {
   const privilege = action.privilege === 'sudo'
     ? '需管理员预配置'
     : action.privilege === 'root'
-      ? (action.privilegeMode === 'sudoers' ? 'Root · sudoers 免密' : 'Root · 密码授权')
+      ? (action.privilegeMode === 'sudoers' ? 'Root · sudoers 免密'
+        : action.privilegeMode === 'keychain' ? 'Root · 钥匙串无人值守' : 'Root · 密码授权')
       : '用户态';
   const command = action.shell === true
     ? `/bin/sh -c ${action.command}`

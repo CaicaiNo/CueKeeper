@@ -114,6 +114,8 @@ export interface ShellRunOptions {
   allowSudo: boolean;
   /** Human-in-the-loop consent for password-dialog root steps. */
   interactive?: boolean;
+  /** Resolves prompt-mode root steps to the login keychain instead of a dialog. */
+  nonInteractive?: boolean;
   /** Input flow or test file directory; shell steps resolve cwd from here. */
   baseDir: string;
   captureOutput?: boolean;
@@ -127,7 +129,10 @@ export interface ShellRunOptions {
  * The gate report is produced before any desktop adapter or shell process is
  * created, so a missing permission never has side effects.
  */
-export function blockedShellReport(flow: Flow, planned: PlannedStep[], gate: ShellGate): Report {
+export function blockedShellReport(
+  flow: Flow, planned: PlannedStep[], gate: ShellGate,
+  options: { nonInteractive?: boolean } = {},
+): Report {
   const reason = gate.message ?? (gate.code === 'SHELL_NOT_ALLOWED'
     ? 'Shell steps require --allow-shell'
     : 'Privileged shell steps require --allow-sudo');
@@ -141,7 +146,7 @@ export function blockedShellReport(flow: Flow, planned: PlannedStep[], gate: She
     entries: planned.map(({ id, action }) => {
       const shell = action as ShellInput;
       const shellResult = action.kind === 'shell'
-        ? { shell: { ...shellContext(shell), execution: 'not-run' as const } }
+        ? { shell: { ...shellContext(shell, options), execution: 'not-run' as const } }
         : {};
       if (id !== gate.stepId) {
         return {
@@ -182,8 +187,13 @@ export async function runFlow(
     allowShell: options.shell?.allowShell ?? false,
     allowSudo: options.shell?.allowSudo ?? false,
     interactive: options.shell?.interactive ?? false,
+    nonInteractive: options.shell?.nonInteractive ?? false,
   });
-  if (gate) return blockedShellReport(flow, planned, gate);
+  if (gate) {
+    return blockedShellReport(flow, planned, gate, {
+      nonInteractive: options.shell?.nonInteractive ?? false,
+    });
+  }
   function requireDesktop(): Desktop {
     if (!desktop) throw new Fault('DESKTOP_DEPENDENCY', 'This flow needs the desktop adapter', true);
     return desktop;
@@ -402,7 +412,7 @@ export async function runFlow(
     const atMs = elapsed();
     let outcome: ShellOutcome;
     if (dryRun) {
-      outcome = previewShell(step);
+      outcome = previewShell(step, { nonInteractive: options.shell?.nonInteractive });
     } else {
       try {
         if (!shellTemp) shellTemp = await privateShellDirectory();
@@ -411,6 +421,7 @@ export async function runFlow(
           hostEnv: options.shell?.hostEnv ?? process.env,
           tempDir: shellTemp,
           privilege: options.shell?.privilege,
+          nonInteractive: options.shell?.nonInteractive ?? false,
         });
         if (plan.privilege === 'root' && options.shell?.announceRoot) {
           // Show the exact program, arguments and directory before the dialog.
@@ -430,7 +441,7 @@ export async function runFlow(
           status: privilegeCode ? 'blocked' : 'failed',
           code: error.code,
           message: error.message,
-          shell: { ...shellContext(step), execution: 'not-run' },
+          shell: { ...shellContext(step, { nonInteractive: options.shell?.nonInteractive }), execution: 'not-run' },
         };
       }
     }

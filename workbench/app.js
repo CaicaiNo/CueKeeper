@@ -521,7 +521,7 @@ function importDialog() {
         el('h3', {}, `Shell 定义 ${shell.reachable + shell.definitions} 个`),
         muted(`可执行 ${shell.reachable} 个 · 行为定义内 ${shell.definitions} 个（含尚未调用的行为）`),
         shell.privileged
-          ? muted(`其中 ${shell.privileged} 个是提权步骤，实时运行还需 --allow-sudo；密码授权型 Root 步骤还会在运行确认后弹框。`)
+          ? muted(`其中 ${shell.privileged} 个是提权步骤，实时运行还需 --allow-sudo；密码授权型 Root 步骤还会在运行确认后弹框，钥匙串模式需先执行 cuekeeper sudo set。`)
           : muted('全部是用户态步骤。'),
         muted('保存、校验和离线预览都不会执行；实时运行需要启动参数 --allow-shell。'),
       ]), 0);
@@ -765,7 +765,11 @@ function shellDialog() {
   const timeout = el('input', { type: 'number', min: '1', max: '120000', value: '30000' });
   const expected = el('input', { type: 'number', min: '0', max: '255', value: '0' });
   const privilege = select([['user', '用户态'], ['root', 'Root · 需管理员密码'], ['sudo', '需管理员预配置']]);
-  const rootMode = select([['prompt', '每次弹框输入管理员密码'], ['sudoers', 'sudoers 免密（无人值守）']]);
+  const rootMode = select([
+    ['prompt', '每次弹框输入管理员密码'],
+    ['keychain', '登录钥匙串自动填充（需先 cuekeeper sudo set）'],
+    ['sudoers', 'sudoers 免密（无人值守）'],
+  ]);
   const task = input({ placeholder: '/Library/CueKeeper/privileged/<任务 ID>', maxLength: 4096 });
   const envRows = el('div', { className: 'stack' });
   const envBlock = el('div', { className: 'stack' },
@@ -876,7 +880,8 @@ function planText(step) {
   const privilege = step.privilege === 'sudo'
     ? '需管理员预配置'
     : step.privilege === 'root'
-      ? (step.privilegeMode === 'sudoers' ? 'Root · sudoers 免密' : 'Root · 密码授权')
+      ? (step.privilegeMode === 'sudoers' ? 'Root · sudoers 免密'
+        : step.privilegeMode === 'keychain' ? 'Root · 钥匙串无人值守' : 'Root · 密码授权')
       : '用户态';
   return `${privilege} · ${step.mode} · ${step.timeoutMs} ms · 目录 ${step.cwd}\n${command}`;
 }

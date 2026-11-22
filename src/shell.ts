@@ -29,7 +29,7 @@ export type ShellInput = ShellStep & {
   readonly cwd?: string;
   readonly env?: Record<string, string | { secretEnv: string }>;
   readonly timeoutMs?: number;
-  readonly privilegeMode?: 'prompt' | 'sudoers';
+  readonly privilegeMode?: 'prompt' | 'sudoers' | 'keychain';
 };
 
 export type ShellPrivilege = 'user' | 'sudo' | 'root';
@@ -93,15 +93,27 @@ export function shellPrivilege(step: ShellInput): ShellPrivilege {
 
 /** Root steps default to the interactive password dialog. */
 export function shellPrivilegeMode(step: ShellInput): RootMode {
-  return step.privilegeMode === 'sudoers' ? 'sudoers' : 'prompt';
+  return step.privilegeMode === 'sudoers' ? 'sudoers'
+    : step.privilegeMode === 'keychain' ? 'keychain' : 'prompt';
+}
+
+/**
+ * `--non-interactive` upgrades a prompt-mode root step to the login keychain.
+ * An explicit `sudoers` or `keychain` choice in the flow is never overridden.
+ */
+export function effectiveRootMode(
+  step: ShellInput, options: { nonInteractive?: boolean } = {},
+): RootMode {
+  const mode = shellPrivilegeMode(step);
+  return mode === 'prompt' && options.nonInteractive ? 'keychain' : mode;
 }
 
 /** The `shell` report fields that do not depend on how execution ended. */
-export function shellContext(step: ShellInput) {
+export function shellContext(step: ShellInput, options: { nonInteractive?: boolean } = {}) {
   const privilege = shellPrivilege(step);
   return {
     mode: shellMode(step), privilege,
-    ...(privilege === 'root' ? { privilegeMode: shellPrivilegeMode(step) } : {}),
+    ...(privilege === 'root' ? { privilegeMode: effectiveRootMode(step, options) } : {}),
   };
 }
 
@@ -137,7 +149,7 @@ export function hasShellSecrets(step: ShellInput) {
 /** Gate checked before the desktop adapter is initialized. */
 export function shellGate(
   flow: Flow, planned: { id: string; action: { kind: string } }[],
-  options: { allowShell: boolean; allowSudo: boolean; interactive?: boolean },
+  options: { allowShell: boolean; allowSudo: boolean; interactive?: boolean; nonInteractive?: boolean },
 ): ShellGate | undefined {
   const steps = reachableShells(planned);
   if (steps.length && !options.allowShell) {
@@ -151,12 +163,13 @@ export function shellGate(
         message: 'Privileged shell steps require --allow-sudo',
       };
     }
-    if (privilege === 'root' && shellPrivilegeMode(step.action) === 'prompt' && !options.interactive) {
+    const mode = effectiveRootMode(step.action, { nonInteractive: options.nonInteractive });
+    if (privilege === 'root' && mode === 'prompt' && !options.interactive) {
       // Never fall back to the non-interactive form: a root step either shows
       // the password dialog on purpose or it does not run at all.
       return {
         code: 'SHELL_PRIVILEGE_REQUIRED', stepId: step.id,
-        message: 'Interactive root steps require --interactive',
+        message: 'Interactive root steps require --interactive or --non-interactive',
       };
     }
   }
@@ -180,7 +193,7 @@ function baseEnvironment(tempDir: string, hostEnv: NodeJS.ProcessEnv): NodeJS.Pr
 }
 
 export function describeShellStep(
-  step: ShellInput, context: { baseDir: string },
+  step: ShellInput, context: { baseDir: string; nonInteractive?: boolean },
 ): ShellDescription {
   const mode = shellMode(step);
   const privilege = shellPrivilege(step);
@@ -189,7 +202,9 @@ export function describeShellStep(
   const args = privilege === 'sudo' ? [] : mode === 'shell' ? ['-c', step.command!] : step.argv!.slice(1);
   return {
     id: step.id, mode, privilege, program, args, cwd,
-    ...(privilege === 'root' ? { privilegeMode: shellPrivilegeMode(step) } : {}),
+    ...(privilege === 'root'
+      ? { privilegeMode: effectiveRootMode(step, { nonInteractive: context.nonInteractive }) }
+      : {}),
     envKeys: Object.keys(step.env ?? {}).sort(),
     timeoutMs: step.timeoutMs ?? 30_000,
     expectedExitCode: step.expectedExitCode ?? 0,
@@ -204,6 +219,8 @@ export async function planShellStep(
   step: ShellInput,
   context: {
     baseDir: string; hostEnv: NodeJS.ProcessEnv; tempDir: string; privilege?: PrivilegeRunner;
+    /** `--non-interactive`: prompt-mode root steps resolve to the keychain. */
+    nonInteractive?: boolean;
   },
 ): Promise<ShellPlan> {
   const mode = shellMode(step);
@@ -251,7 +268,7 @@ export async function planShellStep(
     if (textBytes([program, ...args]) > shellInputLimit) {
       throw new ShellFault('SHELL_START_FAILED', 'Shell arguments exceed 64 KiB');
     }
-    const privilegeMode = shellPrivilegeMode(step);
+    const privilegeMode = effectiveRootMode(step, { nonInteractive: context.nonInteractive });
     await runner.preflightRoot({ program, args, cwd, mode: privilegeMode });
     return {
       id: step.id, mode: 'argv', privilege, privilegeMode, program, args, cwd,
@@ -307,8 +324,8 @@ export async function removeShellDirectory(directory: string) {
   await rm(directory, { recursive: true, force: true }).catch(() => undefined);
 }
 
-export function previewShell(step: ShellInput): ShellOutcome {
-  return { status: 'resolved', shell: { ...shellContext(step), execution: 'preview' } };
+export function previewShell(step: ShellInput, options: { nonInteractive?: boolean } = {}): ShellOutcome {
+  return { status: 'resolved', shell: { ...shellContext(step, options), execution: 'preview' } };
 }
 
 class StreamCapture {
@@ -681,6 +698,12 @@ async function runRootStep(plan: ShellPlan, context: ShellRunContext): Promise<S
     };
   }
   switch (result.authentication) {
+    case 'missing':
+      return {
+        status: 'blocked', code: 'SUDO_CREDENTIAL_MISSING',
+        message: 'No administrator credential is stored in the login keychain. Run `cuekeeper sudo set` first.',
+        shell: { ...base, execution: 'not-run' },
+      };
     case 'cancelled':
       return {
         status: 'blocked', code: 'SHELL_PRIVILEGE_CANCELLED',

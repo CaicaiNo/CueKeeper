@@ -528,6 +528,14 @@ test('the shell editor builds closed steps and refuses reserved or mixed input',
     cwd: './fixtures', timeoutMs: 4000,
   });
   assert.equal(shellSummary(sudoers).privilege, 'Root · sudoers 免密');
+  const keychain = shellDraft({
+    privilege: 'root', privilegeMode: 'keychain', argv: ['/usr/bin/whoami'], timeoutMs: '4000',
+  });
+  assert.deepEqual(keychain, {
+    kind: 'shell', argv: ['/usr/bin/whoami'], privilege: 'root', privilegeMode: 'keychain',
+    timeoutMs: 4000,
+  });
+  assert.equal(shellSummary(keychain).privilege, 'Root · 钥匙串无人值守');
 
   const invalid = [
     { argv: [] },
