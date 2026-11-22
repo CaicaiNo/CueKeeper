@@ -396,7 +396,6 @@ test('a v2 file wait is a closed contract that only a wait may use', () => {
   assert.match(published, /"file_exists"/);
 });
 
-test('the workbench loads a v2 timeline by scope and stays read-only', async t => {
 test('the workbench loads a v2 timeline by scope and exposes the v2 editor contract', async t => {
   const root = mkdtempSync(join(tmpdir(), 'cuekeeper-v2-workbench-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

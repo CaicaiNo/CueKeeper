@@ -177,7 +177,9 @@ function isElementRecord(value: unknown): value is Record<string, unknown> {
 
 function scopeApp(scope: Scope): string | undefined {
   if (scope.kind === 'window' || scope.kind === 'app') return scope.app;
-  if (scope.surface === 'app_menu_bar' || scope.surface === 'app_context_menu') return scope.app;
+  if (scope.kind === 'surface' && (scope.surface === 'app_menu_bar' || scope.surface === 'app_context_menu')) {
+    return scope.app;
+  }
   return undefined;
 }
 
