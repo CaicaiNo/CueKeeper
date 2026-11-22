@@ -260,11 +260,19 @@ test('v2 timeline helpers describe steps, scopes, diffs and build EditOp payload
   assert.equal(v2StepLabel(flow.steps[0]), '点击 · button · Go');
   assert.equal(v2StepLabel(flow.steps[1]), '输入参数 query');
   assert.equal(v2StepLabel(flow.steps[2], app => app), '等待 · 窗口属性 · title = Notes');
+  // A target with no name must not borrow the window title as its identity.
+  assert.equal(
+    v2StepLabel({
+      kind: 'click', count: 2,
+      scope: { kind: 'window', app: 'com.apple.finder', windowKey: 'f', windowTitle: 'cuekeeper-demo' },
+      target: { kind: 'element', role: 'AXTextField' },
+    }, app => app),
+    '双击 · AXTextField · 未知目标');
   assert.equal(checkLabel({ kind: 'window_exists', equals: true }), '窗口存在 = 成立');
   assert.equal(checkLabel({
     target: { kind: 'element', role: 'textfield' },
     expect: { property: 'text', equals: 'hello' },
-  }), 'textfield · text = hello');
+  }), 'textfield · 未知目标 · text = hello');
 
   const options = scopeOptions(flow, appId => appId);
   assert.deepEqual(options.map(option => option.key), [

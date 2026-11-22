@@ -301,20 +301,28 @@ test('a click the helper saw on an element keeps that element when the tree read
   for (const event of events) await recording.add(parseCaptureEvent(event));
   const flow = recording.finish();
   assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
+  // The helper reports AX roles; a recorded target uses the snapshot vocabulary
+  // so it can be resolved again against the window tree.
   assert.deepEqual(flow.steps[0].target, {
-    kind: 'element', role: 'AXImage', name: 'Install Test.pkg',
+    kind: 'element', role: 'image', name: 'Install Test.pkg',
   });
   assert.equal(flow.steps[0].count, 2);
   assert.ok(recording.captureWarnings.some(warning => warning.code === 'NATIVE_ELEMENT_FALLBACK'));
   assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
 
-  // An element fallback without a name still records the role alone.
+  // A role without a name identifies nothing: the click keeps its point and
+  // says so, instead of becoming an AXTextField that replay would guess at.
   const anonymous = data.events.map(event => event.kind !== 'click' ? event : {
-    ...event, owner: { ...event.owner, role: 'AXImage' },
+    ...event, owner: { ...event.owner, role: 'AXTextField' },
   });
   const second = new GlobalRecording(readerFor(data, { failWindow: 11 }), { now: () => NOW });
   for (const event of anonymous) await second.add(parseCaptureEvent(event));
-  assert.deepEqual(second.finish().steps[0].target, { kind: 'element', role: 'AXImage' });
+  const unnamed = second.finish();
+  assert.deepEqual(unnamed.steps[0].target, { kind: 'point', point: [420, 300] });
+  assert.equal(unnamed.steps[0].count, 2);
+  assert.ok(second.captureWarnings.some(warning => warning.code === 'UNTARGETED_FILE_CLICK'));
+  assert.equal(second.captureWarnings.some(warning => warning.code === 'NATIVE_ELEMENT_FALLBACK'), false);
+  assert.equal(flowV2Check.Check(unnamed), true);
 });
 
 test('a window tree read that fails once is retried before a fallback is used', async () => {
@@ -344,6 +352,56 @@ test('a click that already missed its budget keeps a point target, not a gap', a
   const flow = recording.finish();
   assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
   assert.equal(flow.steps[0].target.kind, 'point');
+});
+
+test('a Finder file click records the file item, not the unnamed field under it', async () => {
+  const flow = (await recordFixture('finder-folder-file-click')).finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
+  // The pointer hit the row's textfield; the target is the file the row names.
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'row', name: 'manifest.json' });
+  assert.equal(flow.steps[0].count, 2);
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+test('an item label that carries its name in its value still names the click', async () => {
+  const data = fixture('finder-folder-file-click');
+  const row = data.snapshots['11'].tree.children[0].children[0];
+  delete row.name;
+  row.children = [{
+    role: 'statictext', value: 'manifest.json', ref: '@w11:e4',
+    bounds: { x: 40, y: 42, width: 300, height: 20 }, states: [], secure: false, children: [],
+  }];
+  const recording = new GlobalRecording(readerFor(data), { now: () => NOW });
+  for (const event of data.events) await recording.add(parseCaptureEvent(event));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'statictext', name: 'manifest.json' });
+});
+
+test('a Finder click on an item with no name anywhere keeps its point and warns', async () => {
+  const data = fixture('finder-folder-file-click');
+  const outline = data.snapshots['11'].tree.children[0];
+  for (const row of outline.children) delete row.name;
+  const recording = new GlobalRecording(readerFor(data), { now: () => NOW });
+  for (const event of data.events) await recording.add(parseCaptureEvent(event));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps[0].target, { kind: 'point', point: [250, 50] });
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_FILE_CLICK'));
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+test('a tree that cannot name the item falls back to the helper\'s named element evidence', async () => {
+  const data = fixture('finder-folder-file-click');
+  const outline = data.snapshots['11'].tree.children[0];
+  for (const row of outline.children) delete row.name;
+  const events = data.events.map(event => event.kind !== 'click' ? event : {
+    ...event, owner: { ...event.owner, role: 'AXRow', name: 'manifest.json' },
+  });
+  const recording = new GlobalRecording(readerFor(data), { now: () => NOW });
+  for (const event of events) await recording.add(parseCaptureEvent(event));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'row', name: 'manifest.json' });
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'NATIVE_ELEMENT_FALLBACK'));
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_FILE_CLICK'), false);
 });
 
 test('a small list view still records the clicked element rather than a fallback', async () => {
