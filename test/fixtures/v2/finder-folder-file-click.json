@@ -1,0 +1,114 @@
+{
+  "events": [
+    {
+      "kind": "focus",
+      "t": 50,
+      "seen": 1700000000000,
+      "focusGeneration": 1,
+      "secure": false,
+      "owner": {
+        "app": "com.apple.finder",
+        "pid": 100,
+        "processInstance": 1700000000000,
+        "windowNumber": 11,
+        "windowTitle": "cuekeeper-demo"
+      }
+    },
+    {
+      "kind": "click",
+      "t": 100,
+      "seen": 1700000000000,
+      "point": [250, 50],
+      "count": 1,
+      "focusGeneration": 1,
+      "secure": false,
+      "decision": "record",
+      "owner": {
+        "app": "com.apple.finder",
+        "pid": 100,
+        "processInstance": 1700000000000,
+        "windowNumber": 11,
+        "windowTitle": "cuekeeper-demo",
+        "pressable": false
+      }
+    },
+    {
+      "kind": "click",
+      "t": 250,
+      "seen": 1700000000000,
+      "point": [251, 51],
+      "count": 2,
+      "focusGeneration": 1,
+      "secure": false,
+      "decision": "record",
+      "owner": {
+        "app": "com.apple.finder",
+        "pid": 100,
+        "processInstance": 1700000000000,
+        "windowNumber": 11,
+        "windowTitle": "cuekeeper-demo",
+        "pressable": false
+      }
+    }
+  ],
+  "snapshots": {
+    "11": {
+      "windowId": "w-11",
+      "tree": {
+        "role": "window",
+        "name": "cuekeeper-demo",
+        "ref": "@w11:e1",
+        "bounds": { "x": 0, "y": 0, "width": 800, "height": 600 },
+        "states": [],
+        "secure": false,
+        "children": [
+          {
+            "role": "outline",
+            "ref": "@w11:e2",
+            "bounds": { "x": 0, "y": 30, "width": 780, "height": 500 },
+            "states": [],
+            "secure": false,
+            "children": [
+              {
+                "role": "row",
+                "name": "manifest.json",
+                "ref": "@w11:e3",
+                "bounds": { "x": 0, "y": 40, "width": 780, "height": 24 },
+                "states": [],
+                "secure": false,
+                "children": [
+                  {
+                    "role": "textfield",
+                    "ref": "@w11:e4",
+                    "bounds": { "x": 40, "y": 42, "width": 300, "height": 20 },
+                    "states": [],
+                    "secure": false,
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "role": "row",
+                "name": "notes.txt",
+                "ref": "@w11:e5",
+                "bounds": { "x": 0, "y": 64, "width": 780, "height": 24 },
+                "states": [],
+                "secure": false,
+                "children": [
+                  {
+                    "role": "textfield",
+                    "ref": "@w11:e6",
+                    "bounds": { "x": 40, "y": 66, "width": 300, "height": 20 },
+                    "states": [],
+                    "secure": false,
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

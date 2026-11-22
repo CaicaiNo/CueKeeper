@@ -42,6 +42,7 @@ struct RecordingPointerTests {
             }
         }
         let count = cases.count + (try testSequences(emitTrace: emitTrace)) + testHover() + testGlobalClickEvidence()
+            + testPointerIdentity()
         if !emitTrace { print("Recording pointer: \(count)/\(count) passed") }
     }
 
@@ -253,6 +254,34 @@ struct RecordingPointerTests {
         precondition(lag.shouldReport(isKeyDown: true, timestamp: start, now: start + 4_000_000_000))
         precondition(!lag.shouldReport(isKeyDown: true, timestamp: start, now: start + 4_100_000_000))
         return 7
+    }
+
+    /// Finder names the clicked file, not the anonymous field under the
+    /// pointer: a role alone would make a replay hit any look-alike.
+    private static func testPointerIdentity() -> Int {
+        let image = PointerElement(role: "AXImage", name: "manifest.json")
+        precondition(PointerIdentityResolver.resolve(hit: image, ancestors: [])
+            == PointerIdentity(role: "AXImage", name: "manifest.json"))
+
+        // The name lives on the enclosing row, which is what the click means.
+        let field = PointerElement(role: "AXTextField", name: nil)
+        let row = PointerElement(role: "AXRow", name: "manifest.json")
+        let cell = PointerElement(role: "AXCell", name: nil)
+        precondition(PointerIdentityResolver.resolve(hit: field, ancestors: [row, cell])
+            == PointerIdentity(role: "AXRow", name: "manifest.json"))
+
+        // A named static text label names the file it labels.
+        let label = PointerElement(role: "AXStaticText", name: "notes.txt")
+        precondition(PointerIdentityResolver.resolve(hit: label, ancestors: [cell, row])
+            == PointerIdentity(role: "AXStaticText", name: "notes.txt"))
+
+        // A wrapper never becomes the target; an unnamed chain proves no name.
+        let toolbar = PointerElement(role: "AXToolbar", name: "Downloads")
+        let group = PointerElement(role: "AXGroup", name: "列")
+        precondition(PointerIdentityResolver.resolve(hit: field, ancestors: [group, toolbar])
+            == PointerIdentity(role: "AXTextField", name: nil))
+        precondition(PointerIdentityResolver.resolve(hit: PointerElement(role: nil, name: nil), ancestors: []) == nil)
+        return 5
     }
 
     /// Drag sampling, endpoints and duration are asserted directly: a wrong

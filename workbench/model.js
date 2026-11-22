@@ -347,7 +347,10 @@ export function v2TargetLabel(target) {
   if (!target) return '';
   if (target.kind === 'window') return '窗口';
   if (target.kind === 'point') return `坐标 (${target.point?.join(', ')})`;
-  return [target.role, target.name, target.path?.join(' › '),
+  // A role alone is not a target: showing the window title or the bare role
+  // here would claim an identity the recording never proved.
+  const name = typeof target.name === 'string' && target.name.trim() ? target.name : '未知目标';
+  return [target.role, name, target.path?.join(' › '),
     target.index === undefined ? '' : `[${target.index}]`]
     .filter(value => value !== undefined && value !== '').join(' · ');
 }

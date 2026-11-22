@@ -13,7 +13,7 @@ import type { InputSource } from './ime.js';
 import type { ElementLocator } from './contracts.js';
 import { defaultLifecyclePollMs, LifecycleWatcher } from './lifecycle.js';
 import type { LifecycleObservation, LifecycleWatchOptions } from './lifecycle.js';
-import { Fault, flatten, hitTest, object, resolve, toLocator } from './locator.js';
+import { clickIdentity, Fault, flatten, hitTest, object, resolve, toLocator } from './locator.js';
 import type { Located, Point, Snapshot } from './locator.js';
 import type { LifecycleEvent } from './wait-candidates.js';
 
@@ -90,6 +90,16 @@ function nativeLabel(value: unknown) {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   return trimmed && trimmed.length <= 256 ? trimmed : undefined;
+}
+
+/**
+ * The helper reports AX roles ("AXTextField") while the window snapshot names
+ * the same element in lower case ("textfield"). Only the snapshot vocabulary is
+ * re-addressable at replay, so a native fallback target is converted into it.
+ */
+function snapshotRole(role: string) {
+  const stripped = role.startsWith('AX') ? role.slice(2) : role;
+  return /^[A-Za-z][A-Za-z0-9]*$/.test(stripped) ? stripped.toLowerCase() : role;
 }
 
 function clampDelta(value: number) {
@@ -328,10 +338,15 @@ export class GlobalRecording {
         this.enterSecure();
         return;
       }
-      const locator = toLocator(snapshot, hit);
-      target = locator;
-      if (button === 'left' && hit.node.ref && editable.has(hit.node.role)) {
-        this.textAnchor = { at: event.t, scope: scopeKey(scope), locator };
+      // A click names the file or item it landed on, not the anonymous text
+      // field Finder puts under the pointer. When the tree cannot name it, the
+      // helper's own AX evidence is the remaining proof of identity.
+      const identity = clickIdentity(snapshot.tree, hit);
+      target = identity
+        ? toLocator(snapshot, identity)
+        : this.evidenceTarget(event) ?? this.untargetedClick(event);
+      if (button === 'left' && identity?.node === hit.node && hit.node.ref && editable.has(hit.node.role)) {
+        this.textAnchor = { at: event.t, scope: scopeKey(scope), locator: target as ElementLocator };
       }
     } else {
       target = this.nativeTarget(event);
@@ -361,21 +376,44 @@ export class GlobalRecording {
   }
 
   /**
-   * The target a click keeps when its window tree could not be read. The AX
-   * role the helper saw under the pointer is the stronger evidence; without it
-   * the recorded point stays, marked by a warning the workbench shows. Replaying
-   * a point needs physical input and an element target edited in first.
+   * The element target the helper's own AX evidence names. A role alone would
+   * match every look-alike in the window, so only evidence that carries a name
+   * becomes an element; everything else stays a point.
+   */
+  private evidenceTarget(event: Extract<CaptureEvent, { kind: 'click' }>): ClickTarget | undefined {
+    const role = nativeLabel(event.owner?.role);
+    const name = nativeLabel(event.owner?.name);
+    if (!role || !name) return undefined;
+    this.warn('NATIVE_ELEMENT_FALLBACK',
+      'A click was kept from the helper\'s element evidence because the window tree did not name the element');
+    return { kind: 'element', role: snapshotRole(role), name };
+  }
+
+  /**
+   * The target a click keeps when its window tree could not be read. Named
+   * element evidence is the strongest remaining proof; without it the click
+   * keeps its point, marked by a warning the workbench shows.
    */
   private nativeTarget(event: Extract<CaptureEvent, { kind: 'click' }>): ClickTarget {
+    const target = this.evidenceTarget(event);
+    if (target) return target;
     const role = nativeLabel(event.owner?.role);
-    if (role) {
-      const name = nativeLabel(event.owner?.name);
-      this.warn('NATIVE_ELEMENT_FALLBACK',
-        'A click was kept from the helper\'s element evidence because reading its window tree failed');
-      return { kind: 'element', role, ...(name ? { name } : {}) };
-    }
+    if (role) return this.untargetedClick(event);
     this.warn('NATIVE_POINT_FALLBACK',
       'A click was kept at its screen point because reading its window tree failed; edit it into an element before replay');
+    return { kind: 'point', point: event.point };
+  }
+
+  /**
+   * A click with no proven element identity. Keeping the role alone would make
+   * the step click whichever same-role element happens to be there, so the point
+   * stays and the warning says the step still needs a target.
+   */
+  private untargetedClick(event: Extract<CaptureEvent, { kind: 'click' }>): ClickTarget {
+    const file = event.owner?.app === 'com.apple.finder';
+    this.warn(file ? 'UNTARGETED_FILE_CLICK' : 'UNTARGETED_ELEMENT_CLICK', file
+      ? 'A Finder click hit no named file item; it is kept at its screen point and must be edited into a named element before replay'
+      : 'A click hit no named element; it is kept at its screen point and must be edited into a named element before replay');
     return { kind: 'point', point: event.point };
   }
 

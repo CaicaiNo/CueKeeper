@@ -125,6 +125,8 @@ Shell 的完整约束见 [Shell 步骤设计](shell-steps.md) 与 [Root 步骤�
 | `UNSUPPORTED_DRAG_BUTTON` | 适配器直接收到右键拖拽（正常流程在规划期已先拒绝） | 否，直接失败 |
 | `UNTARGETED_POINT` | 固定应用路径的录制里，坐标点击 / 滚动 / 悬停无法绑定到元素 | 是（录制警告） |
 | `UNTARGETED_HOVER` | 固定应用路径的录制里，悬停落点无法绑定到元素 | 是（录制警告） |
+| `UNTARGETED_FILE_CLICK` | 全局录制里 Finder 的点击没命中任何有名字的文件项，改记坐标 | 是（录制警告），回放前需改成有名字的元素 |
+| `UNTARGETED_ELEMENT_CLICK` | 全局录制里点击没命中任何有名字的元素，改记坐标 | 是（录制警告），回放前需改成有名字的元素 |
 | `HOVER_UNRESOLVED` | 悬停的元素目标没有 bounds，无法算出回放坐标 | 否，直接失败 |
 | `CLIPBOARD_UNSUPPORTED_TYPE` | 开启剪贴板录制，但 clipboard 不是纯文本 | 是（录制警告，保留快捷键） |
 | `CLIPBOARD_TOO_LARGE` | 剪贴板文本超过 4000 字符 | 是（录制警告，保留快捷键） |
