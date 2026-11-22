@@ -68,6 +68,7 @@ test('v2 schemas are published as closed objects', () => {
   assert.ok(report.properties.entries.items.properties.textMode);
   assert.ok(report.properties.entries.items.properties.input);
   assert.ok(report.properties.entries.items.properties.checkpoint);
+  assert.ok(report.properties.entries.items.properties.focusAfter);
 });
 
 test('report v2 describes text mode and checkpoints without carrying text', () => {
@@ -309,10 +310,10 @@ test('the v2 canonical hash ignores key order and tracks scope, order and intent
   assert.notEqual(hashFlowV2(parseFlowV2(withIntent)), hashFlowV2(flow));
 });
 
-test('entry points that still need v1 refuse v2 with UNSUPPORTED_FLOW_VERSION', t => {
+test('v2 live replay needs --foreground; batch, snapshots and packing still refuse v2', t => {
   const live = cli(['run', 'examples/global-two-apps.flow.json']);
   assert.equal(live.code, 2);
-  assert.equal(live.error.code, 'UNSUPPORTED_FLOW_VERSION');
+  assert.equal(live.error.code, 'FOREGROUND_REQUIRED');
 
   const batch = cli(['run', 'examples/global-two-apps.flow.json', '--dry-run', '--data', 'rows.json']);
   assert.equal(batch.code, 2);

@@ -197,7 +197,8 @@ node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --selec
 | `record [--app <bundle-id>] [--window <精确标题>] [--out <flow.json>] [--app-path <路径>] [--countdown 3]` | 默认倒计时后录制当前前台窗口，流程写入 `~/.cuekeeper/recordings`；显式参数优先。显示计时 HUD，支持 `--no-indicator`、`--sound` 与显式开启剪贴板文本的 `--clipboard` |
 | `pick --app <bundle-id> --window <精确标题> [--app-path <路径>] [--select <ref>] [--snapshot <snapshot.json>]` | 只读快照，按可交互元素优先列出候选，或输出可写入 flow 的定位器 |
 | `run <flow.json> --dry-run` | 用当前窗口解析定位器；纯 Shell 流程无需快照 |
-| `run <flow-v2.json> --dry-run [--report <report-v2.json>]` | 输出 v2 结构计划，按步骤 scope 标记 `resolved`；不启动、聚焦或输入。v2 实时回放待跨 App 调度器接入 |
+| `run <flow-v2.json> --dry-run [--report <report-v2.json>]` | 输出 v2 结构计划，按步骤 scope 标记 `resolved`；不启动、聚焦或输入 |
+| `run <flow-v2.json> --foreground [--inputs <values.json>] [--headed] [--report <report-v2.json>]` | 跨 App 实时回放：按 scope 启动/激活、绑定窗口、每步确认前台后投递并核对投递状态；`--inputs` 提供 `input` 参数值 |
 | `run <flow.json> --allow-shell [--allow-sudo] [--interactive|--non-interactive] [--capture-shell-output]` | 执行 Shell 步骤；固定任务首版禁用，root 步骤走密码框、sudoers 或登录钥匙串 |
 | `sudo set\|status\|clear [--json]` | 保存 / 查询 / 删除登录钥匙串里的管理员凭据，供 `--non-interactive` 的 root 步骤使用 |
 | `run <flow.json> --headed --report <report.json>` | 允许物理点击，回放并记录逐步结果 |
@@ -209,6 +210,8 @@ node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --selec
 | `serve --config <server.json> --data <dir>` | 启动自建上传服务；列表、下载、查看器接口见[上传服务](docs/server.md) |
 
 v2 flow 顶层没有 `target`，每一步用 `scope` 声明窗口、应用或系统界面；`windowKey` 在 flow 内绑定一个 App，标题变化后仍跟随同一窗口。契约、报告和哈希定义见 `schemas/flow-v2.schema.json` 与 `schemas/report-v2.schema.json`。批量、报告打包和工作台运行仍只支持 v1，遇到 v2 会以 `UNSUPPORTED_FLOW_VERSION` 停止；工作台可以按 scope 分组复盘 v2 时间线。
+
+v2 实时回放需要显式 `--foreground`，因为它会跨 App 抢前台并注入输入。运行时一次只持有一个前台租约（`~/.cuekeeper/run.lock`，可用 `CUEKEEPER_STATE_DIR` 改目录），取消、失败和正常结束都会释放。每步先按 `windowKey` 绑定进程实例与原生窗口号，再确认前台；窗口被移动或改名不影响绑定，同名新窗口不会接管旧 `windowKey`，进程重启、路径错误副本和人工切走分别以 `APP_AMBIGUOUS`、`APP_PATH_INVALID`、`FOCUS_INTERRUPTED` 停在原步骤。
 
 默认在主屏显示边框和 HUD。窗口服务器确认面板后，HUD 显示「录制就绪」，终端在标准错误输出 `INDICATOR_READY`。录制时可切到飞书等其他应用，返回目标窗口后继续，已捕获的动作会保留。`Ctrl+Option+P` 暂停或继续，`Ctrl+Option+X` 停止并保存。可用 `--no-indicator` 关闭边框和 HUD，热键仍可用。
 

@@ -414,6 +414,57 @@
               }
             ]
           },
+          "focusAfter": {
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "window",
+                    "type": "string"
+                  },
+                  "app": {
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*(?:\\.[A-Za-z0-9][A-Za-z0-9-]*)+$",
+                    "type": "string"
+                  },
+                  "windowKey": {
+                    "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+                    "type": "string"
+                  },
+                  "windowTitle": {
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "app",
+                  "windowKey",
+                  "windowTitle"
+                ]
+              },
+              {
+                "additionalProperties": false,
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "app",
+                    "type": "string"
+                  },
+                  "app": {
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*(?:\\.[A-Za-z0-9][A-Za-z0-9-]*)+$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "app"
+                ]
+              }
+            ]
+          },
           "textMode": {
             "anyOf": [
               {

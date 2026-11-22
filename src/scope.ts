@@ -1,0 +1,391 @@
+import { mkdir, open, readFile, unlink, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { AppIdentitySession, parseWindowId } from './app-identity.js';
+import type { WindowScope } from './contracts-v2.js';
+import type { Desktop, WindowInfo } from './desktop.js';
+import { Fault } from './locator.js';
+import type { Snapshot } from './locator.js';
+
+// A v2 step names a scope, not a window title: the resolver binds a window key
+// to one native window number inside one running process and keeps that binding
+// for the whole run. Titles are labels for the first bind only; a new window
+// never takes over an existing key.
+
+/** One window key bound to the running process that owns it. */
+export interface WindowBinding {
+  app: string;
+  windowKey: string;
+  pid: number;
+  /** Opaque instance marker; a restarted process gets a different value. */
+  processInstance: string;
+  windowNumber: number;
+  windowId: string;
+  /** Title recorded in the flow; used only to find the window the first time. */
+  title: string;
+  /** Last title the driver reported for the same window; may have changed. */
+  observedTitle: string;
+  /** Incremented each time this run brings the window to the front. */
+  focusGeneration: number;
+}
+
+export interface AppBinding {
+  app: string;
+  pid: number;
+  processInstance: string;
+}
+
+export interface ScopeResolverOptions {
+  desktop: Desktop;
+  signal: AbortSignal;
+  /** One pinned identity session per bundle ID. */
+  identityFor(app: string): AppIdentitySession;
+  launchTimeoutMs?: number;
+  focusTimeoutMs?: number;
+  wait?(ms: number): Promise<void>;
+}
+
+function titleOf(window: WindowInfo): string {
+  return window.title;
+}
+
+/**
+ * Resolves app and window scopes against a live desktop, proves ownership before
+ * every read or input, and detects a foreground the run did not expect.
+ */
+export class ScopeResolver {
+  private readonly desktop: Desktop;
+  private readonly signal: AbortSignal;
+  private readonly identityFor: (app: string) => AppIdentitySession;
+  private readonly launchTimeoutMs: number;
+  private readonly focusTimeoutMs: number;
+  private readonly wait: (ms: number) => Promise<void>;
+  private readonly windows = new Map<string, WindowBinding>();
+  private readonly processes = new Map<string, AppBinding>();
+  /** Window this run last saw (or left) in front; a different one is a steal. */
+  private expectedForeground: string | undefined;
+
+  constructor(options: ScopeResolverOptions) {
+    this.desktop = options.desktop;
+    this.signal = options.signal;
+    this.identityFor = options.identityFor;
+    this.launchTimeoutMs = options.launchTimeoutMs ?? 15_000;
+    this.focusTimeoutMs = options.focusTimeoutMs ?? 5_000;
+    this.wait = options.wait ?? (ms => sleep(ms, undefined, { signal: options.signal }));
+  }
+
+  get foreground(): string | undefined { return this.expectedForeground; }
+
+  identity(app: string): AppIdentitySession {
+    return this.identityFor(app);
+  }
+
+  /** Launches the pinned copy of an app. Idempotent while it is already running. */
+  async launch(app: string): Promise<AppBinding> {
+    this.signal.throwIfAborted();
+    const instance = await this.identityFor(app).prepare(this.desktop, {
+      launch: true, timeoutMs: this.launchTimeoutMs,
+    });
+    const binding: AppBinding = { app, pid: instance.pid, processInstance: instance.startedAt };
+    this.processes.set(app, binding);
+    return binding;
+  }
+
+  /** Requires the app to be running; never launches and never rebinds. */
+  async requireRunning(app: string): Promise<AppBinding> {
+    this.signal.throwIfAborted();
+    const instance = await this.identityFor(app).prepare(this.desktop, { launch: false, timeoutMs: 0 });
+    const binding: AppBinding = { app, pid: instance.pid, processInstance: instance.startedAt };
+    this.processes.set(app, binding);
+    return binding;
+  }
+
+  /**
+   * Resolves a window scope. The first resolution matches the recorded title
+   * inside the bound process; every later one follows the bound window number,
+   * so a retitled or moved window keeps its key and a same-titled new window
+   * cannot capture it.
+   */
+  async resolveWindow(scope: WindowScope): Promise<WindowBinding> {
+    this.signal.throwIfAborted();
+    const existing = this.windows.get(scope.windowKey);
+    if (existing) return this.refresh(existing);
+    const app = await this.requireRunning(scope.app);
+    const identity = this.identityFor(scope.app);
+    const owned = await identity.ownedWindows(this.desktop);
+    const matches = owned.filter(window => window.title === scope.windowTitle);
+    if (matches.length > 1) {
+      throw new Fault('AMBIGUOUS_TARGET', `More than one window titled "${scope.windowTitle}" belongs to ${scope.app}`);
+    }
+    if (!matches.length) {
+      throw new Fault('WINDOW_NOT_FOUND', `No window titled "${scope.windowTitle}" belongs to ${scope.app}`);
+    }
+    const windowNumber = parseWindowId(matches[0].id);
+    if (windowNumber === undefined) {
+      throw new Fault('WINDOW_CHANGED', 'The driver reported a window ID that is not a native window number');
+    }
+    const binding: WindowBinding = {
+      app: scope.app,
+      windowKey: scope.windowKey,
+      pid: app.pid,
+      processInstance: app.processInstance,
+      windowNumber,
+      windowId: matches[0].id,
+      title: scope.windowTitle,
+      observedTitle: titleOf(matches[0]),
+      focusGeneration: 0,
+    };
+    this.windows.set(scope.windowKey, binding);
+    return binding;
+  }
+
+  /** Re-proves the bound window still exists inside the same process. */
+  private async refresh(binding: WindowBinding): Promise<WindowBinding> {
+    const identity = this.identityFor(binding.app);
+    // The inventory already proves the instance and every window's owner, so a
+    // single read decides whether the bound window is still open.
+    const owned = await identity.ownedWindows(this.desktop);
+    const found = owned.find(window => window.id === binding.windowId);
+    if (!found) {
+      throw new Fault('WINDOW_CHANGED', 'The bound window is no longer open; the run does not rebind to another window');
+    }
+    binding.pid = identity.pid ?? binding.pid;
+    binding.processInstance = identity.processInstance ?? binding.processInstance;
+    binding.observedTitle = titleOf(found);
+    return binding;
+  }
+
+  /** Reads the bound window's tree with owner checks before and after. */
+  async snapshot(binding: WindowBinding, timeoutMs?: number): Promise<Snapshot> {
+    this.signal.throwIfAborted();
+    const identity = this.identityFor(binding.app);
+    await identity.verifyOwnedWindow(binding.windowId);
+    const snapshot = await this.desktop.snapshotWindow(binding.windowId, undefined, timeoutMs);
+    if (snapshot.windowId !== binding.windowId) {
+      throw new Fault('WINDOW_CHANGED', 'The driver read a different window than the bound one');
+    }
+    await identity.verifyOwnedWindow(binding.windowId);
+    return snapshot;
+  }
+
+  /** The window the driver reports in front, without moving focus. */
+  private async observedForeground(): Promise<WindowInfo | undefined> {
+    if (this.desktop.focusedWindow) return this.desktop.focusedWindow();
+    const windows = await this.desktop.listAllWindows();
+    return windows.find(window => window.isFocused === true);
+  }
+
+  /**
+   * Brings the bound window forward only when the run owns the foreground. A
+   * window the run did not leave in front is a user switch, not a hand-off, so
+   * the step stops instead of stealing focus back.
+   */
+  async confirmForeground(binding: WindowBinding): Promise<void> {
+    this.signal.throwIfAborted();
+    const focused = await this.observedForeground();
+    if (this.expectedForeground !== undefined && focused !== undefined &&
+        focused.id !== this.expectedForeground && focused.id !== binding.windowId) {
+      throw new Fault('FOCUS_INTERRUPTED',
+        `Another window (${focused.id}) took the foreground; the run does not take focus back`);
+    }
+    if (focused?.id === binding.windowId) {
+      this.expectedForeground = binding.windowId;
+      return;
+    }
+    await this.focus(binding);
+  }
+
+  /** Focuses a bound window and proves its owner after the driver call. */
+  private async focus(binding: WindowBinding): Promise<void> {
+    const identity = this.identityFor(binding.app);
+    await identity.focusOwnedWindow(this.desktop, binding.windowId, this.focusTimeoutMs);
+    binding.pid = identity.pid ?? binding.pid;
+    binding.processInstance = identity.processInstance ?? binding.processInstance;
+    binding.focusGeneration += 1;
+    this.expectedForeground = binding.windowId;
+  }
+
+  /** Explicitly focuses a declared window after a step. */
+  async focusAfter(scope: WindowScope, timeoutMs = 5_000): Promise<WindowBinding> {
+    // A window opened by the step may take a moment to appear; only wait for
+    // the declared hand-off to become observable, never for a different window.
+    const deadline = performance.now() + timeoutMs;
+    for (;;) {
+      try {
+        const binding = await this.resolveWindow(scope);
+        await this.focus(binding);
+        return binding;
+      } catch (error) {
+        const transient = error instanceof Fault &&
+          ['WINDOW_NOT_FOUND', 'APP_NOT_FOUND', 'WINDOW_CHANGED'].includes(error.code);
+        if (!transient || performance.now() >= deadline) throw error;
+        await this.wait(100);
+      }
+    }
+  }
+
+  /**
+   * After launching or activating an app, its own front window may legitimately
+   * arrive in front of the run. Accept the observed foreground only when it
+   * belongs to that app; anything else stays a focus interruption.
+   */
+  async absorbAppForeground(app: string, timeoutMs = 2_000): Promise<void> {
+    const deadline = performance.now() + timeoutMs;
+    for (;;) {
+      if (await this.foregroundBelongsTo(app)) return;
+      if (performance.now() >= deadline) return;
+      await this.wait(100);
+    }
+  }
+
+  /** A declared app-scope hand-off must actually bring one of its windows forward. */
+  async activateApp(app: string, timeoutMs = 5_000): Promise<AppBinding> {
+    const identity = this.identityFor(app);
+    const instance = await identity.prepare(this.desktop, { launch: false, timeoutMs: 0 });
+    await identity.activate(this.desktop);
+    const binding: AppBinding = { app, pid: instance.pid, processInstance: instance.startedAt };
+    this.processes.set(app, binding);
+    const deadline = performance.now() + timeoutMs;
+    for (;;) {
+      if (await this.foregroundBelongsTo(app)) return binding;
+      if (performance.now() >= deadline) {
+        throw new Fault('FOCUS_INTERRUPTED', `Activating ${app} did not bring one of its windows forward`);
+      }
+      await this.wait(100);
+    }
+  }
+
+  private async foregroundBelongsTo(app: string): Promise<boolean> {
+    const focused = await this.observedForeground();
+    if (!focused) return false;
+    const owned = await this.identityFor(app).ownedWindows(this.desktop);
+    if (!owned.some(window => window.id === focused.id)) return false;
+    this.expectedForeground = focused.id;
+    return true;
+  }
+}
+
+// A live cross-app replay drives the shared foreground. Two of them at once
+// would interleave their launches and focus changes, so a run takes one lease
+// for the whole session and always releases it.
+
+export interface RunLeaseOptions {
+  runId: string;
+  /** State root; defaults to CUEKEEPER_STATE_DIR or ~/.cuekeeper. */
+  directory?: string;
+  ttlMs?: number;
+  pid?: number;
+  now?(): number;
+}
+
+export interface LeaseHolder {
+  runId: string;
+  pid: number;
+  expiresAt: string;
+}
+
+export function defaultStateDirectory(env: NodeJS.ProcessEnv = process.env) {
+  const configured = env.CUEKEEPER_STATE_DIR?.trim();
+  return configured ? configured : join(homedir(), '.cuekeeper');
+}
+
+function alive(pid: number) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+export class RunLease {
+  readonly runId: string;
+  readonly path: string;
+  private readonly pid: number;
+  private readonly ttlMs: number;
+  private readonly now: () => number;
+  private owned = false;
+
+  constructor(options: RunLeaseOptions) {
+    this.runId = options.runId;
+    this.path = join(options.directory ?? defaultStateDirectory(), 'run.lock');
+    this.pid = options.pid ?? process.pid;
+    this.ttlMs = options.ttlMs ?? 30 * 60_000;
+    this.now = options.now ?? (() => Date.now());
+  }
+
+  get held(): boolean { return this.owned; }
+
+  private expiresAt() {
+    return new Date(this.now() + this.ttlMs).toISOString();
+  }
+
+  private async holder(): Promise<LeaseHolder | undefined> {
+    let raw: string;
+    try {
+      raw = await readFile(this.path, 'utf8');
+    } catch {
+      return undefined;
+    }
+    try {
+      const record = JSON.parse(raw) as Partial<LeaseHolder>;
+      if (typeof record.runId !== 'string' || typeof record.pid !== 'number' ||
+          typeof record.expiresAt !== 'string') return undefined;
+      return { runId: record.runId, pid: record.pid, expiresAt: record.expiresAt };
+    } catch {
+      return undefined;
+    }
+  }
+
+  private record() {
+    return JSON.stringify({ runId: this.runId, pid: this.pid, expiresAt: this.expiresAt() });
+  }
+
+  /** Takes the lease or reports the run that still holds it. */
+  async acquire(): Promise<void> {
+    if (this.owned) {
+      await writeFile(this.path, this.record(), { mode: 0o600 });
+      return;
+    }
+    await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const handle = await open(this.path, 'wx', 0o600);
+        try {
+          await handle.writeFile(this.record());
+        } finally {
+          await handle.close();
+        }
+        this.owned = true;
+        return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+          throw new Fault('RUN_LEASE_FAILED', 'Could not create the foreground run lease');
+        }
+        const holder = await this.holder();
+        const stale = !holder || Date.parse(holder.expiresAt) <= this.now() || !alive(holder.pid);
+        if (!stale) {
+          throw new Fault('RUN_BUSY', `Another run (${holder.runId}, pid ${holder.pid}) holds the foreground lease`);
+        }
+        await unlink(this.path).catch(() => {});
+      }
+    }
+    throw new Fault('RUN_BUSY', 'Could not acquire the foreground run lease');
+  }
+
+  /** Extends the lease so a long run never expires under itself. */
+  async refresh(): Promise<void> {
+    if (!this.owned) return;
+    await writeFile(this.path, this.record(), { mode: 0o600 }).catch(() => {});
+  }
+
+  /** Releases only this run's lease. */
+  async release(): Promise<void> {
+    if (!this.owned) return;
+    this.owned = false;
+    const holder = await this.holder();
+    if (holder?.runId === this.runId) await unlink(this.path).catch(() => {});
+  }
+}
+
