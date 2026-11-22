@@ -184,6 +184,7 @@ any failure/cancel → Stop → Release
 | `INTENT_EQUIVALENCE_REJECTED` | 待执行 intent 的类别与适配器、原始区间或可观察效果不符。预检在桌面调用前终止 |
 | `SEMANTIC_PRECONDITION_FAILED` / `SEMANTIC_RESULT_UNVERIFIED` | intent 参数或副作用前提不满足，或执行结果无法验证。报告附回退资格与原始区间 |
 | `CAPTURE_GAP` / `UNSUPPORTED_FLOW_VERSION` | Flow 有待处理的缺口，或当前入口不支持该版本。均在桌面调用前停止 |
+| `ELECTRON_ACCESSIBILITY_REQUIRED` / `ELECTRON_ACCESSIBILITY_UNVERIFIED` | Electron/VS Code 目标的编辑器未开启无障碍：全局录制在进入该 App 前停止并保留 partial（退出码 1），单窗口录制在 helper 启动前拒绝（退出码 2）；只有占位提示才判未开启，Welcome/Settings 等无证据窗口只警告并继续 |
 | `WAIT_TIMEOUT` / `ASSERTION_FALSE` / `ASSERTION_CAPTURE_FAILED` | 等待条件超时、可信的观测结果不匹配、截图目标或安全捕获路径不可用 |
 
 ## 6. 隐私与运行边界

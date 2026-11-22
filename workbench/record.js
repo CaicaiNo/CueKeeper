@@ -97,6 +97,13 @@ function setMessage(text, error = false) {
   message.className = `record-message${error ? ' error' : ''}`;
 }
 
+/** A stop reason plus the flow prefix that was saved before the stop. */
+function errorText(result) {
+  const partialPath = result.partial === true ? (result.flowPath || state.path) : '';
+  return `${result.error.code}：${result.error.message}` +
+    (partialPath ? `（部分录制：${partialPath}）` : '');
+}
+
 async function request(route, method = 'POST', body) {
   const response = await fetch(`/${route}`, {
     method,
@@ -160,6 +167,11 @@ async function poll() {
   }
   const wasRecording = state.recording;
   adopt(status);
+  // After the page reloads onto a partial recording, the last outcome is still
+  // on the server: keep the stop reason (and the saved prefix) visible.
+  if (!status.recording && !wasRecording && status.error) {
+    setMessage(errorText(status), true);
+  }
   if (!status.recording && wasRecording && !state.busy && !state.stopFailed) {
     // The recorder finished on its own (max duration, crash, permission stop).
     // Stopping now is what imports the flow and reports the reason.
@@ -207,7 +219,7 @@ async function finish() {
   state.stopFailed = false;
   adopt(result);
   if (result.error) {
-    setMessage(`${result.error.code}：${result.error.message}`, true);
+    setMessage(errorText(result), true);
   } else if (Array.isArray(result.warnings) && result.warnings.length) {
     const text = result.warnings.map(warning => `${warning.code}：${warning.message}`).join('；');
     setMessage(text, result.partial === true);

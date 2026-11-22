@@ -8,6 +8,10 @@ import type { FlowV2, StepV2, WindowScope } from './contracts-v2.js';
 import { parseCaptureEvent } from './capture-protocol.js';
 import type { CaptureEvent, CaptureGapCode } from './capture-protocol.js';
 import type { Desktop } from './desktop.js';
+import {
+  ElectronAccessibilityGuard, electronAccessibilityCode, electronAccessibilityHint,
+  electronAccessibilityUnverifiedCode,
+} from './electron-accessibility.js';
 import { scopeKey, validateFlowV2 } from './flow-v2.js';
 import type { InputSource } from './ime.js';
 import type { ElementLocator } from './contracts.js';
@@ -899,6 +903,31 @@ export async function recordGlobal(
     window => desktop.snapshotWindow(`w-${window.windowNumber}`, window.windowTitle, 1200),
     { exclude },
   );
+  // Every Electron app/window is classified once, when the recording first
+  // reaches it. A disabled editor stops the session before its first step is
+  // recorded; the steps captured so far stay as a partial flow.
+  const accessibilityGuard = new ElectronAccessibilityGuard({
+    read: window => desktop.snapshotWindow(`w-${window.windowNumber}`, window.windowTitle, 1200),
+  });
+  const accessibilityKinds = new Set(['focus', 'click']);
+  async function checkAccessibility(event: CaptureEvent) {
+    if (!accessibilityKinds.has(event.kind)) return;
+    if (event.secure || event.decision === 'gap') return;
+    const owner = event.owner;
+    if (!owner?.app || !owner.pid || !owner.windowNumber) return;
+    if (exclude.includes(owner.app)) return;
+    const verdict = await accessibilityGuard.inspect({
+      app: owner.app, pid: owner.pid, windowNumber: owner.windowNumber, windowTitle: owner.windowTitle,
+    });
+    if (verdict === 'disabled') {
+      throw new Fault(electronAccessibilityCode, electronAccessibilityHint(owner.app));
+    }
+    if (verdict === 'unverified') {
+      recording.warn(electronAccessibilityUnverifiedCode,
+        'Electron 窗口里既没有编辑器控件，也没有无障碍占位提示（例如欢迎页/设置页），' +
+        '无法确认无障碍模式；该窗口继续录制。');
+    }
+  }
   if (options.inputSource && !options.inputSource.ascii) {
     recording.warn('IME_ACTIVE',
       `录制开始时输入源为「${options.inputSource.name}」，物理按键可能被改写成带分隔符的文本。全局录制只保存参数名，建议切到 ABC/U.S.`);
@@ -974,7 +1003,9 @@ export async function recordGlobal(
         recording.endBursts();
         continue;
       }
-      await recording.add(parseCaptureEvent(data));
+      const event = parseCaptureEvent(data);
+      await checkAccessibility(event);
+      await recording.add(event);
     }
 
     const code = await completion;

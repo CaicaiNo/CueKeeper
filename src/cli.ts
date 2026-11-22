@@ -21,6 +21,7 @@ import {
   readImeLock, readImeRecord, releaseImeLock, removeImeRecord, restoreImeRecord,
 } from './ime.js';
 import { Fault } from './locator.js';
+import { electronAccessibilityCode } from './electron-accessibility.js';
 import type { Snapshot } from './locator.js';
 import { pickCandidates, selectCandidate } from './pick.js';
 import type { PickCandidate } from './pick.js';
@@ -784,6 +785,11 @@ async function main() {
       if (workbench) lines.push(workbench);
       const fault = result.failure ??
         (result.partial ? new Fault('PARTIAL_RECORDING', 'Some input was skipped') : undefined);
+      // JSON mode still puts the recovery steps on stderr; the code travels in
+      // the envelope. Human mode prints the same message through `success`.
+      if (fault?.code === electronAccessibilityCode && machine) {
+        process.stderr.write(`${fault.message}\n`);
+      }
       if (fault && machine) {
         console.log(JSON.stringify({ ok: false, data, error: { code: fault.code, message: fault.message } }));
         process.exitCode = fault.code === 'INTERRUPTED' ? 130 : 1;
@@ -938,6 +944,10 @@ try {
     error instanceof Fault && !error.dependency ? 1 : 2;
   const reason = error instanceof Error ? error.message : 'Unexpected error';
   if (machine) {
+    // The envelope carries the code; the recovery steps stay readable on stderr.
+    if (error instanceof Fault && error.code === electronAccessibilityCode) {
+      process.stderr.write(`${reason}\n`);
+    }
     console.log(JSON.stringify({ ok: false, error: {
       code: signal.aborted ? 'INTERRUPTED' :
         error instanceof UnsupportedFlowVersionError ? error.code :

@@ -85,6 +85,7 @@ test('the record controls start the recorder, surface errors, and reload after t
   const calls = [];
   const reloads = [];
   let mode = 'busy';
+  let stopMode = 'imported';
   globalThis.document = document;
   globalThis.window = { location: { reload: () => reloads.push(true) } };
   globalThis.fetch = async (url, init = {}) => {
@@ -100,6 +101,16 @@ test('the record controls start the recorder, surface errors, and reload after t
       });
     }
     if (url === '/api/record/stop') {
+      if (stopMode === 'electron') {
+        return json(200, {
+          recording: false, exitCode: 1, partial: true, steps: 2, warnings: [],
+          flowPath: '/Users/test/.cuekeeper/recordings/recording-2.flow.json',
+          error: {
+            code: 'ELECTRON_ACCESSIBILITY_REQUIRED',
+            message: 'VS Code 的无障碍编辑器没有开启，录制已停止。\n请用 --force-renderer-accessibility 重启 VS Code',
+          },
+        });
+      }
       return json(200, {
         recording: false, exitCode: 130, partial: true, steps: 2, warnings: [],
         flowPath: '/Users/test/.cuekeeper/recordings/recording-1.flow.json',
@@ -155,5 +166,19 @@ test('the record controls start the recorder, surface errors, and reload after t
   assert.equal(stopButton.hidden, true);
   await new Promise(resolve => setTimeout(resolve, 700));
   assert.deepEqual(reloads, [true]);
+  assert.equal(stopButton.hidden, true);
+
+  // An inaccessible Electron editor stops the recording: the page names the
+  // code, the recovery hint, and the partially saved flow.
+  stopMode = 'electron';
+  await startButton.click();
+  await tick();
+  await stopButton.click();
+  await tick();
+  assert.match(message.textContent, /ELECTRON_ACCESSIBILITY_REQUIRED：/);
+  assert.match(message.textContent, /force-renderer-accessibility/);
+  assert.match(message.textContent,
+    /部分录制：\/Users\/test\/\.cuekeeper\/recordings\/recording-2\.flow\.json/);
+  assert.match(message.className, /error/);
   assert.equal(stopButton.hidden, true);
 });
