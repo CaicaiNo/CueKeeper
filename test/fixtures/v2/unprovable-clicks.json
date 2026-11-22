@@ -1,0 +1,67 @@
+{
+  "description": "Unprovable clicks: an occluded click whose AX owner conflicts, and a first-mouse click on a control in an unfocused window both become CAPTURE_SCOPE_UNVERIFIED gaps. A background click on the unfocused window is proven to only activate it, so it becomes navigation instead of a click.",
+  "snapshots": {
+    "11": {
+      "windowId": "w-11",
+      "tree": {
+        "role": "window", "name": "Downloads", "ref": "@w11:e1",
+        "bounds": { "x": 0, "y": 0, "width": 800, "height": 600 },
+        "states": [], "secure": false, "children": [
+          {
+            "role": "textfield", "name": "Search", "ref": "@w11:e2",
+            "bounds": { "x": 100, "y": 100, "width": 200, "height": 24 },
+            "states": ["focused"], "secure": false, "children": []
+          }
+        ]
+      }
+    },
+    "21": {
+      "windowId": "w-21",
+      "tree": {
+        "role": "window", "name": "Notes 1", "ref": "@w21:e1",
+        "bounds": { "x": 1000, "y": 0, "width": 800, "height": 600 },
+        "states": [], "secure": false, "children": [
+          {
+            "role": "button", "name": "Save", "ref": "@w21:e2",
+            "bounds": { "x": 1100, "y": 300, "width": 80, "height": 24 },
+            "states": [], "secure": false, "children": []
+          }
+        ]
+      }
+    }
+  },
+  "events": [
+    {
+      "kind": "click", "t": 100, "seen": 1700000000000, "point": [150, 110],
+      "focusGeneration": 1, "secure": false, "decision": "record",
+      "owner": {
+        "app": "com.apple.finder", "pid": 100, "processInstance": 1700000000000,
+        "windowNumber": 11, "windowTitle": "Downloads", "role": "AXTextField", "pressable": true
+      }
+    },
+    {
+      "kind": "click", "t": 200, "seen": 1700000000000, "point": [1150, 310],
+      "focusGeneration": 1, "secure": false, "decision": "gap", "gapCode": "CAPTURE_SCOPE_UNVERIFIED",
+      "owner": {
+        "app": "com.apple.TextEdit", "pid": 200, "processInstance": 1700000000000,
+        "windowNumber": 21, "windowTitle": "Notes 1", "role": "AXButton", "pressable": true
+      }
+    },
+    {
+      "kind": "click", "t": 300, "seen": 1700000000000, "point": [1050, 500],
+      "focusGeneration": 2, "secure": false, "decision": "navigate",
+      "owner": {
+        "app": "com.apple.TextEdit", "pid": 200, "processInstance": 1700000000000,
+        "windowNumber": 21, "windowTitle": "Notes 1", "role": "AXWindow", "pressable": false
+      }
+    },
+    {
+      "kind": "click", "t": 400, "seen": 1700000000000, "point": [1100, 300],
+      "focusGeneration": 3, "secure": false, "decision": "gap", "gapCode": "CAPTURE_SCOPE_UNVERIFIED",
+      "owner": {
+        "app": "com.apple.TextEdit", "pid": 200, "processInstance": 1700000000000,
+        "windowNumber": 21, "windowTitle": "Notes 1", "role": "AXButton", "pressable": true
+      }
+    }
+  ]
+}

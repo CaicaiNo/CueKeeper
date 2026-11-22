@@ -1,0 +1,46 @@
+{
+  "description": "A drag that starts in one TextEdit window and ends in another is outside P2 support: it leaves a CROSS_SCOPE_GESTURE gap and no drag step.",
+  "snapshots": {
+    "21": {
+      "windowId": "w-21",
+      "tree": {
+        "role": "window", "name": "Notes 1", "ref": "@w21:e1",
+        "bounds": { "x": 1000, "y": 0, "width": 800, "height": 600 },
+        "states": [], "secure": false, "children": [
+          {
+            "role": "textfield", "name": "Body", "ref": "@w21:e2",
+            "bounds": { "x": 1100, "y": 100, "width": 400, "height": 24 },
+            "states": ["focused"], "secure": false, "children": []
+          }
+        ]
+      }
+    },
+    "22": {
+      "windowId": "w-22",
+      "tree": {
+        "role": "window", "name": "Notes 2", "ref": "@w22:e1",
+        "bounds": { "x": 1000, "y": 700, "width": 800, "height": 600 },
+        "states": [], "secure": false, "children": [
+          {
+            "role": "textfield", "name": "Body", "ref": "@w22:e2",
+            "bounds": { "x": 1100, "y": 800, "width": 400, "height": 24 },
+            "states": ["focused"], "secure": false, "children": []
+          }
+        ]
+      }
+    }
+  },
+  "events": [
+    {
+      "kind": "drag", "t": 100, "seen": 1700000000000,
+      "from": [1300, 112], "to": [1300, 812], "path": [[1300, 400], [1300, 700]],
+      "durationMs": 420, "button": "left", "modifiers": [],
+      "fromWindowNumber": 21, "toWindowNumber": 22,
+      "focusGeneration": 1, "secure": false, "decision": "record",
+      "owner": {
+        "app": "com.apple.TextEdit", "pid": 200, "processInstance": 1700000000000,
+        "windowNumber": 21, "windowTitle": "Notes 1"
+      }
+    }
+  ]
+}

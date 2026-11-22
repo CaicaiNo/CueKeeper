@@ -1,0 +1,66 @@
+{
+  "description": "A password field is focused: the helper reports secure events without content. The whole interval collapses to one SECURE_INPUT gap, and recording resumes after it ends.",
+  "snapshots": {
+    "11": {
+      "windowId": "w-11",
+      "tree": {
+        "role": "window", "name": "Downloads", "ref": "@w11:e1",
+        "bounds": { "x": 0, "y": 0, "width": 800, "height": 600 },
+        "states": [], "secure": false, "children": [
+          {
+            "role": "textfield", "name": "Search", "ref": "@w11:e2",
+            "bounds": { "x": 100, "y": 100, "width": 200, "height": 24 },
+            "states": ["focused"], "secure": false, "children": []
+          },
+          {
+            "role": "securetextfield", "name": "Password", "ref": "@w11:e3",
+            "bounds": { "x": 100, "y": 200, "width": 200, "height": 24 },
+            "states": [], "secure": true, "children": []
+          }
+        ]
+      }
+    }
+  },
+  "events": [
+    {
+      "kind": "text", "t": 100, "seen": 1700000000000, "chars": "ok",
+      "focusGeneration": 1, "secure": false,
+      "owner": {
+        "app": "com.apple.finder", "pid": 100, "processInstance": 1700000000000,
+        "windowNumber": 11, "windowTitle": "Downloads"
+      }
+    },
+    {
+      "kind": "text", "t": 200, "seen": 1700000000000,
+      "focusGeneration": 2, "secure": true,
+      "owner": {
+        "app": "com.apple.finder", "pid": 100, "processInstance": 1700000000000,
+        "windowNumber": 11, "windowTitle": "Downloads"
+      }
+    },
+    {
+      "kind": "text", "t": 260, "seen": 1700000000000,
+      "focusGeneration": 2, "secure": true,
+      "owner": {
+        "app": "com.apple.finder", "pid": 100, "processInstance": 1700000000000,
+        "windowNumber": 11, "windowTitle": "Downloads"
+      }
+    },
+    {
+      "kind": "key", "t": 320, "seen": 1700000000000, "key": "return", "modifiers": [],
+      "focusGeneration": 2, "secure": true,
+      "owner": {
+        "app": "com.apple.finder", "pid": 100, "processInstance": 1700000000000,
+        "windowNumber": 11, "windowTitle": "Downloads"
+      }
+    },
+    {
+      "kind": "text", "t": 400, "seen": 1700000000000, "chars": "done",
+      "focusGeneration": 3, "secure": false,
+      "owner": {
+        "app": "com.apple.finder", "pid": 100, "processInstance": 1700000000000,
+        "windowNumber": 11, "windowTitle": "Downloads"
+      }
+    }
+  ]
+}

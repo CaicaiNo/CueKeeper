@@ -25,6 +25,7 @@ import type { Snapshot } from './locator.js';
 import { pickCandidates, selectCandidate } from './pick.js';
 import type { PickCandidate } from './pick.js';
 import { record } from './record.js';
+import { recordGlobal } from './record-v2.js';
 import { displayRecordingsDirectory, recordingFileName, recordingsDirectory, writeRecording } from './recording-output.js';
 import { packReport } from './report.js';
 import { blockedShellReport, runFlow } from './run.js';
@@ -56,6 +57,7 @@ const help = `Cuekeeper ${buildInfo().version}
   cuekeeper pick --app <bundle-id> --window <title> [--app-path <path>] [--select <ref>] [--snapshot <snapshot.json>] [--json]
   cuekeeper record [--seconds 25] [--countdown 3] [--no-indicator] [--sound] [--clipboard] [--trace-clicks] [--json]
   cuekeeper record --app <bundle-id> [--window <title>] [--out <flow.json>] [--app-path <path>] [--seconds 25] [--countdown 0] [--json]
+  cuekeeper record --global [--max-seconds 600] [--exclude <bundle-id,...>] [--out <flow-v2.json>] [--countdown 3] [--json]
   cuekeeper report pack <report.json> --flow <flow.json> --out <report.zip> [--assets <dir>] [--no-upload] [--queue <dir>] [--config <upload.json>] [--json]
   cuekeeper report upload [--queue <dir>] [--retry-paused] [--json]
   cuekeeper serve --config <server.json> --data <dir> [--host <host>] [--port <port>] [--json]
@@ -79,6 +81,20 @@ const common = {
   help: { type: 'boolean' },
 } as const;
 
+/** Global capture has no target window; its countdown says what is recorded. */
+async function globalCountdown(seconds: number, signal: AbortSignal) {
+  if (seconds === 0) {
+    process.stderr.write('立即开始全局录制。\n');
+    return;
+  }
+  process.stderr.write(`${seconds} 秒后开始全局录制：将记录跨 App 和窗口的操作。\n`);
+  for (let left = seconds; left > 0; left--) {
+    signal.throwIfAborted();
+    process.stderr.write(`${left}…\n`);
+    await new Promise<void>(resolve => setTimeout(resolve, 1000));
+  }
+}
+
 function requireString(value: string | undefined, flag: string): string {
   if (!value) throw new Error(`Missing ${flag}`);
   return value;
@@ -86,6 +102,20 @@ function requireString(value: string | undefined, flag: string): string {
 
 function checkPositionals(positionals: string[], count: number) {
   if (positionals.length !== count) throw new Error('Unexpected positional arguments. See --help');
+}
+
+/** `--exclude` takes comma-separated bundle IDs, each one exact. */
+function parseExclude(value: string | undefined): string[] {
+  if (value === undefined) return [];
+  const entries = value.split(',').map(entry => entry.trim()).filter(Boolean);
+  if (!entries.length) throw new Error('--exclude needs at least one bundle ID');
+  if (entries.length > 32) throw new Error('--exclude accepts at most 32 bundle IDs');
+  for (const entry of entries) {
+    if (!/^[a-z\d][a-z\d.-]*\.[a-z\d][a-z\d-]*$/i.test(entry)) {
+      throw new Error(`--exclude entry ${entry} is not a bundle ID such as com.apple.TextEdit`);
+    }
+  }
+  return [...new Set(entries)];
 }
 
 function macOnly() {
@@ -594,14 +624,13 @@ async function main() {
       args: rest, options: {
         ...common, app: { type: 'string' }, window: { type: 'string' },
         'app-path': { type: 'string' },
-        out: { type: 'string' }, seconds: { type: 'string', default: '25' },
+        out: { type: 'string' }, seconds: { type: 'string' },
         countdown: { type: 'string', default: '3' },
+        global: { type: 'boolean' }, exclude: { type: 'string' }, 'max-seconds': { type: 'string' },
         'no-indicator': { type: 'boolean' }, sound: { type: 'boolean' },
         'trace-clicks': { type: 'boolean' }, clipboard: { type: 'boolean' },
       },
     });
-    const seconds = Number(values.seconds);
-    if (!Number.isInteger(seconds) || seconds < 1 || seconds > 90) throw new Error('--seconds must be an integer from 1 to 90');
     const countdownSeconds = Number(values.countdown);
     if (!Number.isInteger(countdownSeconds) || countdownSeconds < 0 || countdownSeconds > 60) {
       throw new Error('--countdown must be an integer from 0 to 60');
@@ -609,6 +638,74 @@ async function main() {
     const app = values.app;
     const window = values.window;
     const appPath = values['app-path'];
+
+    if (values.global) {
+      // Global capture is an explicit opt-in with its own flow contract. It has
+      // no target window, so any target flag is a contradiction, not a default.
+      if (app !== undefined || window !== undefined || appPath !== undefined) {
+        throw new Error('--global cannot be combined with --app, --window or --app-path');
+      }
+      if (values.seconds !== undefined) throw new Error('--global takes --max-seconds, not --seconds');
+      if (values['trace-clicks']) throw new Error('--trace-clicks is a single-window recording option');
+      if (values.clipboard) {
+        throw new Error('--clipboard is not available with --global: text is stored as an input parameter');
+      }
+      const maxSeconds = Number(values['max-seconds'] ?? '600');
+      if (!Number.isInteger(maxSeconds) || maxSeconds < 1 || maxSeconds > 3600) {
+        throw new Error('--max-seconds must be an integer from 1 to 3600');
+      }
+      const exclude = parseExclude(values.exclude);
+      macOnly();
+      const preflight = preflightFault(await capturePreflight());
+      if (preflight) throw preflight;
+      const output = values.out ? resolve(values.out) : undefined;
+      const directory = output ? undefined : recordingsDirectory();
+      if (output) {
+        await ensureNew(output);
+      } else {
+        await mkdir(directory!, { recursive: true, mode: 0o700 });
+      }
+      const inputSource = await detectInputSource(nativeImeBackend());
+      if (inputSource && !inputSource.ascii) {
+        console.error(`输入法处于中文状态：当前输入源「${inputSource.name}」。全局录制只保存参数名，` +
+          '物理按键仍可能被输入法改写，建议切到 ABC/U.S. 后重新录制。');
+      }
+      await globalCountdown(countdownSeconds, signal);
+      const options = {
+        seconds: maxSeconds, indicator: !values['no-indicator'], sound: values.sound ?? false,
+        exclude, ...(inputSource ? { inputSource } : {}),
+      };
+      const result = await withDesktop({ headed: false, signal },
+        desktop => recordGlobal(desktop, options, signal));
+      const contents = JSON.stringify(result.flow, null, 2) + '\n';
+      const saved = output ?? await writeRecording(directory!, recordingFileName(new Date()), contents);
+      if (output) await writeNew(output, contents);
+      const workbench = output ? undefined : `cuekeeper workbench ${displayRecordingsDirectory()}`;
+      const data = {
+        version: 2, output: saved, flowId: result.flow.id, actions: result.flow.steps.length,
+        ...(workbench ? { workbench } : {}),
+        ...(inputSource ? { inputSource } : {}),
+        ...(result.partial ? { partial: true } : {}),
+        ...(result.warnings.length ? { warnings: result.warnings } : {}),
+      };
+      const lines = [`Saved ${result.flow.steps.length} global steps to ${saved}${result.partial ? ' (partial flow)' : ''}`];
+      if (workbench) lines.push(workbench);
+      const fault = result.failure ??
+        (result.partial ? new Fault('PARTIAL_RECORDING', 'Some input was skipped') : undefined);
+      if (fault && machine) {
+        console.log(JSON.stringify({ ok: false, data, error: { code: fault.code, message: fault.message } }));
+        process.exitCode = fault.code === 'INTERRUPTED' ? 130 : 1;
+      } else {
+        const details = [...lines, ...result.warnings.map(warning => warning.message), ...(fault ? [fault.message] : [])];
+        success(data, details.join('\n'), !fault ? 0 : fault.code === 'INTERRUPTED' ? 130 : 1);
+      }
+      return;
+    }
+
+    const seconds = Number(values.seconds ?? '25');
+    if (!Number.isInteger(seconds) || seconds < 1 || seconds > 90) throw new Error('--seconds must be an integer from 1 to 90');
+    if (values.exclude !== undefined) throw new Error('--exclude needs --global');
+    if (values['max-seconds'] !== undefined) throw new Error('--max-seconds needs --global');
     if (window !== undefined && !window) throw new Error('--window must be a nonempty window title');
     if (window && !app) throw new Error('--window needs --app with a bundle ID. Omit both to record the current front window');
     if (appPath && !app) throw new Error('--app-path needs --app with a bundle ID');
