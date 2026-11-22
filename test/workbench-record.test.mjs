@@ -18,6 +18,7 @@ const args = process.argv.slice(2);
 const out = args[args.indexOf('--out') + 1];
 const marker = process.env.CUEKEEPER_RECORD_MARKER;
 const argvLog = process.env.CUEKEEPER_RECORD_ARGV;
+const envLog = process.env.CUEKEEPER_RECORD_ENV;
 const mode = process.env.CUEKEEPER_RECORD_STUB ?? 'signal';
 const flow = {
   version: 2, id: 'global-stub', name: 'stub 全局录制',
@@ -55,6 +56,9 @@ if (mode === 'crash') {
   process.exitCode = 1;
 } else {
   if (argvLog) await appendFile(argvLog, JSON.stringify(args) + '\\n');
+  if (envLog) await appendFile(envLog, JSON.stringify({
+    workRoot: process.env.CUEKEEPER_WORKDIR, tmpdir: process.env.TMPDIR,
+  }) + '\\n');
 }
 `;
 
@@ -67,16 +71,18 @@ async function waitFor(predicate, timeoutMs = 5000) {
   return false;
 }
 
-async function fixture(t, { stopTimeoutMs = 5000 } = {}) {
-  const root = await mkdtemp(join(tmpdir(), 'cuekeeper-workbench-record-'));
+async function fixture(t, { stopTimeoutMs = 5000, base } = {}) {
+  const root = await mkdtemp(join(base ?? tmpdir(), 'cuekeeper-workbench-record-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const cli = join(root, 'stub-cli.mjs');
   await writeFile(cli, stub);
   const recordings = join(root, 'recordings');
   const marker = join(root, 'signal.txt');
   const argvLog = join(root, 'argv.log');
+  const envLog = join(root, 'env.log');
   process.env.CUEKEEPER_RECORD_MARKER = marker;
   process.env.CUEKEEPER_RECORD_ARGV = argvLog;
+  process.env.CUEKEEPER_RECORD_ENV = envLog;
   const cancellation = new AbortController();
   const { url, closed } = await startWorkbench({
     port: 0, allowLive: false, library: join(root, 'library'),
@@ -88,6 +94,7 @@ async function fixture(t, { stopTimeoutMs = 5000 } = {}) {
     await closed;
     delete process.env.CUEKEEPER_RECORD_MARKER;
     delete process.env.CUEKEEPER_RECORD_ARGV;
+    delete process.env.CUEKEEPER_RECORD_ENV;
     delete process.env.CUEKEEPER_RECORD_STUB;
   });
   const post = async (route, payload = {}, status = 200) => {
@@ -111,13 +118,17 @@ async function fixture(t, { stopTimeoutMs = 5000 } = {}) {
     const text = await readFile(argvLog, 'utf8').catch(() => '');
     return text.split('\n').filter(Boolean).map(line => JSON.parse(line));
   };
+  const environments = async () => {
+    const text = await readFile(envLog, 'utf8').catch(() => '');
+    return text.split('\n').filter(Boolean).map(line => JSON.parse(line));
+  };
   // The stub only answers SIGINT once it has announced itself; waiting for the
   // announcement keeps the test about stop semantics, not process start-up.
   const started = async nth => {
     assert.ok(await waitFor(async () => (await runs()).length >= nth), `run ${nth} did not start`);
     return (await runs())[nth - 1];
   };
-  return { root, url, recordings, marker, post, status, runs, started };
+  return { root, url, recordings, marker, post, status, runs, environments, started };
 }
 
 test('starting a web recording spawns the global CLI once and stopping imports its flow', async t => {
@@ -176,6 +187,31 @@ test('starting a web recording spawns the global CLI once and stopping imports i
   assert.equal(secondStop.recording, false);
   assert.equal(secondStop.steps, 2);
   assert.ok((await stat(first.flowPath)).isFile());
+});
+
+test('the recorder child gets the workbench work root, not the inherited TMPDIR', async t => {
+  // The reported failure: a workbench started from a finished task's shell
+  // inherits a TMPDIR that no longer exists.
+  const home = await mkdtemp(join(tmpdir(), 'cuekeeper-workbench-home-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const gone = join(home, 'deleted', 'tmp');
+  const previous = { HOME: process.env.HOME, TMPDIR: process.env.TMPDIR };
+  process.env.HOME = home;
+  process.env.TMPDIR = gone;
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  const { post, started, environments } = await fixture(t, { base: home });
+  const workRoot = join(home, '.cuekeeper', 'tmp');
+  await post('record/start', { mode: 'global', countdown: 0 });
+  await started(1);
+  assert.ok(await waitFor(async () => (await environments()).length >= 1), 'the stub did not report its environment');
+  assert.deepEqual((await environments())[0], { workRoot, tmpdir: gone });
+  assert.ok((await stat(workRoot)).isDirectory(), 'the durable root exists before the child runs');
+  await post('record/stop');
 });
 
 test('a recording that ignores the stop is killed and reported without a flow', async t => {

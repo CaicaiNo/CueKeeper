@@ -191,6 +191,9 @@ async function begin() {
       mode: 'global', countdown: Number.isFinite(seconds) ? seconds : 3,
     });
     adopt(status);
+    // A recorder that fails during start-up answers with its own fault instead
+    // of a running status; that reason must reach the page, not just the log.
+    if (status.error) setMessage(errorText(status), true);
   } catch (error) {
     setMessage(error.message, true);
     state.busy = false;

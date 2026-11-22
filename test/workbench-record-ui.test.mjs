@@ -95,6 +95,17 @@ test('the record controls start the recorder, surface errors, and reload after t
     }
     if (url === '/api/record/start') {
       if (mode === 'busy') return json(400, { error: 'A recording is already in progress' });
+      if (mode === 'workdir') {
+        return json(200, {
+          recording: false, elapsedMs: 0, warnings: [],
+          error: {
+            code: 'WORKDIR_UNAVAILABLE',
+            message: '无法为录制或回放准备临时工作目录，任务没有开始。' +
+              '已尝试：/Users/test/.cuekeeper/tmp（EACCES: permission denied）；/tmp（EROFS: read-only）。' +
+              '请确认该目录存在且可写，或用 CUEKEEPER_WORKDIR 指定一个可写目录后重试。',
+          },
+        });
+      }
       return json(200, {
         recording: true, flowPath: '/Users/test/.cuekeeper/recordings/recording-1.flow.json',
         startedAt: new Date().toISOString(), elapsedMs: 0, countdownMs: 3000, warnings: [],
@@ -180,5 +191,18 @@ test('the record controls start the recorder, surface errors, and reload after t
   assert.match(message.textContent,
     /部分录制：\/Users\/test\/\.cuekeeper\/recordings\/recording-2\.flow\.json/);
   assert.match(message.className, /error/);
+  assert.equal(stopButton.hidden, true);
+
+  // A recorder that cannot start answers with that reason: the page names the
+  // failed step, the paths it tried, and how to fix it.
+  mode = 'workdir';
+  await startButton.click();
+  await tick();
+  assert.match(message.textContent, /^WORKDIR_UNAVAILABLE：/);
+  assert.match(message.textContent, /无法为录制或回放准备临时工作目录/);
+  assert.match(message.textContent, /\/Users\/test\/\.cuekeeper\/tmp/);
+  assert.match(message.textContent, /CUEKEEPER_WORKDIR/);
+  assert.match(message.className, /error/);
+  assert.equal(startButton.disabled, false);
   assert.equal(stopButton.hidden, true);
 });

@@ -1,11 +1,11 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Fault, contains, object, parseSnapshot } from './locator.js';
 import type { Node, Point, Snapshot } from './locator.js';
 import type { Delivery, Ensure, Target } from './contracts.js';
+import { createDesktopWorkdir } from './workdir.js';
 
 export interface WindowInfo {
   id: string;
@@ -197,10 +197,12 @@ function commandRunner(env: NodeJS.ProcessEnv, signal: AbortSignal) {
 }
 
 export async function withDesktop<T>(
-  options: { headed: boolean; signal: AbortSignal },
+  options: { headed: boolean; signal: AbortSignal; workRoot?: string },
   work: (desktop: Desktop) => Promise<T>,
 ): Promise<T> {
-  const state = await mkdtemp(join(tmpdir(), 'cuekeeper-'));
+  // A durable root, not the inherited TMPDIR: that directory can be deleted
+  // while the process is still running, which made every run fail on mkdtemp.
+  const state = (await createDesktopWorkdir(options.workRoot)).directory;
   try {
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('AGENT_DESKTOP_') && !key.startsWith('CUEKEEPER_SECRET_')));
     env.AGENT_DESKTOP_HOME = state;

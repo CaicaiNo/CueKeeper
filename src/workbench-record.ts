@@ -3,6 +3,7 @@ import type { ChildProcess } from 'node:child_process';
 import { lstat, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { recordingFileName, recordingsDirectory } from './recording-output.js';
+import { workdirEnv } from './workdir.js';
 
 /** Only the CLI's final `--json` line is parsed; nothing here is logged. */
 const stdoutLimit = 64 * 1024;
@@ -64,6 +65,8 @@ export interface RecordControllerOptions {
   recordings?: string;
   /** How long a stop waits for the CLI to exit before it is killed. */
   stopTimeoutMs?: number;
+  /** Durable root for the recorder's per-run desktop state. */
+  workRoot?: string;
   /** True while the workbench is running a test. */
   busy?: () => boolean;
 }
@@ -244,7 +247,10 @@ export function createRecordController(options: RecordControllerOptions) {
     if (maxSeconds !== undefined) args.push('--max-seconds', String(maxSeconds));
     if (exclude.length) args.push('--exclude', exclude.join(','));
 
-    const child = spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'], env: process.env });
+    // The recorder inherits this process's environment, including a TMPDIR
+    // that may already be gone; give it the durable root explicitly.
+    const env = options.workRoot ? { ...process.env, [workdirEnv]: options.workRoot } : process.env;
+    const child = spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'], env });
     const recording: Recording = {
       child, flowPath, startedAt: Date.now(), countdownMs: countdown * 1000,
       output: '', stopping: false,

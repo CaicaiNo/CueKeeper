@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
-import { lstat, mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listApps } from './app-catalog.js';
@@ -36,6 +36,7 @@ import { pickWindowCandidates } from './workbench-pick.js';
 import type { WindowPickResult } from './workbench-pick.js';
 import { confirmWaitCandidate } from './wait-candidates.js';
 import type { WaitCandidate } from './wait-candidates.js';
+import { createDesktopWorkdir, prepareWorkdir, workdirEnv, workdirRoot } from './workdir.js';
 
 const staticFiles = new Map(workbenchAssets.map(asset => [asset.path, [asset.file, asset.type] as const]));
 
@@ -214,11 +215,19 @@ export async function startWorkbench(options: {
   const allowLive = options.allowLive && process.platform === 'darwin';
   const allowShell = options.allowShell ?? false;
   const allowSudo = options.allowSudo ?? false;
+  // Create the durable work root before the first recording, so a workbench
+  // started from a shell whose TMPDIR is already gone still has somewhere to
+  // put per-run desktop state.
+  const workRoot = workdirRoot();
+  const workdirFailure = await prepareWorkdir(workRoot);
+  if (workdirFailure) {
+    console.error(`无法准备临时目录 ${workRoot}（${workdirFailure}）；录制会自动回退到系统临时目录。`);
+  }
   const tokens = new Map<string, ConfirmationToken>();
   const cliPath = options.cliPath ?? fileURLToPath(new URL('./cli.js', import.meta.url));
   // A pick reads one window snapshot; it never focuses, captures or types.
   const pickWindow = options.pickWindow ?? ((scope: WindowScope, signal: AbortSignal) =>
-    withDesktop({ headed: false, signal }, desktop => pickWindowCandidates(desktop, scope)));
+    withDesktop({ headed: false, signal, workRoot }, desktop => pickWindowCandidates(desktop, scope)));
   let running = false;
   let currentRun: AbortController | undefined;
   let currentChild: ChildProcess | undefined;
@@ -232,6 +241,7 @@ export async function startWorkbench(options: {
     cli: options.record?.cli ?? fileURLToPath(new URL('./cli.js', import.meta.url)),
     recordings: options.record?.recordings,
     stopTimeoutMs: options.record?.stopTimeoutMs,
+    workRoot,
     busy: () => running,
   });
 
@@ -282,7 +292,10 @@ export async function startWorkbench(options: {
     let child: ChildProcess | undefined;
     const done = new Promise<CliRunResult>((resolveRun, rejectRun) => {
       child = spawn(process.execPath, [cliPath, ...args], {
-        cwd, stdio: [options.stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'], env: process.env,
+        cwd, stdio: [options.stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+        // The replay child holds no durable root of its own; hand it ours so
+        // its desktop state never depends on the inherited TMPDIR.
+        env: { ...process.env, [workdirEnv]: workRoot },
       });
       currentChild = child;
       let stdout = '';
@@ -610,10 +623,13 @@ export async function startWorkbench(options: {
         // wait on stderr and reads one answer line from stdin.
         if (checkpoints.length) args.push('--checkpoint-events');
         let inputsFile: string | undefined;
+        let inputsDir: string | undefined;
         if (inputs) {
           // Values stay out of the flow: they travel to the CLI as a private,
-          // short-lived file and are removed once the replay exits.
-          inputsFile = join(tmpdir(), `cuekeeper-workbench-inputs-${randomUUID()}.json`);
+          // short-lived file and are removed once the replay exits. The file
+          // sits in the durable work root, never in the inherited TMPDIR.
+          inputsDir = (await createDesktopWorkdir(workRoot)).directory;
+          inputsFile = join(inputsDir, 'inputs.json');
           await writeFile(inputsFile, `${JSON.stringify(inputs)}\n`, { mode: 0o600 });
           args.push('--inputs', inputsFile);
         }
@@ -645,7 +661,7 @@ export async function startWorkbench(options: {
           running = false;
           checkpointWait = undefined;
           checkpointAnswer = undefined;
-          if (inputsFile) await unlink(inputsFile).catch(() => {});
+          if (inputsDir) await rm(inputsDir, { recursive: true, force: true });
         }
       }
       // The page polls while /api/run is in flight: a waiting checkpoint is
@@ -802,7 +818,7 @@ export async function startWorkbench(options: {
             ? { fixtureAppPath: fixtureAppPath(current.snapshot)! } : {}),
         })
         : await (needsDesktop
-          ? withDesktop({ headed: true, signal },
+          ? withDesktop({ headed: true, signal, workRoot },
             desktop => runFlow(flow, desktop, { dryRun, signal, secretTexts, baselineDir, shell }))
           : runFlow(flow, undefined, { dryRun, signal, secretTexts, baselineDir, shell }));
       return send(response, 200, { ...report, stopped: currentRun.signal.aborted });
