@@ -399,3 +399,33 @@ test('apply covers update, move, insert and assert in one contract', async t => 
     },
   });
 });
+
+test('a recorded point click loads as a step and can be edited into an element', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'cuekeeper-workbench-edit-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, 'flow.json');
+  const recorded = {
+    version: 2,
+    id: 'finder-package-click',
+    name: 'Finder package click',
+    steps: [{
+      id: 'open-pkg', kind: 'click', count: 2,
+      scope: { kind: 'window', app: 'com.apple.finder', windowKey: 'finder', windowTitle: 'Downloads' },
+      target: { kind: 'point', point: [420, 300] },
+    }],
+  };
+  await writeFile(path, JSON.stringify(recorded));
+
+  const editor = await loadEditableFlow(path);
+  assert.deepEqual(step(editor, 'open-pkg').target, { kind: 'point', point: [420, 300] });
+  assert.equal(step(editor, 'open-pkg').count, 2);
+
+  // The fallback target is editable: naming the element keeps the click intact.
+  editor.setTarget('open-pkg', { kind: 'element', role: 'AXImage', name: 'Install Test.pkg' });
+  assert.deepEqual(step(editor, 'open-pkg').target, {
+    kind: 'element', role: 'AXImage', name: 'Install Test.pkg',
+  });
+  assert.equal(step(editor, 'open-pkg').count, 2);
+  assert.equal(flowV2Check.Check(editor.flow), true);
+  validateFlowV2(editor.flow);
+});

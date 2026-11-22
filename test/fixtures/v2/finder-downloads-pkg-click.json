@@ -1,0 +1,78 @@
+{
+  "events": [
+    {
+      "kind": "focus",
+      "t": 50,
+      "seen": 1700000000000,
+      "focusGeneration": 1,
+      "secure": false,
+      "owner": {
+        "app": "com.apple.finder",
+        "pid": 100,
+        "processInstance": 1700000000000,
+        "windowNumber": 11,
+        "windowTitle": "Downloads"
+      }
+    },
+    {
+      "kind": "click",
+      "t": 100,
+      "seen": 1700000000000,
+      "point": [420, 300],
+      "count": 1,
+      "focusGeneration": 1,
+      "secure": false,
+      "decision": "record",
+      "owner": {
+        "app": "com.apple.finder",
+        "pid": 100,
+        "processInstance": 1700000000000,
+        "windowNumber": 11,
+        "windowTitle": "Downloads",
+        "pressable": false
+      }
+    },
+    {
+      "kind": "click",
+      "t": 250,
+      "seen": 1700000000000,
+      "point": [421, 301],
+      "count": 2,
+      "focusGeneration": 1,
+      "secure": false,
+      "decision": "record",
+      "owner": {
+        "app": "com.apple.finder",
+        "pid": 100,
+        "processInstance": 1700000000000,
+        "windowNumber": 11,
+        "windowTitle": "Downloads",
+        "pressable": false
+      }
+    }
+  ],
+  "snapshots": {
+    "11": {
+      "windowId": "w-11",
+      "tree": {
+        "role": "window",
+        "name": "Downloads",
+        "ref": "@w11:e1",
+        "bounds": { "x": 0, "y": 0, "width": 800, "height": 600 },
+        "states": [],
+        "secure": false,
+        "children": [
+          {
+            "role": "image",
+            "name": "Install Test.pkg",
+            "ref": "@w11:e2",
+            "bounds": { "x": 380, "y": 280, "width": 80, "height": 70 },
+            "states": [],
+            "secure": false,
+            "children": []
+          }
+        ]
+      }
+    }
+  }
+}

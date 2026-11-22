@@ -136,6 +136,15 @@ function fakeWorld(options = {}) {
       state.calls.push(['click', ref]);
       return delivered('click');
     },
+    async clickPoint(_snapshot, _target, point, { count = 1 } = {}) {
+      // The real driver refuses physical coordinate input without --headed,
+      // before it posts any event.
+      if (!options.headed) {
+        throw new Fault('HEADED_REQUIRED', 'Physical coordinate input requires --headed');
+      }
+      state.calls.push(['clickPoint', point, count]);
+      return delivered('click');
+    },
     async type(ref, text) {
       state.calls.push(['type', ref, text]);
       state.hooks.beforeType?.(state);
@@ -831,4 +840,54 @@ test('an unplanned secure input stops an automatic step before it types', async 
   assert.equal(report.status, 'blocked');
   assert.equal(entry(report, 'type-note').code, 'SECURE_INPUT');
   assert.deepEqual(callsOf(world.world, 'type'), []);
+});
+
+// A recorded click whose window tree could not name its element keeps only a
+// point. It must stay a step that can be replayed as physical input.
+const finderApp = 'com.apple.finder';
+const finderPath = '/System/Library/CoreServices/Finder.app';
+const finderScope = { kind: 'window', app: finderApp, windowKey: 'finder', windowTitle: 'Finder' };
+
+function pointClickFlow(point = [200, 200]) {
+  return parseFlowV2({
+    version: 2,
+    id: 'finder-point-click',
+    name: 'Finder package click',
+    appPaths: { [finderApp]: finderPath },
+    steps: [{
+      id: 'open-pkg', kind: 'click', scope: finderScope,
+      target: { kind: 'point', point }, count: 2,
+    }],
+  });
+}
+
+function finderWorld(t, extra = {}) {
+  return harness(t, {
+    apps: { [finderApp]: [{ pid: 700, startedAt: '700.1', bundleId: finderApp, bundlePath: finderPath }] },
+    focused: 'w-99',
+    readBundleId: { [finderPath]: finderApp },
+    ...extra,
+  });
+}
+
+test('a recorded point click replays as physical input only when headed', async t => {
+  const plain = finderWorld(t);
+  const refused = await plain.run(pointClickFlow());
+  assert.equal(entry(refused, 'open-pkg').status, 'failed');
+  assert.equal(entry(refused, 'open-pkg').code, 'HEADED_REQUIRED');
+  assert.deepEqual(callsOf(plain.world, 'clickPoint'), []);
+
+  const headed = finderWorld(t, { headed: true });
+  const report = await headed.run(pointClickFlow());
+  assert.equal(report.status, 'passed');
+  // The double click keeps its count and its recorded point.
+  assert.deepEqual(callsOf(headed.world, 'clickPoint'), [['clickPoint', [200, 200], 2]]);
+});
+
+test('a recorded point outside the bound window is refused instead of clicked', async t => {
+  const world = finderWorld(t, { headed: true });
+  const report = await world.run(pointClickFlow([2000, 2000]));
+  assert.equal(entry(report, 'open-pkg').status, 'blocked');
+  assert.equal(entry(report, 'open-pkg').code, 'UNSAFE_POINT');
+  assert.deepEqual(callsOf(world.world, 'clickPoint'), []);
 });
