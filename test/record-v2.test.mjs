@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { parseCaptureEvent } from '../dist/capture-protocol.js';
 import { flowV2Check } from '../dist/contracts-v2.js';
 import { parseFlowV2 } from '../dist/flow-v2.js';
+import { resolve } from '../dist/locator.js';
 import { GlobalRecording } from '../dist/record-v2.js';
 import { loadSession } from '../dist/workbench-session.js';
 
@@ -532,6 +533,43 @@ test('a container click is retargeted from the text event focus evidence, with n
   assert.deepEqual(flow.steps[1].target, flow.steps[0].target);
   assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
   assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_RETARGETED_TO_TEXT'));
+});
+
+// VS Code's editor is an AXTextArea. The helper spells the AX role, while the
+// window snapshot and the replay locator use the bare role, so the recorded
+// target has to be written in the snapshot's spelling to resolve at replay.
+test('an AXTextArea focus evidence records the snapshot role and resolves at replay', async () => {
+  const area = { role: 'AXTextArea', name: 'manifest.json', editable: true, bounds: [300, 120, 900, 660] };
+  let reads = 0;
+  const recording = vscodeRecording(async () => {
+    reads += 1;
+    throw new Error('focus evidence must be enough');
+  });
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 100, {
+    point: EDITOR_POINT, decision: 'record', owner: { ...VSCODE_OWNER, role: 'AXGroup' },
+  })));
+  for (const [t, chars] of [[200, 'a'], [240, 'b'], [280, 'c']]) {
+    await recording.add(parseCaptureEvent(vscodeEvent('text', t, { chars, focus: area })));
+  }
+
+  const flow = recording.finish();
+  assert.equal(reads, 0);
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'type']);
+  const expected = { kind: 'element', role: 'textarea', name: 'manifest.json' };
+  assert.deepEqual(flow.steps[0].target, expected);
+  assert.deepEqual(flow.steps[1].target, expected);
+  // The point proven by those chars: the recorded target finds the text area in
+  // a snapshot of the same window, so replay never falls back to a coordinate.
+  const snapshot = {
+    windowId: 'w-33',
+    tree: {
+      role: 'window', name: 'manifest.json — saio_副本', states: [], secure: false, children: [{
+        role: 'textarea', name: 'manifest.json', ref: '@vscode:e4', bounds: EDITOR,
+        states: ['focused'], secure: false, children: [],
+      }],
+    },
+  };
+  assert.equal(resolve(snapshot, flow.steps[1].target).node.role, 'textarea');
 });
 
 test('a click that carries focus evidence binds the field at click time, with no read', async () => {
