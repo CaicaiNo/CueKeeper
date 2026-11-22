@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { captureActionCheck, flowSchema } from './contracts.js';
-import type { Action, Flow, Locator, Target } from './contracts.js';
+import type { Action, ElementLocator, Flow, Locator, Target } from './contracts.js';
 import { AppIdentitySession, IdentityFault } from './app-identity.js';
 import type { ClipboardRead, Desktop } from './desktop.js';
 import { parseFlow } from './flow.js';
@@ -25,6 +25,12 @@ type TimedEvent = RawEvent & { seen: number };
 type Recorded = { event: RawEvent; snapshot: Snapshot };
 
 const textGapMs = 1500;
+// Safari moves the caret into a field before its accessibility "focused" flag
+// lands. A click on an editable control may stand in for focus for this long.
+const clickTextFallbackMs = 5000;
+// One delayed re-read costs little and covers the focus flag that arrives just
+// after the first printable key.
+const textFocusRetryMs = 80;
 // Wheel ticks arrive in bursts; merging them keeps one gesture as one step.
 const scrollGapMs = 350;
 const multiClickGapMs = 1500;
@@ -126,17 +132,68 @@ function dragLocator(snapshot: Snapshot, point: Point, hit: Located | undefined)
   return toLocator(snapshot, hit);
 }
 
+function pause(ms: number) {
+  return new Promise<void>(resolve => setTimeout(resolve, ms));
+}
+
 export class Recording {
   private steps: Action[] = [];
   private text?: {
-    at: number; target: Extract<Locator, { kind: 'element' }>; value: string; ref: string; ime?: boolean;
+    at: number; target: ElementLocator; value: string; ime?: boolean;
   };
   private scroll?: { at: number; startedAt: number; target: Locator; deltaX: number; deltaY: number };
   private lastClick?: { at: number; point: Point; index: number; button: 'left' | 'right' };
+  private textAnchor?: { at: number; locator: ElementLocator };
 
-  constructor(private target: Target, private options: { requireElementLocator?: boolean } = {}) {}
+  constructor(
+    private target: Target,
+    private options: { requireElementLocator?: boolean; clickTextFallback?: boolean } = {},
+  ) {}
 
   private nextId() { return `step-${this.steps.length + 1}`; }
+
+  /**
+   * Picks the editable control a printable event belongs to.
+   *
+   * Focus is the normal evidence. Safari updates the accessibility focus flag
+   * only after the caret already sits in the field, so a recent click on an
+   * editable control is accepted as a fallback once that control's own value
+   * shows the typed text. Secure or non-editable controls never qualify.
+   */
+  private textField(
+    snapshot: Snapshot, focused: Located[], event: Extract<RawEvent, { kind: 'text' }>,
+  ): { field: Located; locator: ElementLocator } | undefined {
+    const [single] = focused;
+    if (focused.length === 1 && single.node.ref && editable.has(single.node.role)) {
+      return { field: single, locator: toLocator(snapshot, single) };
+    }
+    if (!this.options.clickTextFallback) return undefined;
+    // A burst already under way keeps its control even if this snapshot was
+    // taken after the focus flag disappeared again.
+    if (this.text) {
+      try {
+        const field = resolve(snapshot, this.text.target);
+        if (field.node.ref && !field.node.secure && editable.has(field.node.role)) {
+          return { field, locator: this.text.target };
+        }
+      } catch {
+        // The control is gone; this text has no target.
+      }
+      return undefined;
+    }
+    const anchor = this.textAnchor;
+    if (!anchor || event.t - anchor.at > clickTextFallbackMs) return undefined;
+    try {
+      const field = resolve(snapshot, anchor.locator);
+      if (!field.node.ref || field.node.secure || !editable.has(field.node.role)) return undefined;
+      // The first character has to be visible in the control itself; a stale
+      // click alone must not bind text to a field that received nothing.
+      if (!(field.node.value ?? field.node.text ?? '').includes(event.chars)) return undefined;
+      return { field, locator: anchor.locator };
+    } catch {
+      return undefined;
+    }
+  }
 
   endTextBurst() {
     if (!this.text) return;
@@ -170,6 +227,7 @@ export class Recording {
       this.endTextBurst();
       this.endScrollBurst();
       this.lastClick = undefined;
+      this.textAnchor = undefined;
       if (!contains(snapshot.tree.bounds, event.point)) {
         throw new Fault('OUTSIDE_WINDOW', 'Hover fell outside the requested window');
       }
@@ -189,6 +247,7 @@ export class Recording {
       this.endTextBurst();
       this.endScrollBurst();
       this.lastClick = undefined;
+      this.textAnchor = undefined;
       if (event.modifiers.length) return 'DRAG_MODIFIERS_SKIPPED';
       if (!contains(snapshot.tree.bounds, event.from)) return 'DRAG_OUTSIDE_WINDOW';
       const fromHit = hitTest(snapshot, event.from);
@@ -213,6 +272,7 @@ export class Recording {
     if (event.kind === 'click') {
       this.endTextBurst();
       this.endScrollBurst();
+      this.textAnchor = undefined;
       if (!contains(snapshot.tree.bounds, event.point)) {
         throw new Fault('OUTSIDE_WINDOW', 'Click fell outside the requested window');
       }
@@ -222,6 +282,11 @@ export class Recording {
       if (!hit && this.options.requireElementLocator) return 'UNTARGETED_POINT';
       const target: Locator = hit ? toLocator(snapshot, hit) : { kind: 'point', point: event.point };
       const button = event.button ?? 'left';
+      // A left click on an editable control can own the text that follows even
+      // when Safari has not reported it as focused yet.
+      if (hit && button === 'left' && hit.node.ref && !hit.node.secure && editable.has(hit.node.role)) {
+        this.textAnchor = { at: event.t, locator: toLocator(snapshot, hit) };
+      }
       const count = Math.max(1, Math.min(3, event.count ?? 1));
       // macOS reports each click of a multi-click gesture separately: the first
       // as clickState 1, then 2 and 3. Upgrade the recorded step instead of
@@ -248,6 +313,7 @@ export class Recording {
 
     if (event.kind === 'scroll') {
       this.endTextBurst();
+      this.textAnchor = undefined;
       if (!contains(snapshot.tree.bounds, event.point)) {
         throw new Fault('OUTSIDE_WINDOW', 'Scroll fell outside the requested window');
       }
@@ -269,6 +335,7 @@ export class Recording {
     if (event.kind === 'key') {
       this.endTextBurst();
       this.endScrollBurst();
+      this.textAnchor = undefined;
       const intent = pasteIntent(event, clipboard);
       if (intent && 'text' in intent) {
         if (focused.some(entry => entry.node.secure)) {
@@ -296,12 +363,12 @@ export class Recording {
     if (focused.some(entry => entry.node.secure)) {
       throw new Fault('SECURE_INPUT', 'Recording encountered a protected control');
     }
-    const [field] = focused;
-    if (focused.length !== 1 || !field.node.ref || !editable.has(field.node.role)) {
+    const owned = this.textField(snapshot, focused, event);
+    if (!owned) {
       throw new Fault('UNSAFE_TEXT_TARGET', 'Printable input needs one focused, non-secure text control');
     }
-    const locator = toLocator(snapshot, field);
-    if (this.text && (this.text.ref !== field.node.ref || event.t - this.text.at > textGapMs ||
+    const { locator } = owned;
+    if (this.text && (locatorKey(this.text.target) !== locatorKey(locator) || event.t - this.text.at > textGapMs ||
         this.text.value.length + event.chars.length > 4000)) {
       this.endTextBurst();
     }
@@ -309,10 +376,11 @@ export class Recording {
     resolve(snapshot, locator);
     if (!this.text) {
       validateAction({ id: this.nextId(), kind: 'type', target: locator, text: event.chars });
-      this.text = { at: event.t, target: locator, value: '', ref: field.node.ref };
+      this.text = { at: event.t, target: locator, value: '' };
     }
     this.text.value += event.chars;
     this.text.at = event.t;
+    this.textAnchor = { at: event.t, locator };
     if (event.ime) this.text.ime = true;
     return event.ime ? 'IME_COMPOSITION_UNSUPPORTED' : undefined;
   }
@@ -481,7 +549,12 @@ export async function record(
   }, 5000);
   let sessionTimeout: NodeJS.Timeout | undefined;
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
-  const recording = new Recording(recordedTarget, { requireElementLocator: Boolean(target.appPath) });
+  const recording = new Recording(recordedTarget, {
+    requireElementLocator: Boolean(target.appPath),
+    // Safari reports the caret before it reports focus; a click on an editable
+    // control may stand in for the missing focus flag.
+    clickTextFallback: true,
+  });
   const warnings = new Map<string, CaptureWarning>();
 
   let ready = false;
@@ -507,6 +580,15 @@ export async function record(
   }
   function trace(row: Record<string, unknown>) {
     process.stderr.write(`CLICK_TRACE ${JSON.stringify(row)}\n`);
+  }
+  async function readSnapshot(pinWindow?: string) {
+    const captured = bound
+      ? await identity.readWindow(desktop, target, { timeoutMs: 1200, preferredWindowId: initial.windowId })
+      : await desktop.snapshot(target, 1200, pinWindow);
+    if (captured.windowId !== initial.windowId) {
+      throw new Fault('WINDOW_CHANGED', 'Capture switched away from the initial window');
+    }
+    return captured;
   }
 
   try {
@@ -566,12 +648,7 @@ export async function record(
         dragSnapshot = undefined;
         dragUnverified = true;
         try {
-          dragSnapshot = bound
-            ? await identity.readWindow(desktop, target, { timeoutMs: 1200, preferredWindowId: initial.windowId })
-            : await desktop.snapshot(target, 1200, initial.windowId);
-          if (dragSnapshot.windowId !== initial.windowId) {
-            throw new Fault('WINDOW_CHANGED', 'Capture switched away from the initial window');
-          }
+          dragSnapshot = await readSnapshot(initial.windowId);
           dragUnverified = false;
         } catch (error) {
           dragSnapshot = undefined;
@@ -617,23 +694,44 @@ export async function record(
         }
         const pinWindow = event.kind === 'click' || event.kind === 'scroll' || event.kind === 'hover'
           ? initial.windowId : undefined;
-        const captured = bound
-          ? await identity.readWindow(desktop, target, { timeoutMs: 1200, preferredWindowId: initial.windowId })
-          : await desktop.snapshot(target, 1200, pinWindow);
-        if (captured.windowId !== initial.windowId) {
-          throw new Fault('WINDOW_CHANGED', 'Capture switched away from the initial window');
-        }
-        let clipboardRead: ClipboardRead | undefined;
-        if (options.clipboard && event.kind === 'key' && isPasteChord(event)) {
+        let captured = await readSnapshot(pinWindow);
+        let retriedText = false;
+        let skipped: string | undefined;
+        for (;;) {
           try {
-            clipboardRead = await desktop.readClipboard();
-          } catch {
-            // The shortcut is still recordable; content just stays unpinned.
-            warn('CLIPBOARD_READ_FAILED',
-              'The clipboard could not be read, so the paste was recorded as the shortcut only');
+            let clipboardRead: ClipboardRead | undefined;
+            if (options.clipboard && event.kind === 'key' && isPasteChord(event)) {
+              try {
+                clipboardRead = await desktop.readClipboard();
+              } catch {
+                // The shortcut is still recordable; content just stays unpinned.
+                warn('CLIPBOARD_READ_FAILED',
+                  'The clipboard could not be read, so the paste was recorded as the shortcut only');
+              }
+            }
+            skipped = recording.add({ event, snapshot: captured }, clipboardRead);
+            break;
+          } catch (error) {
+            // Safari can deliver printable keys before its accessibility focus
+            // flag lands. Re-read once after a short pause before dropping the
+            // text: the fresh tree may name the focused field, or the clicked
+            // field's value may already show what was typed.
+            if (!retriedText && event.kind === 'text' && error instanceof Fault &&
+                error.code === 'UNSAFE_TEXT_TARGET') {
+              retriedText = true;
+              await pause(textFocusRetryMs);
+              signal.throwIfAborted();
+              try {
+                captured = await readSnapshot();
+              } catch (readError) {
+                if (fatalCaptureError(readError)) throw readError;
+                throw error;
+              }
+              continue;
+            }
+            throw error;
           }
         }
-        const skipped = recording.add({ event, snapshot: captured }, clipboardRead);
         if (skipped) {
           warn(skipped, pointerWarningMessages.get(skipped) ?? `Some input was skipped: ${skipped}`);
           if (traceId) trace({ stage: 'flow', id: traceId, decision: 'filtered', reason: skipped });

@@ -62,7 +62,7 @@
 
 | 操作 | 录制 | 回放 | 离线测试 | 真机状态 | 错误码 |
 | --- | --- | --- | --- | --- | --- |
-| ASCII 文本输入 | 支持。按焦点可编辑控件与 1.5 s 时间间隔合并为 `type` | 支持。驱动 `type <ref> --stdin`，文本不进 argv；headed 回放带 `--headed`，无头回放不带 | `test/cuekeeper.test.mjs`（录制 click/type/key）、`test/type-headed.test.mjs`（headed/无头参数、错误码保留） | 未验证 → HAOC-76/87 | `UNSAFE_TEXT_TARGET`（录制：无焦点或保护控件）、`SECURE_INPUT`（录制）、`UNSAFE_TARGET`（回放：安全控件或无 ref） |
+| ASCII 文本输入 | 支持。按焦点可编辑控件与 1.5 s 时间间隔合并为 `type`；焦点标记迟滞时（Safari 常见）先延迟约 80 ms 重读一次快照，仍无焦点则回退到最近一次左键点击的可编辑控件，并要求该控件自身的 value/text 已包含本次输入的字符 | 支持。驱动 `type <ref> --stdin`，文本不进 argv；headed 回放带 `--headed`，无头回放不带 | `test/cuekeeper.test.mjs`（录制 click/type/key）、`test/safari-text.test.mjs`（延迟重读、点击回退、值证据、保护/非可编辑拒绝）、`test/type-headed.test.mjs`（headed/无头参数、错误码保留） | 未验证 → HAOC-76/87 | `UNSAFE_TEXT_TARGET`（录制：无焦点且无可用点击回退、或控件值未显示输入）、`SECURE_INPUT`（录制）、`UNSAFE_TARGET`（回放：安全控件或无 ref） |
 | Chrome / Chromium 页面文本输入 | 支持。与 ASCII 文本输入同一路径，目标为 web 可编辑控件 | 支持，走 headed 注入：`run --headed` 下驱动 `type <ref> --headed --stdin`，文本仍只走 stdin。无头路径对 web 内容会失败，不静默降级 | `test/type-headed.test.mjs`（headed 参数、stdin 文本、`ACTION_FAILED` 原样保留且不重试） | 修复前真机已复现 `ACTION_FAILED`；修复后的真机回放待 HAOC-87（需先获批时间窗） | `ACTION_FAILED`（web 内容走无头注入时）、`UNSAFE_TARGET` |
 | 快捷键 / 特殊键 | 支持。ANSI 可打印键与方向键、F1–F12、修饰键组合；按住重复只记一次并报 `KEY_REPEAT` | 支持。驱动 `press <combo> --window-id` | `test/cuekeeper.test.mjs`、`test/recording-hotkeys` | 未验证 → HAOC-76/87 | `UNSUPPORTED_KEY`（录制警告）、`UNSUPPORTED_EVENT`（录制警告）、`KEY_REPEAT`（录制警告） |
 | 复制 Cmd+C | 支持。录为 `key: meta+c`；即使开启 `--clipboard` 也不在按键瞬间读取复制结果，内容由后续 Cmd+V 固化 | 支持。驱动 `press meta+c` | `test/cuekeeper.test.mjs`（快捷键路径）、`test/input-ii.test.mjs`（Cmd+V 固化） | 未验证 → HAOC-76/87（真实复制选区） | `UNSUPPORTED_KEY`（录制警告，非 ANSI 键）、`UNSAFE_TEXT_TARGET`（仅文本输入路径） |
@@ -74,6 +74,7 @@
 - **headed 注入是 web 内容的唯一可靠路径**：Chromium 的可访问性文本表面在无头路径读取失败时返回 `ACTION_FAILED`。headed 回放把文本经 stdin 交给驱动，不进入命令行。
 - **不自动降级**：headed 失败时保留驱动原始错误码（如 `ACTION_FAILED`），不会改走无头路径重试；无头运行 `type` 打到 web 内容仍会失败。
 - **原生控件**：TextEdit 等原生控件在无头回放中仍走原路径（不带 `--headed`）；headed 回放对原生控件的表现随同一路径变化，真机回归归 HAOC-87。
+- **Safari 焦点标记迟滞（HAOC-103）**：Safari 在输入框已获得光标后仍可能短暂不报 `focused`。录制侧在可打印文本无焦点目标时延迟约 80 ms 重读一次快照；若仍无焦点，则只在最近一次左键点击命中可编辑、非安全控件、且该控件 value/text 已包含本次输入字符时，才把文本记到该控件上。没有值证据、控件被保护或不可编辑时仍报 `UNSAFE_TEXT_TARGET` / `SECURE_INPUT`，不会放宽 Chrome 与 TextEdit 的现有约束。
 - **真机复测**：Chrome 页面 click → type → click 的完整回放归 HAOC-87，需按项目纪律先获批时间窗；本轮只做离线实现与断言。
 
 ## 流程动作
