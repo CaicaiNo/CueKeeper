@@ -37,12 +37,12 @@ unzip -t out/run-01.zip
 
 ## 输入法字段
 
-报告顶层新增两个可选字段：
+报告顶层有两个可选字段，**默认回放不产生它们**（默认不读、不切、不恢复输入法）：
 
 | 字段 | 内容 |
 | --- | --- |
-| `ime` | `switched`、`original`、`target`、`final`、`runDir`；表示本轮是否切换过输入源、切到哪、最后停在哪 |
-| `warnings[]` | 输入法警告：`code`、`level`（`blocked` / `warning`）、`title`、`message`、`action`、`original`、`current`、`runId`；`IME_BUSY` 带 `holderRunId` / `lockExpiresAt`，恢复失败带 `attempted` / `verified` |
+| `ime` | `switched`、`original`、`target`、`final`、`runDir`；表示本轮是否切换过输入源、切到哪、最后停在哪；只有 `--input-source-switch` 的实时回放才写 |
+| `warnings[]` | 输入法警告：`code`、`level`（`blocked` / `warning`）、`title`、`message`、`action`、`original`、`current`、`runId`；`IME_BUSY` 带 `holderRunId` / `lockExpiresAt`，恢复失败带 `attempted` / `verified`；开启守卫后的阻塞/恢复问题与录制侧警告 |
 
 查看器在顶部横幅显示同样的标题、正文与「下一步」。旧报告没有这些字段时正常打开。规则与错误码见[输入法守卫](ime.md)。
 

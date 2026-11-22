@@ -618,7 +618,7 @@ test('CLI: an English type under Sogou exits 0, writes correct text, and restore
   { skip: process.platform !== 'darwin' }, t => {
     const cli = cliFixture(t);
     const reportPath = join(cli.dir, 'report.json');
-    const result = cli.run(['run', cli.flowPath, '--report', reportPath, '--json']);
+    const result = cli.run(['run', cli.flowPath, '--input-source-switch', '--report', reportPath, '--json']);
     const report = JSON.parse(readFileSync(reportPath, 'utf8'));
     assert.equal(result.code, 0, result.stderr);
     assert.equal(report.status, 'passed');
@@ -635,7 +635,25 @@ test('CLI: an English type under Sogou exits 0, writes correct text, and restore
     assert.equal(JSON.parse(result.stdout).ok, true);
   });
 
-test('CLI: --no-input-source-switch leaves the source alone and reports a warning',
+test('CLI: a default run never calls the input-source helper and reports no ime field',
+  { skip: process.platform !== 'darwin' }, t => {
+    const cli = cliFixture(t);
+    const reportPath = join(cli.dir, 'report.json');
+    const result = cli.run(['run', cli.flowPath, '--report', reportPath, '--json']);
+    const report = JSON.parse(readFileSync(reportPath, 'utf8'));
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(report.status, 'passed');
+    // Zero TIS traffic: no version, no current, no list, no select.
+    assert.deepEqual(cli.reads(), []);
+    assert.equal('ime' in report, false);
+    assert.equal(report.warnings, undefined);
+    assert.equal(cli.imeState().current, SOGOU.id);
+    assert.equal(existsSync(join(cli.imeDir, 'ime.lock')), false);
+    assert.deepEqual(cli.desktopCalls().filter(call => call.command === 'type').map(call => call.input),
+      ['cue', 'keeper']);
+  });
+
+test('CLI: --no-input-source-switch is accepted as the same default',
   { skip: process.platform !== 'darwin' }, t => {
     const cli = cliFixture(t);
     const reportPath = join(cli.dir, 'report.json');
@@ -643,9 +661,57 @@ test('CLI: --no-input-source-switch leaves the source alone and reports a warnin
     const report = JSON.parse(readFileSync(reportPath, 'utf8'));
     assert.equal(result.code, 0, result.stderr);
     assert.equal(report.status, 'passed');
-    assert.equal(report.warnings[0].code, 'IME_SWITCH_DISABLED');
-    assert.equal(report.warnings[0].level, 'warning');
-    assert.deepEqual(cli.reads().filter(call => call.command === 'select'), []);
+    assert.deepEqual(cli.reads(), []);
+    assert.equal('ime' in report, false);
+    assert.equal(report.warnings, undefined);
+    assert.equal(cli.imeState().current, SOGOU.id);
+  });
+
+test('CLI: a default run executes a physical character key without reading TIS',
+  { skip: process.platform !== 'darwin' }, t => {
+    const flow = { ...runFlowDoc, steps: [{ id: 'key-a', kind: 'key', key: 'a' }] };
+    const cli = cliFixture(t, { flow });
+    const reportPath = join(cli.dir, 'report.json');
+    const result = cli.run(['run', cli.flowPath, '--report', reportPath, '--json']);
+    const report = JSON.parse(readFileSync(reportPath, 'utf8'));
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(report.status, 'passed');
+    assert.deepEqual(cli.reads(), []);
+    assert.equal('ime' in report, false);
+    const presses = cli.desktopCalls().filter(call => call.command === 'press');
+    assert.equal(presses.length, 1);
+    assert.equal(presses[0].args[0], 'a');
+  });
+
+test('CLI: --input-source-switch is refused for a batch run',
+  { skip: process.platform !== 'darwin' }, t => {
+    const cli = cliFixture(t);
+    const result = cli.run(['run', cli.flowPath, '--data', join(cli.dir, 'rows.json'),
+      '--input-source-switch', '--json']);
+    assert.equal(result.code, 2);
+    assert.match(JSON.parse(result.stdout).error.message, /Batch runs do not support --input-source-switch/);
+    assert.deepEqual(cli.reads(), []);
+  });
+
+test('CLI: --input-source-switch and --no-input-source-switch cannot be combined',
+  { skip: process.platform !== 'darwin' }, t => {
+    const cli = cliFixture(t);
+    const result = cli.run(['run', cli.flowPath, '--input-source-switch', '--no-input-source-switch', '--json']);
+    assert.equal(result.code, 2);
+    assert.match(JSON.parse(result.stdout).error.message, /--input-source-switch/);
+    assert.deepEqual(cli.reads(), []);
+  });
+
+test('CLI: --input-source is inert without --input-source-switch',
+  { skip: process.platform !== 'darwin' }, t => {
+    const cli = cliFixture(t);
+    const reportPath = join(cli.dir, 'report.json');
+    const result = cli.run(['run', cli.flowPath, '--input-source', US.id, '--report', reportPath, '--json']);
+    const report = JSON.parse(readFileSync(reportPath, 'utf8'));
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(report.status, 'passed');
+    assert.deepEqual(cli.reads(), []);
+    assert.equal('ime' in report, false);
     assert.equal(cli.imeState().current, SOGOU.id);
   });
 
@@ -653,7 +719,7 @@ test('CLI: an installation without ABC/U.S. blocks with IME_SOURCE_UNAVAILABLE a
   { skip: process.platform !== 'darwin' }, t => {
     const cli = cliFixture(t, { sources: [{ ...SOGOU }] });
     const reportPath = join(cli.dir, 'report.json');
-    const result = cli.run(['run', cli.flowPath, '--report', reportPath, '--json']);
+    const result = cli.run(['run', cli.flowPath, '--input-source-switch', '--report', reportPath, '--json']);
     const report = JSON.parse(readFileSync(reportPath, 'utf8'));
     assert.equal(result.code, 1);
     assert.equal(report.status, 'blocked');
@@ -668,7 +734,7 @@ test('CLI: a user switch mid-run blocks the run with IME_CHANGED_BY_USER and exi
   { skip: process.platform !== 'darwin' }, t => {
     const cli = cliFixture(t, { afterType: 'switch-to-sogou' });
     const reportPath = join(cli.dir, 'report.json');
-    const result = cli.run(['run', cli.flowPath, '--report', reportPath, '--json']);
+    const result = cli.run(['run', cli.flowPath, '--input-source-switch', '--report', reportPath, '--json']);
     const report = JSON.parse(readFileSync(reportPath, 'utf8'));
     assert.equal(result.code, 1);
     assert.equal(report.status, 'blocked');
@@ -684,7 +750,7 @@ test('CLI: a user switch mid-run blocks the run with IME_CHANGED_BY_USER and exi
 test('CLI: a failed step still restores the source', { skip: process.platform !== 'darwin' }, t => {
   const cli = cliFixture(t, { failType: true });
   const reportPath = join(cli.dir, 'report.json');
-  const result = cli.run(['run', cli.flowPath, '--report', reportPath, '--json']);
+  const result = cli.run(['run', cli.flowPath, '--input-source-switch', '--report', reportPath, '--json']);
   const report = JSON.parse(readFileSync(reportPath, 'utf8'));
   assert.equal(result.code, 1);
   assert.equal(report.status, 'failed');
@@ -697,7 +763,7 @@ test('CLI: a vanished original source warns and only --strict-ime changes the ex
   { skip: process.platform !== 'darwin' }, t => {
     const first = cliFixture(t, { onSelect: 'drop-original' });
     const firstReport = join(first.dir, 'report.json');
-    const lenient = first.run(['run', first.flowPath, '--report', firstReport, '--json']);
+    const lenient = first.run(['run', first.flowPath, '--input-source-switch', '--report', firstReport, '--json']);
     const report = JSON.parse(readFileSync(firstReport, 'utf8'));
     assert.equal(lenient.code, 0, lenient.stderr);
     assert.equal(report.status, 'passed');
@@ -706,7 +772,8 @@ test('CLI: a vanished original source warns and only --strict-ime changes the ex
 
     const second = cliFixture(t, { onSelect: 'drop-original' });
     const strictReport = join(second.dir, 'report.json');
-    const strict = second.run(['run', second.flowPath, '--report', strictReport, '--strict-ime', '--json']);
+    const strict = second.run(['run', second.flowPath, '--input-source-switch',
+      '--report', strictReport, '--strict-ime', '--json']);
     assert.equal(strict.code, 1);
     assert.equal(JSON.parse(readFileSync(strictReport, 'utf8')).warnings[0].code, 'IME_RESTORE_UNAVAILABLE');
   });

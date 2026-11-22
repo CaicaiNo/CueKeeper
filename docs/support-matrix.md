@@ -56,13 +56,14 @@
 - **开启后内容只进 flow**：`flow.json` 会保存固化的粘贴文本（用户显式选择），但内容不写 stderr / 日志 / 报告条目 / viewer；`report pack` 会拒绝含 `paste` 的流程，避免把文本再打进报告 ZIP。需要分享报告时请改用不含粘贴文本的流程。
 - **只支持纯文本**：图片、文件 URL、富文本与超过 4000 字符的文本不固化，保留 Cmd+V 并给警告；回放会读取当时剪贴板。
 - **IME 只保留提交结果**：组合过程与候选框不逐帧记录；中文文本走 `type` 的 Unicode 插入，不模拟逐键输入。原生事件若在组合中间态带出 ASCII 片段，本轮不做语义过滤，最终文本顺序需真机核对（HAOC-87）。自绘 / 终端类控件需要物理按键时不在支持范围。
+- **回放默认不管输入法**：不加 `--input-source-switch` 时回放不读 TIS、不切换、不恢复，报告里没有 `ime` 字段也没有 IME 警告；`type` 仍走 Unicode 注入，但字符 `key` 不承诺在中文输入法下不被改写。需要自动切换与恢复时显式开启，见[输入法守卫](ime.md)。
 - **真实剪贴板所有权与 Cmd+C 复制结果**归 HAOC-76/87。
 
 ## 键盘与文本
 
 | 操作 | 录制 | 回放 | 离线测试 | 真机状态 | 错误码 |
 | --- | --- | --- | --- | --- | --- |
-| ASCII 文本输入 | 支持。按焦点可编辑控件与 1.5 s 时间间隔合并为 `type`；焦点标记迟滞时（Safari 常见）先延迟约 80 ms 重读一次快照，仍无焦点则回退到最近一次左键点击的可编辑控件，并要求该控件自身的 value/text 已包含本次输入的字符 | 支持。驱动 `type <ref> --stdin`，文本不进 argv；headed 回放带 `--headed`，无头回放不带 | `test/cuekeeper.test.mjs`（录制 click/type/key）、`test/safari-text.test.mjs`（延迟重读、点击回退、值证据、保护/非可编辑拒绝）、`test/type-headed.test.mjs`（headed/无头参数、错误码保留） | 未验证 → HAOC-76/87 | `UNSAFE_TEXT_TARGET`（录制：无焦点且无可用点击回退、或控件值未显示输入）、`SECURE_INPUT`（录制）、`UNSAFE_TARGET`（回放：安全控件或无 ref） |
+| ASCII 文本输入 | 支持。按焦点可编辑控件与 1.5 s 时间间隔合并为 `type`；焦点标记迟滞时（Safari 常见）先延迟约 80 ms 重读一次快照，仍无焦点则回退到最近一次左键点击的可编辑控件，并要求该控件自身的 value/text 已包含本次输入的字符 | 支持。驱动 `type <ref> --stdin`，文本不进 argv；headed 回放带 `--headed`，无头回放不带。默认不碰输入法（不读 TIS、不切换、不恢复），需要自动切换时加 `--input-source-switch` | `test/cuekeeper.test.mjs`（录制 click/type/key）、`test/safari-text.test.mjs`（延迟重读、点击回退、值证据、保护/非可编辑拒绝）、`test/type-headed.test.mjs`（headed/无头参数、错误码保留）、`test/ime.test.mjs`（默认零 TIS 调用、开启后的切换/恢复） | 未验证 → HAOC-76/87 | `UNSAFE_TEXT_TARGET`（录制：无焦点且无可用点击回退、或控件值未显示输入）、`SECURE_INPUT`（录制）、`UNSAFE_TARGET`（回放：安全控件或无 ref）；开启守卫后另见 `IME_*` |
 | Chrome / Chromium 页面文本输入 | 支持。与 ASCII 文本输入同一路径，目标为 web 可编辑控件 | 支持，走 headed 注入：`run --headed` 下驱动 `type <ref> --headed --stdin`，文本仍只走 stdin。无头路径对 web 内容会失败，不静默降级 | `test/type-headed.test.mjs`（headed 参数、stdin 文本、`ACTION_FAILED` 原样保留且不重试） | 修复前真机已复现 `ACTION_FAILED`；修复后的真机回放待 HAOC-87（需先获批时间窗） | `ACTION_FAILED`（web 内容走无头注入时）、`UNSAFE_TARGET` |
 | 快捷键 / 特殊键 | 支持。ANSI 可打印键与方向键、F1–F12、修饰键组合；按住重复只记一次并报 `KEY_REPEAT` | 支持。驱动 `press <combo> --window-id` | `test/cuekeeper.test.mjs`、`test/recording-hotkeys` | 未验证 → HAOC-76/87 | `UNSUPPORTED_KEY`（录制警告）、`UNSUPPORTED_EVENT`（录制警告）、`KEY_REPEAT`（录制警告） |
 | 复制 Cmd+C | 支持。录为 `key: meta+c`；即使开启 `--clipboard` 也不在按键瞬间读取复制结果，内容由后续 Cmd+V 固化 | 支持。驱动 `press meta+c` | `test/cuekeeper.test.mjs`（快捷键路径）、`test/input-ii.test.mjs`（Cmd+V 固化） | 未验证 → HAOC-76/87（真实复制选区） | `UNSUPPORTED_KEY`（录制警告，非 ANSI 键）、`UNSAFE_TEXT_TARGET`（仅文本输入路径） |

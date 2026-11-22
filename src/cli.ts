@@ -39,7 +39,8 @@ const help = `Cuekeeper ${buildInfo().version}
   cuekeeper --version
   cuekeeper doctor [--json]
   cuekeeper flow validate <flow.json|test.json> [--json]
-  cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--interactive|--non-interactive] [--report <report.json>] [--allow-shell] [--allow-sudo] [--capture-shell-output] [--no-input-source-switch] [--input-source <id>] [--strict-ime] [--json]
+  cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--interactive|--non-interactive] [--report <report.json>] [--allow-shell] [--allow-sudo] [--capture-shell-output] [--input-source-switch [--input-source <id>] [--strict-ime]] [--json]
+  cuekeeper run ... [--no-input-source-switch]   (accepted; equal to the default)
   cuekeeper sudo set|status|clear [--json]   (login-keychain credential for --non-interactive root steps)
   cuekeeper ime status|list [--input-source <id>] [--json]
   cuekeeper ime set <id> [--json]
@@ -325,6 +326,7 @@ async function main() {
         'capture-shell-output': { type: 'boolean' }, interactive: { type: 'boolean' },
         'non-interactive': { type: 'boolean' },
         'no-input-source-switch': { type: 'boolean' }, 'input-source': { type: 'string' },
+        'input-source-switch': { type: 'boolean' },
         'strict-ime': { type: 'boolean' },
       },
     });
@@ -332,6 +334,14 @@ async function main() {
     const dryRun = values['dry-run'] ?? false;
     const interactive = values.interactive ?? false;
     const nonInteractive = values['non-interactive'] ?? false;
+    // Replay manages no input source unless asked: Unicode injection does not
+    // depend on the IME, so the default run never reads TIS, never switches,
+    // writes no ime.json and reports no IME warnings. `--no-input-source-switch`
+    // stays accepted as the explicit spelling of that default.
+    const inputSourceSwitch = values['input-source-switch'] ?? false;
+    if (inputSourceSwitch && (values['no-input-source-switch'] ?? false)) {
+      throw new Error('--input-source-switch cannot be combined with --no-input-source-switch');
+    }
     if (interactive && nonInteractive) {
       throw new Error('--interactive cannot be combined with --non-interactive');
     }
@@ -370,6 +380,11 @@ async function main() {
       // confirmation path, so a table with shell definitions is refused here.
       if (flowHasShellDefinitions(flow)) {
         throw new Error('Batch runs do not accept flows with shell steps yet');
+      }
+      // The guard is not wired into batch rows; refuse instead of promising a
+      // protection the run would not apply.
+      if (inputSourceSwitch) {
+        throw new Error('Batch runs do not support --input-source-switch yet');
       }
       // Preflight the whole table, then resolve secrets, before any desktop
       // driver call or report artifact is created.
@@ -413,22 +428,24 @@ async function main() {
       return;
     }
 
-    const imeTarget = values['input-source'] ?? process.env.CUEKEEPER_IME_TARGET;
-    // Only a live replay touches TIS: a dry run and an offline snapshot never
-    // depend on the user's keyboard state. A missing helper reports once and
-    // leaves the run unguarded instead of inventing report warnings.
+    // Only --input-source-switch opts into the guard, and only a live replay
+    // can act on it: a dry run and an offline snapshot never depend on the
+    // user's keyboard state. A missing helper reports once and leaves the run
+    // unguarded instead of inventing report warnings.
     let ime: InputSourceManager | undefined;
-    if (!dryRun && !values.snapshot) {
+    if (inputSourceSwitch && !dryRun && !values.snapshot) {
       const backend = nativeImeBackend();
       if (await backend.available()) {
+        const imeTarget = values['input-source'] ?? process.env.CUEKEEPER_IME_TARGET;
         ime = new InputSourceManager({
           backend,
           ...(imeTarget ? { targetId: imeTarget } : {}),
-          switchEnabled: !(values['no-input-source-switch'] ?? false),
         });
       } else if (!machine) {
         console.error('输入法保护不可用：找不到 cuekeeper-ime，本次运行不会检测或切换输入法。');
       }
+    } else if (!machine && values['input-source']) {
+      console.error('--input-source 只在 --input-source-switch 开启时生效；本次运行不检测或切换输入法。');
     }
     const options = {
       dryRun, signal,

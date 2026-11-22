@@ -39,6 +39,7 @@ cuekeeper run login.test.json --data accounts.json --dry-run --snapshot target.s
 | `--dry-run` | 每行解析定位器、断言作用域和基线等现有 dry-run 检查。步骤保留 `resolved`，不执行输入、修复或断言比较。实时 dry-run 读取桌面可访问性树。 |
 | `--snapshot <snapshot.json>` | 与 `--dry-run` 同用，各行读取同一份离线夹具，沿用其目标及可覆盖窗口范围。 |
 | `--headed` | 只用于 replay，逐行沿用单次运行的权限和输入行为。坐标点击缺少该选项时沿用 `HEADED_REQUIRED`。 |
+| `--input-source-switch` | 不支持：批量行尚未接入输入法守卫（逐行切换会互相干扰），传入时在预检阶段以退出码 `2` 拒绝，不执行任何行。默认与单次运行一致，即不读、不切、不恢复输入法。 |
 | `--json` | stdout 只输出一条现有风格的 JSON 对象。有汇总时为 `{ "ok": ..., "data": ... }`，`data` 是汇总对象，`ok` 表示退出码是否为 `0`。预检出错时为 `{ "ok": false, "error": { "code": ..., "message": ... } }`。 |
 
 文本输出列出失败和阻塞的行号、相关步骤 ID、错误码及总数。使用了 `--report` 时同时打印汇总路径。
