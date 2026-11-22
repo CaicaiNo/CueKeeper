@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { parseCaptureEvent } from '../dist/capture-protocol.js';
 import { flowV2Check } from '../dist/contracts-v2.js';
 import { parseFlowV2 } from '../dist/flow-v2.js';
-import { resolve } from '../dist/locator.js';
+import { Fault, resolve } from '../dist/locator.js';
 import { GlobalRecording } from '../dist/record-v2.js';
 import { loadSession } from '../dist/workbench-session.js';
 
@@ -1153,6 +1153,27 @@ test('a gap and an unprovable click before the first step are startup noise', as
   });
   assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
   assert.ok(recording.captureWarnings.some(warning => warning.code === 'CAPTURE_STARTUP'));
+});
+
+test('a failed tree read reports the window and title it was of', async () => {
+  const recording = new GlobalRecording(async window => {
+    throw new Fault('INCOMPLETE_TREE',
+      `Window snapshot is incomplete (window w-${window.windowNumber}, title "Downloads — 1 item selected")`);
+  }, { now: () => NOW });
+  // A hover carries no element evidence of its own, so it must read the tree.
+  await recording.add(parseCaptureEvent({
+    kind: 'hover', t: 100, seen: NOW, focusGeneration: 1, secure: false,
+    point: [150, 110], dwellMs: 400, owner: FINDER_WINDOW,
+  }));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['gap']);
+  assert.equal(flow.steps[0].code, 'STALE_CAPTURE');
+  const warning = recording.captureWarnings.find(entry => entry.code === 'SNAPSHOT_UNAVAILABLE');
+  // The warning the user sees on the next recording has to say which window and
+  // title the read was of, not just the code.
+  assert.match(warning.message, /INCOMPLETE_TREE/);
+  assert.match(warning.message, /w-11/);
+  assert.match(warning.message, /1 item selected/);
 });
 
 test('a gap after the first step is still kept', async () => {

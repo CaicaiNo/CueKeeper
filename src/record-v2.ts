@@ -1250,7 +1250,9 @@ export class GlobalRecording {
       snapshot = await this.read(this.windowFor(binding));
     } catch (error) {
       if (gapOnFailure) {
-        const reason = error instanceof Fault ? error.code : 'no answer';
+        // The fault says which window and title the read was of; a warning that
+        // only carried the code left the user with nothing to trace next time.
+        const reason = error instanceof Fault ? `${error.code}: ${error.message}` : 'no answer';
         this.warn('SNAPSHOT_UNAVAILABLE', `An accessibility read failed (${reason}); the step is a gap`);
         this.pushGap('STALE_CAPTURE');
       }

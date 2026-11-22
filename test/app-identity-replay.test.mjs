@@ -664,6 +664,8 @@ const bound = index < 0 ? '' : args[index + 1];
 let payload;
 if (command === 'version') payload = { version: '1.3.1' };
 else if (bound === 'w-42') payload = ${JSON.stringify(retitled)};
+else if (bound === 'w-55') payload = { ...${JSON.stringify(retitled)}, complete: false,
+  window: { id: 'w-55', title: 'Sales report — edited' } };
 else payload = { ...${JSON.stringify(retitled)}, window: { id: 'w-78', title: 'Another window' } };
 console.log(JSON.stringify({ version: '2.6', command, ok: true, data: payload }));
 `, { mode: 0o700 });
@@ -691,6 +693,17 @@ console.log(JSON.stringify({ version: '2.6', command, ok: true, data: payload })
     assert.equal(error.code, 'WINDOW_CHANGED');
     assert.match(error.message, /w-78/);
     assert.match(error.message, /w-77/);
+    return true;
+  });
+
+  // A read that does answer but cannot be parsed still says which window and
+  // which title it was of, alongside the recorded hint.
+  await assert.rejects(withDesktop({ headed: false, signal },
+    desktop => desktop.snapshotWindow('w-55', title)), error => {
+    assert.equal(error.code, 'INCOMPLETE_TREE');
+    assert.match(error.message, /w-55/);
+    assert.match(error.message, /Sales report — edited/);
+    assert.match(error.message, /Cuekeeper-M1\.txt/);
     return true;
   });
 });
