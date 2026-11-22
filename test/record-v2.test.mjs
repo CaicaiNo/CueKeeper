@@ -94,22 +94,102 @@ test('a queue gap splits a text burst and blocks replay until resolved', async (
   assert.throws(() => parseFlowV2(flow), { code: 'CAPTURE_GAP' });
 });
 
-test('a secure interval becomes one scope-less gap and never carries content', async () => {
+test('a secure interval becomes one manual checkpoint and never carries content', async () => {
   const data = fixture('secure-input');
   const secret = `Zq${randomUUID().slice(0, 8)}`;
-  const recording = new GlobalRecording(readerFor(data), { now: () => NOW });
+  let reads = 0;
+  const recording = new GlobalRecording(async window => {
+    reads += 1;
+    return structuredClone(data.snapshots[String(window.windowNumber)]);
+  }, { now: () => NOW });
   for (const original of data.events) {
     const event = structuredClone(original);
     if (event.secure) event.chars = secret;
     await recording.add(parseCaptureEvent(event));
   }
   const flow = recording.finish();
-  assert.deepEqual(flow.steps.map(step => step.kind), ['type', 'gap', 'type']);
-  assert.equal(flow.steps[1].code, 'SECURE_INPUT');
-  assert.equal(flow.steps[1].scope, undefined);
+  assert.deepEqual(flow.steps.map(step => step.kind), ['type', 'manual_checkpoint', 'type']);
+  const checkpoint = flow.steps[1];
+  assert.equal(checkpoint.reason, 'secure_input');
+  assert.equal(checkpoint.triggerStepId, 's1');
+  assert.deepEqual(checkpoint.scope, flow.steps[0].scope);
+  assert.deepEqual(checkpoint.resume, {
+    scope: flow.steps[0].scope, check: { kind: 'window_exists', equals: true },
+  });
+  assert.equal(checkpoint.timeoutMs, 120_000);
+  // The checkpoint is a normal, replayable step: no content gap remains.
+  assert.equal(flowV2Check.Check(flow), true);
+  assert.equal(parseFlowV2(flow).steps.length, 3);
+  // Only the two non-secure text events read a window tree.
+  assert.equal(reads, 2);
   const output = JSON.stringify(flow) + JSON.stringify(recording.captureWarnings);
   assert.ok(!output.includes(secret));
   assert.ok(!output.includes('"chars"'));
+});
+
+test('consecutive secure intervals fold into one checkpoint', async () => {
+  const data = fixture('secure-input');
+  const [first, ...rest] = data.events;
+  // A focus notification ends the first interval but records no step; the next
+  // secure event starts a second interval for the same window.
+  const focus = {
+    kind: 'focus', t: 210, seen: 1_700_000_000_000, focusGeneration: 2, secure: false,
+    owner: { app: 'com.apple.finder', pid: 100, processInstance: 1_700_000_000_000, windowNumber: 11, windowTitle: 'Downloads' },
+  };
+  const events = [first, rest[0], focus, ...rest.slice(1)];
+  const recording = new GlobalRecording(readerFor(data), { now: () => NOW });
+  for (const event of events) await recording.add(parseCaptureEvent(event));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['type', 'manual_checkpoint', 'type']);
+  assert.equal(flow.steps.filter(step => step.kind === 'manual_checkpoint').length, 1);
+});
+
+test('a secure interval with no window-scoped trigger stays a SECURE_INPUT gap', async () => {
+  const data = fixture('secure-input');
+  const secure = data.events.filter(event => event.secure);
+  const recording = new GlobalRecording(readerFor(data), { now: () => NOW });
+  for (const event of secure) await recording.add(parseCaptureEvent(event));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['gap']);
+  assert.equal(flow.steps[0].code, 'SECURE_INPUT');
+});
+
+test('a Security Agent window never becomes a scope, even before the secure flag', async () => {
+  const data = fixture('secure-input');
+  const secret = `Zq${randomUUID().slice(0, 8)}`;
+  const agent = 'com.apple.SecurityAgent';
+  const owner = (app, number) => ({
+    app, pid: app === agent ? 900 : 100, processInstance: 1_700_000_000_000,
+    windowNumber: number, windowTitle: app === agent ? 'Install Test App' : 'Downloads',
+  });
+  const events = [
+    data.events[0],
+    {
+      kind: 'focus', t: 220, seen: 1_700_000_000_000, focusGeneration: 2, secure: false,
+      owner: { ...owner(agent, 77), securityAgent: true },
+    },
+    {
+      kind: 'text', t: 240, seen: 1_700_000_000_000, focusGeneration: 2, secure: false,
+      chars: secret, owner: { ...owner(agent, 77), securityAgent: true },
+    },
+    {
+      kind: 'text', t: 400, seen: 1_700_000_000_000, focusGeneration: 3, secure: false,
+      owner: owner('com.apple.finder', 11),
+    },
+  ];
+  let reads = 0;
+  const recording = new GlobalRecording(async window => {
+    reads += 1;
+    return structuredClone(data.snapshots[String(window.windowNumber)]);
+  }, { now: () => NOW });
+  for (const event of events) await recording.add(parseCaptureEvent(event));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['type', 'manual_checkpoint', 'type']);
+  assert.equal(flow.steps.some(step => step.scope?.app === agent), false);
+  assert.equal(flow.steps[1].scope.app, 'com.apple.finder');
+  assert.equal(reads, 2);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'SECURE_AUTHORIZATION'));
+  assert.ok(!JSON.stringify(flow).includes(secret));
 });
 
 test('occluded and first-mouse clicks become gaps; activation-only clicks navigate', async () => {
@@ -169,6 +249,21 @@ test('capture protocol rejects a malformed global event', () => {
   });
   assert.equal(valid.kind, 'click');
   assert.equal(valid.point[0], 10);
+  // Secure evidence names why an event was refused, without carrying content.
+  const secure = parseCaptureEvent({
+    kind: 'text', t: 2, seen: 2, focusGeneration: 3, secure: true,
+    secureEvidence: ['system_secure_input', 'secure_control'],
+    owner: { app: 'com.apple.SecurityAgent', pid: 8, securityAgent: true },
+  });
+  assert.deepEqual(secure.secureEvidence, ['system_secure_input', 'secure_control']);
+  assert.equal(secure.owner.securityAgent, true);
+  assert.throws(() => parseCaptureEvent({
+    kind: 'text', t: 2, seen: 2, focusGeneration: 3, secure: true, secureEvidence: ['nope'],
+  }), { code: 'CAPTURE_PROTOCOL' });
+  assert.throws(() => parseCaptureEvent({
+    kind: 'text', t: 2, seen: 2, focusGeneration: 3, secure: false,
+    secureEvidence: ['secure_control'],
+  }), { code: 'CAPTURE_PROTOCOL' });
 });
 
 test('record --global is an explicit mode that rejects target flags', { skip: process.platform !== 'darwin' }, () => {

@@ -5,7 +5,7 @@ import type { IdentityDeps } from './app-identity.js';
 import { evaluateAssertion } from './assertion.js';
 import type { AssertionObservation } from './assertion.js';
 import type { AssertCheck, ElementLocator } from './contracts.js';
-import { defaultWaitTimeoutMs } from './contracts-v2.js';
+import { defaultCheckpointTimeoutMs, defaultWaitTimeoutMs } from './contracts-v2.js';
 import type {
   AppWaitCheck, DeliveryV2, FlowV2, ReportV2, ReportV2Entry, Scope, StepV2,
   WindowScope, WindowWaitCheck,
@@ -17,6 +17,8 @@ import { InstallState } from './install-state.js';
 import type { InstallStateDeps } from './install-state.js';
 import { Fault, contains, resolve } from './locator.js';
 import type { Node, Point, Snapshot } from './locator.js';
+import { CheckpointFault, runHandOff } from './manual-checkpoint.js';
+import type { CheckpointChannel, CheckpointMetadata } from './manual-checkpoint.js';
 import { ReportV2Session } from './report-v2.js';
 import type { AppIdentityRecord, StepResult } from './report-v2.js';
 import { RunLease, ScopeResolver } from './scope.js';
@@ -49,6 +51,10 @@ export interface FlowV2RunOptions {
   /** Install/download/process evidence seam; production reads the local disk. */
   installState?: InstallState;
   installDeps?: InstallStateDeps;
+  /** Operator hand-off channel; a checkpoint without one blocks the run. */
+  checkpoints?: CheckpointChannel;
+  /** System secure input probe; a hand-off cannot prove recovery without it. */
+  secureInputActive?: () => Promise<boolean>;
 }
 
 type StepOutcome = Omit<StepResult, 'status'> & { status?: 'passed' | 'failed' };
@@ -57,11 +63,18 @@ const blockingCodes = new Set([
   'APP_PATH_INVALID', 'APP_AMBIGUOUS', 'APP_NOT_FOUND', 'APP_UNVERIFIED',
   'AMBIGUOUS_TARGET', 'WINDOW_NOT_FOUND', 'WINDOW_CHANGED', 'FOCUS_INTERRUPTED',
   'IDENTITY_DEPENDENCY', 'RUN_BUSY', 'RUN_LEASE_FAILED', 'INPUT_MISSING',
-  'SURFACE_UNSUPPORTED', 'MANUAL_CHECKPOINT_PENDING', 'WAIT_UNSUPPORTED',
+  'SURFACE_UNSUPPORTED', 'MANUAL_CHECKPOINT_REQUIRED', 'MANUAL_CHECKPOINT_CANCELLED',
+  'MANUAL_CHECKPOINT_TIMEOUT', 'SECURE_INPUT', 'WAIT_UNSUPPORTED',
   'UNSAFE_POINT', 'UNSAFE_TARGET', 'DELIVERY_UNCERTAIN', 'LAUNCH_TIMEOUT',
   'COMMAND_TIMEOUT', 'TIMEOUT', 'DESKTOP_DEPENDENCY', 'UNSUPPORTED_PLATFORM',
   'DOWNLOAD_PATH_INVALID', 'DOWNLOAD_NOT_FOUND', 'DOWNLOAD_INCOMPLETE',
   'DOWNLOAD_AMBIGUOUS', 'PROCESS_MISMATCH',
+]);
+
+// Steps that deliver input to the desktop. Before each one the run re-reads the
+// system secure input flag: an unplanned password prompt stops the step.
+const inputKinds = new Set<StepV2['kind']>([
+  'click', 'type', 'key', 'scroll', 'drag', 'hover', 'paste',
 ]);
 
 const transientWaitCodes = new Set(['NOT_FOUND', 'WINDOW_NOT_FOUND', 'APP_NOT_FOUND', 'INCOMPLETE_TREE']);
@@ -169,6 +182,10 @@ class StepRunner {
     install: InstallState;
     appPaths: Readonly<Record<string, string>>;
     baselineDir?: string;
+    checkpoints?: CheckpointChannel;
+    secureInputActive?: () => Promise<boolean>;
+    /** True when a checkpoint in the flow makes secure-state proof mandatory. */
+    requireSecureState: boolean;
   }) {}
 
   private get desktop() { return this.ctx.desktop; }
@@ -182,8 +199,39 @@ class StepRunner {
       // belong to the bound window, so the step stops instead of replaying it.
       throw new Fault('UNSAFE_POINT', 'P2 replay does not accept recorded pointer paths');
     }
+    // A password prompt the flow did not declare is an unknown secure interface.
+    if (inputKinds.has(step.kind)) await this.guardSecureInput();
     const outcome = await this.dispatch(step);
     return { ...outcome, ...await this.handOff(step) };
+  }
+
+  /**
+   * Reads the system secure input flag before automatic input. When the flow has
+   * no checkpoint, a helper that cannot report the flag keeps the older
+   * unprotected behaviour instead of blocking every existing flow.
+   */
+  private async guardSecureInput() {
+    const probe = this.ctx.secureInputActive;
+    if (!probe) {
+      if (this.ctx.requireSecureState) throw this.missingSecureProbe();
+      return;
+    }
+    let secure: boolean;
+    try {
+      secure = await probe();
+    } catch (error) {
+      if (this.ctx.requireSecureState) throw toFault(error);
+      return;
+    }
+    if (secure) {
+      throw new Fault('SECURE_INPUT',
+        'macOS secure input is active; the run stops instead of typing into an unplanned password prompt');
+    }
+  }
+
+  private missingSecureProbe() {
+    return new Fault('MANUAL_CHECKPOINT_REQUIRED',
+      'A flow with manual checkpoints needs the secure input probe; rebuild the capture helper with pnpm build:recorder', true);
   }
 
   private async dispatch(step: StepV2): Promise<StepOutcome> {
@@ -257,8 +305,7 @@ class StepRunner {
         throw new Fault('SURFACE_UNSUPPORTED',
           'Dock, menu bar and Spotlight surfaces arrive with HAOC-116; this run does not guess their positions');
       case 'manual_checkpoint':
-        throw new Fault('MANUAL_CHECKPOINT_PENDING',
-          'A secure input checkpoint needs an operator; hand-off support arrives with HAOC-114');
+        return this.checkpointStep(step);
       case 'gap':
         return {};
     }
@@ -301,6 +348,80 @@ class StepRunner {
       await this.resolver.absorbAppForeground(step.scope.app);
     }
     return {};
+  }
+
+  /**
+   * Blocks at a secure input checkpoint until the operator confirms the hand-off
+   * in the real interface and both the secure state and resume condition are
+   * proven. The checkpoint never receives, stores or reports a password.
+   */
+  private async checkpointStep(
+    step: Extract<StepV2, { kind: 'manual_checkpoint' }>,
+  ): Promise<StepOutcome> {
+    const channel = this.ctx.checkpoints;
+    const probe = this.ctx.secureInputActive;
+    if (!channel || !probe) {
+      throw new Fault('MANUAL_CHECKPOINT_REQUIRED',
+        'A manual checkpoint needs an operator confirmation channel and the secure input probe; ' +
+        'run it from an interactive terminal with the rebuilt capture helper', true);
+    }
+    // Proving the trigger window is still the bound window stops a hand-off that
+    // would hand the operator an interface the flow no longer owns.
+    await this.resolver.resolveWindow(step.scope);
+    const request = {
+      stepId: step.id,
+      triggerStepId: step.triggerStepId,
+      scope: step.scope,
+      timeoutMs: step.timeoutMs ?? defaultCheckpointTimeoutMs,
+    };
+    const checkpoint: CheckpointMetadata = await runHandOff({
+      request,
+      channel,
+      signal: this.signal,
+      timeoutMs: request.timeoutMs,
+      probe: {
+        secureInput: probe,
+        resume: () => this.resumeHolds(step),
+      },
+    });
+    // The operator just used the desktop; the next step brings its own window
+    // forward instead of treating that interaction as an unexpected focus steal.
+    this.resolver.acceptHandoff();
+    return { checkpoint };
+  }
+
+  /** The checkpoint's read-only resume condition, evaluated without input. */
+  private async resumeHolds(
+    step: Extract<StepV2, { kind: 'manual_checkpoint' }>,
+  ): Promise<boolean> {
+    const check = step.resume.check as WindowWaitCheck;
+    let current: WindowBinding;
+    try {
+      current = await this.resolver.resolveWindow(step.resume.scope);
+    } catch (error) {
+      if (error instanceof Fault &&
+          ['WINDOW_NOT_FOUND', 'APP_NOT_FOUND', 'WINDOW_CHANGED'].includes(error.code)) {
+        return check.kind === 'window_exists' && check.equals === false;
+      }
+      throw error;
+    }
+    if (check.kind === 'window_exists') return check.equals === true;
+    const snapshot = await this.resolver.snapshot(current);
+    if (check.kind === 'element_enabled') {
+      const found = resolve(snapshot, check.target as ElementLocator);
+      if (found.node.secure) return false;
+      const enabled = !found.node.states.includes('disabled');
+      return enabled === check.equals;
+    }
+    const assertion = check.kind === 'window'
+      ? { target: { kind: 'window' as const }, expect: check.expect }
+      : { target: check.target, expect: check.expect };
+    const observation = await evaluateAssertion(assertion as AssertCheck, {
+      desktop: this.desktop,
+      snapshot: async () => snapshot,
+      windowsFor: async () => [{ id: current.windowId, title: current.observedTitle }],
+    });
+    return observation.passed;
   }
 
   private async typeStep(step: Extract<StepV2, { kind: 'type' }>): Promise<StepOutcome> {
@@ -542,6 +663,9 @@ export async function runFlowV2(input: FlowV2, options: FlowV2RunOptions): Promi
     install: options.installState ?? new InstallState(options.installDeps),
     appPaths: flow.appPaths ?? {},
     ...(options.baselineDir === undefined ? {} : { baselineDir: options.baselineDir }),
+    ...(options.checkpoints === undefined ? {} : { checkpoints: options.checkpoints }),
+    ...(options.secureInputActive === undefined ? {} : { secureInputActive: options.secureInputActive }),
+    requireSecureState: flow.steps.some(step => step.kind === 'manual_checkpoint'),
   });
 
   let status: ReportV2['status'] = 'passed';
@@ -572,6 +696,7 @@ export async function runFlowV2(input: FlowV2, options: FlowV2RunOptions): Promi
           status: blocking ? 'blocked' : 'failed',
           code: fault.code,
           message: fault.message,
+          ...(error instanceof CheckpointFault ? { checkpoint: error.checkpoint } : {}),
           ...deliveryOf(error),
         }, atMs);
         status = blocking ? 'blocked' : 'failed';

@@ -104,6 +104,19 @@ const shortcutLabel = action => [
   keyLabels[action.key] ?? action.key.toUpperCase(),
 ].join('+');
 
+/** A checkpoint's read-only resume condition, in the same words as a wait. */
+function resumeLabel(check) {
+  if (!check) return '—';
+  if (check.kind === 'window_exists') return check.equals ? '窗口存在' : '窗口已关闭';
+  if (check.kind === 'element_enabled') {
+    return `${locatorLabel(check.target)} · ${check.equals ? '可用' : '不可用'}`;
+  }
+  if (check.kind === 'window') {
+    return `窗口 ${check.expect?.property} = ${short(String(check.expect?.equals ?? ''))}`;
+  }
+  return `${locatorLabel(check.target)} · ${check.expect?.property} = ${short(String(check.expect?.equals ?? ''))}`;
+}
+
 function actionLabel(action) {
   const target = actionTarget(action);
   const label = target ? locatorLabel(target) : '';
@@ -139,7 +152,7 @@ function actionLabel(action) {
     case 'open_system_surface':
       return `打开 ${SURFACE_LABELS[action.scope.surface] ?? action.scope.surface}`;
     case 'surface_press': return `操作 ${SURFACE_LABELS[action.scope.surface] ?? action.scope.surface} · ${action.selector.kind}`;
-    case 'manual_checkpoint': return `人工检查点 · ${action.reason}`;
+    case 'manual_checkpoint': return `人工检查点 · ${action.reason} · 触发 ${action.triggerStepId}`;
     case 'gap': return `缺口 · ${action.code}`;
     case 'shell': return `Shell · ${short(shellSummary(action).command)}`;
     default: return action.kind;
@@ -497,10 +510,19 @@ function renderInspector() {
         : []),
       ...(row.scope ? [['作用域', scopeText(row.scope)]] : []),
       ...(row.scope ? [] : [['应用', appLabel(row.app)], ['窗口', row.window]]),
+      ...(row.action.kind === 'manual_checkpoint' ? [
+        ['触发步骤', row.action.triggerStepId],
+        ['恢复条件', resumeLabel(row.action.resume?.check)],
+        ['等待上限', duration(row.action.timeoutMs)],
+      ] : []),
       ...(target ? [['定位器', locatorLabel(target)]] : []),
       ['时间', timestamp(row.atMs)], ['耗时', duration(row.durationMs)],
     ], 'meta-grid'),
     isCompatible(row) ? undefined : muted('该动作属于另一窗口，只能在时间线复盘。'),
+    row.action.kind === 'manual_checkpoint'
+      ? muted('回放时请在目标界面由操作者完成授权或输入密码，随后在运行终端输入 continue 独立确认；' +
+        'CueKeeper 不读取密码，超时或取消即停在这里，后续步骤不执行。')
+      : undefined,
     el('div', { className: 'actions' },
       button('加入测试项', () => addAction(row.action), { icon: 'listPlus', disabled: !editable }),
       button('添加断言', () => assertionDialog(row), { icon: 'checkCircle', disabled: !editable }),

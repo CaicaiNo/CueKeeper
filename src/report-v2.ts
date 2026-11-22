@@ -19,6 +19,8 @@ export interface StepResult {
   input?: string;
   /** The declared focusAfter scope the step handed the foreground to. */
   focusAfter?: NonNullable<ReportV2Entry['focusAfter']>;
+  /** Safe checkpoint metadata: trigger, reason and resolution, never a value. */
+  checkpoint?: NonNullable<ReportV2Entry['checkpoint']>;
 }
 
 export class ReportV2Session {
@@ -57,6 +59,7 @@ export class ReportV2Session {
       ...(result.code === undefined ? {} : { code: result.code }),
       ...(result.delivery === undefined ? {} : { delivery: result.delivery }),
       ...(result.focusAfter === undefined ? {} : { focusAfter: result.focusAfter }),
+      ...(result.checkpoint === undefined ? {} : { checkpoint: result.checkpoint }),
       ...(result.textMode === undefined ? {} : { textMode: result.textMode }),
       ...(result.input === undefined ? {} : { input: result.input }),
     };

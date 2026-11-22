@@ -216,6 +216,8 @@ v2 flow 顶层没有 `target`，每一步用 `scope` 声明窗口、应用或系
 
 v2 实时回放需要显式 `--foreground`，因为它会跨 App 抢前台并注入输入。运行时一次只持有一个前台租约（`~/.cuekeeper/run.lock`，可用 `CUEKEEPER_STATE_DIR` 改目录），取消、失败和正常结束都会释放。每步先按 `windowKey` 绑定进程实例与原生窗口号，再确认前台；窗口被移动或改名不影响绑定，同名新窗口不会接管旧 `windowKey`，进程重启、路径错误副本和人工切走分别以 `APP_AMBIGUOUS`、`APP_PATH_INVALID`、`FOCUS_INTERRUPTED` 停在原步骤。
 
+密码与系统授权界面不中止整条录制：连续 secure 区间折叠成一个 `manual_checkpoint`，区间内的按键、文本、截图和剪贴板一律丢弃，系统授权界面（Security Agent）不作为可回放的作用域。回放暂停后由操作者在真实界面完成授权或输入密码，再回到运行终端输入 `continue` 独立确认；CueKeeper 只验证系统 secure 状态已清除且 `resume` 的只读条件成立，默认等待 120 秒。取消、超时或无法证实恢复都会停在该检查点，后续步骤不执行，报告只记录检查点、触发步、恢复条件与结果。含检查点的 flow 需要交互式终端，`--json` 会在任何桌面操作前以 `MANUAL_CHECKPOINT_REQUIRED` 拒绝；secure 状态探测和录制一样来自 `pnpm build:recorder` 构建的 helper。密码、Keychain 内容和授权值不进入 flow、报告、日志或 argv。
+
 默认在主屏显示边框和 HUD。窗口服务器确认面板后，HUD 显示「录制就绪」，终端在标准错误输出 `INDICATOR_READY`。录制时可切到飞书等其他应用，返回目标窗口后继续，已捕获的动作会保留。`Ctrl+Option+P` 暂停或继续，`Ctrl+Option+X` 停止并保存。可用 `--no-indicator` 关闭边框和 HUD，热键仍可用。
 
 批量执行用 `--data <rows.json>` 一次跑多行数据，格式见[参数化批量执行设计](docs/batch-run.md)。每行只覆盖列名指向的调用参数，其余沿用测试项；`--report <batch.json>` 写汇总，并在同级 `<batch.json>.rows/row-NNNNNN/` 保存逐行 v1 报告与绑定后的 flow，可直接用 `report pack` 单独打包：

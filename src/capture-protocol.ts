@@ -19,6 +19,15 @@ export type CaptureGapCode = typeof captureGapCodes[number];
 
 const gapCodeSet = new Set<string>(captureGapCodes);
 
+/**
+ * Why the helper treated an event as secure. The system flag means macOS
+ * disabled event delivery to other processes; the control flag means the AX
+ * element itself is a protected input. Either one ends automatic capture.
+ */
+export const secureEvidenceKinds = ['system_secure_input', 'secure_control'] as const;
+export type SecureEvidence = typeof secureEvidenceKinds[number];
+const secureEvidenceSet = new Set<string>(secureEvidenceKinds);
+
 /** A point in Quartz screen coordinates: top-left origin, whole pixels. */
 export type CapturePoint = [number, number];
 
@@ -46,6 +55,8 @@ export interface CaptureOwner {
   name?: string;
   /** Whether the AX element advertises a press action. */
   pressable?: boolean;
+  /** The owner is the system authorization UI, not the app that opened it. */
+  securityAgent?: boolean;
 }
 
 interface CaptureEventBase {
@@ -57,6 +68,8 @@ interface CaptureEventBase {
   focusGeneration: number;
   /** System secure input was active, or the focused control is protected. */
   secure: boolean;
+  /** Why the event was secure; absent when `secure` is false. */
+  secureEvidence?: SecureEvidence[];
   owner?: CaptureOwner;
   decision?: 'record' | 'navigate' | 'gap';
   gapCode?: CaptureGapCode;
@@ -149,7 +162,20 @@ function owner(value: unknown): CaptureOwner | undefined {
     if (typeof input.pressable !== 'boolean') fail('owner.pressable must be a boolean');
     parsed.pressable = input.pressable;
   }
+  if (input.securityAgent !== undefined) {
+    if (typeof input.securityAgent !== 'boolean') fail('owner.securityAgent must be a boolean');
+    parsed.securityAgent = input.securityAgent;
+  }
   return parsed;
+}
+
+function secureEvidence(value: unknown): SecureEvidence[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 2 ||
+      !value.every(entry => typeof entry === 'string' && secureEvidenceSet.has(entry))) {
+    fail('secureEvidence must list system_secure_input and/or secure_control');
+  }
+  return [...new Set(value)] as SecureEvidence[];
 }
 
 /**
@@ -164,8 +190,11 @@ export function parseCaptureEvent(value: unknown): CaptureEvent {
   const seen = integer(input.seen, 'seen', 0, Number.MAX_SAFE_INTEGER);
   const focusGeneration = integer(input.focusGeneration, 'focusGeneration', 0, Number.MAX_SAFE_INTEGER);
   if (typeof input.secure !== 'boolean') fail('secure must be a boolean');
+  const evidence = secureEvidence(input.secureEvidence);
+  if (input.secure === false && evidence?.length) fail('secureEvidence requires secure: true');
   const base = {
     t, seen, focusGeneration, secure: input.secure,
+    ...(evidence === undefined ? {} : { secureEvidence: evidence }),
     ...(input.owner === undefined ? {} : { owner: owner(input.owner) }),
     ...(input.decision === undefined ? {} : { decision: decision(input.decision) }),
     ...(input.gapCode === undefined ? {} : { gapCode: gapCode(input.gapCode) }),
