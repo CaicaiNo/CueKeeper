@@ -6,6 +6,10 @@ import { captureActionCheck, flowSchema } from './contracts.js';
 import type { Action, ElementLocator, Flow, Locator, Target } from './contracts.js';
 import { AppIdentitySession, IdentityFault } from './app-identity.js';
 import type { ClipboardRead, Desktop } from './desktop.js';
+import {
+  ElectronAccessibilityGuard, electronAccessibilityCode, electronAccessibilityHint,
+  electronAccessibilityUnverifiedCode,
+} from './electron-accessibility.js';
 import { parseFlow } from './flow.js';
 import { looksImeAltered } from './ime.js';
 import type { InputSource } from './ime.js';
@@ -533,6 +537,18 @@ export async function record(
   const windowNumber = /^w-([1-9]\d*)$/.exec(initial.windowId)?.[1];
   if (!windowNumber) throw new Fault('WINDOW_ID', 'Capture requires a macOS window number');
   signal.throwIfAborted();
+  // The target is resolved and its tree already read; an Electron editor that
+  // reports itself inaccessible would only produce a thin, unreplayable flow.
+  // This runs before the helper is spawned, so a refused target records nothing.
+  const accessibilityGuard = new ElectronAccessibilityGuard({
+    read: async () => initial,
+    ...(target.appPath ? { bundles: async () => [target.appPath!] } : {}),
+  });
+  const accessibility = await accessibilityGuard.inspect({ app: target.app }, 'target');
+  if (accessibility === 'disabled') {
+    // A target preflight is an environment precondition: exit 2, no helper.
+    throw new Fault(electronAccessibilityCode, electronAccessibilityHint(target.app), true);
+  }
   // A bound recording persists the canonical path actually proven at runtime.
   const recordedTarget: Target = bound ? { ...target, appPath: bound.bundlePath } : target;
   const executable = process.env.CUEKEEPER_RECORDER?.trim() ||
@@ -563,6 +579,15 @@ export async function record(
     clickTextFallback: true,
   });
   const warnings = new Map<string, CaptureWarning>();
+  if (accessibility === 'unverified') {
+    // Welcome pages and Settings windows have no editor to prove either state;
+    // the recording continues exactly as before, with the doubt named.
+    warnings.set(electronAccessibilityUnverifiedCode, {
+      code: electronAccessibilityUnverifiedCode,
+      message: '目标 Electron 窗口里既没有编辑器控件，也没有无障碍占位提示（例如欢迎页/设置页），' +
+        '无法确认无障碍模式；本次录制继续。',
+    });
+  }
   // The source is read before capture starts: a Chinese IME can turn physical
   // keys into separator-bearing text (`cu’e`), which is otherwise silent.
   if (options.inputSource && !options.inputSource.ascii) {
