@@ -30,6 +30,7 @@ import { displayRecordingsDirectory, recordingFileName, recordingsDirectory, wri
 import { packReport } from './report.js';
 import { blockedShellReport, runFlow } from './run.js';
 import type { ShellRunOptions } from './run.js';
+import { runFlowV2 } from './run-v2.js';
 import { createRootPrivilegeRunner } from './shell-privilege.js';
 import { createSudoKeychainStore, runSudoCommand } from './sudo-credential.js';
 import { flowHasShellDefinitions, reachableShells, shellGate } from './shell.js';
@@ -46,7 +47,8 @@ const help = `Cuekeeper ${buildInfo().version}
   cuekeeper doctor [--json]
   cuekeeper flow validate <flow.json|test.json> [--json]
   cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--interactive|--non-interactive] [--report <report.json>] [--allow-shell] [--allow-sudo] [--capture-shell-output] [--input-source-switch [--input-source <id>] [--strict-ime]] [--json]
-  cuekeeper run <flow-v2.json> --dry-run [--report <report-v2.json>] [--json]   (v2: scope plan only; live replay is not available yet)
+  cuekeeper run <flow-v2.json> --dry-run [--report <report-v2.json>] [--json]   (v2: scope plan only)
+  cuekeeper run <flow-v2.json> --foreground [--inputs <values.json>] [--headed] [--report <report-v2.json>] [--json]
   cuekeeper run ... [--no-input-source-switch]   (accepted; equal to the default)
   cuekeeper sudo set|status|clear [--json]   (login-keychain credential for --non-interactive root steps)
   cuekeeper ime status|list [--input-source <id>] [--json]
@@ -98,6 +100,31 @@ async function globalCountdown(seconds: number, signal: AbortSignal) {
 function requireString(value: string | undefined, flag: string): string {
   if (!value) throw new Error(`Missing ${flag}`);
   return value;
+}
+
+/** A command-line usage problem: exit code 2 with its own stable code. */
+class UsageFault extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
+/** Runtime values for v2 `input` parameters: a flat JSON object of strings. */
+async function readInputs(path: string): Promise<Record<string, string>> {
+  const parsed = await readJson(path);
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new UsageFault('INPUTS_INVALID', '--inputs must be a JSON object mapping parameter names to text');
+  }
+  const inputs: Record<string, string> = {};
+  for (const [name, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof value !== 'string') {
+      throw new UsageFault('INPUTS_INVALID', `--inputs value for ${name} must be a string`);
+    }
+    inputs[name] = value;
+  }
+  return inputs;
 }
 
 function checkPositionals(positionals: string[], count: number) {
@@ -367,6 +394,7 @@ async function main() {
     const { values, positionals } = parseArgs({
       args: rest, allowPositionals: true, options: {
         ...common, 'dry-run': { type: 'boolean' }, headed: { type: 'boolean' },
+        foreground: { type: 'boolean' }, inputs: { type: 'string' },
         report: { type: 'string' }, snapshot: { type: 'string' }, data: { type: 'string' },
         'allow-shell': { type: 'boolean' }, 'allow-sudo': { type: 'boolean' },
         'capture-shell-output': { type: 'boolean' }, interactive: { type: 'boolean' },
@@ -399,27 +427,51 @@ async function main() {
     }
     if (values.snapshot && !dryRun) throw new Error('--snapshot requires --dry-run');
     if (values.headed && dryRun) throw new Error('--headed is only for replay');
+    if (values['foreground'] && dryRun) throw new Error('--foreground is only for live replay');
+    if (values.inputs && dryRun) throw new Error('--inputs is only for live replay');
     if (values.report) await ensureNew(values.report);
     const document = await readJson(positionals[0]);
     if (isFlowV2(document)) {
-      // A v2 flow is refused at the entry points it cannot honour yet. The dry
-      // run is a structural scope plan: no launch, focus, clipboard or input.
+      // A v2 flow has no flow-level target: every step names its own scope. The
+      // dry run is a structural scope plan; a live run additionally takes the
+      // shared foreground, so it needs an explicit --foreground.
       const flow = parseFlowV2(document);
       if (values.data) {
         throw new UnsupportedFlowVersionError('Batch runs do not support flow version 2 yet');
       }
-      if (!dryRun) {
-        throw new UnsupportedFlowVersionError(
-          'Live replay of flow version 2 needs the cross-app runner; use --dry-run for now');
-      }
       if (values.snapshot) {
-        throw new UnsupportedFlowVersionError('A version 2 dry run resolves scopes from the flow; --snapshot fixtures are not supported yet');
+        throw new UnsupportedFlowVersionError('Version 2 runs resolve scopes from the flow; --snapshot fixtures are not supported');
       }
-      const report = dryRunFlowV2(flow);
+      if (dryRun) {
+        const report = dryRunFlowV2(flow);
+        if (values.report) await writeNew(values.report, JSON.stringify(report, null, 2) + '\n');
+        const details = planFlowV2(flow).map(describePlannedStep).join('\n');
+        success(report, `${report.mode} ${report.status}\n${details}`);
+        return;
+      }
+      if (!values['foreground']) {
+        throw new UsageFault('FOREGROUND_REQUIRED',
+          'Live replay of a version 2 flow drives the mouse and keyboard across apps; pass --foreground to confirm');
+      }
+      macOnly();
+      const inputs = values.inputs ? await readInputs(values.inputs) : undefined;
+      const baselineDir = resolve(dirname(resolve(positionals[0])), 'baselines');
+      const report = await withDesktop({ headed: values.headed ?? false, signal }, desktop =>
+        runFlowV2(flow, {
+          desktop, signal, baselineDir,
+          ...(inputs ? { inputs } : {}),
+        }));
       if (values.report) await writeNew(values.report, JSON.stringify(report, null, 2) + '\n');
-      const details = planFlowV2(flow).map(describePlannedStep).join('\n');
-      success(report, `${report.mode} ${report.status}\n${details}`);
+      const details = report.entries.map(entry =>
+        `${entry.id} ${entry.kind}${entry.delivery ? ` ${entry.delivery}` : ''} ${entry.status}` +
+        (entry.code ? ` ${entry.code}` : '') + (entry.message ? ` — ${entry.message}` : ''),
+      ).join('\n');
+      success(report, `${report.mode} ${report.status}\n${details}`, signal.aborted ? 130 :
+        report.status === 'passed' ? 0 : 1);
       return;
+    }
+    if (values['foreground'] || values.inputs) {
+      throw new UsageFault('UNSUPPORTED_FLAG', '--foreground and --inputs only apply to flow version 2');
     }
     const { flow, secrets } = parseTestItem(document);
     const planned = plan(flow);
@@ -841,6 +893,7 @@ try {
   await main();
 } catch (error) {
   const code = signal.aborted ? 130 : error instanceof UnsupportedFlowVersionError ? 2 :
+    error instanceof UsageFault ? 2 :
     error instanceof BatchError ? 2 :
     error instanceof Fault && !error.dependency ? 1 : 2;
   const reason = error instanceof Error ? error.message : 'Unexpected error';
@@ -848,6 +901,7 @@ try {
     console.log(JSON.stringify({ ok: false, error: {
       code: signal.aborted ? 'INTERRUPTED' :
         error instanceof UnsupportedFlowVersionError ? error.code :
+        error instanceof UsageFault ? error.code :
         error instanceof Fault ? error.code :
         error instanceof BatchError ? error.code : 'INPUT_ERROR',
       message: reason,

@@ -87,10 +87,15 @@ export interface Desktop {
   listWindows(app: string, timeoutMs?: number): Promise<WindowInfo[]>;
   /** Read-only inventory without an app filter, for identity cross-checks. */
   listAllWindows(timeoutMs?: number): Promise<WindowInfo[]>;
+  /**
+   * The window the system currently treats as frontmost, read without moving
+   * focus. Absent when the driver does not report `is_focused` at all.
+   */
+  focusedWindow?(timeoutMs?: number): Promise<WindowInfo | undefined>;
   /** Read-only application inventory, for mapping a window's owner PID to a bundle ID. */
   listApps(timeoutMs?: number): Promise<RunningApp[]>;
   /** Window-only calls; no bundle ID is resolved by the driver. */
-  snapshotWindow(windowId: string, title: string, timeoutMs?: number): Promise<Snapshot>;
+  snapshotWindow(windowId: string, title?: string, timeoutMs?: number): Promise<Snapshot>;
   focusWindow(windowId: string, timeoutMs?: number): Promise<void>;
   screenshotWindow(windowId: string, timeoutMs?: number): Promise<Uint8Array>;
   /** Capture the whole window as PNG bytes without touching the window. */
@@ -356,6 +361,11 @@ export async function withDesktop<T>(
           undefined, timeoutMs + 3000);
         return windowList(data);
       },
+      async focusedWindow(timeoutMs = 3000) {
+        const data = await call('list-windows', ['--timeout-ms', String(timeoutMs)],
+          undefined, timeoutMs + 3000);
+        return windowList(data).find(window => window.isFocused === true);
+      },
       async listApps(timeoutMs = 3000) {
         const data = await call('list-apps', ['--timeout-ms', String(timeoutMs)],
           undefined, timeoutMs + 3000);
@@ -365,7 +375,14 @@ export async function withDesktop<T>(
         const data = await call('snapshot', [
           '--include-bounds', '--max-depth', '50', '--timeout-ms', String(timeoutMs), '--window-id', windowId,
         ], undefined, timeoutMs + 3000);
-        return parseSnapshot(data, { app: '', window: title });
+        // A v2 scope follows its window by number, so a recorded title that the
+        // user has since changed is not an identity check. Only the driver's own
+        // window ID is compared, by the caller.
+        const observed = title ?? (() => {
+          const window = object(object(data).window);
+          return typeof window.title === 'string' ? window.title : '';
+        })();
+        return parseSnapshot(data, { app: '', window: observed });
       },
       async focusWindow(windowId, timeoutMs = 5000) {
         const result = object(await call('focus-window', ['--window-id', windowId], undefined, timeoutMs));
@@ -528,6 +545,11 @@ export function offlineDesktop(data: unknown, expected: Target): Desktop {
     async listAllWindows() {
       return [{ id: snap.windowId, title: expected.window }];
     },
+    async focusedWindow() {
+      // A fixture describes one window and no focus history; it is never the
+      // foreground for a live-style ownership check.
+      return undefined;
+    },
     async listApps() {
       throw new Fault('WINDOW_MISMATCH', 'Offline fixtures do not include an application inventory');
     },
@@ -535,7 +557,7 @@ export function offlineDesktop(data: unknown, expected: Target): Desktop {
       if (windowId !== snap.windowId) {
         throw new Fault('WINDOW_CHANGED', 'Offline fixture does not cover the requested window');
       }
-      if (title !== expected.window) {
+      if (title !== undefined && title !== expected.window) {
         throw new Fault('WINDOW_MISMATCH', 'Offline fixture does not cover the requested window');
       }
       return snap;

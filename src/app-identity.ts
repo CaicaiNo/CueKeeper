@@ -633,6 +633,94 @@ export class AppIdentitySession {
     }
   }
 
+  /**
+   * Cross-app replay binds each app once. An existing instance is re-verified;
+   * otherwise a pinned copy is opened only when the caller allows a launch.
+   */
+  async prepare(
+    desktop: Desktop, options: { launch: boolean; timeoutMs: number },
+  ): Promise<RunningInstance> {
+    if (this.offline) {
+      throw new Fault('IDENTITY_DEPENDENCY', 'Offline reads never bind a live instance', true);
+    }
+    if (!this.instance) await this.bindInstances(desktop);
+    if (this.instance) return this.verifyInstance();
+    if (!options.launch) throw new Fault('APP_NOT_FOUND', 'The target application is not running');
+    if (this.mode === 'bundle_path') {
+      await this.launch(false, options.timeoutMs);
+    } else {
+      await this.ensureLegacy(desktop, { kind: 'app_running', app: this.app }, options.timeoutMs);
+    }
+    if (!this.instance) {
+      throw new Fault('IDENTITY_DEPENDENCY', 'The app identity helper could not bind a launched instance', true);
+    }
+    return this.requireInstance();
+  }
+
+  /** Every window proven to belong to the bound instance. */
+  async ownedWindows(desktop: Desktop, timeoutMs = 3000): Promise<WindowInfo[]> {
+    if (this.offline) {
+      throw new Fault('IDENTITY_DEPENDENCY', 'Offline runs have no live window inventory', true);
+    }
+    if (!this.instance) await this.bindInstances(desktop);
+    const instance = await this.verifyInstance();
+    const owned = (await this.probe.windows()).filter(window => window.ownerPid === instance.pid);
+    const ids = new Set(owned.map(window => `w-${window.number}`));
+    const driver = (await desktop.listAllWindows(timeoutMs)).filter(window => ids.has(window.id));
+    // An inventory that drops a window of the bound instance cannot prove a
+    // title is absent, and a driver owner that disagrees with the system means
+    // the two sources no longer describe the same process.
+    if (driver.length !== ids.size) {
+      throw this.fault('APP_AMBIGUOUS', 'driver_target_unconfirmed',
+        '无法确认操作仍指向选中的副本，本轮已停止。');
+    }
+    if (driver.some(window => window.processInstance !== undefined && window.processInstance !== instance.pid)) {
+      throw this.fault('APP_AMBIGUOUS', 'driver_target_unconfirmed',
+        '无法确认操作仍指向选中的副本，本轮已停止。');
+    }
+    this.checked = true;
+    return driver;
+  }
+
+  /** Owner check for a window already bound by number (no title comparison). */
+  async verifyOwnedWindow(windowId: string) {
+    await this.verifyWindow(windowId);
+    this.checked = true;
+  }
+
+  /** Focuses a bound window and proves the same instance still owns it. */
+  async focusOwnedWindow(desktop: Desktop, windowId: string, timeoutMs?: number) {
+    await desktop.focusWindow(windowId, timeoutMs);
+    await this.verifyWindow(windowId);
+    this.checked = true;
+  }
+
+  /**
+   * Brings the bound copy's running instance forward through its exact bundle
+   * URL. The helper never substitutes another copy, and the instance is
+   * re-verified after the activation so a restart is still caught.
+   */
+  async activate(desktop: Desktop) {
+    if (!await this.probe.available()) {
+      throw new Fault('IDENTITY_DEPENDENCY', 'The app identity helper is unavailable', true);
+    }
+    if (!this.instance) await this.bindInstances(desktop);
+    const instance = await this.verifyInstance();
+    const path = this.canonicalPath ?? instance.bundlePath;
+    if (!path) {
+      throw this.fault('APP_AMBIGUOUS', 'identity_unproven',
+        '无法确认操作仍指向选中的副本，本轮已停止。');
+    }
+    await this.probe.open(path, true);
+    await this.verifyInstance();
+    this.checked = true;
+  }
+
+  get pid(): number | undefined { return this.instance?.pid; }
+
+  /** Opaque marker that changes when the process restarts. */
+  get processInstance(): string | undefined { return this.instance?.startedAt; }
+
   /** Public pre-input owner check for an already-bound window. */
   async verifyWindowId(windowId: string, title: string) {
     await this.verifyWindow(windowId, title);

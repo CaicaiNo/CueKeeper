@@ -321,6 +321,9 @@ const entry = object({
   code: T.Optional(T.String()),
   phase: T.Optional(phase),
   delivery: T.Optional(deliveryState),
+  // The scope a step asked to leave in front, recorded after the step so a
+  // later focus loss can be told apart from the step's own hand-off.
+  focusAfter: T.Optional(T.Union([windowScope, appScope])),
   textMode: T.Optional(textMode),
   input: T.Optional(parameterName),
   checkpoint: T.Optional(checkpointResult),
