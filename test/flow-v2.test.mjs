@@ -397,6 +397,7 @@ test('a v2 file wait is a closed contract that only a wait may use', () => {
 });
 
 test('the workbench loads a v2 timeline by scope and stays read-only', async t => {
+test('the workbench loads a v2 timeline by scope and exposes the v2 editor contract', async t => {
   const root = mkdtempSync(join(tmpdir(), 'cuekeeper-v2-workbench-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const directory = join(root, 'run');
@@ -454,9 +455,22 @@ test('the workbench loads a v2 timeline by scope and stays read-only', async t =
 
   const state = await post('state', {});
   assert.equal(state.body.session.version, 2);
-  for (const route of ['plan', 'save', 'run']) {
-    const rejected = await post(route, { session: imported.body.id, test: {}, mode: 'offline' });
-    assert.equal(rejected.status, 400, `${route}: ${JSON.stringify(rejected.body)}`);
-    assert.match(rejected.body.error, /UNSUPPORTED_FLOW_VERSION/);
-  }
+  assert.equal(state.body.session.v2.diff.changed, false);
+  assert.equal(state.body.session.v2.flow.id, flow.id);
+  // The v1-only plan endpoint stays closed for a v2 session.
+  const planned = await post('plan', { session: imported.body.id, test: {}, mode: 'offline' });
+  assert.equal(planned.status, 400, JSON.stringify(planned.body));
+  assert.match(planned.body.error, /UNSUPPORTED_FLOW_VERSION/);
+  // A v2 run accepts a dry run and refuses the v1 offline mode.
+  const offline = await post('run', { session: imported.body.id, test: {}, mode: 'offline' });
+  assert.equal(offline.status, 400);
+  const dry = await post('run', { session: imported.body.id, mode: 'dry-run' });
+  assert.equal(dry.status, 200, JSON.stringify(dry.body));
+  assert.equal(dry.body.mode, 'dry-run');
+  assert.equal(dry.body.entries.length, flow.steps.length);
+  // Saving writes a sibling revision through the P2 engine.
+  const saved = await post('save', { session: imported.body.id });
+  assert.equal(saved.status, 201, JSON.stringify(saved.body));
+  assert.match(saved.body.output, /flow\.edited-.+\.json$/);
+  assert.equal(saved.body.v2.saved.length, 1);
 });
