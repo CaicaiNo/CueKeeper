@@ -73,18 +73,47 @@ test('secure input cannot be added to a flow', () => {
   assert.throws(() => recording.finish(), { code: 'EMPTY_RECORDING' });
 });
 
+const asciiSource = { id: 'com.apple.keylayout.ABC', name: 'ABC', ascii: true, selectable: true };
+const sogouSource = { id: 'com.sogou.inputmethod.sogou.pinyin', name: '搜狗拼音', ascii: false, selectable: true };
+
+/**
+ * A stub TIS helper. The recorder reads the active input source before capture,
+ * so a locally built `cuekeeper-ime` plus a Chinese IME on the host would add
+ * `IME_ACTIVE` warnings and a stderr prompt to every assertion below. Injecting
+ * the stub keeps the recording tests independent of the host's input source.
+ */
+function imeStub(dir, source) {
+  const helper = join(dir, 'cuekeeper-ime');
+  writeFileSync(helper, `#!/usr/bin/env node
+const [command] = process.argv.slice(2);
+const source = ${JSON.stringify(source)};
+const reply = data => console.log(JSON.stringify({ ok: true, data }));
+if (command === 'version') reply({ helper: 'cuekeeper-ime', version: 1 });
+else if (command === 'list') reply({ sources: [source] });
+else if (command === 'current') reply({ source });
+else {
+  console.log(JSON.stringify({ ok: false, error: { code: 'INPUT_ERROR', message: 'unknown command' } }));
+  process.exit(1);
+}
+`, { mode: 0o700 });
+  return helper;
+}
+
 // Exercise the real CLI and output writer without invoking either live macOS executable.
 // The driver resolves a window by title only when asked to; otherwise it
 // snapshots whichever window the app has in front. `frontWindow` models a
 // second app window that is in front of the target, and `windows` replaces the
-// whole inventory (for a title that is absent).
+// whole inventory (for a title that is absent). `imeSource` is what the stubbed
+// input-source helper reports as the active source.
 function recordFixture(t, events, { captureExit = 0, flags = [], seconds = 1, ready = true,
-  missingWindowAtSnapshot, frontWindow, windows } = {}) {
+  missingWindowAtSnapshot, frontWindow, windows, imeSource = asciiSource } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-record-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const dist = join(dir, 'dist');
   cpSync(new URL('../dist/', import.meta.url), dist, {
-    recursive: true, filter: source => !source.endsWith('/cuekeeper-capture'),
+    // Never inherit the capture binary or a locally built input-source helper.
+    recursive: true, filter: source =>
+      !source.endsWith('/cuekeeper-capture') && !source.endsWith('/cuekeeper-ime'),
   });
   cpSync(new URL('../package.json', import.meta.url), join(dir, 'package.json'));
   symlinkSync(fileURLToPath(new URL('../node_modules/', import.meta.url)), join(dir, 'node_modules'), 'dir');
@@ -144,7 +173,13 @@ process.exitCode = ${captureExit};
   const result = spawnSync(process.execPath, [join(dist, 'cli.js'), 'record',
     '--app', fixture.target.app, '--window', fixture.target.window, '--out', path, '--seconds', String(seconds),
     '--json', ...flags], {
-    env: { ...process.env, CUEKEEPER_AGENT_DESKTOP: desktop, CUEKEEPER_APP_IDENTITY: join(dir, 'identity') },
+    env: {
+      ...process.env,
+      CUEKEEPER_AGENT_DESKTOP: desktop,
+      CUEKEEPER_APP_IDENTITY: join(dir, 'identity'),
+      CUEKEEPER_IME: imeStub(dir, imeSource),
+      CUEKEEPER_IME_DIR: join(dir, 'ime-root'),
+    },
     encoding: 'utf8', timeout: 10000,
   });
   return { code: result.status, response: JSON.parse(result.stdout), stderr: result.stderr,
@@ -154,6 +189,32 @@ process.exitCode = ${captureExit};
 
 const captureClick = { kind: 'click', point: [135, 165] };
 const captureSave = { kind: 'key', key: 's', modifiers: ['meta'] };
+
+test('record CLI records under the stubbed ASCII source without IME noise',
+  { skip: process.platform !== 'darwin' }, t => {
+    const { code, response, stderr } = recordFixture(t, [captureClick]);
+    assert.equal(code, 0, stderr);
+    assert.deepEqual(response.data.inputSource, asciiSource);
+    assert.equal(response.data.warnings, undefined);
+    assert.doesNotMatch(stderr, /输入法/);
+  });
+
+test('record CLI warns IME_ACTIVE for a stubbed Chinese source and stays quiet once it reports ASCII',
+  { skip: process.platform !== 'darwin' }, t => {
+    const chinese = recordFixture(t, [captureClick], { imeSource: sogouSource });
+    assert.equal(chinese.code, 0, chinese.stderr);
+    assert.deepEqual(chinese.response.data.inputSource, sogouSource);
+    assert.deepEqual(chinese.response.data.warnings.map(warning => warning.code), ['IME_ACTIVE']);
+    assert.match(chinese.stderr, /输入法处于中文状态：当前输入源「搜狗拼音」/);
+
+    // Back on the default stub the warning and the prompt must both disappear:
+    // the failure was the host source leaking in, not a real capture difference.
+    const restored = recordFixture(t, [captureClick]);
+    assert.equal(restored.code, 0, restored.stderr);
+    assert.deepEqual(restored.response.data.inputSource, asciiSource);
+    assert.equal(restored.response.data.warnings, undefined);
+    assert.doesNotMatch(restored.stderr, /输入法/);
+  });
 
 test('record CLI saves three clicks and exits zero with an unsupported input warning',
   { skip: process.platform !== 'darwin' }, t => {

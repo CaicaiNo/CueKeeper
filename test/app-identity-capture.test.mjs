@@ -46,7 +46,11 @@ function recordWorkspace(t, options = {}) {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const dist = join(root, 'dist');
   cpSync(new URL('../dist/', import.meta.url), dist, {
-    recursive: true, filter: source => !source.endsWith('/cuekeeper-capture'),
+    // Never inherit the capture binary or a locally built input-source helper:
+    // the recorder reads the active source, and the host's Chinese IME must not
+    // change what this test records or prints.
+    recursive: true, filter: source =>
+      !source.endsWith('/cuekeeper-capture') && !source.endsWith('/cuekeeper-ime'),
   });
   cpSync(new URL('../package.json', import.meta.url), join(root, 'package.json'));
   symlinkSync(fileURLToPath(new URL('../node_modules/', import.meta.url)), join(root, 'node_modules'), 'dir');
@@ -104,6 +108,20 @@ process.exitCode = ${options.captureExit ?? 0};
 `, { mode: 0o700 });
 
   const output = join(root, 'recorded.flow.json');
+  const imeHelper = join(root, 'ime-helper');
+  const abcSource = { id: 'com.apple.keylayout.ABC', name: 'ABC', ascii: true, selectable: true };
+  writeFileSync(imeHelper, `#!/usr/bin/env node
+const [command] = process.argv.slice(2);
+const source = ${JSON.stringify(abcSource)};
+const reply = data => console.log(JSON.stringify({ ok: true, data }));
+if (command === 'version') reply({ helper: 'cuekeeper-ime', version: 1 });
+else if (command === 'list') reply({ sources: [source] });
+else if (command === 'current') reply({ source });
+else {
+  console.log(JSON.stringify({ ok: false, error: { code: 'INPUT_ERROR', message: 'unknown command' } }));
+  process.exit(1);
+}
+`, { mode: 0o700 });
   const result = spawnSync(process.execPath, [join(dist, 'cli.js'), 'record',
     '--app', app, '--window', title, '--app-path', requested, '--out', output,
     '--seconds', '1', '--no-indicator', '--json', ...(options.flags ?? [])], {
@@ -111,6 +129,8 @@ process.exitCode = ${options.captureExit ?? 0};
       ...process.env,
       CUEKEEPER_AGENT_DESKTOP: driver,
       CUEKEEPER_APP_IDENTITY: helper,
+      CUEKEEPER_IME: imeHelper,
+      CUEKEEPER_IME_DIR: join(root, 'ime-root'),
     },
     encoding: 'utf8', timeout: 20000,
   });

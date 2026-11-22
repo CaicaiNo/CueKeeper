@@ -694,9 +694,30 @@ console.log(JSON.stringify({ version: '2.6', command, ok: true, data: payload })
 
   const flowPath = join(root, 'flow.json');
   writeFileSync(flowPath, JSON.stringify({ ...baseFlow, target: { app, window: title, appPath: requested } }));
+  // The flow types ASCII, and the replay guard reads the active input source.
+  // A stub keeps the run off this Mac's TIS and out of the user's IME.
+  const imeHelper = join(root, 'ime.js');
+  writeFileSync(imeHelper, `#!/usr/bin/env node
+const [command] = process.argv.slice(2);
+const source = { id: 'com.apple.keylayout.ABC', name: 'ABC', ascii: true, selectable: true };
+const reply = data => console.log(JSON.stringify({ ok: true, data }));
+if (command === 'version') reply({ helper: 'cuekeeper-ime', version: 1 });
+else if (command === 'list') reply({ sources: [source] });
+else if (command === 'current') reply({ source });
+else {
+  console.log(JSON.stringify({ ok: false, error: { code: 'INPUT_ERROR', message: 'unknown command' } }));
+  process.exit(1);
+}
+`, { mode: 0o700 });
   const reportPath = join(root, 'report.json');
   const result = spawnSync(process.execPath, [cliPath, 'run', flowPath, '--report', reportPath, '--json'], {
-    env: { ...process.env, CUEKEEPER_AGENT_DESKTOP: driver, CUEKEEPER_APP_IDENTITY: helper },
+    env: {
+      ...process.env,
+      CUEKEEPER_AGENT_DESKTOP: driver,
+      CUEKEEPER_APP_IDENTITY: helper,
+      CUEKEEPER_IME: imeHelper,
+      CUEKEEPER_IME_DIR: join(root, 'ime-root'),
+    },
     encoding: 'utf8', timeout: 20000,
   });
   assert.equal(result.status, 0, result.stdout + result.stderr);
