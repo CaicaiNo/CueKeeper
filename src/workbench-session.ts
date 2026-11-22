@@ -14,6 +14,7 @@ import type { PickCandidate } from './pick.js';
 import { describeApps } from './apps.js';
 import { inferSetup } from './setup.js';
 import { summarizeShellUsage } from './shell.js';
+import { parseLifecycleDocument, proposeWaitCandidates } from './wait-candidates.js';
 
 export const sameTarget = (a: { app: string; window: string }, b: { app: string; window: string }) =>
   a.app === b.app && a.window === b.window;
@@ -126,8 +127,8 @@ async function newestRecording(directory: string): Promise<string | undefined> {
 export async function loadSession(path: string) {
   const directory = await realpath(path);
   if (!(await stat(directory)).isDirectory()) throw new Error('Select a run directory');
-  const [primary, recorded, rawReport, rawActions, snapshot] = await Promise.all(
-    ['flow.json', 'recorded.flow.json', 'report.json', 'actions.json', 'snapshot.json']
+  const [primary, recorded, rawReport, rawActions, rawLifecycle, snapshot] = await Promise.all(
+    ['flow.json', 'recorded.flow.json', 'report.json', 'actions.json', 'lifecycle.json', 'snapshot.json']
       .map(name => readArtifact(directory, name)),
   );
   let source = primary ?? recorded;
@@ -139,7 +140,7 @@ export async function loadSession(path: string) {
     source = await readArtifact(directory, oneKey);
   }
   const parsed = parseFlowDocument(source);
-  if (parsed.version === 2) return loadV2Session(directory, parsed.flow, rawReport, rawActions);
+  if (parsed.version === 2) return loadV2Session(directory, parsed.flow, rawReport, rawActions, rawLifecycle);
   const flow = parsed.flow;
   const planned = plan(flow);
   let report: Report | undefined;
@@ -254,6 +255,7 @@ async function loadV2Session(
   flow: FlowV2,
   rawReport: unknown,
   rawActions: unknown,
+  rawLifecycle: unknown,
 ) {
   let report: ReportV2 | undefined;
   if (rawReport !== undefined) {
@@ -321,6 +323,18 @@ async function loadV2Session(
     };
   }));
 
+  // Wait candidates only come from explicit lifecycle events. Step times place
+  // an event between recorded steps; without a time or an explicit step, the
+  // event is skipped rather than placed by guessing.
+  const stepTimes = new Map<string, number>();
+  for (const [stepId, info] of metadata) {
+    const at = readTime(info.atMs);
+    if (at !== undefined) stepTimes.set(stepId, at);
+  }
+  const waitCandidates = rawLifecycle === undefined
+    ? []
+    : proposeWaitCandidates(flow, parseLifecycleDocument(rawLifecycle), { stepTimes });
+
   const appIds = new Set(Object.keys(flow.appPaths ?? {}));
   for (const step of flow.steps) {
     if (step.kind === 'gap') continue;
@@ -343,6 +357,7 @@ async function loadV2Session(
       id, directory, version: 2, name: flow.name, target: undefined, setup: [], apps,
       appPaths: flow.appPaths ?? {},
       timeline, scopeGroups: groups, candidates: [], durationMs,
+      waitCandidates,
       timingSource: fromCapture ? 'capture' : report?.mode,
       startedAt: fromCapture ? undefined : report?.startedAt,
       hasSnapshot: false, snapshotAppPath: undefined, pathConflict: false,

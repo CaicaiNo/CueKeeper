@@ -13,12 +13,16 @@ import type {
 import { DesktopFault } from './desktop.js';
 import type { Desktop, DragEndpoint } from './desktop.js';
 import { parseFlowV2 } from './flow-v2.js';
+import { InstallState } from './install-state.js';
+import type { InstallStateDeps } from './install-state.js';
 import { Fault, contains, resolve } from './locator.js';
 import type { Node, Point, Snapshot } from './locator.js';
 import { ReportV2Session } from './report-v2.js';
 import type { AppIdentityRecord, StepResult } from './report-v2.js';
 import { RunLease, ScopeResolver } from './scope.js';
 import type { WindowBinding } from './scope.js';
+import { assertWaitCheckSupported, waitFor } from './wait.js';
+import type { WaitObservation } from './wait.js';
 
 // Cross-app replay. Every step first resolves its scope to one window of one
 // running process, then prepares that window, confirms the run still owns the
@@ -42,6 +46,9 @@ export interface FlowV2RunOptions {
   launchTimeoutMs?: number;
   /** Directory holding `baselines/<sha256>.png` next to the flow file. */
   baselineDir?: string;
+  /** Install/download/process evidence seam; production reads the local disk. */
+  installState?: InstallState;
+  installDeps?: InstallStateDeps;
 }
 
 type StepOutcome = Omit<StepResult, 'status'> & { status?: 'passed' | 'failed' };
@@ -53,6 +60,8 @@ const blockingCodes = new Set([
   'SURFACE_UNSUPPORTED', 'MANUAL_CHECKPOINT_PENDING', 'WAIT_UNSUPPORTED',
   'UNSAFE_POINT', 'UNSAFE_TARGET', 'DELIVERY_UNCERTAIN', 'LAUNCH_TIMEOUT',
   'COMMAND_TIMEOUT', 'TIMEOUT', 'DESKTOP_DEPENDENCY', 'UNSUPPORTED_PLATFORM',
+  'DOWNLOAD_PATH_INVALID', 'DOWNLOAD_NOT_FOUND', 'DOWNLOAD_INCOMPLETE',
+  'DOWNLOAD_AMBIGUOUS', 'PROCESS_MISMATCH',
 ]);
 
 const transientWaitCodes = new Set(['NOT_FOUND', 'WINDOW_NOT_FOUND', 'APP_NOT_FOUND', 'INCOMPLETE_TREE']);
@@ -96,6 +105,18 @@ function scrollIntent(step: Extract<StepV2, { kind: 'scroll' }>): {
     direction: vertical ? (deltaY > 0 ? 'up' : 'down') : (deltaX > 0 ? 'right' : 'left'),
     amount: Math.max(1, Math.min(1000, Math.round(magnitude))),
   };
+}
+
+/** A wait's scope and condition for the timeout message; never a captured value. */
+function waitDescription(step: Extract<StepV2, { kind: 'wait' }>): string {
+  const check = step.check as { kind: string; equals?: boolean; expect?: { property?: string } };
+  const condition = check.kind === 'element' || check.kind === 'window'
+    ? (check.expect?.property ?? 'condition')
+    : `${check.kind} = ${String(check.equals)}`;
+  const scope = step.scope.kind === 'app'
+    ? `app ${step.scope.app}`
+    : `window ${step.scope.app}/${step.scope.windowKey}`;
+  return `${scope}; ${condition}`;
 }
 
 function assertionOutcome(observation: AssertionObservation): StepOutcome {
@@ -145,6 +166,8 @@ class StepRunner {
     resolver: ScopeResolver;
     signal: AbortSignal;
     inputs: Readonly<Record<string, string>>;
+    install: InstallState;
+    appPaths: Readonly<Record<string, string>>;
     baselineDir?: string;
   }) {}
 
@@ -258,6 +281,9 @@ class StepRunner {
 
   /** A declared focusAfter scope, or the launched app's own front window. */
   private async handOff(step: StepV2): Promise<StepOutcome> {
+    // A wait observes only. It never moves focus, even if the file declares a
+    // focusAfter, because a wait that changes the desktop is not a wait.
+    if (step.kind === 'wait') return {};
     const declared = (step as { focusAfter?: ReportV2Entry['focusAfter'] }).focusAfter;
     if (declared?.kind === 'window') {
       await this.resolver.focusAfter(declared);
@@ -322,38 +348,36 @@ class StepRunner {
 
   private async waitStep(step: Extract<StepV2, { kind: 'wait' }>): Promise<StepOutcome> {
     const timeoutMs = step.timeoutMs ?? defaultWaitTimeoutMs;
-    const deadline = performance.now() + timeoutMs;
-    for (;;) {
-      this.signal.throwIfAborted();
-      let matched = false;
-      try {
-        matched = await this.observeWait(step);
-      } catch (error) {
-        if (!(error instanceof Fault) || !transientWaitCodes.has(error.code)) throw error;
-      }
-      if (matched) return {};
-      const remaining = deadline - performance.now();
-      if (remaining <= 0) {
-        throw new Fault('WAIT_TIMEOUT', `Wait ${step.id} did not match before its ${timeoutMs} ms deadline`);
-      }
-      await sleep(Math.min(100, remaining), undefined, { signal: this.signal });
-    }
+    // A wait only observes: resolveWindow, ownedWindows, snapshots and install
+    // evidence are reads, so no launch, focus, click or clipboard write happens
+    // until the condition matches.
+    await waitFor({
+      describe: () => `${step.id} (${waitDescription(step)})`,
+      observe: () => this.observeWait(step),
+    }, {
+      timeoutMs,
+      signal: this.signal,
+      transient: error => error instanceof Fault && transientWaitCodes.has(error.code),
+    });
+    return {};
   }
 
-  private async observeWait(step: Extract<StepV2, { kind: 'wait' }>): Promise<boolean> {
+  private async observeWait(step: Extract<StepV2, { kind: 'wait' }>): Promise<WaitObservation> {
+    assertWaitCheckSupported(step.check.kind);
     if (step.scope.kind === 'app') {
       const check = step.check as AppWaitCheck;
       if (check.kind === 'app_installed') {
-        throw new Fault('WAIT_UNSUPPORTED', 'app_installed waits arrive with HAOC-115');
+        const app = step.scope.app;
+        const evidence = await this.ctx.install.appInstalled(app, {
+          ...(this.ctx.appPaths[app] === undefined ? {} : { path: this.ctx.appPaths[app] }),
+        });
+        return {
+          matched: evidence.installed === check.equals,
+          detail: `app_installed=${evidence.installed} evidence=${evidence.evidence.join(',') || 'none'}`,
+        };
       }
-      let running = true;
-      try {
-        await this.resolver.requireRunning(step.scope.app);
-      } catch (error) {
-        if (error instanceof Fault && error.code === 'APP_NOT_FOUND') running = false;
-        else throw error;
-      }
-      return running === check.equals;
+      const running = await this.resolver.appRunning(step.scope.app);
+      return { matched: running === check.equals, detail: `app_running=${running}` };
     }
     const scope = step.scope as WindowScope;
     const check = step.check as WindowWaitCheck;
@@ -364,14 +388,22 @@ class StepRunner {
       // A window that is not open yet (or no longer open) only answers
       // `window_exists`; any other condition keeps waiting for it to appear.
       if (error instanceof Fault &&
-          ['WINDOW_NOT_FOUND', 'APP_NOT_FOUND', 'WINDOW_CHANGED'].includes(error.code)) {
-        if (check.kind === 'window_exists') return check.equals === false;
+          ['WINDOW_NOT_FOUND', 'APP_NOT_FOUND', 'WINDOW_CHANGED', 'AMBIGUOUS_TARGET'].includes(error.code)) {
+        const exists = false;
+        if (check.kind === 'window_exists') return { matched: exists === check.equals, detail: 'window_exists=false' };
+        return { matched: false, detail: `${check.kind} waiting for the window (${error.code})` };
       }
       throw error;
     }
-    if (check.kind === 'window_exists') return check.equals === true;
+    if (check.kind === 'window_exists') {
+      return { matched: check.equals === true, detail: 'window_exists=true' };
+    }
     if (check.kind === 'element_enabled') {
-      throw new Fault('WAIT_UNSUPPORTED', 'element_enabled waits arrive with HAOC-115');
+      const { node } = resolve(await this.resolver.snapshot(binding), check.target as ElementLocator);
+      // AX omits AXEnabled when it is true, so only an explicit disabled marker
+      // proves a control is not enabled.
+      const enabled = node.states.includes('enabled') ? true : !node.states.includes('disabled');
+      return { matched: enabled === check.equals, detail: `element_enabled=${enabled}` };
     }
     const assertion = check.kind === 'window'
       ? { target: { kind: 'window' as const }, expect: check.expect }
@@ -381,7 +413,10 @@ class StepRunner {
       snapshot: () => this.resolver.snapshot(binding),
       windowsFor: async () => [{ id: binding.windowId, title: binding.observedTitle }],
     });
-    return observation.passed;
+    return {
+      matched: observation.passed,
+      detail: observation.passed ? undefined : (observation.message ?? 'condition did not match'),
+    };
   }
 
   private async assertStep(step: Extract<StepV2, { kind: 'assert' }>): Promise<StepOutcome> {
@@ -504,6 +539,8 @@ export async function runFlowV2(input: FlowV2, options: FlowV2RunOptions): Promi
     resolver,
     signal: options.signal,
     inputs: options.inputs ?? {},
+    install: options.installState ?? new InstallState(options.installDeps),
+    appPaths: flow.appPaths ?? {},
     ...(options.baselineDir === undefined ? {} : { baselineDir: options.baselineDir }),
   });
 

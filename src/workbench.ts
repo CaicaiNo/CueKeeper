@@ -11,7 +11,8 @@ import { fixtureAppPath, offlineDesktop, withDesktop } from './desktop.js';
 import { readJson, writeNew } from './files.js';
 import { hashFlow, plan } from './flow.js';
 import { isFlowV2 } from './flow-v2.js';
-import { object } from './locator.js';
+import type { FlowV2 } from './contracts-v2.js';
+import { Fault, object } from './locator.js';
 import { crop, decodePng, encodePng } from './png.js';
 import { runFlow } from './run.js';
 import type { ShellRunOptions } from './run.js';
@@ -23,6 +24,8 @@ import { keepConfirmedSetup } from './setup.js';
 import { parseLibraryItem, parseTestItem, resolveSecrets } from './test-item.js';
 import { workbenchAssets } from './workbench-assets.js';
 import { loadSession, sameTarget } from './workbench-session.js';
+import { confirmWaitCandidate } from './wait-candidates.js';
+import type { WaitCandidate } from './wait-candidates.js';
 
 const staticFiles = new Map(workbenchAssets.map(asset => [asset.path, [asset.file, asset.type] as const]));
 
@@ -83,6 +86,19 @@ async function saveBaseline(directory: string, source: string, region: ReturnTyp
     await writeFile(target, cropped, { mode: 0o600 });
   }
   return { sha256, frameWidth: image.width, frameHeight: image.height };
+}
+
+async function writeProposedWaitFlow(directory: string, flow: FlowV2): Promise<string> {
+  for (let nth = 1; nth <= 50; nth++) {
+    const path = join(directory, nth === 1 ? 'flow.with-waits.json' : `flow.with-waits-${nth}.json`);
+    try {
+      await writeNew(path, JSON.stringify(flow, null, 2) + '\n');
+      return path;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+  }
+  throw new Error('No free flow.with-waits name left in this run directory');
 }
 
 interface ConfirmationToken {
@@ -201,9 +217,30 @@ export async function startWorkbench(options: {
     }
     const current = session;
     if (!current || data.session !== current.view.id) return send(response, 409, { error: 'Reload the current session' });
+    const activeFlow = current.flow;
+    // A confirmed wait candidate writes a new flow copy; it never edits the
+    // reviewed flow.json, and it never starts the desktop.
+    if (path === '/api/wait-candidate') {
+      if (running) throw new Error('A test is running');
+      if (!isFlowV2(activeFlow)) throw new Error('Only a version 2 session has wait candidates');
+      const candidates = (current.view as { waitCandidates?: WaitCandidate[] }).waitCandidates ?? [];
+      const candidate = candidates.find(item => item.id === data.candidate);
+      if (!candidate) throw new Error('Unknown wait candidate; reload the session');
+      let next: FlowV2;
+      try {
+        next = confirmWaitCandidate(activeFlow, candidate);
+      } catch (error) {
+        // The workbench API carries one message, so keep the explicit code.
+        if (error instanceof Fault) throw new Error(`${error.code}: ${error.message}`);
+        throw error;
+      }
+      const output = await writeProposedWaitFlow(current.directory, next);
+      return send(response, 201, {
+        output, steps: next.steps.length, candidate: candidate.id, ready: candidate.ready,
+      });
+    }
     // Editing, saving and replay all still depend on the v1 single-window
     // contract. A v2 session is review-only until the cross-app runner lands.
-    const activeFlow = current.flow;
     if (isFlowV2(activeFlow)) {
       return send(response, 400, {
         error: 'UNSUPPORTED_FLOW_VERSION: a flow version 2 session is read-only in the workbench; ' +

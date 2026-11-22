@@ -102,6 +102,17 @@ export class ScopeResolver {
   }
 
   /**
+   * A fresh read-only "is any instance of this app running" check for waits. It
+   * never touches the bound session, so an app that exits and is reinstalled
+   * mid-flow can be observed instead of tripping over the old instance.
+   */
+  async appRunning(app: string): Promise<boolean> {
+    this.signal.throwIfAborted();
+    const instances = await this.identityFor(app).probe.instances(app);
+    return instances.length > 0;
+  }
+
+  /**
    * Resolves a window scope. The first resolution matches the recorded title
    * inside the bound process; every later one follows the bound window number,
    * so a retitled or moved window keeps its key and a same-titled new window

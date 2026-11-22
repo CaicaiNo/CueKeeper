@@ -255,6 +255,37 @@ function conditionDialog(condition) {
   });
 }
 
+const waitEventLabels = {
+  download_completed: '下载完成', installer_shown: '安装器出现', install_completed: '安装完成',
+  app_appeared: 'App 出现', uninstaller_shown: '卸载器出现', app_disappeared: 'App 消失',
+};
+
+function renderWaitCandidates(session) {
+  const candidates = session.waitCandidates ?? [];
+  if (!candidates.length) {
+    return [muted('全局 flow 没有顶层目标或前置条件；启动、激活与等待都写在声明作用域的步骤里。' +
+      '目录内没有 lifecycle.json 的下载/安装/卸载事件时，不提出候选等待。')];
+  }
+  const summary = muted(
+    `${candidates.filter(candidate => candidate.ready).length} / ${candidates.length} 个候选等待来自下载、安装或卸载事件；` +
+    '确认后写入新的 flow 副本，不会修改当前 flow.json，也不会启动桌面。');
+  return [summary, ...candidates.map(candidate => el('article', { className: 'condition' },
+    el('div', { className: 'condition-head' },
+      el('span', { className: 'state-chip inferred' }, candidate.ready ? '待确认' : '需补充条件'),
+      el('strong', {}, waitEventLabels[candidate.eventKind] ?? candidate.eventKind)),
+    el('p', { className: 'muted' }, `接在 ${candidate.afterStepId} 之后 · ${candidate.reason}`),
+    el('p', { className: 'muted' }, candidate.step ? actionLabel(candidate.step) : '还没有可写入的等待条件。'),
+    el('div', { className: 'actions' },
+      button('确认并写入', async () => {
+        try {
+          const result = await api('wait-candidate', { session: session.id, candidate: candidate.id });
+          status(`已写入 ${result.output.split('/').at(-1)}（${result.steps} 步），请复核后再运行`, 'success');
+        } catch (error) {
+          status(error.message, 'error');
+        }
+      }, { style: 'small', icon: 'check', disabled: !candidate.ready }))))];
+}
+
 function renderSetup() {
   const { session, setup } = state;
   const panel = $('setup');
@@ -263,7 +294,7 @@ function renderSetup() {
     return;
   }
   if (session.version === 2) {
-    panel.replaceChildren(muted('全局 flow 没有顶层目标或前置条件；启动、激活与等待都写在声明作用域的步骤里。'));
+    panel.replaceChildren(...renderWaitCandidates(session));
     return;
   }
   const conditions = setup.conditions;

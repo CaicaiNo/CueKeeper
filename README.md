@@ -132,9 +132,12 @@ node dist/cli.js workbench /path/to/run-directory
 | --- | --- |
 | `report.json` | 校验与 flow 配对，显示回放或离线运行时间 |
 | `actions.json` | 提供录制时间、应用、窗口和缩略图索引 |
+| `lifecycle.json` | 提供下载、安装、卸载事件，用于提出待确认的 `wait` 候选 |
 | `snapshot.json` | 提供同一目标窗口的 agent-desktop 2.6 快照，支持重新拾取和离线运行 |
 
 `actions.json` 使用 `{"version":1,"flowId":"…","durationMs":1800,"actions":[{"id":"step-1","atMs":240,"durationMs":35,"thumbnail":"images/step-1.png"}]}`。动作 ID 使用流程的展开 ID。可选的 `app` 和 `window` 默认取自 flow。旧录制缺少时间或图片时，工作台会显示现有的数据。v1 测试项仍绑定一个目标窗口，其他应用或窗口的动作可筛选和复盘。
+
+v2 会话可从 `lifecycle.json` 的下载、安装、卸载事件提出候选等待，在「前置条件」区逐个确认后写入 `flow.with-waits.json`，并保留原 `flow.json`。事件没有位置或时间证据时不提候选，空闲段不会被当作等待条件。等待执行、安装/下载证据与错误码见 [条件等待](docs/waiting.md)。
 
 在时间线勾选动作并「合并为行为」。可将输入提取为 `string` 或 `secret` 参数。行为库保存在 `~/.cuekeeper/behaviors`，可用 `--library <directory>` 切换。引用在草稿中保留行为标识，复制会为草稿生成独立定义。也可直接加入动作、添加断言或修改定位器，然后在草稿中调整顺序。
 

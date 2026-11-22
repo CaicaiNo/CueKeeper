@@ -179,7 +179,8 @@ export function nativeIdentityProbe(executable = helperPath()): IdentityProbe {
   };
 }
 
-async function plistBundleId(path: string) {
+/** Reads CFBundleIdentifier from an .app bundle without launching it. */
+export async function plistBundleId(path: string) {
   return new Promise<string | undefined>(resolve => {
     execFile('plutil', ['-extract', 'CFBundleIdentifier', 'raw', '-o', '-', `${path}/Contents/Info.plist`],
       { encoding: 'utf8', timeout: 5000 }, (error, stdout) => {
