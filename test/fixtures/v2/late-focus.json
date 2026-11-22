@@ -1,0 +1,83 @@
+{
+  "description": "A late focus notification for a window the flow already left arrives after the user returned. It may only confirm evidence; it must not move the recording back or add a second navigation.",
+  "snapshots": {
+    "11": {
+      "windowId": "w-11",
+      "tree": {
+        "role": "window", "name": "Downloads", "ref": "@w11:e1",
+        "bounds": { "x": 0, "y": 0, "width": 800, "height": 600 },
+        "states": [], "secure": false, "children": [
+          {
+            "role": "textfield", "name": "Search", "ref": "@w11:e2",
+            "bounds": { "x": 100, "y": 100, "width": 200, "height": 24 },
+            "states": ["focused"], "secure": false, "children": []
+          }
+        ]
+      }
+    },
+    "21": {
+      "windowId": "w-21",
+      "tree": {
+        "role": "window", "name": "Notes 1", "ref": "@w21:e1",
+        "bounds": { "x": 1000, "y": 0, "width": 800, "height": 600 },
+        "states": [], "secure": false, "children": [
+          {
+            "role": "textfield", "name": "Body", "ref": "@w21:e2",
+            "bounds": { "x": 1100, "y": 100, "width": 400, "height": 24 },
+            "states": ["focused"], "secure": false, "children": []
+          }
+        ]
+      }
+    }
+  },
+  "events": [
+    {
+      "kind": "text", "t": 100, "seen": 1700000000000, "chars": "a",
+      "focusGeneration": 1, "secure": false,
+      "owner": {
+        "app": "com.apple.finder", "pid": 100, "processInstance": 1700000000000,
+        "windowNumber": 11, "windowTitle": "Downloads"
+      }
+    },
+    {
+      "kind": "focus", "t": 200, "seen": 1700000000000,
+      "focusGeneration": 2, "secure": false,
+      "owner": {
+        "app": "com.apple.TextEdit", "pid": 200, "processInstance": 1700000000000,
+        "windowNumber": 21, "windowTitle": "Notes 1"
+      }
+    },
+    {
+      "kind": "text", "t": 300, "seen": 1700000000000, "chars": "b",
+      "focusGeneration": 2, "secure": false,
+      "owner": {
+        "app": "com.apple.TextEdit", "pid": 200, "processInstance": 1700000000000,
+        "windowNumber": 21, "windowTitle": "Notes 1"
+      }
+    },
+    {
+      "kind": "focus", "t": 400, "seen": 1700000000000,
+      "focusGeneration": 3, "secure": false,
+      "owner": {
+        "app": "com.apple.finder", "pid": 100, "processInstance": 1700000000000,
+        "windowNumber": 11, "windowTitle": "Downloads"
+      }
+    },
+    {
+      "kind": "text", "t": 500, "seen": 1700000000000, "chars": "c",
+      "focusGeneration": 3, "secure": false,
+      "owner": {
+        "app": "com.apple.finder", "pid": 100, "processInstance": 1700000000000,
+        "windowNumber": 11, "windowTitle": "Downloads"
+      }
+    },
+    {
+      "kind": "focus", "t": 900, "seen": 1700000000000,
+      "focusGeneration": 2, "secure": false,
+      "owner": {
+        "app": "com.apple.TextEdit", "pid": 200, "processInstance": 1700000000000,
+        "windowNumber": 21, "windowTitle": "Notes 1"
+      }
+    }
+  ]
+}

@@ -11,6 +11,8 @@ final class Capture {
     private let window: Int
     private let pid: Int32?
     private let bundlePath: String?
+    private let global: Bool
+    private let exclude: Set<String>
     private let indicator: RecordingIndicator?
     private let sound: Bool
     private let traceClicks: Bool
@@ -36,11 +38,29 @@ final class Capture {
     private var stopped = false
     private(set) var failed = false
 
-    init(app: String, window: Int, pid: Int32?, bundlePath: String?, showIndicator: Bool, sound: Bool, traceClicks: Bool) {
+    // Global attribution evidence. The generation advances whenever the front
+    // app or its focused window changes, so a late notification can only
+    // confirm evidence, never move the recording back to a window it left.
+    private var focusGeneration = 0
+    private var focusPid: Int32?
+    private var focusApp: String?
+    private var focusInstance: Int?
+    private var focusWindowNumber: Int?
+    private var focusTitle: String?
+    // The pointer evidence frozen on mouse-down; release uses it unchanged.
+    private var pendingPointEvidence: [String: Any]?
+    private var lagNotedAt: TimeInterval = 0
+
+    private var eventLimit: Int { global ? 20_000 : 1000 }
+
+    init(app: String, window: Int, pid: Int32?, bundlePath: String?, global: Bool = false,
+         exclude: Set<String> = [], showIndicator: Bool, sound: Bool, traceClicks: Bool) {
         self.app = app
         self.window = window
         self.pid = pid
         self.bundlePath = bundlePath
+        self.global = global
+        self.exclude = exclude
         self.indicator = showIndicator ? RecordingIndicator() : nil
         self.sound = sound
         self.traceClicks = traceClicks
@@ -51,6 +71,256 @@ final class Capture {
         guard let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], CGWindowID(window)) as? [[String: Any]],
               let owner = list.first?[kCGWindowOwnerPID as String] as? NSNumber else { return nil }
         return owner.int32Value
+    }
+
+    // MARK: - Global attribution evidence
+
+    private struct FocusedWindow {
+        let number: Int?
+        let title: String
+    }
+
+    private func axAttribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+        return value
+    }
+
+    private func axString(_ element: AXUIElement, _ name: String) -> String? {
+        axAttribute(element, name) as? String
+    }
+
+    private func axElement(_ element: AXUIElement, _ name: String) -> AXUIElement? {
+        guard let value = axAttribute(element, name), CFGetTypeID(value) == AXUIElementGetTypeID() else {
+            return nil
+        }
+        return (value as! AXUIElement)
+    }
+
+    private func axPoint(_ element: AXUIElement, _ name: String) -> CGPoint? {
+        guard let value = axAttribute(element, name), CFGetTypeID(value) == AXValueGetTypeID() else {
+            return nil
+        }
+        var point = CGPoint.zero
+        guard AXValueGetValue(value as! AXValue, .cgPoint, &point) else { return nil }
+        return point
+    }
+
+    private func axSize(_ element: AXUIElement, _ name: String) -> CGSize? {
+        guard let value = axAttribute(element, name), CFGetTypeID(value) == AXValueGetTypeID() else {
+            return nil
+        }
+        var size = CGSize.zero
+        guard AXValueGetValue(value as! AXValue, .cgSize, &size) else { return nil }
+        return size
+    }
+
+    private func axActions(_ element: AXUIElement) -> [String] {
+        var names: CFArray?
+        guard AXUIElementCopyActionNames(element, &names) == .success,
+              let names = names as? [String] else { return [] }
+        return names
+    }
+
+    private func launchMillis(_ application: NSRunningApplication) -> Int? {
+        application.launchDate.map { Int($0.timeIntervalSince1970 * 1000) }
+    }
+
+    /**
+     * Resolves the focused window's native number without a private AX call.
+     * The AX focused window is matched to the app's layer-0 CGWindow by frame;
+     * a single-window app is accepted without a frame match.
+     */
+    private func focusedWindowInfo(_ application: NSRunningApplication) -> FocusedWindow? {
+        let axApp = AXUIElementCreateApplication(application.processIdentifier)
+        guard let axWindow = axElement(axApp, kAXFocusedWindowAttribute as String) else { return nil }
+        let title = axString(axWindow, kAXTitleAttribute as String) ?? ""
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                   kCGNullWindowID) as? [[String: Any]] else {
+            return FocusedWindow(number: nil, title: title)
+        }
+        let owned = list.filter {
+            ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == application.processIdentifier &&
+            ($0[kCGWindowLayer as String] as? NSNumber)?.intValue == 0
+        }
+        if let position = axPoint(axWindow, kAXPositionAttribute as String),
+           let size = axSize(axWindow, kAXSizeAttribute as String) {
+            for entry in owned {
+                guard let bounds = entry[kCGWindowBounds as String] as? NSDictionary,
+                      let rect = CGRect(dictionaryRepresentation: bounds),
+                      abs(rect.minX - position.x) <= 4, abs(rect.minY - position.y) <= 4,
+                      abs(rect.width - size.width) <= 8, abs(rect.height - size.height) <= 8,
+                      let number = (entry[kCGWindowNumber as String] as? NSNumber)?.intValue else { continue }
+                return FocusedWindow(number: number, title: title)
+            }
+        }
+        if owned.count == 1,
+           let number = (owned[0][kCGWindowNumber as String] as? NSNumber)?.intValue {
+            return FocusedWindow(number: number, title: title)
+        }
+        return FocusedWindow(number: nil, title: title)
+    }
+
+    /** Advances the evidence generation when the front app or window changes. */
+    private func noteFocus(pid: Int32?, app: String?, window: Int?, title: String?, instance: Int?, report: Bool) {
+        let changed = pid != focusPid || app != focusApp || window != focusWindowNumber
+        if !changed {
+            if let title, title != focusTitle {
+                focusTitle = title
+            }
+            return
+        }
+        focusGeneration += 1
+        focusPid = pid
+        focusApp = app
+        focusWindowNumber = window
+        focusTitle = title
+        focusInstance = instance
+        guard report, let pid, let app else { return }
+        var owner: [String: Any] = ["app": app, "pid": Int(pid)]
+        if let instance { owner["processInstance"] = instance }
+        if let window { owner["windowNumber"] = window }
+        if let title { owner["windowTitle"] = title }
+        emit([
+            "kind": "focus", "t": elapsedMs(), "seen": wallClockMs(),
+            "focusGeneration": focusGeneration, "secure": IsSecureEventInputEnabled(),
+            "owner": owner,
+        ])
+    }
+
+    @discardableResult
+    private func refreshGlobalFocus() -> NSRunningApplication? {
+        guard let frontmost = NSWorkspace.shared.frontmostApplication else { return nil }
+        targetIsFrontmost = true
+        targetWasFrontmost = true
+        let instance = launchMillis(frontmost)
+        guard frontmost.processIdentifier != Int32(ownPID) else { return nil }
+        guard let app = frontmost.bundleIdentifier, !exclude.contains(app) else {
+            noteFocus(pid: frontmost.processIdentifier, app: nil, window: nil, title: nil,
+                      instance: instance, report: false)
+            return nil
+        }
+        let window = focusedWindowInfo(frontmost)
+        // Focus changes while paused update evidence but never become steps.
+        noteFocus(pid: frontmost.processIdentifier, app: app, window: window?.number,
+                  title: window?.title, instance: instance,
+                  report: pausedAt == nil && stopReleaseDeadline == nil)
+        return frontmost
+    }
+
+    private func wallClockMs() -> Int {
+        Int(Date().timeIntervalSince1970 * 1000)
+    }
+
+    private func elapsedMs() -> Int {
+        guard let started else { return 0 }
+        return Int((ProcessInfo.processInfo.systemUptime - started) * 1000)
+    }
+
+    private func excluded(_ app: String?) -> Bool {
+        guard let app else { return false }
+        return exclude.contains(app)
+    }
+
+    /**
+     * What AX and the native window stack can prove about the window under a
+     * pointer. A missing or conflicting owner is reported as a gap; the
+     * TypeScript engine never fills it in from another window's snapshot.
+     */
+    private func pointerEvidence(screenPoint: NSPoint, activation: Bool) -> [String: Any] {
+        let quartzX = Float(screenPoint.x)
+        let quartzY = Float(NSScreen.screens.first.map { $0.frame.maxY - screenPoint.y } ?? screenPoint.y)
+        let stackWindow = NSWindow.windowNumber(at: screenPoint, belowWindowWithWindowNumber: 0)
+        var stackPid: Int32?
+        var stackApp: String?
+        var stackTitle = ""
+        var stackInstance: Int?
+        if stackWindow > 0,
+           let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], CGWindowID(stackWindow)) as? [[String: Any]],
+           let info = list.first {
+            stackPid = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value
+            stackTitle = (info[kCGWindowName as String] as? String) ?? ""
+            if let stackPid {
+                let owner = NSRunningApplication(processIdentifier: stackPid)
+                stackApp = owner?.bundleIdentifier
+                stackInstance = owner.flatMap { launchMillis($0) }
+            }
+        }
+        var axPid: Int32?
+        var role: String?
+        var name: String?
+        var windowTitle = stackTitle
+        var pressable = false
+        // Never read AX for an excluded app: exclusion is a privacy boundary.
+        if !excluded(stackApp) {
+            let system = AXUIElementCreateSystemWide()
+            var hit: AXUIElement?
+            if AXUIElementCopyElementAtPosition(system, quartzX, quartzY, &hit) == .success, let hit {
+                var elementPid: pid_t = 0
+                AXUIElementGetPid(hit, &elementPid)
+                axPid = elementPid
+                role = axString(hit, kAXRoleAttribute as String)
+                name = axString(hit, kAXTitleAttribute as String) ?? axString(hit, kAXDescriptionAttribute as String)
+                if let axWindow = axElement(hit, kAXWindowAttribute as String) {
+                    windowTitle = axString(axWindow, kAXTitleAttribute as String) ?? windowTitle
+                }
+                pressable = axActions(hit).contains(kAXPressAction as String)
+            }
+        }
+        var owner: [String: Any] = [:]
+        if let app = stackApp { owner["app"] = app }
+        if let ownerPid = axPid ?? stackPid { owner["pid"] = Int(ownerPid) }
+        if let instance = stackInstance { owner["processInstance"] = instance }
+        if stackWindow > 0 { owner["windowNumber"] = stackWindow }
+        if !windowTitle.isEmpty { owner["windowTitle"] = windowTitle }
+        if let role { owner["role"] = role }
+        if let name { owner["name"] = name }
+        owner["pressable"] = pressable
+
+        let secure = checkSecureInput()
+        var decision = "record"
+        var gapCode: String?
+        if secure {
+            decision = "gap"
+            gapCode = "SECURE_INPUT"
+        } else if stackWindow <= 0 || axPid == nil || axPid != stackPid || excluded(stackApp) {
+            decision = "gap"
+            gapCode = "CAPTURE_SCOPE_UNVERIFIED"
+        } else if stackWindow != focusWindowNumber {
+            // The pointer landed on a window that is not the focused one. A
+            // plain background click only activates it; a pressable control
+            // could be a first-mouse delivery, which macOS does not prove.
+            if activation && !pressable && activationRoles.contains(role ?? "") {
+                decision = "navigate"
+            } else {
+                decision = "gap"
+                gapCode = "CAPTURE_SCOPE_UNVERIFIED"
+            }
+        }
+        var evidence: [String: Any] = [
+            "focusGeneration": focusGeneration, "secure": secure, "owner": owner,
+            "decision": decision,
+        ]
+        if let gapCode { evidence["gapCode"] = gapCode }
+        return evidence
+    }
+
+    private func emitGap(_ code: String, detail: String? = nil) {
+        var row: [String: Any] = [
+            "kind": "gap", "gapCode": code,
+            "t": elapsedMs(), "seen": wallClockMs(), "focusGeneration": focusGeneration,
+            "secure": IsSecureEventInputEnabled(),
+        ]
+        if let detail { row["detail"] = detail }
+        emit(row)
+    }
+
+    private func focusedElementIsSecure(_ application: NSRunningApplication) -> Bool {
+        let axApp = AXUIElementCreateApplication(application.processIdentifier)
+        guard let element = axElement(axApp, kAXFocusedUIElementAttribute as String) else { return false }
+        let role = axString(element, kAXRoleAttribute as String) ?? ""
+        let subrole = axString(element, kAXSubroleAttribute as String) ?? ""
+        return role.contains("Secure") || subrole.contains("Secure")
     }
 
     /** The bound instance, or nil when no path identity was requested. */
@@ -154,7 +424,8 @@ final class Capture {
         updateIndicator()
         playCue()
         traceMouseLifecycle("ready")
-        var ready: [String: Any] = ["kind": "ready", "indicator": indicatorEvidence, "hotkeysFiltered": true]
+        var ready: [String: Any] = ["kind": "ready", "indicator": indicatorEvidence,
+                                    "hotkeysFiltered": true, "global": global]
         ready["identity"] = identity
         emit(ready)
         refreshFocus()
@@ -194,6 +465,7 @@ final class Capture {
     @discardableResult
     func refreshFocus() -> NSRunningApplication? {
         guard started != nil, !stopped, stopReleaseDeadline == nil else { return nil }
+        if global { return refreshGlobalFocus() }
         let frontmost = NSWorkspace.shared.frontmostApplication
         let target = pid.map { frontmost?.processIdentifier == $0 ? frontmost : nil }
             ?? (frontmost?.bundleIdentifier == app ? frontmost : nil)
@@ -243,8 +515,16 @@ final class Capture {
                 return
             }
         }
-        guard CGPreflightListenEventAccess() else { stop("INPUT_MONITORING_LOST"); return }
-        guard AXIsProcessTrusted() else { stop("ACCESSIBILITY_LOST"); return }
+        guard CGPreflightListenEventAccess() else {
+            if global { emitGap("CAPTURE_GAP", detail: "input_monitoring_lost") }
+            stop("INPUT_MONITORING_LOST")
+            return
+        }
+        guard AXIsProcessTrusted() else {
+            if global { emitGap("CAPTURE_GAP", detail: "accessibility_lost") }
+            stop("ACCESSIBILITY_LOST")
+            return
+        }
         guard CFMachPortIsValid(hotkeyTap), CGEvent.tapIsEnabled(tap: hotkeyTap) else {
             stop("HOTKEY_TAP_UNAVAILABLE", detail: "The recording hotkey filter became unavailable")
             return
@@ -253,7 +533,7 @@ final class Capture {
         if !CGEvent.tapIsEnabled(tap: tap) {
             pointer = RecordingPointer()
             traceMouseLifecycle("tap_interrupted")
-            warn("TAP_INTERRUPTED")
+            if global { emitGap("STALE_CAPTURE", detail: "tap_interrupted") } else { warn("TAP_INTERRUPTED") }
             CGEvent.tapEnable(tap: tap, enable: true)
         }
         flushPauseBoundary()
@@ -317,6 +597,19 @@ final class Capture {
     }
 
     func receive(_ type: CGEventType, _ event: CGEvent) {
+        // A helper that fell behind the event queue has lost events. The gap
+        // splits any burst and tells the flow not to bridge the hole.
+        if global, started != nil, !stopped, pausedAt == nil, event.timestamp > 0 {
+            let now = DispatchTime.now().uptimeNanoseconds
+            if now > event.timestamp {
+                let lag = Double(now - event.timestamp) / 1_000_000_000
+                let uptime = ProcessInfo.processInfo.systemUptime
+                if lag > 0.5, uptime - lagNotedAt > 2 {
+                    lagNotedAt = uptime
+                    emitGap("STALE_CAPTURE", detail: "event_lag")
+                }
+            }
+        }
         if type == .mouseMoved {
             receiveHover(event)
             return
@@ -356,17 +649,35 @@ final class Capture {
         guard pausedAt == nil else { return }
         let destination = event.getIntegerValueField(.eventTargetUnixProcessID)
         guard destination != ownPID, event.getIntegerValueField(.eventSourceUnixProcessID) != ownPID else { return }
+        var frontmost: NSRunningApplication?
         if type == .keyDown {
-            guard let frontmost = refreshFocus(), !checkSecureInput(),
-                  destination <= 0 || destination == Int64(frontmost.processIdentifier) else { return }
+            guard let active = refreshFocus() else { return }
+            frontmost = active
+            if global {
+                _ = checkSecureInput()
+            } else {
+                guard !checkSecureInput() else { return }
+            }
+            guard destination <= 0 || destination == Int64(active.processIdentifier) else { return }
         } else {
             // Scope unsupported pointer input to the selected window.
             guard let primary = NSScreen.screens.first else { return }
             let point = NSPoint(x: event.location.x, y: primary.frame.maxY - event.location.y)
-            guard indicator?.covers(point) != true,
-                  NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0) == window else {
+            guard indicator?.covers(point) != true else {
                 emit(["kind": "boundary"])
                 return
+            }
+            let hit = NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0)
+            if global {
+                guard hit > 0, hit == focusWindowNumber else {
+                    emit(["kind": "boundary"])
+                    return
+                }
+            } else {
+                guard hit == window else {
+                    emit(["kind": "boundary"])
+                    return
+                }
             }
         }
         if repeating { warn("KEY_REPEAT"); return }
@@ -379,6 +690,15 @@ final class Capture {
             (.maskCommand, "meta"), (.maskControl, "ctrl"), (.maskAlternate, "alt"), (.maskShift, "shift")
         ]
         let modifiers = flags.compactMap { flag, name in event.flags.contains(flag) ? name : nil }
+        // Secure content is never read. One secure event opens the interval;
+        // the TypeScript engine drops everything inside it and leaves a gap.
+        if global, let frontmost,
+           secureInput || focusedElementIsSecure(frontmost) {
+            var payload: [String: Any] = ["kind": "text", "secure": true, "t": t, "seen": seen]
+            addFocusEvidence(&payload)
+            emit(payload)
+            return
+        }
         let special = namedKeys[code]
         if special == nil || special == "space" {
             if modifiers.isEmpty || modifiers == ["shift"] {
@@ -401,6 +721,7 @@ final class Capture {
                             "t": t, "seen": seen,
                         ]
                         if ime { payload["ime"] = true }
+                        if global { addFocusEvidence(&payload) }
                         emit(payload)
                         return
                     }
@@ -410,15 +731,41 @@ final class Capture {
             }
         }
         guard let key = special ?? ansiKeys[code] else { warn("UNSUPPORTED_KEY"); return }
-        emit(["kind": "key", "key": key, "modifiers": modifiers, "t": t, "seen": seen])
+        var payload: [String: Any] = ["kind": "key", "key": key, "modifiers": modifiers, "t": t, "seen": seen]
+        if global { addFocusEvidence(&payload) }
+        emit(payload)
+    }
+
+    /** Adds the front window's evidence to a key/text payload. */
+    private func addFocusEvidence(_ payload: inout [String: Any]) {
+        payload["focusGeneration"] = focusGeneration
+        payload["secure"] = secureInput
+        let owner = focusOwner()
+        if !owner.isEmpty { payload["owner"] = owner }
+    }
+
+    private func focusOwner() -> [String: Any] {
+        var owner: [String: Any] = [:]
+        if let focusApp { owner["app"] = focusApp }
+        if let focusPid { owner["pid"] = Int(focusPid) }
+        if let focusInstance { owner["processInstance"] = focusInstance }
+        if let focusWindowNumber { owner["windowNumber"] = focusWindowNumber }
+        if let focusTitle { owner["windowTitle"] = focusTitle }
+        return owner
     }
 
     private func registerEvent() -> Bool {
-        if events < 1001 {
+        if events < eventLimit {
             events += 1
-            if events == 1001 { warn("EVENT_LIMIT") }
+            if events == eventLimit {
+                if global {
+                    emitGap("CAPTURE_GAP", detail: "event_limit")
+                } else {
+                    warn("EVENT_LIMIT")
+                }
+            }
         }
-        return events <= 1000
+        return events <= eventLimit
     }
 
     private func traceMouseLifecycle(_ event: String, code: String? = nil) {
@@ -443,13 +790,13 @@ final class Capture {
                                    eventNumber: event.getIntegerValueField(.mouseEventNumber),
                                    clickState: event.getIntegerValueField(.mouseEventClickState))
         let button = event.getIntegerValueField(.mouseEventButtonNumber)
-        let screenPoint = eventKind == .down || traceClicks ? NSScreen.screens.first.map {
+        let screenPoint = eventKind == .down || traceClicks || global ? NSScreen.screens.first.map {
             NSPoint(x: sample.location.x, y: $0.frame.maxY - sample.location.y)
         } : nil
         let hit = screenPoint.map { NSWindow.windowNumber(at: $0, belowWindowWithWindowNumber: 0) }
-        let frontmost = traceClicks ? NSWorkspace.shared.frontmostApplication : nil
+        let frontmost = traceClicks || !global ? NSWorkspace.shared.frontmostApplication : nil
         var targetAppFrontmost: Bool?
-        if let frontmost {
+        if !global, let frontmost {
             if let pid {
                 targetAppFrontmost = frontmost.processIdentifier == pid
             } else {
@@ -458,7 +805,7 @@ final class Capture {
         }
         // The top normal window is a diagnostic hint for activation within the same app.
         var frontWindow: Int?
-        if hit == window, let frontmost, targetAppFrontmost == true,
+        if !global, hit == window, let frontmost, targetAppFrontmost == true,
            let info = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] {
             let top = info.first {
                 ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == frontmost.processIdentifier &&
@@ -474,8 +821,10 @@ final class Capture {
             recorderEvent: event.getIntegerValueField(.eventTargetUnixProcessID) == ownPID ||
                 event.getIntegerValueField(.eventSourceUnixProcessID) == ownPID,
             overIndicator: screenPoint.map { indicator?.covers($0) == true } ?? false,
-            hitWindow: hit.flatMap { $0 > 0 ? $0 : nil }, targetWindow: window,
-            targetAppFrontmost: targetAppFrontmost, frontWindow: frontWindow, button: button
+            hitWindow: hit.flatMap { $0 > 0 ? $0 : nil },
+            targetWindow: global ? (hit ?? 0) : window,
+            targetAppFrontmost: global ? nil : targetAppFrontmost,
+            frontWindow: global ? nil : frontWindow, button: button
         )
         var reason = observation.reason
         var click: RecordingPointer.Click?
@@ -483,9 +832,14 @@ final class Capture {
         switch reason {
         case .awaitingRelease:
             reason = pointer.press(sample, button: button, modifiers: modifierNames(modifiers))
+            if global, reason == .awaitingRelease, let screenPoint {
+                // Activation is only meaningful for a click; evidence freezes at
+                // mouse-down and is never re-read on release.
+                pendingPointEvidence = pointerEvidence(screenPoint: screenPoint, activation: true)
+            }
         case .unmatchedUp where type == .leftMouseUp || type == .rightMouseUp:
             (reason, click, drag) = pointer.release(sample, modifiers: modifierNames(modifiers))
-            if (reason == .accepted || reason == .dragAccepted) && events >= 1000 { reason = .eventLimit }
+            if (reason == .accepted || reason == .dragAccepted) && events >= eventLimit { reason = .eventLimit }
         case .dragObserved:
             reason = pointer.drag(sample, modifiers: modifierNames(modifiers))
         case .unsupportedClick, .overlay, .otherWindow, .noWindow:
@@ -512,6 +866,17 @@ final class Capture {
                 "seen": Int(Date().timeIntervalSince1970 * 1000),
             ]
             if click.button == 1 { emitted["button"] = "right" }
+            if global {
+                if let evidence = pendingPointEvidence {
+                    for (key, value) in evidence { emitted[key] = value }
+                } else {
+                    emitted["decision"] = "gap"
+                    emitted["gapCode"] = "CAPTURE_SCOPE_UNVERIFIED"
+                    emitted["focusGeneration"] = focusGeneration
+                    emitted["secure"] = secureInput
+                }
+                pendingPointEvidence = nil
+            }
             if traceClicks { emitted["traceId"] = click.down.traceId }
             emit(emitted)
         case .dragStarted:
@@ -532,6 +897,30 @@ final class Capture {
                 "t": Int((ProcessInfo.processInfo.systemUptime - started) * 1000),
                 "seen": Int(Date().timeIntervalSince1970 * 1000),
             ]
+            if global {
+                if var evidence = pendingPointEvidence {
+                    // v2 cannot navigate and drag in one gesture.
+                    if evidence["decision"] as? String != "record" {
+                        evidence["decision"] = "gap"
+                        evidence["gapCode"] = "CAPTURE_SCOPE_UNVERIFIED"
+                    }
+                    if let number = (evidence["owner"] as? [String: Any])?["windowNumber"] as? Int {
+                        emitted["fromWindowNumber"] = number
+                    }
+                    for (key, value) in evidence { emitted[key] = value }
+                } else {
+                    emitted["decision"] = "gap"
+                    emitted["gapCode"] = "CAPTURE_SCOPE_UNVERIFIED"
+                    emitted["focusGeneration"] = focusGeneration
+                    emitted["secure"] = secureInput
+                }
+                pendingPointEvidence = nil
+                if let primary = NSScreen.screens.first {
+                    let dropPoint = NSPoint(x: drag.to.location.x, y: primary.frame.maxY - drag.to.location.y)
+                    let dropWindow = NSWindow.windowNumber(at: dropPoint, belowWindowWithWindowNumber: 0)
+                    if dropWindow > 0 { emitted["toWindowNumber"] = dropWindow }
+                }
+            }
             if traceClicks { emitted["traceId"] = drag.from.traceId }
             emit(emitted)
         case .unsupportedClick:
@@ -570,13 +959,22 @@ final class Capture {
             return
         }
         let point = NSPoint(x: event.location.x, y: primary.frame.maxY - event.location.y)
-        guard indicator?.covers(point) != true,
-              NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0) == window else {
+        guard indicator?.covers(point) != true else {
             hover.reset()
             return
         }
-        _ = started
-        _ = started
+        let hit = NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0)
+        if global {
+            guard let focusWindowNumber, hit == focusWindowNumber else {
+                hover.reset()
+                return
+            }
+        } else {
+            guard hit == window else {
+                hover.reset()
+                return
+            }
+        }
         guard let dwellMs = hover.sample(location: event.location, timestamp: event.timestamp),
               let anchor = hover.location else { return }
         emitHover(dwellMs, point: NSPoint(x: anchor.x, y: primary.frame.maxY - anchor.y))
@@ -597,13 +995,20 @@ final class Capture {
 
     private func emitHover(_ dwellMs: Int, point: NSPoint) {
         guard let started, registerEvent() else { return }
-        emit([
+        var payload: [String: Any] = [
             "kind": "hover",
             "point": [Int(point.x.rounded()), Int(point.y.rounded())],
             "dwellMs": max(300, min(60_000, dwellMs)),
             "t": Int((ProcessInfo.processInfo.systemUptime - started) * 1000),
             "seen": Int(Date().timeIntervalSince1970 * 1000),
-        ])
+        ]
+        if global {
+            // A hover outside the focused window is noise, not a step.
+            let evidence = pointerEvidence(screenPoint: point, activation: false)
+            guard evidence["decision"] as? String == "record" else { return }
+            for (key, value) in evidence { payload[key] = value }
+        }
+        emit(payload)
     }
 
     /// Wheel input is scoped to the selected window and recorded as line deltas,
@@ -616,8 +1021,11 @@ final class Capture {
         guard refreshFocus() != nil else { return }
         guard let primary = NSScreen.screens.first else { return }
         let point = NSPoint(x: event.location.x, y: primary.frame.maxY - event.location.y)
-        guard indicator?.covers(point) != true,
-              NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0) == window else {
+        guard indicator?.covers(point) != true else {
+            emit(["kind": "boundary"])
+            return
+        }
+        if !global, NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0) != window {
             emit(["kind": "boundary"])
             return
         }
@@ -634,7 +1042,7 @@ final class Capture {
         }
         guard deltaX != 0 || deltaY != 0 else { return }
         guard registerEvent() else { return }
-        emit([
+        var payload: [String: Any] = [
             "kind": "scroll",
             "point": [Int(point.x.rounded()), Int(point.y.rounded())],
             "deltaX": Int(deltaX.clamped(to: -scrollDeltaLimit...scrollDeltaLimit)),
@@ -642,7 +1050,14 @@ final class Capture {
             "phase": scrollPhase(event.getIntegerValueField(.scrollWheelEventScrollPhase)),
             "t": Int((ProcessInfo.processInfo.systemUptime - started) * 1000),
             "seen": Int(Date().timeIntervalSince1970 * 1000),
-        ])
+        ]
+        if global {
+            // Scrolling a window that is not the focused one cannot be replayed
+            // as a focused step; the evidence says so and the engine gaps it.
+            let evidence = pointerEvidence(screenPoint: point, activation: false)
+            for (key, value) in evidence { payload[key] = value }
+        }
+        emit(payload)
     }
 
     private func scrollPhase(_ value: Int64) -> String {
@@ -655,6 +1070,12 @@ final class Capture {
 }
 
 private let scrollDeltaLimit: Int64 = 1000
+
+/// AX roles that denote a window's own surface rather than a control. A click
+/// on one of these in an inactive window only activates the window.
+private let activationRoles: Set<String> = [
+    "AXWindow", "AXSheet", "AXGroup", "AXScrollArea", "AXLayoutArea", "AXSplitGroup", "AXUnknown",
+]
 
 private extension Int64 {
     func clamped(to range: ClosedRange<Int64>) -> Int64 {
@@ -689,34 +1110,62 @@ struct RecorderCommand {
             print("{\"accessibility\":\(accessibility),\"inputMonitoring\":\(inputMonitoring)}")
             exit(0)
         }
-        guard args.count >= 4, let window = Int(args[2]), window > 0,
-              let seconds = Double(args[3]), (1...90).contains(seconds) else {
-            exit(2)
+        let global = args.count >= 2 && args[1] == "--global"
+        var app = ""
+        var window = 0
+        var seconds: Double
+        var index: Int
+        if global {
+            // Global capture takes no target: `<helper> --global <seconds> ...`.
+            guard args.count >= 3, let value = Double(args[2]), (1...3600).contains(value) else { exit(2) }
+            seconds = value
+            index = 3
+        } else {
+            guard args.count >= 4, let value = Int(args[2]), value > 0,
+                  let duration = Double(args[3]), (1...90).contains(duration) else { exit(2) }
+            app = args[1]
+            window = value
+            seconds = duration
+            index = 4
         }
         // Identity switches pair a PID and canonical path with the container's
         // window number; any other token is rejected rather than ignored.
         var switches: [String] = []
         var pid: Int32?
         var appPath: String?
-        var index = 4
+        var exclude = Set<String>()
         while index < args.count {
             switch args[index] {
             case "--no-indicator", "--sound", "--trace-clicks":
                 switches.append(args[index])
                 index += 1
             case "--pid":
-                guard index + 1 < args.count, let value = Int32(args[index + 1]), value > 0 else { exit(2) }
+                guard !global, index + 1 < args.count, let value = Int32(args[index + 1]), value > 0 else { exit(2) }
                 pid = value
                 index += 2
             case "--app-path":
-                guard index + 1 < args.count, !args[index + 1].isEmpty else { exit(2) }
+                guard !global, index + 1 < args.count, !args[index + 1].isEmpty else { exit(2) }
                 appPath = args[index + 1]
+                index += 2
+            case "--exclude":
+                guard global, index + 1 < args.count else { exit(2) }
+                let entries = args[index + 1].split(separator: ",").map {
+                    String($0).trimmingCharacters(in: .whitespaces)
+                }
+                guard !entries.isEmpty, entries.count <= 32 else { exit(2) }
+                for entry in entries {
+                    guard !entry.isEmpty,
+                          entry.range(of: #"^[A-Za-z0-9][A-Za-z0-9.-]*(?:\.[A-Za-z0-9][A-Za-z0-9.-]*)+$"#,
+                                      options: .regularExpression) != nil else { exit(2) }
+                    exclude.insert(entry)
+                }
                 index += 2
             default:
                 exit(2)
             }
         }
-        let capture = Capture(app: args[1], window: window, pid: pid, bundlePath: appPath,
+        let capture = Capture(app: app, window: window, pid: pid, bundlePath: appPath,
+                              global: global, exclude: exclude,
                               showIndicator: !switches.contains("--no-indicator"),
                               sound: switches.contains("--sound"),
                               traceClicks: switches.contains("--trace-clicks"))

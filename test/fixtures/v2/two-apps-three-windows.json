@@ -1,0 +1,121 @@
+{
+  "description": "Two apps, three windows: Finder Downloads -> TextEdit Notes 1 -> TextEdit Notes 2 -> Finder Downloads. The same TextEdit process owns both notes windows, so the two windows must get different window keys.",
+  "snapshots": {
+    "11": {
+      "windowId": "w-11",
+      "tree": {
+        "role": "window", "name": "Downloads", "ref": "@w11:e1",
+        "bounds": { "x": 0, "y": 0, "width": 800, "height": 600 },
+        "states": [], "secure": false, "children": [
+          {
+            "role": "textfield", "name": "Search", "ref": "@w11:e2",
+            "bounds": { "x": 100, "y": 100, "width": 200, "height": 24 },
+            "states": ["focused"], "secure": false, "children": []
+          }
+        ]
+      }
+    },
+    "21": {
+      "windowId": "w-21",
+      "tree": {
+        "role": "window", "name": "Notes 1", "ref": "@w21:e1",
+        "bounds": { "x": 1000, "y": 0, "width": 800, "height": 600 },
+        "states": [], "secure": false, "children": [
+          {
+            "role": "textfield", "name": "Body", "ref": "@w21:e2",
+            "bounds": { "x": 1100, "y": 100, "width": 400, "height": 24 },
+            "states": ["focused"], "secure": false, "children": []
+          }
+        ]
+      }
+    },
+    "22": {
+      "windowId": "w-22",
+      "tree": {
+        "role": "window", "name": "Notes 2", "ref": "@w22:e1",
+        "bounds": { "x": 1000, "y": 700, "width": 800, "height": 600 },
+        "states": [], "secure": false, "children": [
+          {
+            "role": "textfield", "name": "Body", "ref": "@w22:e2",
+            "bounds": { "x": 1100, "y": 800, "width": 400, "height": 24 },
+            "states": ["focused"], "secure": false, "children": []
+          }
+        ]
+      }
+    }
+  },
+  "events": [
+    {
+      "kind": "click", "t": 100, "seen": 1700000000000, "point": [150, 110],
+      "focusGeneration": 1, "secure": false, "decision": "record",
+      "owner": {
+        "app": "com.apple.finder", "pid": 100, "processInstance": 1700000000000,
+        "windowNumber": 11, "windowTitle": "Downloads", "role": "AXTextField", "pressable": true
+      }
+    },
+    {
+      "kind": "text", "t": 200, "seen": 1700000000000, "chars": "Zq-file",
+      "focusGeneration": 1, "secure": false,
+      "owner": {
+        "app": "com.apple.finder", "pid": 100, "processInstance": 1700000000000,
+        "windowNumber": 11, "windowTitle": "Downloads"
+      }
+    },
+    {
+      "kind": "text", "t": 260, "seen": 1700000000000, "chars": "Zq-file",
+      "focusGeneration": 1, "secure": false,
+      "owner": {
+        "app": "com.apple.finder", "pid": 100, "processInstance": 1700000000000,
+        "windowNumber": 11, "windowTitle": "Downloads"
+      }
+    },
+    {
+      "kind": "focus", "t": 400, "seen": 1700000000000,
+      "focusGeneration": 2, "secure": false,
+      "owner": {
+        "app": "com.apple.TextEdit", "pid": 200, "processInstance": 1700000000000,
+        "windowNumber": 21, "windowTitle": "Notes 1"
+      }
+    },
+    {
+      "kind": "text", "t": 500, "seen": 1700000000000, "chars": "Zq-one",
+      "focusGeneration": 2, "secure": false,
+      "owner": {
+        "app": "com.apple.TextEdit", "pid": 200, "processInstance": 1700000000000,
+        "windowNumber": 21, "windowTitle": "Notes 1"
+      }
+    },
+    {
+      "kind": "focus", "t": 700, "seen": 1700000000000,
+      "focusGeneration": 3, "secure": false,
+      "owner": {
+        "app": "com.apple.TextEdit", "pid": 200, "processInstance": 1700000000000,
+        "windowNumber": 22, "windowTitle": "Notes 2"
+      }
+    },
+    {
+      "kind": "text", "t": 800, "seen": 1700000000000, "chars": "Zq-two",
+      "focusGeneration": 3, "secure": false,
+      "owner": {
+        "app": "com.apple.TextEdit", "pid": 200, "processInstance": 1700000000000,
+        "windowNumber": 22, "windowTitle": "Notes 2"
+      }
+    },
+    {
+      "kind": "focus", "t": 1000, "seen": 1700000000000,
+      "focusGeneration": 4, "secure": false,
+      "owner": {
+        "app": "com.apple.finder", "pid": 100, "processInstance": 1700000000000,
+        "windowNumber": 11, "windowTitle": "Downloads"
+      }
+    },
+    {
+      "kind": "key", "t": 1100, "seen": 1700000000000, "key": "a", "modifiers": ["meta"],
+      "focusGeneration": 4, "secure": false,
+      "owner": {
+        "app": "com.apple.finder", "pid": 100, "processInstance": 1700000000000,
+        "windowNumber": 11, "windowTitle": "Downloads"
+      }
+    }
+  ]
+}
