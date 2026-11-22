@@ -199,6 +199,253 @@
         }
       ]
     },
+    "ime": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "switched": {
+          "type": "boolean"
+        },
+        "original": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "id": {
+              "minLength": 1,
+              "maxLength": 256,
+              "type": "string"
+            },
+            "name": {
+              "minLength": 1,
+              "maxLength": 256,
+              "type": "string"
+            },
+            "ascii": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "ascii"
+          ]
+        },
+        "target": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "id": {
+              "minLength": 1,
+              "maxLength": 256,
+              "type": "string"
+            },
+            "name": {
+              "minLength": 1,
+              "maxLength": 256,
+              "type": "string"
+            },
+            "ascii": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "ascii"
+          ]
+        },
+        "final": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "id": {
+              "minLength": 1,
+              "maxLength": 256,
+              "type": "string"
+            },
+            "name": {
+              "minLength": 1,
+              "maxLength": 256,
+              "type": "string"
+            },
+            "ascii": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "ascii"
+          ]
+        },
+        "runDir": {
+          "minLength": 1,
+          "maxLength": 4096,
+          "type": "string"
+        }
+      },
+      "required": [
+        "switched"
+      ]
+    },
+    "warnings": {
+      "maxItems": 50,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "code": {
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Z_]+$",
+            "type": "string"
+          },
+          "level": {
+            "anyOf": [
+              {
+                "const": "blocked",
+                "type": "string"
+              },
+              {
+                "const": "warning",
+                "type": "string"
+              }
+            ]
+          },
+          "title": {
+            "minLength": 1,
+            "maxLength": 256,
+            "type": "string"
+          },
+          "message": {
+            "maxLength": 2000,
+            "type": "string"
+          },
+          "action": {
+            "maxLength": 2000,
+            "type": "string"
+          },
+          "original": {
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "id": {
+                "minLength": 1,
+                "maxLength": 256,
+                "type": "string"
+              },
+              "name": {
+                "minLength": 1,
+                "maxLength": 256,
+                "type": "string"
+              },
+              "ascii": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "ascii"
+            ]
+          },
+          "current": {
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "id": {
+                "minLength": 1,
+                "maxLength": 256,
+                "type": "string"
+              },
+              "name": {
+                "minLength": 1,
+                "maxLength": 256,
+                "type": "string"
+              },
+              "ascii": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "ascii"
+            ]
+          },
+          "runId": {
+            "minLength": 1,
+            "maxLength": 128,
+            "type": "string"
+          },
+          "holderRunId": {
+            "minLength": 1,
+            "maxLength": 128,
+            "type": "string"
+          },
+          "lockExpiresAt": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "attempted": {
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "id": {
+                "minLength": 1,
+                "maxLength": 256,
+                "type": "string"
+              },
+              "name": {
+                "minLength": 1,
+                "maxLength": 256,
+                "type": "string"
+              },
+              "ascii": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "ascii"
+            ]
+          },
+          "verified": {
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "id": {
+                "minLength": 1,
+                "maxLength": 256,
+                "type": "string"
+              },
+              "name": {
+                "minLength": 1,
+                "maxLength": 256,
+                "type": "string"
+              },
+              "ascii": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "ascii"
+            ]
+          }
+        },
+        "required": [
+          "code",
+          "level",
+          "title",
+          "message",
+          "action"
+        ]
+      }
+    },
     "entries": {
       "minItems": 1,
       "type": "array",

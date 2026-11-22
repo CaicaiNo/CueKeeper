@@ -7,6 +7,8 @@ import type { Action, ElementLocator, Flow, Locator, Target } from './contracts.
 import { AppIdentitySession, IdentityFault } from './app-identity.js';
 import type { ClipboardRead, Desktop } from './desktop.js';
 import { parseFlow } from './flow.js';
+import { looksImeAltered } from './ime.js';
+import type { InputSource } from './ime.js';
 import { Fault, contains, flatten, hitTest, object, resolve, toLocator } from './locator.js';
 import type { Located, Point, Snapshot } from './locator.js';
 import { inferSetup } from './setup.js';
@@ -48,9 +50,14 @@ type CaptureOptions = {
   clipboard?: boolean;
   /** Identity session for a path-fixed target; created from the target otherwise. */
   identity?: AppIdentitySession;
+  /** Input source observed when recording started; non-ASCII changes the text risk. */
+  inputSource?: InputSource;
 };
 type CaptureWarning = { code: string; message: string };
-type CaptureResult = { flow: Flow; warnings: CaptureWarning[]; partial: boolean; failure?: Fault };
+type CaptureResult = {
+  flow: Flow; warnings: CaptureWarning[]; partial: boolean; failure?: Fault;
+  inputSource?: InputSource;
+};
 
 const pointerWarningMessages = new Map([
   ['DRAG_MODIFIERS_SKIPPED', 'A drag with held modifiers was skipped because v1 replays plain left drags only'],
@@ -556,6 +563,15 @@ export async function record(
     clickTextFallback: true,
   });
   const warnings = new Map<string, CaptureWarning>();
+  // The source is read before capture starts: a Chinese IME can turn physical
+  // keys into separator-bearing text (`cu’e`), which is otherwise silent.
+  if (options.inputSource && !options.inputSource.ascii) {
+    warnings.set('IME_ACTIVE', {
+      code: 'IME_ACTIVE',
+      message: `录制开始时输入源为「${options.inputSource.name}」，英文按键可能被改写成带分隔符的文本（例如 cu’e）。` +
+        '建议切到 ABC/U.S. 后重新录制。',
+    });
+  }
 
   let ready = false;
   let targetActive = true;
@@ -783,6 +799,19 @@ export async function record(
     }
     throw error;
   }
+  // A committed burst can carry a syllable separator (or split one across two
+  // chunks), so the finished flow is the only place that sees the whole text.
+  const nonAsciiSource = options.inputSource ? !options.inputSource.ascii : false;
+  const suspicious = flow.steps
+    .flatMap(step => step.kind === 'type' && typeof step.text === 'string' &&
+      looksImeAltered(step.text, nonAsciiSource) ? [step.id] : []);
+  if (suspicious.length) {
+    warn('IME_UNCOMMITTED', `步骤 ${suspicious.join('、')} 的文本含有输入法分隔符（例如 cu’e），` +
+      '不是正常的英文输入。请切到 ABC/U.S. 后重新录制该段，或手动修正 flow 里的 text。');
+  }
   if (recording.exceededStepLimit) warn('STEP_LIMIT', `The flow retains the first ${stepLimit} actions`);
-  return { flow, warnings: [...warnings.values()], partial: !!failure, failure };
+  return {
+    flow, warnings: [...warnings.values()], partial: !!failure, failure,
+    ...(options.inputSource ? { inputSource: options.inputSource } : {}),
+  };
 }

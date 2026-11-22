@@ -13,6 +13,8 @@ import { DesktopFault, isMissingWindow } from './desktop.js';
 import type { ClickOptions, Desktop, DragEndpoint } from './desktop.js';
 import { hashFlow, plan, scrollIntent } from './flow.js';
 import type { PlannedStep } from './flow.js';
+import { isImeFault } from './ime.js';
+import type { InputSourceManager } from './ime.js';
 import { Fault, contains, resolve } from './locator.js';
 import type { Located, Point, Snapshot } from './locator.js';
 import {
@@ -177,10 +179,13 @@ export async function runFlow(
     identity?: AppIdentitySession;
     /** Enables shell steps. Omit for flows that contain none. */
     shell?: ShellRunOptions;
+    /** Input-source guard for a live replay; omitted for dry-run and offline. */
+    ime?: InputSourceManager;
   },
 ): Promise<Report> {
   const planned = plan(flow);
   const { dryRun, signal } = options;
+  const ime = options.ime;
   const offline = options.offline === true;
   const shellSteps = reachableShells(planned);
   const gate = dryRun || !shellSteps.length ? undefined : shellGate(flow, planned, {
@@ -217,6 +222,8 @@ export async function runFlow(
 
   const identity = options.identity ?? new AppIdentitySession(flow.target);
   let identityBlock: { fault: IdentityFault; entryId?: string } | undefined;
+  /** Set when the input source blocked a step; the run stops like an identity block. */
+  let imeStop = false;
   /**
    * A blocked start lists every planned action as blocked without inventing
    * setup entries, and keeps the report timeline in flow order.
@@ -307,7 +314,9 @@ export async function runFlow(
     } catch (error) {
       if (signal.aborted || (error instanceof Fault && error.dependency)) throw error;
       if (error instanceof IdentityFault) identityBlock = { fault: error, entryId: id };
-      outcome = errorOutcome(error, error instanceof IdentityFault ? 'blocked' : failure);
+      // An IME block is an input-source decision, never the app's failure.
+      if (isImeFault(error)) imeStop = true;
+      outcome = errorOutcome(error, error instanceof IdentityFault || isImeFault(error) ? 'blocked' : failure);
     }
     // A repair can record the identity failure itself while keeping repair
     // details; the entry that triggered it names the stop.
@@ -467,11 +476,11 @@ export async function runFlow(
 
   const globalReady = await checkConditions(flow.setup, 'global');
   let halted = !globalReady;
-  let stopped = identityBlock ? 'identity' : undefined;
+  let stopped: 'identity' | 'ime' | undefined = identityBlock ? 'identity' : undefined;
   if (halted) report.status = 'blocked';
   try {
     for (const { id, action } of planned) {
-      if (stopped === 'identity') {
+      if (stopped) {
         report.entries.push(stopEntry(id, action, 'skipped', 'Stopped by an earlier result'));
         continue;
       }
@@ -598,6 +607,9 @@ export async function runFlow(
         }
         if (action.kind === 'key') {
           if (dryRun) return { status: 'resolved', message: 'Window resolved for shortcut' };
+          // A character key is composed by an active IME; named keys and
+          // command chords are not.
+          if (ime) await ime.prepare('key', action.key, action.modifiers ?? []);
           if (pathBound) await identity.verifyWindowId(current.windowId, flow.target.window);
           return { status: 'passed', delivery: await client.press(
             [...(action.modifiers ?? []), action.key].join('+'), current,
@@ -680,6 +692,11 @@ export async function runFlow(
         if (!node.ref || node.secure) throw new Fault('UNSAFE_TARGET', 'Control is secure or has no action reference');
         if (dryRun) return { status: 'resolved', message: `Resolved ${node.role}` };
         if (pathBound) await identity.verifyWindowId(current.windowId, flow.target.window);
+        // Text still travels through Unicode injection; the guard only makes
+        // the input source match what the step assumes.
+        if (action.kind === 'type' && ime) {
+          await ime.prepare('type', options.secretTexts?.get(id) ?? action.text);
+        }
         const delivery = action.kind === 'click'
           ? await client.click(node.ref, clickOptions(action))
           : await client.type(node.ref, options.secretTexts?.get(id) ?? action.text);
@@ -690,12 +707,25 @@ export async function runFlow(
         stopped = 'identity';
         continue;
       }
+      if (imeStop) {
+        // The blocked step already names the IME code; later steps did not run.
+        report.status = 'blocked';
+        stopped = 'ime';
+        continue;
+      }
       if (status === 'failed') {
         report.status = 'failed';
         halted = true;
       }
     }
   } finally {
+    // Restore runs on success, failure, cancellation and SIGINT/SIGTERM; the
+    // manager reports a failed restore instead of throwing.
+    if (ime) {
+      const restored = await ime.restore();
+      if (restored.warnings.length) report.warnings = restored.warnings;
+      report.ime = restored.summary;
+    }
     if (shellTemp) await removeShellDirectory(shellTemp);
   }
   if (identityBlock) {

@@ -408,11 +408,43 @@ const appIdentity = T.Union([
     entryId: T.Optional(T.String({ minLength: 1, maxLength: 196 })),
   }),
 ]);
+// An input source fact. Flow v1 keeps its required fields; a report carries
+// which source a run started on, which one it used and how it ended.
+const inputSource = object({
+  id: T.String({ minLength: 1, maxLength: 256 }),
+  name: T.String({ minLength: 1, maxLength: 256 }),
+  ascii: T.Boolean(),
+});
+// One IME warning is user-visible: CLI stderr, --json and viewer read the same
+// record. `level` separates a blocked step from an advisory restore result.
+const imeWarning = object({
+  code: T.String({ minLength: 1, maxLength: 64, pattern: '^[A-Z_]+$' }),
+  level: T.Union([T.Literal('blocked'), T.Literal('warning')]),
+  title: T.String({ minLength: 1, maxLength: 256 }),
+  message: T.String({ maxLength: 2000 }),
+  action: T.String({ maxLength: 2000 }),
+  original: T.Optional(inputSource),
+  current: T.Optional(inputSource),
+  runId: T.Optional(T.String({ minLength: 1, maxLength: 128 })),
+  holderRunId: T.Optional(T.String({ minLength: 1, maxLength: 128 })),
+  lockExpiresAt: T.Optional(T.String({ maxLength: 64 })),
+  attempted: T.Optional(inputSource),
+  verified: T.Optional(inputSource),
+});
+const imeSummary = object({
+  switched: T.Boolean(),
+  original: T.Optional(inputSource),
+  target: T.Optional(inputSource),
+  final: T.Optional(inputSource),
+  runDir: T.Optional(T.String({ minLength: 1, maxLength: 4096 })),
+});
 export const reportSchema = object({
   version: T.Literal(1), flowId: id, flowSha256: digest, startedAt: timestamp,
   mode: T.Union([T.Literal('replay'), T.Literal('dry-run')]),
   status: T.Union([T.Literal('passed'), T.Literal('failed'), T.Literal('blocked')]),
   appIdentity: T.Optional(appIdentity),
+  ime: T.Optional(imeSummary),
+  warnings: T.Optional(T.Array(imeWarning, { maxItems: 50 })),
   entries: T.Array(entry, { minItems: 1 }),
 });
 
@@ -482,6 +514,8 @@ export type ElementLocator = Static<typeof element>;
 export type Check = Static<typeof check>;
 export type Target = Static<typeof targetSchema>;
 export type Report = Static<typeof reportSchema>;
+export type ImeWarningReport = NonNullable<Report['warnings']>[number];
+export type ImeSummaryReport = NonNullable<Report['ime']>;
 export type AppIdentity = Static<typeof appIdentity>;
 export type AppIdentityReason =
   | 'invalid_bundle_path' | 'bundle_id_mismatch' | 'unsupported_path_platform'

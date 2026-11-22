@@ -35,6 +35,17 @@ unzip -t out/run-01.zip
 
 所有按钮都只操作本地 DOM。`报告 JSON` 与 `流程 JSON` 下载的是同一归档里的文件。
 
+## 输入法字段
+
+报告顶层新增两个可选字段：
+
+| 字段 | 内容 |
+| --- | --- |
+| `ime` | `switched`、`original`、`target`、`final`、`runDir`；表示本轮是否切换过输入源、切到哪、最后停在哪 |
+| `warnings[]` | 输入法警告：`code`、`level`（`blocked` / `warning`）、`title`、`message`、`action`、`original`、`current`、`runId`；`IME_BUSY` 带 `holderRunId` / `lockExpiresAt`，恢复失败带 `attempted` / `verified` |
+
+查看器在顶部横幅显示同样的标题、正文与「下一步」。旧报告没有这些字段时正常打开。规则与错误码见[输入法守卫](ime.md)。
+
 ## 资产约定
 
 把文件放在报告旁边的 `assets/` 目录（或通过 `--assets <dir>` 指定），打包时自动带入：

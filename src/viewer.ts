@@ -54,6 +54,17 @@ function identityBanner(report: Report) {
     <span class="mono">${escapeHtml(reason)}${identity.entryId ? ` · ${escapeHtml(identity.entryId)}` : ''}</span>
   </div>`;
 }
+
+/** Report warnings are the same input-source facts CLI and --json show. */
+function imeBanners(report: Report) {
+  return (report.warnings ?? []).map(item => `<div class="banner ime-banner ime-${escapeHtml(item.level)}">
+    <span class="ic" aria-hidden="true">${viewerIcon('alert')}</span>
+    <span><b>${escapeHtml(item.title)}</b> <span class="mono">${escapeHtml(item.code)}</span>　${escapeHtml(item.message)}
+      <span class="ime-action">下一步：${escapeHtml(item.action)}</span></span>
+    <span class="sp"></span>
+    <span class="mono">${escapeHtml(item.original?.name ?? '')} → ${escapeHtml(item.current?.name ?? '')}</span>
+  </div>`).join('');
+}
 const kindLabels: Record<string, string> = {
   setup: '前置条件', click: '点击', type: '输入', key: '快捷键', wait: '等待', assert: '断言', scroll: '滚轮',
   drag: '拖拽', hover: '悬停', paste: '粘贴',
@@ -612,6 +623,7 @@ export function renderViewer(report: Report, flow: Flow, steps: PlannedStep[], a
   </div>
 
   ${identityBanner(report)}
+  ${imeBanners(report)}
 
   <main class="layout">
     <section class="rail" aria-label="执行时间线">
@@ -717,6 +729,7 @@ a{color:var(--accent)}
 .banner .sp{flex:1}
 .banner .btn{height:26px;padding:0 10px;background:transparent;border-color:var(--warn-line);color:#6E4A12}
 .banner .btn:hover{background:#F7EEDC;color:#5A3C0E}
+.ime-banner .ime-action{display:block;margin-top:2px;color:#7A5A25;font-size:11.5px}
 
 .layout{display:grid;grid-template-columns:392px minmax(0,1fr);flex:1;min-height:0}
 .rail{background:var(--surface-2);border-right:1px solid var(--line);overflow-y:auto;padding:16px 12px 28px 16px}

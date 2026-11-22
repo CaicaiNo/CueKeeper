@@ -10,6 +10,7 @@ import { loadBaseline } from './assertion.js';
 import { fixtureAppPath, offlineDesktop, withDesktop } from './desktop.js';
 import { readJson, writeNew } from './files.js';
 import { hashFlow, plan } from './flow.js';
+import { InputSourceManager, nativeImeBackend } from './ime.js';
 import { object } from './locator.js';
 import { crop, decodePng, encodePng } from './png.js';
 import { runFlow } from './run.js';
@@ -317,6 +318,18 @@ export async function startWorkbench(options: {
       };
       const secretTexts = dryRun ? undefined : resolveSecrets(secrets, process.env);
       const baselineDir = join(current.directory, 'baselines');
+      // A live run from the workbench guards the input source too; a missing
+      // helper leaves it unguarded instead of failing the run.
+      let ime: InputSourceManager | undefined;
+      if (!dryRun) {
+        const backend = nativeImeBackend();
+        if (await backend.available()) {
+          const targetId = process.env.CUEKEEPER_IME_TARGET;
+          ime = new InputSourceManager({
+            backend, switchEnabled: true, ...(targetId ? { targetId } : {}),
+          });
+        }
+      }
       const report = dryRun
         ? await runFlow(flow, needsDesktop ? offlineDesktop(current.snapshot, flow.target) : undefined, {
           dryRun, signal, baselineDir, shell, offline: true,
@@ -325,8 +338,12 @@ export async function startWorkbench(options: {
         })
         : await (needsDesktop
           ? withDesktop({ headed: true, signal },
-            desktop => runFlow(flow, desktop, { dryRun, signal, secretTexts, baselineDir, shell }))
-          : runFlow(flow, undefined, { dryRun, signal, secretTexts, baselineDir, shell }));
+            desktop => runFlow(flow, desktop, {
+              dryRun, signal, secretTexts, baselineDir, shell, ...(ime ? { ime } : {}),
+            }))
+          : runFlow(flow, undefined, {
+            dryRun, signal, secretTexts, baselineDir, shell, ...(ime ? { ime } : {}),
+          }));
       return send(response, 200, { ...report, stopped: currentRun.signal.aborted });
     } finally {
       running = false;

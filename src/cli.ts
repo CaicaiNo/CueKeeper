@@ -12,6 +12,10 @@ import type { Target } from './contracts.js';
 import { fixtureAppPath, offlineDesktop, withDesktop } from './desktop.js';
 import { ensureNew, readJson, writeNew } from './files.js';
 import { parseFlow, plan } from './flow.js';
+import {
+  InputSourceManager, chooseAsciiSource, defaultImeDir, detectInputSource, nativeImeBackend,
+  readImeLock, readImeRecord, releaseImeLock, removeImeRecord, restoreImeRecord,
+} from './ime.js';
 import { Fault } from './locator.js';
 import type { Snapshot } from './locator.js';
 import { pickCandidates, selectCandidate } from './pick.js';
@@ -35,8 +39,12 @@ const help = `Cuekeeper ${buildInfo().version}
   cuekeeper --version
   cuekeeper doctor [--json]
   cuekeeper flow validate <flow.json|test.json> [--json]
-  cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--interactive|--non-interactive] [--report <report.json>] [--allow-shell] [--allow-sudo] [--capture-shell-output] [--json]
+  cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--interactive|--non-interactive] [--report <report.json>] [--allow-shell] [--allow-sudo] [--capture-shell-output] [--no-input-source-switch] [--input-source <id>] [--strict-ime] [--json]
   cuekeeper sudo set|status|clear [--json]   (login-keychain credential for --non-interactive root steps)
+  cuekeeper ime status|list [--input-source <id>] [--json]
+  cuekeeper ime set <id> [--json]
+  cuekeeper ime restore --run <run-directory> [--strict-ime] [--json]
+  cuekeeper ime unlock --run <run-id> [--json]
   cuekeeper workbench [run-directory] [--port <port>] [--library <directory>] [--allow-live-replay] [--allow-shell] [--allow-sudo]
   cuekeeper pick --app <bundle-id> --window <title> [--app-path <path>] [--select <ref>] [--snapshot <snapshot.json>] [--json]
   cuekeeper record --app <bundle-id> --window <title> --out <flow.json> [--app-path <path>] [--seconds 25] [--clipboard] [--no-indicator] [--sound] [--trace-clicks] [--json]
@@ -151,6 +159,89 @@ async function main() {
     return;
   }
 
+  if (command === 'ime') {
+    const { values, positionals } = parseArgs({
+      args: rest, allowPositionals: true, options: {
+        ...common, run: { type: 'string' }, 'strict-ime': { type: 'boolean' },
+        'input-source': { type: 'string' },
+      },
+    });
+    macOnly();
+    const backend = nativeImeBackend();
+    const action = positionals[0] ?? 'status';
+    const requireHelper = async () => {
+      if (!await backend.available()) {
+        throw new Fault('IME_DEPENDENCY', '输入法辅助程序不可用，请先运行 pnpm build:recorder 重新构建');
+      }
+    };
+    if (action === 'status' || action === 'list') {
+      if (positionals.length > 1) throw new Error('Unexpected positional arguments. See --help');
+      await requireHelper();
+      const current = await backend.current();
+      const sources = await backend.list();
+      const target = chooseAsciiSource(sources, values['input-source'] ?? process.env.CUEKEEPER_IME_TARGET);
+      const lock = await readImeLock();
+      const data = {
+        current, ascii: current.ascii, ...(target ? { target } : {}), lock,
+        ...(action === 'list' ? { sources } : {}), directory: defaultImeDir(),
+      };
+      success(data, [
+        `当前输入源：${current.name}（${current.id}）${current.ascii ? ' · ASCII' : ' · 非 ASCII'}`,
+        target ? `英文目标：${target.name}（${target.id}）` : '英文目标：没有可用的 ABC / U.S. 输入源',
+        lock.holder
+          ? `锁：run ${lock.holder.runId} 持有${lock.stale ? '（已过期，可接管）' : ''}`
+          : '锁：空闲',
+        ...(action === 'list'
+          ? sources.map(source => `- ${source.name}（${source.id}）${source.ascii ? ' · ASCII' : ''}`)
+          : []),
+      ].join('\n'));
+      return;
+    }
+    if (action === 'set') {
+      checkPositionals(positionals, 2);
+      await requireHelper();
+      const wanted = positionals[1];
+      const source = (await backend.list()).find(item => item.id === wanted || item.name === wanted);
+      if (!source) throw new Fault('IME_SOURCE_UNAVAILABLE', `系统里没有输入源 ${wanted}`);
+      await backend.select(source.id);
+      const after = await backend.current();
+      if (after.id !== source.id) {
+        throw new Fault('IME_RESTORE_FAILED', `已请求切换到 ${source.name}，系统当前仍是 ${after.name}`);
+      }
+      success({ source: after }, `已切换到 ${after.name}（${after.id}）`);
+      return;
+    }
+    if (action === 'restore') {
+      const directory = requireString(values.run, '--run');
+      await requireHelper();
+      const record = await readImeRecord(directory);
+      const result = await restoreImeRecord(record, backend);
+      const data = {
+        runId: record.runId, original: record.original, restored: result.restored,
+        ...(result.current ? { current: result.current } : {}),
+        ...(result.warning ? { warnings: [result.warning] } : {}),
+      };
+      if (!result.restored && result.warning) {
+        console.error(`${result.warning.title}：${result.warning.message}`);
+        console.error(`下一步：${result.warning.action}`);
+        success(data, `${result.warning.title}：${result.warning.message}`,
+          values['strict-ime'] ? 1 : 0);
+        return;
+      }
+      await removeImeRecord(directory);
+      success(data, `已恢复输入源：${result.current?.name ?? record.original.name}`);
+      return;
+    }
+    if (action === 'unlock') {
+      const runId = requireString(values.run, '--run');
+      const result = await releaseImeLock(runId);
+      if (!result.released) throw new Fault('IME_BUSY', `锁不属于 run ${runId}，或没有锁`);
+      success({ runId, path: result.path }, `已释放 run ${runId} 的输入法锁`);
+      return;
+    }
+    throw new Error('Unknown ime action. Use status, list, set, restore or unlock');
+  }
+
   if (command === 'pick') {
     const { values } = parseArgs({
       args: rest, options: {
@@ -233,6 +324,8 @@ async function main() {
         'allow-shell': { type: 'boolean' }, 'allow-sudo': { type: 'boolean' },
         'capture-shell-output': { type: 'boolean' }, interactive: { type: 'boolean' },
         'non-interactive': { type: 'boolean' },
+        'no-input-source-switch': { type: 'boolean' }, 'input-source': { type: 'string' },
+        'strict-ime': { type: 'boolean' },
       },
     });
     checkPositionals(positionals, 1);
@@ -320,11 +413,29 @@ async function main() {
       return;
     }
 
+    const imeTarget = values['input-source'] ?? process.env.CUEKEEPER_IME_TARGET;
+    // Only a live replay touches TIS: a dry run and an offline snapshot never
+    // depend on the user's keyboard state. A missing helper reports once and
+    // leaves the run unguarded instead of inventing report warnings.
+    let ime: InputSourceManager | undefined;
+    if (!dryRun && !values.snapshot) {
+      const backend = nativeImeBackend();
+      if (await backend.available()) {
+        ime = new InputSourceManager({
+          backend,
+          ...(imeTarget ? { targetId: imeTarget } : {}),
+          switchEnabled: !(values['no-input-source-switch'] ?? false),
+        });
+      } else if (!machine) {
+        console.error('输入法保护不可用：找不到 cuekeeper-ime，本次运行不会检测或切换输入法。');
+      }
+    }
     const options = {
       dryRun, signal,
       secretTexts: dryRun ? undefined : resolveSecrets(secrets, process.env),
       baselineDir,
       shell,
+      ...(ime ? { ime } : {}),
       ...(values.report ? { evidenceDir: `${resolve(values.report)}.assets` } : {}),
     };
     let report;
@@ -349,6 +460,11 @@ async function main() {
       }
     }
     if (values.report) await writeNew(values.report, JSON.stringify(report, null, 2) + '\n');
+    const imeWarnings = report.warnings ?? [];
+    for (const warning of imeWarnings) {
+      console.error(`${warning.title}：${warning.message}`);
+      console.error(`下一步：${warning.action}`);
+    }
     const details = report.entries
       .map(entry => {
         const shellDetail = entry.kind === 'shell'
@@ -357,8 +473,12 @@ async function main() {
           (entry.message ? ` — ${entry.message}` : '');
       })
       .join('\n');
-    success(report, `${report.mode} ${report.status}\n${details}`,
-      signal.aborted ? 130 : report.status === 'passed' ? 0 : 1);
+    // A restore problem never changes the test result unless --strict-ime asks
+    // for it; a blocked step already made the run non-passing.
+    const restoreFailed = imeWarnings.some(warning =>
+      warning.code === 'IME_RESTORE_FAILED' || warning.code === 'IME_RESTORE_UNAVAILABLE');
+    success(report, `${report.mode} ${report.status}\n${details}`, signal.aborted ? 130 :
+      report.status !== 'passed' ? 1 : values['strict-ime'] && restoreFailed ? 1 : 0);
     return;
   }
 
@@ -439,12 +559,21 @@ async function main() {
     const preflight = preflightFault(await capturePreflight());
     if (preflight) throw preflight;
     await ensureNew(output);
+    // The input source is read before capture; a Chinese IME rewrites physical
+    // keys into candidate text, which the recorder cannot undo.
+    const inputSource = await detectInputSource(nativeImeBackend());
+    if (inputSource && !inputSource.ascii) {
+      console.error(`输入法处于中文状态：当前输入源「${inputSource.name}」，录制的英文可能被改写成 cu’e 这类文本。` +
+        '建议切到 ABC/U.S. 后重新录制。');
+    }
     const options = { seconds, indicator: !values['no-indicator'], sound: values.sound ?? false,
-      traceClicks: values['trace-clicks'] ?? false, clipboard: values.clipboard ?? false };
+      traceClicks: values['trace-clicks'] ?? false, clipboard: values.clipboard ?? false,
+      ...(inputSource ? { inputSource } : {}) };
     const { flow, warnings, partial, failure } = await withDesktop({ headed: false, signal },
       desktop => record(desktop, target, options, signal));
     await writeNew(output, JSON.stringify(flow, null, 2) + '\n');
     const data = { output, flowId: flow.id, actions: flow.steps.length,
+      ...(inputSource ? { inputSource } : {}),
       ...(partial ? { partial: true } : {}), ...(warnings.length ? { warnings } : {}) };
     const message = `Saved ${flow.steps.length} actions to ${output}${partial ? ' (partial flow)' : ''}`;
     const fault = failure ?? (partial ? new Fault('PARTIAL_RECORDING', 'Some input was skipped') : undefined);
