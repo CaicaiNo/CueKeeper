@@ -1,0 +1,49 @@
+{
+  "version": 2,
+  "id": "cross-app-smoke",
+  "name": "跨 App 输入并检查窗口",
+  "inputs": ["sampleText"],
+  "appPaths": {
+    "com.apple.TextEdit": "/System/Applications/TextEdit.app",
+    "com.apple.finder": "/System/Library/CoreServices/Finder.app"
+  },
+  "steps": [
+    {
+      "id": "s1",
+      "kind": "type",
+      "scope": {
+        "kind": "window",
+        "app": "com.apple.TextEdit",
+        "windowKey": "editor",
+        "windowTitle": "QA Notes"
+      },
+      "target": { "kind": "element", "role": "textfield" },
+      "input": "sampleText"
+    },
+    {
+      "id": "s2",
+      "kind": "activate_app",
+      "scope": { "kind": "app", "app": "com.apple.finder" },
+      "focusAfter": {
+        "kind": "window",
+        "app": "com.apple.finder",
+        "windowKey": "files",
+        "windowTitle": "QA Files"
+      }
+    },
+    {
+      "id": "s3",
+      "kind": "assert",
+      "scope": {
+        "kind": "window",
+        "app": "com.apple.finder",
+        "windowKey": "files",
+        "windowTitle": "QA Files"
+      },
+      "check": {
+        "target": { "kind": "window" },
+        "expect": { "property": "title", "equals": "QA Files" }
+      }
+    }
+  ]
+}

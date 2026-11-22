@@ -179,10 +179,11 @@ node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --selec
 | --- | --- |
 | `doctor [--json]` | 只读自检：Node 运行时、文件完整性、agent-desktop 版本、录制器与辅助功能/输入监控权限；末行为下一步 |
 | `--version` | 打印版本，发布包还带构建提交 |
-| `flow validate <flow.json>` | 检查 v1 结构、ID、行为引用和参数绑定 |
+| `flow validate <flow.json\|test.json>` | 检查 v1 结构、ID、行为引用和参数绑定；v2 则校验每步 scope、windowKey 绑定、appPaths/inputs/intent 引用，含缺口时拒绝 |
 | `record --app <bundle-id> --window <精确标题> --out <flow.json> [--app-path <路径>]` | 录制目标窗口，显示计时 HUD，支持 `--no-indicator`、`--sound` 与显式开启剪贴板文本的 `--clipboard` |
 | `pick --app <bundle-id> --window <精确标题> [--app-path <路径>] [--select <ref>] [--snapshot <snapshot.json>]` | 只读快照，按可交互元素优先列出候选，或输出可写入 flow 的定位器 |
 | `run <flow.json> --dry-run` | 用当前窗口解析定位器；纯 Shell 流程无需快照 |
+| `run <flow-v2.json> --dry-run [--report <report-v2.json>]` | 输出 v2 结构计划，按步骤 scope 标记 `resolved`；不启动、聚焦或输入。v2 实时回放待跨 App 调度器接入 |
 | `run <flow.json> --allow-shell [--allow-sudo] [--interactive|--non-interactive] [--capture-shell-output]` | 执行 Shell 步骤；固定任务首版禁用，root 步骤走密码框、sudoers 或登录钥匙串 |
 | `sudo set\|status\|clear [--json]` | 保存 / 查询 / 删除登录钥匙串里的管理员凭据，供 `--non-interactive` 的 root 步骤使用 |
 | `run <flow.json> --headed --report <report.json>` | 允许物理点击，回放并记录逐步结果 |
@@ -192,6 +193,8 @@ node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --selec
 | `report pack <report.json> --flow <flow.json> --out <report.zip>` | 验证报告与流程配对，生成可离线打开的 ZIP；`--assets <dir>` 带入截图、日志和 AX 快照；配置上传后自动入队 |
 | `report upload [--queue <dir>] [--retry-paused]` | 处理本地上传队列；暂停项修复原因后用 `--retry-paused` 手动继续 |
 | `serve --config <server.json> --data <dir>` | 启动自建上传服务；列表、下载、查看器接口见[上传服务](docs/server.md) |
+
+v2 flow 顶层没有 `target`，每一步用 `scope` 声明窗口、应用或系统界面；`windowKey` 在 flow 内绑定一个 App，标题变化后仍跟随同一窗口。契约、报告和哈希定义见 `schemas/flow-v2.schema.json` 与 `schemas/report-v2.schema.json`。批量、报告打包和工作台运行仍只支持 v1，遇到 v2 会以 `UNSUPPORTED_FLOW_VERSION` 停止；工作台可以按 scope 分组复盘 v2 时间线。
 
 默认在主屏显示边框和 HUD。窗口服务器确认面板后，HUD 显示「录制就绪」，终端在标准错误输出 `INDICATOR_READY`。录制时可切到飞书等其他应用，返回目标窗口后继续，已捕获的动作会保留。`Ctrl+Option+P` 暂停或继续，`Ctrl+Option+X` 停止并保存。可用 `--no-indicator` 关闭边框和 HUD，热键仍可用。
 

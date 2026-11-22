@@ -1,0 +1,108 @@
+{
+  "version": 2,
+  "id": "global-two-apps",
+  "name": "两个 App 三个窗口的顺序输入",
+  "inputs": ["address", "note"],
+  "appPaths": {
+    "com.apple.TextEdit": "/System/Applications/TextEdit.app",
+    "com.apple.Safari": "/Applications/Safari.app"
+  },
+  "steps": [
+    {
+      "id": "launch-browser",
+      "kind": "launch_app",
+      "scope": { "kind": "app", "app": "com.apple.Safari" },
+      "focusAfter": {
+        "kind": "window",
+        "app": "com.apple.Safari",
+        "windowKey": "browser",
+        "windowTitle": "Cuekeeper 测试页"
+      }
+    },
+    {
+      "id": "wait-browser",
+      "kind": "wait",
+      "scope": {
+        "kind": "window",
+        "app": "com.apple.Safari",
+        "windowKey": "browser",
+        "windowTitle": "Cuekeeper 测试页"
+      },
+      "check": { "kind": "window_exists", "equals": true },
+      "timeoutMs": 15000
+    },
+    {
+      "id": "type-address",
+      "kind": "type",
+      "scope": {
+        "kind": "window",
+        "app": "com.apple.Safari",
+        "windowKey": "browser",
+        "windowTitle": "Cuekeeper 测试页"
+      },
+      "target": { "kind": "element", "role": "textfield", "name": "地址与搜索" },
+      "input": "address"
+    },
+    {
+      "id": "copy-address",
+      "kind": "key",
+      "scope": {
+        "kind": "window",
+        "app": "com.apple.Safari",
+        "windowKey": "browser",
+        "windowTitle": "Cuekeeper 测试页"
+      },
+      "key": "c",
+      "modifiers": ["meta"]
+    },
+    {
+      "id": "switch-notes",
+      "kind": "activate_app",
+      "scope": { "kind": "app", "app": "com.apple.TextEdit" },
+      "focusAfter": {
+        "kind": "window",
+        "app": "com.apple.TextEdit",
+        "windowKey": "notes",
+        "windowTitle": "QA Notes"
+      }
+    },
+    {
+      "id": "paste-address",
+      "kind": "paste",
+      "scope": {
+        "kind": "window",
+        "app": "com.apple.TextEdit",
+        "windowKey": "notes",
+        "windowTitle": "QA Notes"
+      },
+      "target": { "kind": "element", "role": "textfield" },
+      "source": { "kind": "copy", "stepId": "copy-address" }
+    },
+    {
+      "id": "type-note",
+      "kind": "type",
+      "scope": {
+        "kind": "window",
+        "app": "com.apple.TextEdit",
+        "windowKey": "notes-draft",
+        "windowTitle": "QA Draft"
+      },
+      "target": { "kind": "element", "role": "textfield" },
+      "input": "note"
+    },
+    {
+      "id": "assert-editor",
+      "kind": "assert",
+      "scope": {
+        "kind": "window",
+        "app": "com.apple.TextEdit",
+        "windowKey": "notes-draft",
+        "windowTitle": "QA Draft"
+      },
+      "check": {
+        "target": { "kind": "window" },
+        "expect": { "property": "exists", "equals": true }
+      }
+    }
+  ]
+}

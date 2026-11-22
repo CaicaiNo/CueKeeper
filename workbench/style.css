@@ -259,6 +259,14 @@ input::placeholder { color: #a5a199; }
 .row-description strong { font-size: 12.5px; font-weight: 500; color: var(--ink); }
 .row-description small { color: var(--muted); font-size: 10.5px; margin-top: 1px; }
 .row-duration { text-align: right; overflow-wrap: anywhere; }
+.scope-head {
+  display: flex; align-items: baseline; gap: 10px;
+  margin: 10px 0 0; padding: 6px 10px;
+  border-radius: 4px; background: #f1efe8;
+}
+.scope-head strong { font: 11px var(--mono); color: var(--ink-2); letter-spacing: .01em; }
+.scope-head small { font-size: 10.5px; color: var(--muted); }
+
 .thumbnail { margin: 0 6px 10px 96px; font-size: 11px; }
 .thumbnail summary { cursor: pointer; color: var(--accent); }
 .thumbnail img { display: block; max-width: 100%; max-height: 280px; margin-top: 8px; border-radius: 3px; border: 1px solid var(--line); }

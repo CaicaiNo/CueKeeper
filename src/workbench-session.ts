@@ -3,8 +3,11 @@ import { realpath, stat } from 'node:fs/promises';
 import { extname, isAbsolute, join, relative, sep } from 'node:path';
 import { reportCheck } from './contracts.js';
 import type { Action, Report } from './contracts.js';
+import { reportV2Check } from './contracts-v2.js';
+import type { FlowV2, ReportV2, Scope, StepV2 } from './contracts-v2.js';
 import { readJson } from './files.js';
-import { hashFlow, parseFlow, plan } from './flow.js';
+import { hashFlow, plan } from './flow.js';
+import { hashFlowV2, parseFlowDocument, scopeKey } from './flow-v2.js';
 import { object, parseSnapshot } from './locator.js';
 import { pickCandidates } from './pick.js';
 import type { PickCandidate } from './pick.js';
@@ -17,13 +20,52 @@ export const sameTarget = (a: { app: string; window: string }, b: { app: string;
 
 type TimelineAction = {
   id: string;
-  action: Action;
+  action: Action | StepV2;
   app: string;
   window: string;
   atMs?: number;
   durationMs?: number;
   thumbnail?: string;
+  /** v2 only: the step scope the row belongs to. */
+  scope?: Scope;
+  /** v2 only: identity of the consecutive scope group. */
+  scopeGroup?: string;
+  /** v2 only: true on the first row of a scope group. */
+  groupStart?: boolean;
 };
+
+type ScopeGroup = {
+  key: string;
+  kind: 'window' | 'app' | 'surface' | 'gap';
+  app?: string;
+  window?: string;
+  surface?: string;
+  stepIds: string[];
+};
+
+function scopeRowTarget(scope: Scope | undefined): { app: string; window: string } {
+  if (!scope) return { app: '', window: '' };
+  if (scope.kind === 'window') return { app: scope.app, window: scope.windowTitle };
+  if (scope.kind === 'app') return { app: scope.app, window: '' };
+  const app = scope.surface === 'app_menu_bar' || scope.surface === 'app_context_menu'
+    ? scope.app : '';
+  const window = scope.surface === 'app_context_menu' ? scope.windowTitle : scope.surface;
+  return { app, window };
+}
+
+function scopeGroupOf(scope: Scope | undefined, key: string, stepId: string): ScopeGroup {
+  if (!scope) return { key, kind: 'gap', stepIds: [stepId] };
+  if (scope.kind === 'window') {
+    return { key, kind: 'window', app: scope.app, window: scope.windowTitle, stepIds: [stepId] };
+  }
+  if (scope.kind === 'app') return { key, kind: 'app', app: scope.app, stepIds: [stepId] };
+  return {
+    key, kind: 'surface', surface: scope.surface, stepIds: [stepId],
+    ...(scope.surface === 'app_menu_bar' || scope.surface === 'app_context_menu'
+      ? { app: scope.app } : {}),
+    ...(scope.surface === 'app_context_menu' ? { window: scope.windowTitle } : {}),
+  };
+}
 
 const imageTypes: Record<string, string> = {
   png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp',
@@ -72,7 +114,10 @@ export async function loadSession(path: string) {
   if (primary === undefined && recorded === undefined) {
     throw new Error('The selected directory needs flow.json or recorded.flow.json');
   }
-  const flow = parseFlow(primary === undefined ? recorded : primary);
+  const document = primary === undefined ? recorded : primary;
+  const parsed = parseFlowDocument(document);
+  if (parsed.version === 2) return loadV2Session(directory, parsed.flow, rawReport, rawActions);
+  const flow = parsed.flow;
   const planned = plan(flow);
   let report: Report | undefined;
   if (rawReport !== undefined) {
@@ -163,7 +208,7 @@ export async function loadSession(path: string) {
   return {
     directory, flow, images, snapshot,
     view: {
-      id, directory, name: flow.name, target: flow.target, setup, apps, timeline, candidates,
+      id, directory, version: 1, name: flow.name, target: flow.target, setup, apps, timeline, candidates,
       durationMs, timingSource: fromCapture ? 'capture' : report?.mode,
       startedAt: fromCapture ? undefined : report?.startedAt,
       hasSnapshot: snapshot !== undefined,
@@ -171,6 +216,114 @@ export async function loadSession(path: string) {
       // The flow owns identity; a fixture from another path blocks offline runs.
       pathConflict: Boolean(flow.target.appPath && snapshotAppPath && flow.target.appPath !== snapshotAppPath),
       shell: summarizeShellUsage(flow, planned),
+    },
+  };
+}
+
+/**
+ * A v2 session is read-only in the workbench: there is no flow-level target, no
+ * setup inference and no single-window snapshot to bind. Rows carry their step
+ * scope and are grouped by consecutive identical scope, which is how a
+ * cross-app recording is reviewed.
+ */
+async function loadV2Session(
+  directory: string,
+  flow: FlowV2,
+  rawReport: unknown,
+  rawActions: unknown,
+) {
+  let report: ReportV2 | undefined;
+  if (rawReport !== undefined) {
+    if (!reportV2Check.Check(rawReport) || rawReport.flowId !== flow.id ||
+        rawReport.flowSha256 !== hashFlowV2(flow)) {
+      throw new Error('report.json does not match the selected version 2 flow');
+    }
+    report = rawReport;
+    if (report.entries.length !== flow.steps.length || flow.steps.some((step, index) =>
+      report!.entries[index].id !== step.id || report!.entries[index].kind !== step.kind)) {
+      throw new Error('report.json timeline does not match the selected version 2 flow');
+    }
+  }
+
+  const metadata = new Map<string, Record<string, unknown>>();
+  let captureDuration: number | undefined;
+  if (rawActions !== undefined) {
+    const data = object(rawActions);
+    if ((data.version !== 1 && data.version !== 2) || data.flowId !== flow.id ||
+        !Array.isArray(data.actions) || data.actions.length > flow.steps.length) {
+      throw new Error('Expected actions.json with version 1 or 2, the current flowId, and an actions array');
+    }
+    captureDuration = readTime(data.durationMs);
+    const ids = new Set(flow.steps.map(step => step.id));
+    for (const item of data.actions) {
+      const info = object(item);
+      if (typeof info.id !== 'string' || !ids.has(info.id) || metadata.has(info.id)) {
+        throw new Error('actions.json contains an unknown or duplicate action ID');
+      }
+      metadata.set(info.id, info);
+    }
+  }
+
+  const fromCapture = captureDuration !== undefined ||
+    [...metadata.values()].some(info => info.atMs !== undefined || info.durationMs !== undefined);
+  const id = randomUUID();
+  const images = new Map<string, { path: string; type: string }>();
+  const groups: ScopeGroup[] = [];
+  const timeline = await Promise.all(flow.steps.map(async (step, index): Promise<TimelineAction> => {
+    const info = metadata.get(step.id);
+    const timing = report?.entries[index];
+    const image = info?.thumbnail;
+    let thumbnail: string | undefined;
+    if (image !== undefined) {
+      if (typeof image !== 'string' || isAbsolute(image) || image.split('/').includes('..')) {
+        throw new Error('Expected a relative PNG, JPEG, or WebP thumbnail path');
+      }
+      const extension = extname(image).slice(1).toLowerCase();
+      if (!Object.hasOwn(imageTypes, extension)) throw new Error('Unsupported thumbnail format');
+      const type = imageTypes[extension];
+      images.set(String(index), { path: await localFile(directory, image, 8 * 1024 * 1024), type });
+      thumbnail = `/thumbnail/${id}/${index}`;
+    }
+    const scope = step.kind === 'gap' ? undefined : step.scope;
+    const key = scope ? scopeKey(scope) : `gap:${step.id}`;
+    const last = groups.at(-1);
+    if (!last || last.key !== key) groups.push(scopeGroupOf(scope, key, step.id));
+    else last.stepIds.push(step.id);
+    return {
+      id: step.id, action: step, scope, scopeGroup: key,
+      groupStart: groups.at(-1)!.stepIds.length === 1,
+      ...scopeRowTarget(scope), thumbnail,
+      atMs: fromCapture ? readTime(info?.atMs) : timing?.atMs,
+      durationMs: fromCapture ? readTime(info?.durationMs) : timing?.durationMs,
+    };
+  }));
+
+  const appIds = new Set(Object.keys(flow.appPaths ?? {}));
+  for (const step of flow.steps) {
+    if (step.kind === 'gap') continue;
+    const scope = step.scope;
+    if (scope.kind === 'surface') {
+      if (scope.surface === 'app_menu_bar' || scope.surface === 'app_context_menu') appIds.add(scope.app);
+    } else {
+      appIds.add(scope.app);
+    }
+    if ('focusAfter' in step && step.focusAfter) appIds.add(step.focusAfter.app);
+  }
+  const completeTimings = timeline.every(row => row.atMs !== undefined && row.durationMs !== undefined);
+  const durationMs = fromCapture
+    ? captureDuration ?? (completeTimings ? Math.max(...timeline.map(row => row.atMs! + row.durationMs!)) : undefined)
+    : report ? Math.max(...report.entries.map(entry => entry.atMs + entry.durationMs)) : undefined;
+  const apps = await describeApps([...appIds]);
+  return {
+    directory, flow, images, snapshot: undefined,
+    view: {
+      id, directory, version: 2, name: flow.name, target: undefined, setup: [], apps,
+      appPaths: flow.appPaths ?? {},
+      timeline, scopeGroups: groups, candidates: [], durationMs,
+      timingSource: fromCapture ? 'capture' : report?.mode,
+      startedAt: fromCapture ? undefined : report?.startedAt,
+      hasSnapshot: false, snapshotAppPath: undefined, pathConflict: false,
+      shell: { reachable: 0, definitions: 0, privileged: 0 },
     },
   };
 }
