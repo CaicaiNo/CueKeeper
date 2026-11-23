@@ -857,14 +857,18 @@ function v2DryRun() {
 function v2LiveDialog() {
   const flow = v2Flow();
   if (!flow) return;
-  const saved = state.v2?.saved?.at(-1);
+  // The server names the file the run would read: the newest revision, or the
+  // recording itself when nothing was edited.
+  const live = state.v2?.live;
   const confirmed = el('input', { type: 'checkbox', className: 'checkbox checkbox-sm' });
   const values = new Map((flow.inputs ?? []).map(name => [name, input({ maxLength: 4000, spellcheck: false, autocomplete: 'off' })]));
   const checkpoints = flow.steps.filter(step => step.kind === 'manual_checkpoint');
   openDialog('实时回放 v2 流程', [
-    muted(saved && !state.v2?.dirty
-      ? `将回放已保存的 revision：${saved.path}`
-      : '实时回放只能运行已保存的 revision；请先保存当前修改。'),
+    muted(!live
+      ? '当前有未保存的修改，请先保存 revision。'
+      : live.revision
+        ? `将回放已保存的 revision：${live.path}`
+        : `将直接回放导入的录制文件：${live.path}`),
     muted('会占用前台并可能触发 macOS 权限提示；运行期间点「停止回放」会中断 CLI。'),
     ...(checkpoints.length ? [muted(
       `含 ${checkpoints.length} 个人工检查点：回放会暂停在检查点，由你在真实界面完成授权，` +
@@ -877,7 +881,7 @@ function v2LiveDialog() {
     ] : []),
   ], '开始回放', () => {
     if (!confirmed.checked) throw new Error('确认后才会开始实时回放。');
-    if (!saved || state.v2?.dirty) throw new Error('实时回放只能运行已保存的 revision；请先保存当前修改。');
+    if (!state.v2?.live) throw new Error('当前有未保存的修改，请先保存 revision。');
     const inputs = Object.fromEntries([...values.entries()].map(([name, node]) => [name, node.value]));
     // The replay may pause at a checkpoint; close the dialog and keep the page
     // live so the waiting panel can be answered.

@@ -721,6 +721,24 @@ export class EditableFlowV2 {
     return clone(this.saved);
   }
 
+  /**
+   * The file a live replay may run for the current document: the newest
+   * revision when it matches byte-for-byte, the untouched recording when the
+   * edits were undone back to it, and nothing while an edit is unsaved. A
+   * freshly imported recording therefore replays without a revision file.
+   */
+  replayTarget(): { path: string; kind: 'revision' | 'original' } | undefined {
+    const flowSha256 = hashFlowV2(this.state);
+    const revision = this.saved.at(-1);
+    if (revision && revision.flowSha256 === flowSha256) {
+      return { path: revision.path, kind: 'revision' };
+    }
+    if (flowSha256 === this.source.flowSha256) {
+      return { path: this.source.path, kind: 'original' };
+    }
+    return undefined;
+  }
+
   private commit<T>(edit: (draft: FlowV2) => T): T {
     const draft = clone(this.state);
     const result = edit(draft);

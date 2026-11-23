@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -27,6 +27,21 @@ async function fixture(t) {
   await copyFile(examplePath('global-two-apps.flow'), join(directory, 'flow.json'));
   const flow = JSON.parse(await readFile(join(directory, 'flow.json'), 'utf8'));
   return { root, directory, flow };
+}
+
+/** A replay CLI that records its argv and prints one passing v2 report. */
+async function reportingStub(root) {
+  const stub = join(root, 'stub-cli.mjs');
+  await writeFile(stub, [
+    "import { writeFile } from 'node:fs/promises';",
+    'await writeFile(process.env.CUEKEEPER_V2_STUB_ARGV, JSON.stringify(process.argv.slice(2)));',
+    'const entry = { id: "wait-browser", kind: "wait", status: "passed", atMs: 0, durationMs: 4 };',
+    'const report = { version: 2, flowId: "global-two-apps", flowSha256: "a".repeat(64),',
+    '  startedAt: new Date().toISOString(), mode: "replay", status: "passed", entries: [entry] };',
+    'process.stdout.write(JSON.stringify({ ok: true, data: report }) + "\\n");',
+    '',
+  ].join('\n'));
+  return stub;
 }
 
 async function server(t, options = {}) {
@@ -263,6 +278,81 @@ test('saving writes a sibling revision, keeps the recording bytes and a live run
   assert.equal(failed.entries[0].code, 'ASSERTION_FALSE');
   const statuses = statusMap(failed);
   assert.equal(statuses.get('wait-browser').status, 'failed');
+});
+
+test('a freshly imported recording replays live without a revision file', async t => {
+  const { root, directory } = await fixture(t);
+  const argvFile = join(root, 'argv.json');
+  const stub = await reportingStub(root);
+  process.env.CUEKEEPER_V2_STUB_ARGV = argvFile;
+  t.after(() => { delete process.env.CUEKEEPER_V2_STUB_ARGV; });
+  const { post } = await server(t, { root, cliPath: stub, allowLive: true });
+  const session = await post('import', { directory });
+  const recording = join(await realpath(directory), 'flow.json');
+
+  // The untouched import names the recording it would replay, so the page has
+  // no reason to demand a revision the operator never made.
+  assert.equal(session.v2.dirty, false);
+  assert.equal(session.v2.saved.length, 0);
+  assert.deepEqual(session.v2.live, { path: recording, revision: false });
+
+  const live = await post('run', {
+    session: session.id, mode: 'live', confirm: true,
+    inputs: { address: 'ck.test', note: 'hello' },
+  });
+  assert.equal(live.status, 'passed');
+  assert.equal(live.exitCode, 0);
+  assert.equal(live.entries[0].status, 'passed');
+  const argv = JSON.parse(await readFile(argvFile, 'utf8'));
+  assert.equal(argv[0], 'run');
+  assert.equal(argv[1], recording);
+  assert.ok(argv.includes('--headed'));
+  // Replaying the recording must not leave a revision file behind.
+  assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('flow.edited-')), []);
+});
+
+test('a live replay follows the newest revision and refuses an unsaved edit', async t => {
+  const { root, directory } = await fixture(t);
+  const argvFile = join(root, 'argv.json');
+  const stub = await reportingStub(root);
+  process.env.CUEKEEPER_V2_STUB_ARGV = argvFile;
+  t.after(() => { delete process.env.CUEKEEPER_V2_STUB_ARGV; });
+  const { post } = await server(t, { root, cliPath: stub, allowLive: true });
+  const session = await post('import', { directory });
+  const recording = join(await realpath(directory), 'flow.json');
+  const runLive = () => post('run', {
+    session: session.id, mode: 'live', confirm: true, inputs: { address: 'ck.test', note: 'hello' },
+  });
+
+  // One unsaved edit has no file to replay: ask for a revision instead of
+  // silently running a recording that no longer matches the timeline.
+  const edited = await edit(post, session, { kind: 'update', id: 'type-note', patch: { text: 'hello' } });
+  assert.equal(edited.dirty, true);
+  assert.equal(edited.live, undefined);
+  const refused = await post('run', { session: session.id, mode: 'live', confirm: true }, 400);
+  assert.match(refused.error, /save a revision before a live replay/);
+  await assert.rejects(readFile(argvFile), error => error.code === 'ENOENT');
+
+  // Undoing the edit returns to the recording bytes, so the raw file replays.
+  const undone = await post('v2/undo', { session: session.id });
+  assert.equal(undone.dirty, false);
+  assert.deepEqual(undone.live, { path: recording, revision: false });
+  const replayed = await runLive();
+  assert.equal(replayed.status, 'passed');
+  assert.equal(JSON.parse(await readFile(argvFile, 'utf8'))[1], recording);
+
+  // Once a revision is saved it is the replay target, even for the same bytes.
+  const saved = await post('save', { session: session.id }, 201);
+  const state = await post('state', {});
+  assert.deepEqual(state.session.v2.live, { path: saved.output, revision: true });
+  const fromRevision = await runLive();
+  assert.equal(fromRevision.status, 'passed');
+  assert.equal(JSON.parse(await readFile(argvFile, 'utf8'))[1], saved.output);
+
+  // Editing after the save leaves the revision behind and blocks the run.
+  await edit(post, session, { kind: 'update', id: 'type-note', patch: { text: 'changed' } });
+  const refusedAgain = await post('run', { session: session.id, mode: 'live', confirm: true }, 400);
+  assert.match(refusedAgain.error, /save a revision before a live replay/);
 });
 
 test('a capture gap can be imported, blocks running and is replaced in place', async t => {

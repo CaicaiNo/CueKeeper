@@ -171,6 +171,12 @@ test('starting a web recording spawns the global CLI once and stopping imports i
   assert.deepEqual(stopped.session.timeline.map(row => row.action.kind), ['activate_app', 'gap']);
   const state = await post('state');
   assert.equal(state.session.id, stopped.session.id);
+  // Stopping also loads the editor: the page replays the file the recorder
+  // just wrote, without asking for a revision the operator never made.
+  const recorded = stopped.flowPath;
+  assert.equal(state.session.v2.flowPath, recorded);
+  assert.deepEqual(state.session.v2.live, { path: recorded, revision: false });
+  assert.equal(state.session.v2.saved.length, 0);
 
   // Stopping again reports the same finished recording instead of failing.
   const again = await post('record/stop');

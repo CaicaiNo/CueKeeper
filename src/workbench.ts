@@ -204,9 +204,9 @@ export async function startWorkbench(options: {
   let importedRecording: string | undefined;
   // A v2 session keeps its editing state in this server process; the P2 engine
   // owns mutations, undo/redo, validation, the diff and revision writes.
-  const openEditor = async (loaded: Awaited<ReturnType<typeof loadSession>> | undefined) => {
+  const openEditor = async (loaded: Awaited<ReturnType<typeof loadSession>> | undefined, recording?: string) => {
     if (!loaded || loaded.view.version !== 2) return undefined;
-    const flowPath = (loaded.view as { flowPath?: string }).flowPath;
+    const flowPath = recording ?? (loaded.view as { flowPath?: string }).flowPath;
     if (!flowPath) throw new Error('The version 2 session has no recording path');
     return loadEditableFlow(flowPath);
   };
@@ -250,6 +250,10 @@ export async function startWorkbench(options: {
     if (!editable) return undefined;
     const flow = editable.flow;
     const saved = editable.savedRevisions;
+    const flowSha256 = hashFlowV2(flow);
+    // The page names the file a live replay would run, so an untouched import
+    // replays the recording itself instead of demanding a revision.
+    const target = editable.replayTarget();
     return {
       flowPath: editable.source.path,
       originalSha256: editable.source.sha256,
@@ -259,8 +263,9 @@ export async function startWorkbench(options: {
       // Dirty means "differs from the last saved revision"; with no revision
       // yet it means "differs from the recording".
       dirty: saved.length
-        ? saved.at(-1)!.flowSha256 !== hashFlowV2(flow)
-        : hashFlowV2(flow) !== editable.source.flowSha256,
+        ? saved.at(-1)!.flowSha256 !== flowSha256
+        : flowSha256 !== editable.source.flowSha256,
+      live: target && { path: target.path, revision: target.kind === 'revision' },
       validation: editable.validate(),
       canUndo: editable.canUndo,
       canRedo: editable.canRedo,
@@ -373,7 +378,11 @@ export async function startWorkbench(options: {
     }
     try {
       const imported = await loadSession(dirname(result.flowPath), { flowFile: basename(result.flowPath) });
+      // The freed recording becomes the editor state too, so the page can edit
+      // and replay what was just recorded without a second import.
+      const nextEditable = await openEditor(imported, result.flowPath);
       session = imported;
+      editable = nextEditable;
       importedRecording = result.flowPath;
       return imported.view;
     } catch (error) {
@@ -623,15 +632,15 @@ export async function startWorkbench(options: {
         if (!allowLive || data.confirm !== true) {
           throw new Error('Live replay requires --allow-live-replay and explicit confirmation');
         }
-        const saved = editable.savedRevisions.at(-1);
-        if (!saved || saved.flowSha256 !== hashFlowV2(flow)) {
-          throw new Error('Save the edited flow before a live replay');
+        const live = editable.replayTarget();
+        if (!live) {
+          throw new Error('The flow has unsaved edits; save a revision before a live replay');
         }
         const checkpoints = flow.steps.filter(step => step.kind === 'manual_checkpoint');
         const inputs = (flow.inputs ?? []).length
           ? inputValues(flow.inputs as string[], data.inputs)
           : undefined;
-        const args = ['run', saved.path, '--foreground', '--headed', '--json'];
+        const args = ['run', live.path, '--foreground', '--headed', '--json'];
         // A checkpoint flow uses the machine channel: the CLI announces the
         // wait on stderr and reads one answer line from stdin.
         if (checkpoints.length) args.push('--checkpoint-events');
