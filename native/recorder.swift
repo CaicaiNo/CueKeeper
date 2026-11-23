@@ -396,12 +396,14 @@ final class Capture {
                     hitRole = axString(hit, kAXRoleAttribute as String)
                     subrole = axString(hit, kAXSubroleAttribute as String)
                     if let identity = menuItemIdentity(hit) {
-                        menuAction = true
                         role = identity.role
                         name = identity.name
+                        // Only a menu whose app window can be proved is a step;
+                        // a menu surface is never a scope of its own.
                         if let stackPid,
                            let number = menuScopeWindow(pid: stackPid, title: &windowTitle) {
                             ownerWindow = number
+                            menuAction = true
                         }
                     } else {
                         let identity = pointerIdentity(hit)
@@ -463,14 +465,15 @@ final class Capture {
      * proved the same way a focus probe would prove it.
      */
     private func menuScopeWindow(pid: Int32, title: inout String?) -> Int? {
-        if pid == focusPid {
+        if pid == focusPid, let number = focusWindowNumber {
             if let focusTitle, !focusTitle.isEmpty { title = focusTitle }
-            if let number = focusWindowNumber { return number }
+            return number
         }
         let axApp = AXUIElementCreateApplication(pid)
-        guard let main = axElement(axApp, kAXMainWindowAttribute as String) else { return nil }
+        guard let main = axElement(axApp, kAXMainWindowAttribute as String),
+              let number = windowNumber(for: main, pid: pid) else { return nil }
         if let label = axString(main, kAXTitleAttribute as String), !label.isEmpty { title = label }
-        return windowNumber(for: main, pid: pid)
+        return number
     }
 
     /**
