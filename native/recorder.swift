@@ -159,11 +159,14 @@ final class Capture {
     /**
      * Resolves the focused window's native number without a private AX call.
      * The AX focused window is matched to the app's layer-0 CGWindow by frame;
-     * a single-window app is accepted without a frame match.
+     * a single-window app is accepted without a frame match. When the app
+     * reports no focused window (an inline rename field, a window mid-animation),
+     * its main window is the same window and is read instead.
      */
     private func focusedWindowInfo(_ application: NSRunningApplication) -> FocusedWindow? {
         let axApp = AXUIElementCreateApplication(application.processIdentifier)
-        guard let axWindow = axElement(axApp, kAXFocusedWindowAttribute as String) else { return nil }
+        guard let axWindow = axElement(axApp, kAXFocusedWindowAttribute as String) ??
+                axElement(axApp, kAXMainWindowAttribute as String) else { return nil }
         let title = axString(axWindow, kAXTitleAttribute as String) ?? ""
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
                                                    kCGNullWindowID) as? [[String: Any]] else {
@@ -191,11 +194,24 @@ final class Capture {
         return FocusedWindow(number: nil, title: title)
     }
 
-    /** Advances the evidence generation when the front app or window changes. */
+    /**
+     * Advances the evidence generation when the front app or window changes.
+     *
+     * A probe that could not read a window number does not clear the window this
+     * app process already proved: the app and its process did not change, so the
+     * proved window still describes it. Only another app/process or a newly read
+     * window number replaces it. Clearing it made a whole typing burst a scope
+     * gap per character (Finder's inline rename field).
+     */
     private func noteFocus(pid: Int32?, app: String?, window: Int?, title: String?, instance: Int?, report: Bool) {
-        let changed = pid != focusPid || app != focusApp || window != focusWindowNumber
+        let effectiveWindow = FocusEvidence.windowNumber(
+            probed: window, pid: pid, app: app,
+            previousPid: focusPid, previousApp: focusApp, previousWindow: focusWindowNumber)
+        let changed = pid != focusPid || app != focusApp || effectiveWindow != focusWindowNumber
         if !changed {
-            if let title, title != focusTitle {
+            // A probe that could not read a title says nothing about the window
+            // it kept; an empty title must not retitle a proved window.
+            if let title, !title.isEmpty, title != focusTitle {
                 focusTitle = title
             }
             return
@@ -204,13 +220,13 @@ final class Capture {
         focusChangedAtNs = DispatchTime.now().uptimeNanoseconds
         focusPid = pid
         focusApp = app
-        focusWindowNumber = window
+        focusWindowNumber = effectiveWindow
         focusTitle = title
         focusInstance = instance
         guard report, let pid, let app else { return }
         var owner: [String: Any] = ["app": app, "pid": Int(pid)]
         if let instance { owner["processInstance"] = instance }
-        if let window { owner["windowNumber"] = window }
+        if let effectiveWindow { owner["windowNumber"] = effectiveWindow }
         if let title { owner["windowTitle"] = title }
         emit([
             "kind": "focus", "t": elapsedMs(), "seen": wallClockMs(),
