@@ -12,7 +12,6 @@ import {
   electronAccessibilityUnverifiedCode,
 } from './electron-accessibility.js';
 import { scopeKey, validateFlowV2 } from './flow-v2.js';
-import type { InputSource } from './ime.js';
 import type { ElementLocator } from './contracts.js';
 import { defaultLifecyclePollMs, LifecycleWatcher } from './lifecycle.js';
 import type { LifecycleObservation, LifecycleWatchOptions } from './lifecycle.js';
@@ -1453,7 +1452,6 @@ export interface GlobalCaptureOptions {
   indicator: boolean;
   sound: boolean;
   exclude?: string[];
-  inputSource?: InputSource;
   /**
    * Install/download observation while recording. `true` (the default) watches
    * the user's Downloads and application directories; `false` disables it; an
@@ -1539,10 +1537,6 @@ export async function recordGlobal(
         'Electron 窗口里既没有编辑器控件，也没有无障碍占位提示（例如欢迎页/设置页），' +
         '无法确认无障碍模式；该窗口继续录制。');
     }
-  }
-  if (options.inputSource && !options.inputSource.ascii) {
-    recording.warn('IME_ACTIVE',
-      `录制开始时输入源为「${options.inputSource.name}」，物理按键可能被改写成带分隔符的文本。全局录制只保存参数名，建议切到 ABC/U.S.`);
   }
 
   let ready = false;

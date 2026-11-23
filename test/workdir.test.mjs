@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { withDesktop } from '../dist/desktop.js';
 import { startWorkbench } from '../dist/workbench.js';
 import { createDesktopWorkdir, workdirRoot } from '../dist/workdir.js';
+import { imeStub } from './support/ime-stub.mjs';
 
 // The workbench inherits TMPDIR from the shell that started it. That directory
 // can be deleted while the workbench is still running (a finished task's temp
@@ -79,6 +80,7 @@ function record(fixture, { env = {}, out = join(fixture.root, 'recorded.flow.jso
   const stubDir = join(fixture.root, 'stubs');
   mkdirSync(stubDir, { recursive: true });
   const desktop = desktopStub(stubDir);
+  const ime = imeStub(stubDir);
   const result = spawnSync(process.execPath, [
     cliPath, 'record', '--global', '--countdown', '0', '--no-indicator',
     '--max-seconds', '2', '--out', out, '--json',
@@ -90,6 +92,7 @@ function record(fixture, { env = {}, out = join(fixture.root, 'recorded.flow.jso
       CUEKEEPER_RECORDER: captureStub(stubDir),
       CUEKEEPER_ELECTRON_APPS: '',
       CUEKEEPER_APP_IDENTITY: join(stubDir, 'identity'),
+      CUEKEEPER_IME: ime.helper,
       CUEKEEPER_IME_DIR: join(stubDir, 'ime-root'),
       ...env,
     },

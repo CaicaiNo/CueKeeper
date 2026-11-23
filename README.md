@@ -200,7 +200,7 @@ node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --selec
 | `--version` | 打印版本，发布包还带构建提交 |
 | `flow validate <flow.json\|test.json>` | 检查 v1 结构、ID、行为引用和参数绑定；v2 则校验每步 scope、windowKey 绑定、appPaths/inputs/intent 引用，含缺口时拒绝 |
 | `record [--app <bundle-id>] [--window <精确标题>] [--out <flow.json>] [--app-path <路径>] [--countdown 3]` | 默认倒计时后录制当前前台窗口，流程写入 `~/.cuekeeper/recordings`；显式参数优先。显示计时 HUD，支持 `--no-indicator`、`--sound` 与显式开启剪贴板文本的 `--clipboard` |
-| `record --global [--max-seconds 600] [--out <flow.json>] [--exclude <bundle-ids>] [--no-lifecycle]` | 跨 App 全局录制，生成 v2 flow；录制期间只读观察下载与安装，把生命周期事件写入 flow 同目录的 `lifecycle.json`（`--no-lifecycle` 关闭） |
+| `record --global [--max-seconds 600] [--out <flow.json>] [--exclude <bundle-ids>] [--no-lifecycle]` | 跨 App 全局录制，生成 v2 flow；开始前自动把中文输入法切到 ABC/U.S.、结束后恢复原输入源（工作台走同一条路径）；录制期间只读观察下载与安装，把生命周期事件写入 flow 同目录的 `lifecycle.json`（`--no-lifecycle` 关闭） |
 | `pick --app <bundle-id> --window <精确标题> [--app-path <路径>] [--select <ref>] [--snapshot <snapshot.json>]` | 只读快照，按可交互元素优先列出候选，或输出可写入 flow 的定位器 |
 | `run <flow.json> --dry-run` | 用当前窗口解析定位器；纯 Shell 流程无需快照 |
 | `run <flow-v2.json> --dry-run [--report <report-v2.json>]` | 输出 v2 结构计划，按步骤 scope 标记 `resolved`；不启动、聚焦或输入 |

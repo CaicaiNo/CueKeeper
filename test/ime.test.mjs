@@ -312,6 +312,105 @@ test('C3: a user switch plus a removed original reports both facts', async t => 
   assert.deepEqual(fake.state.selects, [ABC.id]);
 });
 
+// --- G: recording keeps the user's source and puts it back ----------------
+
+test('G1: a recording under a Chinese source switches to ABC once and restores it', async t => {
+  const fake = fakeBackend({ current: SOGOU });
+  const { manager, baseDir, runId } = managerFor(t, fake);
+  const started = await manager.startRecording();
+  assert.deepEqual(fake.state.selects, [ABC.id]);
+  assert.equal(fake.state.current.id, ABC.id);
+  assert.equal(started.switched, true);
+  assert.equal(started.original.id, SOGOU.id);
+  assert.equal(started.final.id, ABC.id);
+  // The snapshot exists before capture starts, so a SIGKILL is recoverable.
+  const record = JSON.parse(readFileSync(join(baseDir, 'runs', runId, 'ime.json'), 'utf8'));
+  assert.equal(record.original.id, SOGOU.id);
+
+  const result = await manager.restore(true);
+  assert.deepEqual(result.warnings, []);
+  assert.equal(fake.state.current.id, SOGOU.id);
+  assert.deepEqual(fake.state.selects, [ABC.id, SOGOU.id]);
+  assert.equal(existsSync(join(baseDir, 'runs', runId, 'ime.json')), false);
+});
+
+test('G2: a recording under an ASCII source never takes the lock or touches TIS', async t => {
+  const fake = fakeBackend({ current: ABC });
+  const { manager, baseDir } = managerFor(t, fake);
+  const started = await manager.startRecording();
+  assert.deepEqual(fake.state.selects, []);
+  assert.equal(started.switched, false);
+  assert.equal(started.final.id, ABC.id);
+  assert.equal(existsSync(join(baseDir, 'ime.lock')), false);
+  const result = await manager.restore(true);
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(fake.state.selects, []);
+  assert.equal(fake.state.current.id, ABC.id);
+});
+
+test('G3: a failed recording switch is a warning, not a stopped recording', async t => {
+  const fake = fakeBackend({ current: SOGOU, select: () => { throw new Error('TIS failure'); } });
+  const { manager, baseDir, runId } = managerFor(t, fake);
+  const started = await manager.startRecording();
+  assert.deepEqual(fake.state.selects, [ABC.id, ABC.id]);
+  assert.equal(fake.state.current.id, SOGOU.id);
+  assert.equal(started.switched, false);
+  assert.deepEqual(started.original?.id, SOGOU.id);
+  const warnings = manager.warnings();
+  assert.deepEqual(warnings.map(item => item.code), ['IME_SWITCH_FAILED']);
+  assert.equal(warnings[0].level, 'warning');
+  assert.match(warnings[0].message, /输入法未切换，可能影响文本捕获/);
+  // Nothing was switched, so nothing is left behind for a manual restore.
+  await manager.restore(true);
+  assert.equal(existsSync(join(baseDir, 'runs', runId, 'ime.json')), false);
+});
+
+test('G4: a recording with no ASCII source keeps recording and says why', async t => {
+  const fake = fakeBackend({ current: SOGOU, sources: [{ ...SOGOU }] });
+  const { manager } = managerFor(t, fake);
+  const started = await manager.startRecording();
+  assert.deepEqual(fake.state.selects, []);
+  assert.equal(started.final?.id, SOGOU.id);
+  assert.deepEqual(manager.warnings().map(item => item.code), ['IME_SWITCH_FAILED']);
+});
+
+test('G5: a failed recording restore only warns and leaves the recovery file', async t => {
+  const fake = fakeBackend({ current: SOGOU });
+  const { manager, baseDir, runId } = managerFor(t, fake);
+  await manager.startRecording();
+  fake.backend.select = async id => { fake.state.selects.push(id); };
+  const result = await manager.restore(true);
+  assert.deepEqual(result.warnings.map(item => item.code), ['IME_RESTORE_FAILED']);
+  assert.match(result.warnings[0].message, /录制结果已保存/);
+  assert.equal(fake.state.current.id, ABC.id);
+  assert.equal(existsSync(join(baseDir, 'runs', runId, 'ime.json')), true);
+});
+
+test('G6: another run holding the IME lock makes the recording leave the source alone', async t => {
+  const fake = fakeBackend({ current: SOGOU });
+  const { manager, baseDir } = managerFor(t, fake);
+  mkdirSync(baseDir, { recursive: true });
+  writeFileSync(join(baseDir, 'ime.lock'), JSON.stringify({
+    runId: 'other-run', pid: process.pid, expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  }));
+  const started = await manager.startRecording();
+  assert.deepEqual(fake.state.selects, []);
+  assert.equal(fake.state.current.id, SOGOU.id);
+  assert.equal(started.switched, false);
+  assert.deepEqual(manager.warnings().map(item => item.code), ['IME_SWITCH_FAILED']);
+  assert.match(manager.warnings()[0].message, /other-run/);
+});
+
+test('G7: a missing helper warns once and the recording is not blocked', async t => {
+  const fake = fakeBackend({ current: SOGOU });
+  fake.backend.available = async () => false;
+  const { manager } = managerFor(t, fake);
+  const started = await manager.startRecording();
+  assert.deepEqual(fake.state.selects, []);
+  assert.equal(started.switched, false);
+  assert.deepEqual(manager.warnings().map(item => item.code), ['IME_UNAVAILABLE']);
+});
+
 // --- E and F: concurrency, crash recovery, ime.json -----------------------
 
 test('E1: a live lock held by another run returns IME_BUSY without switching', async t => {

@@ -14,6 +14,7 @@ import { parseFlowV2 } from '../dist/flow-v2.js';
 import { Fault, resolve } from '../dist/locator.js';
 import { GlobalRecording } from '../dist/record-v2.js';
 import { loadSession } from '../dist/workbench-session.js';
+import { ABC_SOURCE, imeStub, SOGOU_SOURCE } from './support/ime-stub.mjs';
 
 // The engine is exercised offline: events and window trees come from fixtures,
 // no helper is spawned and no accessibility tree is read from the desktop.
@@ -1278,6 +1279,7 @@ test('record --global is an explicit mode that rejects target flags', { skip: pr
  */
 function globalCliFixture(t, {
   events, snapshots, cliArgs = [], seconds = 2, exit = 0, ready, download, retitle = '',
+  imeSource = ABC_SOURCE,
 }) {
   const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-global-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -1366,6 +1368,7 @@ process.exitCode = ${exit};
 `, { mode: 0o700 });
 
   const output = join(dir, 'global.flow.json');
+  const ime = imeStub(dir, { current: imeSource });
   const result = spawnSync(process.execPath, [join(dist, 'cli.js'), 'record', '--global',
     '--countdown', '0', '--no-indicator', '--max-seconds', String(seconds),
     '--out', output, '--json', ...cliArgs], {
@@ -1374,6 +1377,7 @@ process.exitCode = ${exit};
       CUEKEEPER_AGENT_DESKTOP: desktop,
       CUEKEEPER_RECORDER: capture,
       CUEKEEPER_APP_IDENTITY: join(dir, 'identity'),
+      CUEKEEPER_IME: ime.helper,
       CUEKEEPER_IME_DIR: join(dir, 'ime-root'),
       ...(downloadDir === undefined ? {} : {
         CUEKEEPER_LIFECYCLE_DOWNLOAD_DIRS: downloadDir,
@@ -1388,6 +1392,8 @@ process.exitCode = ${exit};
     dir, downloadDir, code: result.status, response, stderr: result.stderr, output, written,
     captureArgs: JSON.parse(readFileSync(captureArgs, 'utf8')),
     commands: readFileSync(commandsLog, 'utf8').trim().split('\n').filter(Boolean),
+    imeSelects: ime.selects(),
+    imeCurrent: ime.current(),
   };
 }
 
@@ -1456,6 +1462,60 @@ test('record --global keeps a partial flow when the helper stops after an event'
   assert.equal(run.response.data.partial, true);
   const flow = JSON.parse(run.written);
   assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
+});
+
+test('record --global switches a Chinese source to ABC and restores it afterwards', {
+  skip: process.platform !== 'darwin',
+}, t => {
+  const data = fixture('two-apps-three-windows');
+  const run = globalCliFixture(t, {
+    events: [data.events[0]],
+    snapshots: data.snapshots,
+    imeSource: SOGOU_SOURCE,
+  });
+  assert.equal(run.code, 0, run.stderr + JSON.stringify(run.response));
+  // Capture ran under ABC, then the user's own source came back.
+  assert.deepEqual(run.imeSelects, [ABC_SOURCE.id, SOGOU_SOURCE.id]);
+  assert.deepEqual(run.imeCurrent, SOGOU_SOURCE);
+  // The source the user had is still reported, without the old warning: the
+  // recording solved it instead of asking the user to switch.
+  assert.deepEqual(run.response.data.inputSource, SOGOU_SOURCE);
+  assert.equal(run.response.data.warnings, undefined);
+  assert.doesNotMatch(run.stderr, /输入法处于中文状态/);
+  const flow = JSON.parse(run.written);
+  assert.equal(flow.steps[0].kind, 'click');
+});
+
+test('record --global restores the Chinese source when the capture helper fails', {
+  skip: process.platform !== 'darwin',
+}, t => {
+  const data = fixture('two-apps-three-windows');
+  const run = globalCliFixture(t, {
+    events: [data.events[0]],
+    snapshots: data.snapshots,
+    seconds: 1,
+    exit: 1,
+    imeSource: SOGOU_SOURCE,
+  });
+  assert.equal(run.code, 1);
+  assert.equal(run.response.data.partial, true);
+  // A failed recording is still a finished recording for the input source.
+  assert.deepEqual(run.imeSelects, [ABC_SOURCE.id, SOGOU_SOURCE.id]);
+  assert.deepEqual(run.imeCurrent, SOGOU_SOURCE);
+});
+
+test('record --global leaves an already-ASCII source alone', { skip: process.platform !== 'darwin' }, t => {
+  const data = fixture('two-apps-three-windows');
+  const run = globalCliFixture(t, {
+    events: [data.events[0]],
+    snapshots: data.snapshots,
+  });
+  assert.equal(run.code, 0, run.stderr + JSON.stringify(run.response));
+  // No switch and no restore: the source was never touched.
+  assert.deepEqual(run.imeSelects, []);
+  assert.deepEqual(run.imeCurrent, ABC_SOURCE);
+  assert.deepEqual(run.response.data.inputSource, ABC_SOURCE);
+  assert.equal(run.response.data.warnings, undefined);
 });
 
 test('a helper that does not confirm global mode is refused', { skip: process.platform !== 'darwin' }, t => {

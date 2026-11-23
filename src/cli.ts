@@ -746,19 +746,34 @@ async function main() {
       } else {
         await mkdir(directory!, { recursive: true, mode: 0o700 });
       }
-      const inputSource = await detectInputSource(nativeImeBackend());
-      if (inputSource && !inputSource.ascii) {
-        console.error(`输入法处于中文状态：当前输入源「${inputSource.name}」。全局录制只保存参数名，` +
-          '物理按键仍可能被输入法改写，建议切到 ABC/U.S. 后重新录制。');
-      }
-      await globalCountdown(countdownSeconds, signal);
-      const options = {
-        seconds: maxSeconds, indicator: !values['no-indicator'], sound: values.sound ?? false,
-        exclude, lifecycle: values['no-lifecycle'] ? false : true,
-        ...(inputSource ? { inputSource } : {}),
-      };
-      const result = await withDesktop({ headed: false, signal },
-        desktop => recordGlobal(desktop, options, signal));
+      // An active Chinese IME rewrites physical keys before the recorder sees
+      // them, so a global recording starts under an ASCII source and puts the
+      // user's own source back afterwards. Both the workbench and the CLI reach
+      // this branch, so the switch lives here and nowhere else.
+      const ime = new InputSourceManager({
+        backend: nativeImeBackend(),
+        // The lock has to outlive the longest recording, or a parallel run
+        // would treat this live lock as stale.
+        lockTtlMs: (maxSeconds + 60) * 1000,
+      });
+      const started = await ime.startRecording();
+      const inputSource = started.original ?? started.final;
+      // Restore inside the finally: a normal stop, a local stop, a capture
+      // failure and SIGINT all end here, and none of them may leave the user
+      // on ABC. A restore problem is a warning, never a second failure.
+      const result = await (async () => {
+        try {
+          await globalCountdown(countdownSeconds, signal);
+          const options = {
+            seconds: maxSeconds, indicator: !values['no-indicator'], sound: values.sound ?? false,
+            exclude, lifecycle: values['no-lifecycle'] ? false : true,
+          };
+          return await withDesktop({ headed: false, signal },
+            desktop => recordGlobal(desktop, options, signal));
+        } finally {
+          await ime.restore(true);
+        }
+      })();
       const contents = JSON.stringify(result.flow, null, 2) + '\n';
       const saved = output ?? await writeRecording(directory!, recordingFileName(new Date()), contents);
       if (output) await writeNew(output, contents);
@@ -770,6 +785,9 @@ async function main() {
           JSON.stringify({ version: 1, events: result.lifecycle }, null, 2) + '\n');
       }
       const workbench = output ? undefined : `cuekeeper workbench ${displayRecordingsDirectory()}`;
+      // Capture warnings first (they describe what was lost), then the input
+      // source facts: the switch before capture and the restore after it.
+      const warnings = [...result.warnings, ...ime.warnings()];
       const data = {
         version: 2, output: saved, flowId: result.flow.id, actions: result.flow.steps.length,
         snapshotReads: result.snapshotReads,
@@ -777,7 +795,7 @@ async function main() {
         ...(workbench ? { workbench } : {}),
         ...(inputSource ? { inputSource } : {}),
         ...(result.partial ? { partial: true } : {}),
-        ...(result.warnings.length ? { warnings: result.warnings } : {}),
+        ...(warnings.length ? { warnings } : {}),
       };
       const lines = [`Saved ${result.flow.steps.length} global steps to ${saved}${result.partial ? ' (partial flow)' : ''}`];
       // The recording's accessibility cost: a window is read once, so this stays
@@ -798,7 +816,7 @@ async function main() {
         console.log(JSON.stringify({ ok: false, data, error: { code: fault.code, message: fault.message } }));
         process.exitCode = fault.code === 'INTERRUPTED' ? 130 : 1;
       } else {
-        const details = [...lines, ...result.warnings.map(warning => warning.message), ...(fault ? [fault.message] : [])];
+        const details = [...lines, ...warnings.map(warning => warning.message), ...(fault ? [fault.message] : [])];
         success(data, details.join('\n'), !fault ? 0 : fault.code === 'INTERRUPTED' ? 130 : 1);
       }
       return;

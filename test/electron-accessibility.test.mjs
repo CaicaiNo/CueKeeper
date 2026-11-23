@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import {
   classifyElectronAccessibility, ElectronAccessibilityGuard,
 } from '../dist/electron-accessibility.js';
+import { imeStub } from './support/ime-stub.mjs';
 
 // Chromium/Electron only builds a renderer's AX tree when accessibility is on.
 // These fixtures freeze the three observable states: the app's own placeholder,
@@ -198,6 +199,7 @@ process.exitCode = 0;
 `, { mode: 0o700 });
 
   const output = join(dir, 'recorded.flow.json');
+  const ime = imeStub(dir);
   const result = spawnSync(process.execPath, [join(dist, 'cli.js'), 'record', ...cliArgs, '--out', output, '--json'], {
     env: {
       ...process.env,
@@ -206,6 +208,7 @@ process.exitCode = 0;
       // Keep host installs out of the probe unless the test names the app.
       CUEKEEPER_ELECTRON_APPS: electronApps ?? '',
       CUEKEEPER_APP_IDENTITY: join(dir, 'identity'),
+      CUEKEEPER_IME: ime.helper,
       CUEKEEPER_IME_DIR: join(dir, 'ime-root'),
     },
     encoding: 'utf8', timeout: 20_000,

@@ -30,7 +30,8 @@ export type ImeLevel = 'warning' | 'blocked';
 export type ImeCode =
   | 'IME_SOURCE_UNAVAILABLE' | 'IME_CHANGED_BY_USER' | 'IME_RESTORE_FAILED'
   | 'IME_RESTORE_UNAVAILABLE' | 'IME_BUSY' | 'IME_SWITCH_DISABLED'
-  | 'IME_PHYSICAL_KEY_BLOCKED' | 'IME_ACTIVE' | 'IME_UNCOMMITTED' | 'IME_UNAVAILABLE';
+  | 'IME_PHYSICAL_KEY_BLOCKED' | 'IME_ACTIVE' | 'IME_UNCOMMITTED' | 'IME_UNAVAILABLE'
+  | 'IME_SWITCH_FAILED';
 
 /**
  * One user-visible input-source fact. The shape is what `--json`, the report
@@ -117,6 +118,10 @@ const copy: Record<ImeCode, { title: string; action: string }> = {
     title: '输入法保护不可用',
     action: '运行 pnpm build:recorder 重新构建输入法辅助程序，或重新安装发布包。',
   },
+  IME_SWITCH_FAILED: {
+    title: '没有切换到英文输入法',
+    action: '录制会继续。需要准确捕获英文按键时，先在系统设置添加 ABC/U.S. 或手动切换后重录这一段。',
+  },
 };
 
 function warning(
@@ -133,9 +138,12 @@ function sourceUnavailable(current?: InputSource, targetId?: string): ImeWarning
     current ? { current } : {});
 }
 
-function changedByUser(original: InputSource, current: InputSource, runId: string): ImeWarning {
-  return warning('IME_CHANGED_BY_USER', 'blocked',
-    `运行中检测到输入源从「${original.name}」变为「${current.name}」。为避免覆盖你的选择，后续输入已停止。`,
+function changedByUser(original: InputSource, current: InputSource, runId: string,
+  recording = false): ImeWarning {
+  return warning('IME_CHANGED_BY_USER', recording ? 'warning' : 'blocked',
+    recording
+      ? `录制中检测到输入源从「${original.name}」变为「${current.name}」；为避免覆盖你的选择，没有切回。`
+      : `运行中检测到输入源从「${original.name}」变为「${current.name}」。为避免覆盖你的选择，后续输入已停止。`,
     { original, current, runId });
 }
 
@@ -160,6 +168,14 @@ function restoreUnavailable(original: InputSource, current: InputSource): ImeWar
 function imeUnavailable(): ImeWarning {
   return warning('IME_UNAVAILABLE', 'warning',
     '找不到可用的输入法辅助程序（cuekeeper-ime），本次运行没有检测或切换输入法。');
+}
+
+/**
+ * Recording keeps going without a switched source: the flow is still worth
+ * recording, and only physical English keys may come out wrong.
+ */
+function switchFailed(message: string, current?: InputSource): ImeWarning {
+  return warning('IME_SWITCH_FAILED', 'warning', message, current ? { original: current } : {});
 }
 
 function busy(holder: { runId?: string; expiresAt?: string } | undefined): ImeWarning {
@@ -369,6 +385,11 @@ export interface ImeManagerOptions {
   pid?: number;
 }
 
+/** What one attempt to select an ASCII source achieved. */
+type AsciiOutcome =
+  | { ok: true; source: InputSource }
+  | { ok: false; reason: 'missing' | 'select' | 'readback'; seen?: InputSource };
+
 /**
  * The input-source guard for one replay run.
  *
@@ -533,9 +554,25 @@ export class InputSourceManager {
   }
 
   private async ensureAscii(current: InputSource) {
+    const outcome = await this.applyAscii();
+    if (outcome.ok) return;
+    if (outcome.reason === 'readback' && outcome.seen) {
+      throw new ImeFault(this.warn(warning('IME_SOURCE_UNAVAILABLE', 'blocked',
+        `已请求切换到「${this.target?.name}」，但系统当前仍是「${outcome.seen.name}」；本轮已停止。`,
+        { attempted: this.target, current: outcome.seen })));
+    }
+    throw new ImeFault(this.warn(sourceUnavailable(current, this.targetId)));
+  }
+
+  /**
+   * Selects the ASCII target and reads it back. Replay turns a failure into a
+   * blocked fault; recording turns it into a warning. Both share this switch so
+   * the lock, the snapshot and the read-back rule stay in one place.
+   */
+  private async applyAscii(): Promise<AsciiOutcome> {
     const sources = await this.backend.list().catch(() => [] as InputSource[]);
     const target = chooseAsciiSource(sources, this.targetId);
-    if (!target) throw new ImeFault(this.warn(sourceUnavailable(current, this.targetId)));
+    if (!target) return { ok: false, reason: 'missing' };
     this.target = target;
     await this.acquireLock();
     // ime.json must exist before TIS changes, or a crash loses the original.
@@ -546,7 +583,7 @@ export class InputSourceManager {
       try {
         await this.backend.select(target.id);
       } catch {
-        throw new ImeFault(this.warn(sourceUnavailable(current, this.targetId)));
+        return { ok: false, reason: 'select' };
       }
     }
     // The switch happened; a failed read-back still needs a restore.
@@ -555,14 +592,63 @@ export class InputSourceManager {
     try {
       after = await this.backend.current();
     } catch {
-      throw new ImeFault(this.warn(sourceUnavailable(current, this.targetId)));
+      return { ok: false, reason: 'readback' };
     }
-    if (after.id !== target.id) {
-      throw new ImeFault(this.warn(warning('IME_SOURCE_UNAVAILABLE', 'blocked',
-        `已请求切换到「${target.name}」，但系统当前仍是「${after.name}」；本轮已停止。`,
-        { attempted: target, current: after })));
-    }
+    if (after.id !== target.id) return { ok: false, reason: 'readback', seen: after };
     this.activeAscii = after;
+    return { ok: true, source: after };
+  }
+
+  /**
+   * Recording-time switch: an ASCII source before capture starts.
+   *
+   * Unlike `prepare()`, nothing here blocks the recording. A missing helper, a
+   * missing ASCII source, a lock held by another run or a failed TIS call all
+   * become one warning: a flow recorded under the wrong source is still worth
+   * keeping. The caller restores the user's source with `restore(true)`.
+   */
+  async startRecording(): Promise<ImeSummary> {
+    if (!await this.available()) {
+      this.warn(imeUnavailable());
+      return this.summary();
+    }
+    let current: InputSource;
+    try {
+      current = await this.backend.current();
+    } catch {
+      this.warn(switchFailed('读不到当前输入源，输入法未切换，可能影响文本捕获。'));
+      return this.summary();
+    }
+    if (current.ascii) {
+      // Already safe: never touch TIS and never take the lock.
+      this.sawAscii = true;
+      this.activeAscii = current;
+      return this.summary(current);
+    }
+    this.original = current;
+    const holder = (await readImeLock(dirname(this.lockFile))).holder;
+    if (holder && holder.runId !== this.runId &&
+        Date.parse(holder.expiresAt) > this.now() && alive(holder.pid)) {
+      this.warn(switchFailed(
+        `另一个测试（run ${holder.runId}）正在管理输入法，本次录制没有切换，可能影响文本捕获。`, current));
+      return this.summary(current);
+    }
+    let outcome: AsciiOutcome;
+    try {
+      outcome = await this.applyAscii();
+    } catch {
+      this.warn(switchFailed('切换输入法失败，本次录制沿用当前输入源，可能影响文本捕获。', current));
+      return this.summary(current);
+    }
+    if (outcome.ok) return this.summary(outcome.source);
+    const target = this.target?.name ?? 'ABC';
+    this.warn(switchFailed(outcome.reason === 'missing'
+      ? '系统里没有可用的 ABC 或 U.S. 输入源，输入法未切换，可能影响文本捕获。'
+      : outcome.reason === 'select'
+        ? `切换到「${target}」失败，输入法未切换，可能影响文本捕获。`
+        : `已请求切换到「${target}」，但系统当前仍是「${outcome.seen?.name ?? '原输入法'}」，可能影响文本捕获。`,
+    current));
+    return this.summary(outcome.seen ?? current);
   }
 
   /**
@@ -599,11 +685,19 @@ export class InputSourceManager {
     await this.ensureAscii(current);
   }
 
-  /** Best-effort restore for the run's `finally`; never throws. */
-  async restore(): Promise<ImeRestoreResult> {
+  /**
+   * Best-effort restore for the run's `finally`; never throws.
+   *
+   * `recording` only changes the wording when the user took the source back:
+   * a recording keeps going, it does not stop the input.
+   */
+  async restore(recording = false): Promise<ImeRestoreResult> {
     let final: InputSource | undefined;
     try {
       if (!await this.available() || !this.switched) {
+        // Nothing was switched, so a snapshot may exist without a restore to
+        // match it; it must not be left for `ime restore --run` to replay.
+        if (!this.switched) await this.removeRecord();
         return { warnings: this.warnings(), summary: this.summary() };
       }
       const original = this.original;
@@ -614,15 +708,16 @@ export class InputSourceManager {
         final = current;
       } catch {
         // D3: a failed read never claims success.
-        this.warn(warning('IME_RESTORE_FAILED', 'warning',
-          `运行结束后无法读取当前输入源，无法确认是否已切回「${original.name}」。测试结果已正常记录。`,
-          { original, attempted: original }));
+        const copy = recording
+          ? `录制结束后无法读取当前输入源，无法确认是否已切回「${original.name}」。录制结果已保存。`
+          : `运行结束后无法读取当前输入源，无法确认是否已切回「${original.name}」。测试结果已正常记录。`;
+        this.warn(warning('IME_RESTORE_FAILED', 'warning', copy, { original, attempted: original }));
         return { warnings: this.warnings(), summary: this.summary(final) };
       }
       if (this.activeAscii && current.id !== this.activeAscii.id) {
         // B3: the user changed the source after the last step; keep it, but
         // still report a vanished original if both facts are true (C3).
-        this.warn(changedByUser(this.activeAscii, current, this.runId));
+        this.warn(changedByUser(this.activeAscii, current, this.runId, recording));
         const sources = await this.backend.list().catch(() => [] as InputSource[]);
         if (!sources.some(source => source.id === original.id)) {
           this.warn(restoreUnavailable(original, current));
@@ -657,7 +752,8 @@ export class InputSourceManager {
       }
       if (selectError || !verified || verified.id !== original.id) {
         this.warn(warning('IME_RESTORE_FAILED', 'warning',
-          `已尝试切回「${original.name}」，但系统仍停留在「${verified?.name ?? current.name}」。测试结果已正常记录。`,
+          `已尝试切回「${original.name}」，但系统仍停留在「${verified?.name ?? current.name}」。` +
+            (recording ? '录制结果已保存。' : '测试结果已正常记录。'),
           { original, current: verified ?? current, attempted: original, ...(verified ? { verified } : {}) }));
         return { warnings: this.warnings(), summary: this.summary(final ?? current) };
       }
