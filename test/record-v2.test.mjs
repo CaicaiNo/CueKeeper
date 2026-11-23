@@ -1116,6 +1116,81 @@ test('text with neither focus evidence nor a provable control is dropped, not a 
     'the drop must say why the text could not be bound');
 });
 
+test('a failed focus probe keeps the window it proved, so typing stays bound', async () => {
+  const recording = vscodeRecording(async () => {
+    throw new Error('focus evidence must be enough');
+  });
+  // The recording proves VS Code's editor window with a click in it.
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 100, {
+    point: EDITOR_POINT, decision: 'record',
+    owner: { ...VSCODE_OWNER, role: 'AXTextField', name: 'manifest.json' },
+  })));
+  // The next focus probe reads the app but not its window number, as Finder's
+  // inline rename field does: the generation advances and the owner loses the
+  // window. The window the same app process proved is still the right one.
+  const unprobed = { app: VSCODE_OWNER.app, pid: VSCODE_OWNER.pid, processInstance: VSCODE_OWNER.processInstance };
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 150, seen: NOW, focusGeneration: 2, secure: false, owner: unprobed,
+  }));
+  for (const t of [200, 250, 300, 350, 400]) {
+    await recording.add(parseCaptureEvent({
+      ...vscodeEvent('text', t, { chars: 'N', focus: EDITOR_FOCUS }), owner: unprobed, focusGeneration: 2,
+    }));
+  }
+  const flow = recording.finish();
+  // Five characters are one bound burst, not five scope gaps.
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'type']);
+  assert.deepEqual(flow.steps[1].scope, {
+    kind: 'window', app: 'com.microsoft.VSCode', windowKey: 'vscode-1',
+    windowTitle: 'manifest.json — saio_副本',
+  });
+  assert.deepEqual(flow.steps[1].target, { kind: 'element', role: 'textfield', name: 'manifest.json' });
+  assert.equal(flow.steps[1].input, 'input_1');
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.equal(flowV2Check.Check(flow), true);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'TEXT_SCOPE_FROM_LAST_WINDOW'),
+    'the reuse of a proved window must say why it happened');
+  assert.ok(!JSON.stringify(flow).includes('NNNNN'));
+});
+
+test('an app switch never reuses the window the previous app proved', async () => {
+  const recording = vscodeRecording(async () => {
+    throw new Error('focus evidence must be enough');
+  });
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 100, {
+    point: EDITOR_POINT, decision: 'record',
+    owner: { ...VSCODE_OWNER, role: 'AXTextField', name: 'manifest.json' },
+  })));
+  // TextEdit comes forward, but its probe fails too: another app means the old
+  // window number is not this app's and must not be reached for.
+  const unprobed = { app: 'com.apple.TextEdit', pid: 200, processInstance: 2 };
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 150, seen: NOW, focusGeneration: 5, secure: false, owner: unprobed,
+  }));
+  await recording.add(parseCaptureEvent({
+    ...vscodeEvent('text', 200, { chars: 'Zq-x', focus: { ...EDITOR_FOCUS, name: 'draft.txt' } }),
+    owner: unprobed, focusGeneration: 5,
+  }));
+  // Proof for the new app restores normal binding: the recording is not stuck.
+  const textedit = { ...unprobed, windowNumber: 21, windowTitle: 'draft.txt' };
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 300, seen: NOW, focusGeneration: 6, secure: false, owner: textedit,
+  }));
+  await recording.add(parseCaptureEvent({
+    ...vscodeEvent('text', 350, { chars: 'Zq-y', focus: { ...EDITOR_FOCUS, name: 'draft.txt' } }),
+    owner: textedit, focusGeneration: 6,
+  }));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'gap', 'activate_app', 'type']);
+  assert.equal(flow.steps[1].code, 'CAPTURE_SCOPE_UNVERIFIED');
+  // The characters typed after the switch never land in VS Code's window.
+  assert.deepEqual(flow.steps[3].scope, {
+    kind: 'window', app: 'com.apple.TextEdit', windowKey: 'textedit-1', windowTitle: 'draft.txt',
+  });
+  assert.equal(flow.steps.some(step => step.scope?.windowKey === 'vscode-1' && step.kind === 'type'), false);
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'TEXT_SCOPE_FROM_LAST_WINDOW'), false);
+});
+
 test('a 2.5 second queue delay still records text without STALE_CAPTURE', async () => {
   const snapshot = vscodeSnapshot();
   let reads = 0;

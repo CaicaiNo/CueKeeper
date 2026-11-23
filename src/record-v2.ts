@@ -257,6 +257,12 @@ export class GlobalRecording {
    */
   private focusTargets = new Map<string, ElementLocator>();
   /**
+   * The last window this recording could prove, and where. A character event
+   * whose own evidence lost its window number (one failed focus probe over the
+   * same app process) keeps this window instead of becoming a gap per character.
+   */
+  private lastWindow?: { binding: WindowBinding; generation: number };
+  /**
    * Text waiting for one fallback tree read. It is buffered, never awaited by
    * the text path: the read resolves in the background and the buffered burst
    * becomes one `type` step when it does. A non-text event settles it first so
@@ -801,7 +807,7 @@ export class GlobalRecording {
   }
 
   private async onText(event: Extract<CaptureEvent, { kind: 'text' }>) {
-    const binding = this.bindingFor(event);
+    const binding = this.bindingFor(event) ?? this.retainedWindow(event);
     if (!binding) {
       this.pushGap('CAPTURE_SCOPE_UNVERIFIED');
       return;
@@ -1152,6 +1158,7 @@ export class GlobalRecording {
     if (existing) {
       // The same native window can retitle; the key keeps following it.
       if (existing.title !== title) existing.title = title;
+      this.lastWindow = { binding: existing, generation: event.focusGeneration };
       return existing;
     }
     if (this.bindings.size >= maxWindowBindings) return undefined;
@@ -1162,6 +1169,32 @@ export class GlobalRecording {
     };
     this.bindings.set(id, binding);
     this.apps.add(owner.app);
+    this.lastWindow = { binding, generation: event.focusGeneration };
+    return binding;
+  }
+
+  /**
+   * The window a character event keeps when its own evidence lost the window
+   * number. The helper can fail one focus probe (Finder's inline rename field, a
+   * window mid-animation) without the app or its process changing; the window
+   * this recording already proved for that process is still the one receiving
+   * the characters. Another app, another process, or a generation that already
+   * named a different window never inherits it.
+   */
+  private retainedWindow(event: CaptureEvent): WindowBinding | undefined {
+    const owner = event.owner;
+    const last = this.lastWindow;
+    if (!owner?.app || !owner.pid || !last) return undefined;
+    const binding = last.binding;
+    if (binding.app !== owner.app || binding.pid !== owner.pid) return undefined;
+    if ((binding.processInstance ?? 0) !== (owner.processInstance ?? 0)) return undefined;
+    // A late event from an older generation is never moved forward to a window
+    // that later evidence already named.
+    if (event.focusGeneration < last.generation) return undefined;
+    const claimed = this.generationWindow.get(event.focusGeneration);
+    if (claimed !== undefined && claimed !== this.bindingId(binding)) return undefined;
+    this.warn('TEXT_SCOPE_FROM_LAST_WINDOW',
+      'A text event lost its window number to a failed focus probe; the window this app already proved was used instead');
     return binding;
   }
 
