@@ -7,6 +7,7 @@ import type {
   WindowScope, WindowWaitCheck,
 } from './contracts-v2.js';
 import { writeNew } from './files.js';
+import { planBuiltinInsertion } from './builtin-behaviors.js';
 import { hashFlowV2, isFlowV2, validateFlowV2 } from './flow-v2.js';
 
 // The pure editing layer behind the workbench timeline. It loads a v2 flow,
@@ -816,6 +817,24 @@ export class EditableFlowV2 {
   insertStep(index: number, step: StepV2): FlowV2 {
     return this.commit(draft => {
       insertInto(draft, index, step);
+      return clone(draft);
+    });
+  }
+
+  /**
+   * Expand one built-in behavior into real steps and commit them as a single
+   * undo entry. The behavior is a product definition, not a flow file: the
+   * expansion only names runtime inputs, so no parameter value is stored.
+   */
+  insertBuiltinBehavior(input: unknown): FlowV2 {
+    return this.commit(draft => {
+      const planned = planBuiltinInsertion(draft, input);
+      planned.steps.forEach((step, offset) => insertInto(draft, planned.index + offset, step));
+      if (planned.inputs.length) {
+        const declared = draft.inputs ?? [];
+        const missing = planned.inputs.filter(name => !declared.includes(name));
+        if (missing.length) draft.inputs = [...declared, ...missing];
+      }
       return clone(draft);
     });
   }

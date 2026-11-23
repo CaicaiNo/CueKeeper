@@ -516,21 +516,51 @@ function renderInspector() {
   }
   const panel = $('inspector');
   if (state.tab === 'library') {
-    const items = [...state.library].sort((a, b) => a.behavior.name.localeCompare(b.behavior.name));
-    panel.replaceChildren(items.length ? el('div', { className: 'stack-list' }, ...items.map(item => {
-      const compatible = state.session?.version === 1 && sameTarget(item.target, state.session.target);
-      const { behavior, parameterTypes } = item;
-      const shell = item.shell ?? { steps: 0, privileged: 0 };
-      return el('article', { className: 'library-item stack-list card bg-base-300' },
-        el('h3', { className: 'card-title' }, behavior.name),
-        muted(`${behavior.steps.length} 步 · ${item.target.app} · ${item.target.window}`),
-        shell.steps ? muted(`含 ${shell.steps} 个 Shell 步骤${shell.privileged ? ` · ${shell.privileged} 个提权步骤` : ''}`) : undefined,
-        behavior.parameters.length ? muted(behavior.parameters.map(param => `${param} · ${parameterTypes[param]}`).join(' / ')) : undefined,
-        el('div', { className: 'actions' },
-          button('引用', () => behaviorDialog(item, false), { style: 'small', icon: 'plus', disabled: !compatible }),
-          button('复制到草稿', () => behaviorDialog(item, true), { style: 'small', icon: 'copy', disabled: !compatible })),
-        compatible || !state.session ? undefined : muted('此行为属于另一目标窗口。'));
-    })) : empty('从时间线选中多个动作，合并到行为库。'));
+    const library = state.library ?? { builtin: [], custom: [] };
+    const builtins = library.builtin ?? [];
+    const custom = [...(library.custom ?? [])].sort((a, b) => a.behavior.name.localeCompare(b.behavior.name));
+    const canInsert = state.session?.version === 2;
+    // Built-ins ship with the product: they are read-only and are inserted as
+    // real steps, so they never appear as an editable library file.
+    panel.replaceChildren(el('div', { className: 'stack-list' },
+      el('p', { className: 'eyebrow' }, '内置行为 · 随产品发布'),
+      ...[['finder', 'Finder 基础动作'], ['universal', '通用（任何 App）']].flatMap(([group, title]) => {
+        const items = builtins.filter(item => item.group === group);
+        if (!items.length) return [];
+        return [
+          el('h3', { className: 'inspector-heading library-group-heading' }, title),
+          ...items.map(item => el('article', { className: 'library-item stack-list card bg-base-300' },
+            el('h3', { className: 'card-title' }, item.name,
+              el('span', {
+                className: `badge badge-soft badge-sm ${item.group === 'finder' ? 'badge-info' : 'badge-ghost'}`,
+              }, item.appLabel)),
+            el('p', { className: 'builtin-steps' }, item.steps.map(step => step.label).join(' → ')),
+            item.parameters.length
+              ? muted(`参数 · ${item.parameters.map(parameter => parameter.name).join(' / ')}`)
+              : undefined,
+            muted('不可编辑、不可删除；插入后就是时间线里的普通步骤，参数值在运行时填写。'),
+            el('div', { className: 'actions' },
+              button('插入', () => builtinInsertDialog(item), {
+                style: 'small primary', icon: 'plus', disabled: !canInsert,
+              })))),
+        ];
+      }),
+      !canInsert ? muted('插入内置行为需要 v2 录制；v1 会话仍可引用「我的行为」。') : undefined,
+      el('h3', { className: 'inspector-heading library-group-heading' }, '我的行为'),
+      ...(custom.length ? custom.map(item => {
+        const compatible = state.session?.version === 1 && sameTarget(item.target, state.session.target);
+        const { behavior, parameterTypes } = item;
+        const shell = item.shell ?? { steps: 0, privileged: 0 };
+        return el('article', { className: 'library-item stack-list card bg-base-300' },
+          el('h3', { className: 'card-title' }, behavior.name),
+          muted(`${behavior.steps.length} 步 · ${item.target.app} · ${item.target.window}`),
+          shell.steps ? muted(`含 ${shell.steps} 个 Shell 步骤${shell.privileged ? ` · ${shell.privileged} 个提权步骤` : ''}`) : undefined,
+          behavior.parameters.length ? muted(behavior.parameters.map(param => `${param} · ${parameterTypes[param]}`).join(' / ')) : undefined,
+          el('div', { className: 'actions' },
+            button('引用', () => behaviorDialog(item, false), { style: 'small', icon: 'plus', disabled: !compatible }),
+            button('复制到草稿', () => behaviorDialog(item, true), { style: 'small', icon: 'copy', disabled: !compatible })),
+          compatible || !state.session ? undefined : muted('此行为属于另一目标窗口。'));
+      }) : [empty('从时间线选中多个动作，合并到行为库。')])));
     return;
   }
   const row = getRows().find(action => action.id === state.focused);
@@ -1509,7 +1539,7 @@ function mergeDialog(rows) {
       [row.id, { param: param.value.trim(), type: type.value }]));
     const { item, defaults } = makeBehavior(rows, name.value.trim(), bindings, state.session.target);
     const saved = await api('library', { session: state.session.id, item });
-    state.library.push(saved);
+    state.library.custom.push(saved);
     if (add.checked) state.draft.push({ id: id('call'), item: saved, args: defaults });
     state.selected.clear();
     state.tab = 'library';
@@ -1517,6 +1547,90 @@ function mergeDialog(rows) {
     const shell = saved.shell ?? { steps: 0, privileged: 0 };
     status(`已保存行为「${saved.behavior.name}」${add.checked ? '并加入草稿' : ''}` +
       (shell.steps ? ` · 含 ${shell.steps} 个 Shell 步骤${shell.privileged ? '（需管理员预配置）' : ''}` : ''), 'success');
+  });
+}
+
+/** The window a built-in insert should default to: a window of the target app. */
+function builtinScopeDefault(item) {
+  const anchor = v2SelectedStep() ?? v2Steps().at(-1);
+  const anchorScope = anchor && anchor.kind !== 'gap' && anchor.scope.kind === 'window'
+    ? anchor.scope : undefined;
+  const matches = scope => item.app === undefined || scope.app === item.app;
+  if (anchorScope && matches(anchorScope)) return anchorScope;
+  const windows = v2Steps()
+    .filter(step => step.kind !== 'gap' && step.scope.kind === 'window')
+    .map(step => step.scope)
+    .filter(matches);
+  if (windows.length) return windows.at(-1);
+  // A Finder action never defaults to another app's window: the app is fixed
+  // by the behavior, only the title and key are the operator's to fill in.
+  if (item.app !== undefined) return { kind: 'window', app: item.app, windowTitle: '', windowKey: '' };
+  return anchorScope ?? { kind: 'window', app: '', windowTitle: '', windowKey: '' };
+}
+
+/**
+ * Insert one built-in behavior. It expands on the server into real steps in a
+ * single undo entry; the dialog only names the window and the runtime inputs.
+ */
+function builtinInsertDialog(item) {
+  if (!state.session || state.session.version !== 2) {
+    status('内置行为只能插入 v2 录制。', 'error');
+    return;
+  }
+  const anchor = v2SelectedStep() ?? v2Steps().at(-1);
+  const prefill = builtinScopeDefault(item);
+  const app = input({ required: true, maxLength: 256, value: prefill.app ?? '', placeholder: 'com.apple.finder' });
+  const title = input({ required: true, maxLength: 256, value: prefill.windowTitle ?? '' });
+  const key = input({ maxLength: 64, value: prefill.windowKey ?? '', placeholder: '留空自动生成' });
+  const params = item.parameters.map(parameter => ({
+    parameter, node: input({ maxLength: 64, value: parameter.name }),
+  }));
+  const needsTarget = item.steps.some(step => step.kind === 'type');
+  const picker = needsTarget ? locatorFields({ kind: 'element', role: item.targetRole }) : undefined;
+  openDialog(`插入内置行为 · ${item.name}`, [
+    muted(`${item.appLabel} · ${item.steps.map(step => step.label).join(' → ')}`),
+    muted('内置行为展开成真实步骤；参数不会写进 flow，运行测试项时再填值。'),
+    field('App 标识', app), field('窗口标题', title), field('windowKey', key),
+    params.length ? el('div', { className: 'parameter-list stack-list' },
+      el('h3', {}, '参数名'),
+      muted('插入后也可以在步骤详情里改参数名或目标控件。'),
+      ...params.map(({ parameter, node }) => field(parameter.label, node, parameter.placeholder))) : undefined,
+    picker ? el('div', { className: 'stack-list' },
+      muted(`「输入」步骤需要一个文本控件；默认按类型 ${item.targetRole} 匹配，匹配不唯一时在这里指定名称或序号。`),
+      ...picker.controls) : undefined,
+    muted(anchor ? `插入到 ${anchor.id} 之后。` : '插入到流程末尾。'),
+  ], '插入', async () => {
+    const appId = app.value.trim();
+    if (!appId) throw new Error('填写 App 标识。');
+    if (!title.value.trim()) throw new Error('填写窗口标题。');
+    const values = {};
+    for (const { parameter, node } of params) {
+      const name = node.value.trim();
+      if (!/^[a-zA-Z][a-zA-Z0-9_]{0,63}$/.test(name)) {
+        throw new Error(`参数名 ${parameter.name} 需要字母开头，只含字母、数字与下划线。`);
+      }
+      values[parameter.name] = name;
+    }
+    const target = picker ? picker.value() : undefined;
+    const known = new Set(v2Steps().map(step => step.id));
+    const inserted = await v2Call('v2/behavior', {
+      behavior: item.id,
+      scope: {
+        app: appId, windowTitle: title.value.trim(),
+        ...(key.value.trim() ? { windowKey: key.value.trim() } : {}),
+      },
+      ...(target ? { target } : {}),
+      ...(params.length ? { params: values } : {}),
+      ...(anchor ? { afterStepId: anchor.id } : {}),
+    });
+    // Select the first expanded step so the timeline shows where it landed.
+    const first = inserted?.flow?.steps.find(step => !known.has(step.id));
+    if (first) {
+      state.v2Selected = first.id;
+      renderV2();
+      renderTimeline();
+    }
+    status(`已插入内置行为「${item.name}」：${item.steps.length} 步`, 'success');
   });
 }
 
@@ -2010,7 +2124,7 @@ for (const tab of ['actions', 'library']) $(`${tab}-tab`).onclick = () => { stat
 
 try {
   const initial = await api('state');
-  state.library = initial.library;
+  state.library = initial.library ?? { builtin: [], custom: [] };
   state.allowLive = initial.allowLive;
   setSession(initial.session ?? null);
   status(initial.session ? '已导入本地会话' : '会话与测试项保存在本机');

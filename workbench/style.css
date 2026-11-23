@@ -316,6 +316,9 @@ button:disabled { cursor: default; }
 .actions { display: flex; flex-wrap: wrap; gap: 7px; }
 .library-item { padding: 14px; overflow-wrap: anywhere; }
 .library-item .card-title { font-size: 13px; }
+.library-item .card-title .badge { margin-left: auto; }
+.library-group-heading { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+.builtin-steps { margin: 0; font: 11.5px var(--mono); color: var(--color-base-content); overflow-wrap: anywhere; }
 .empty { padding: 48px 0; max-width: 32ch; color: var(--muted); font-size: 12.5px; line-height: 1.65; }
 
 .eyebrow { font: 10px var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }

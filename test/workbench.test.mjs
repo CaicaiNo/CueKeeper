@@ -115,7 +115,12 @@ test('workbench imports timeline metadata, reuses the library, and runs a saved 
   assert.deepEqual(type.action.target, picked);
   const { item, defaults } = makeBehavior(three, '登录', new Map([[type.id, { param: 'text', type: 'string' }]]), flow.target);
   const saved = await post('library', { session: session.id, item }, 201);
-  assert.deepEqual((await post('state', {})).library, [saved]);
+  const library = (await post('state', {})).library;
+  assert.deepEqual(library.custom, [saved]);
+  // The built-in group ships with the product and never lands in the library
+  // directory, so it is present even when no custom behavior exists yet.
+  assert.ok(library.builtin.some(entry => entry.id === 'finder-rename'));
+  assert.equal(saved.source, 'custom');
   assert.deepEqual(saved.behavior.steps[1].text, { param: 'text' });
 
   const test = compileDraft(session, 'TextEdit 测试', [{ id: 'first', item: saved, args: defaults }]);
@@ -621,5 +626,5 @@ test('the workbench imports a shell report, saves a replayable shell test, and f
   const { item } = makeBehavior(session.timeline, 'Shell behavior', new Map(), flow.target);
   const libraryItem = await post('library', { session: session.id, item }, 201);
   assert.deepEqual(libraryItem.shell, { steps: 2, privileged: 0 });
-  assert.deepEqual((await post('state', {})).library[0].shell, { steps: 2, privileged: 0 });
+  assert.deepEqual((await post('state', {})).library.custom[0].shell, { steps: 2, privileged: 0 });
 });

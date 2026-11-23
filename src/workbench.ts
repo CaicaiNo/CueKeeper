@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { listApps } from './app-catalog.js';
 import { appIconPng } from './apps.js';
 import { loadBaseline } from './assertion.js';
+import { BuiltinBehaviorError, builtinBehaviorViews } from './builtin-behaviors.js';
 import { fixtureAppPath, offlineDesktop, withDesktop } from './desktop.js';
 import { readJson, writeNew } from './files.js';
 import { hashFlow, plan } from './flow.js';
@@ -344,6 +345,8 @@ export async function startWorkbench(options: {
     const shells = item.behavior.steps.filter(step => step.kind === 'shell');
     return {
       ...item,
+      source: 'custom' as const,
+      editable: true,
       shell: {
         steps: shells.length,
         privileged: shells.filter(step => step.kind === 'shell' && shellPrivilege(step) !== 'user').length,
@@ -392,16 +395,24 @@ export async function startWorkbench(options: {
     }
   }
 
+  /**
+   * The library has two groups that never mix: built-in behaviors ship with the
+   * product (read-only, inserted as real steps) and custom behaviors live in the
+   * library directory the CLI wrote.
+   */
   async function listLibrary() {
+    const builtin = builtinBehaviorViews();
     let names;
     try {
       names = await readdir(library, { withFileTypes: true });
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { builtin, custom: [] };
       throw error;
     }
-    return Promise.all(names.filter(entry => entry.isFile() && /^[a-z0-9_-]+\.behavior\.json$/i.test(entry.name))
+    const custom = await Promise.all(names
+      .filter(entry => entry.isFile() && /^[a-z0-9_-]+\.behavior\.json$/i.test(entry.name))
       .map(async entry => libraryEntry(await parseLibraryItem(await readJson(join(library, entry.name))))));
+    return { builtin, custom };
   }
 
   async function requestHandler(request: IncomingMessage, response: ServerResponse) {
@@ -541,6 +552,24 @@ export async function startWorkbench(options: {
           }
           throw error;
         }
+      }
+      if (path === '/api/v2/behavior') {
+        if (running) return send(response, 409, { error: 'A test is running' });
+        // One built-in behavior becomes several real steps in one undo entry;
+        // its parameters are runtime inputs, so no value enters the flow. The
+        // engine commits the draft only when every step passes the schema.
+        try {
+          editable.insertBuiltinBehavior(data);
+        } catch (error) {
+          if (error instanceof BuiltinBehaviorError) {
+            return send(response, 400, { error: error.message, code: error.code });
+          }
+          if (error instanceof EditError) {
+            return send(response, 400, { error: error.code, message: error.message, detail: error.toDetail() });
+          }
+          throw error;
+        }
+        return send(response, 200, v2View());
       }
       if (path === '/api/v2/edit') {
         if (running) return send(response, 409, { error: 'A test is running' });
