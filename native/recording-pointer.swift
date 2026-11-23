@@ -52,6 +52,9 @@ struct GlobalPointerEvidence {
     let isFocused: Bool
     // nil means AX could not resolve an element; false means it contradicted Quartz.
     let axOwnerMatches: Bool?
+    // A click on a menu item: the menu is a separate window, so the item's
+    // window evidence is the app window that opened it, never the menu itself.
+    var menuAction = false
 
     private static let activationRoles: Set<String> = [
         "AXWindow", "AXSheet", "AXGroup", "AXScrollArea", "AXLayoutArea", "AXSplitGroup", "AXUnknown",
@@ -65,6 +68,12 @@ struct GlobalPointerEvidence {
             fields["secureEvidence"] = secureEvidence
             fields["decision"] = "gap"
             fields["gapCode"] = "SECURE_INPUT"
+        } else if menuAction && targetMatches && axOwnerMatches == true {
+            // A menu action is a real press on the app it belongs to: the menu
+            // item names the step, and the window that opened the menu is the
+            // scope. Treating the menu surface as an unfocused window made every
+            // context-menu choice a capture gap.
+            fields["decision"] = "record"
         } else if targetMatches && isFocused && (axOwnerMatches == true || (forClick && axOwnerMatches == nil)) {
             fields["decision"] = "record"
         } else if targetMatches && !isFocused && axOwnerMatches == true && forClick &&

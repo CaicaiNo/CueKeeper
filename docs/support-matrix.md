@@ -136,6 +136,7 @@ Shell 的完整约束见 [Shell 步骤设计](shell-steps.md) 与 [Root 步骤�
 | `FOCUSED_EDITABLE_TARGET` | 点击落在聚焦可编辑控件的范围内，target 记为该控件而不是指针命中的容器 | 是（录制警告），回放目标更准确 |
 | `CLICK_RETARGETED_TO_TEXT` | 点击先记为容器，后续文本事件的焦点证据证明控件后，原地改成该控件 | 是（录制警告） |
 | `TEXT_TARGET_FROM_CLICK` | 文本事件没有焦点元素证据，target 取自此前点击证明的可编辑控件 | 是（录制警告） |
+| `WINDOW_SCOPE_FROM_LAST_WINDOW` | 事件自己没给出窗口（无窗口号，或标题为空的无标题 surface，如 Finder 内联重命名、右键菜单）时，归到同 app 同进程已证明的窗口，不新建窗口 | 是（录制警告），避免录出回放不存在的窗口 |
 | `UNTARGETED_TEXT` | 文本事件没有焦点元素证据，兜底读树也没有证明唯一聚焦可编辑控件，这些字符被丢弃 | 是（录制警告，不产生缺口） |
 | `CAPTURE_BACKLOG` | 队列落后 helper 超过 8 秒，积压的文本事件被丢弃 | 是（录制警告，不产生一串缺口） |
 | `CAPTURE_STARTUP` | 录制开头（第一个可重放步骤之前）没有窗口证据的事件——500 ms 内无窗口的事件，以及任何时刻开头的 `CAPTURE_SCOPE_UNVERIFIED` 缺口——被当作启动噪音丢弃 | 是（录制警告） |

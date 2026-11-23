@@ -24,4 +24,21 @@ struct FocusEvidence {
         guard let app, pid != nil, pid == previousPid, app == previousApp else { return nil }
         return previousWindow
     }
+
+    /**
+     * Whether the reported AX window is a surface of another window rather than
+     * a window the user can be sent back to.
+     *
+     * A sheet or a dialog always is. An untitled one is when the app keeps a
+     * different titled window it can belong to; an app whose only window is
+     * untitled keeps it, because nothing else can own it.
+     */
+    static func isTransientSurface(role: String?, subrole: String?, title: String?,
+                                   mainTitle: String?, isMainWindow: Bool) -> Bool {
+        if role == "AXSheet" || role == "AXDialog" || subrole == "AXSheet" || subrole == "AXDialog" {
+            return true
+        }
+        guard (title ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        return !isMainWindow && !(mainTitle ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 }

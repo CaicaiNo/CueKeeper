@@ -251,9 +251,29 @@ struct RecordingPointerTests {
                                             secureEvidence: ["system_secure_input"], targetMatches: true,
                                             isFocused: true, axOwnerMatches: nil)
         precondition(secure.fields(forClick: true)["gapCode"] as? String == "SECURE_INPUT")
+
+        // A context menu is its own window owned by the app, so the menu is
+        // never the focused window. The item the user pressed is still a proven
+        // action: it names the step and keeps the window that opened the menu.
+        let menuItem: [String: Any] = [
+            "app": "com.apple.finder", "pid": Int(finderPID), "windowNumber": finderWindow,
+            "windowTitle": "Downloads", "role": "AXMenuItem", "name": "重命名", "pressable": true,
+        ]
+        var menuEvidence = GlobalPointerEvidence(owner: menuItem, focusGeneration: 3, secureEvidence: [],
+                                                  targetMatches: true, isFocused: false, axOwnerMatches: true)
+        menuEvidence.menuAction = true
+        let menuFields = menuEvidence.fields(forClick: true)
+        precondition(menuFields["decision"] as? String == "record", "a menu item press became a gap")
+        precondition(menuFields["gapCode"] == nil)
+        // The same unfocused item without menu proof is not a press the recorder
+        // can attribute; only the menu path earns the record.
+        let unfocusedItem = GlobalPointerEvidence(owner: menuItem, focusGeneration: 3, secureEvidence: [],
+                                                   targetMatches: true, isFocused: false, axOwnerMatches: true)
+        precondition(unfocusedItem.fields(forClick: true)["gapCode"] as? String == "CAPTURE_SCOPE_UNVERIFIED")
+
         precondition(lag.shouldReport(isKeyDown: true, timestamp: start, now: start + 4_000_000_000))
         precondition(!lag.shouldReport(isKeyDown: true, timestamp: start, now: start + 4_100_000_000))
-        return 7
+        return 9
     }
 
     /// Finder names the clicked file, not the anonymous field under the

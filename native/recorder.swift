@@ -162,18 +162,33 @@ final class Capture {
      * a single-window app is accepted without a frame match. When the app
      * reports no focused window (an inline rename field, a window mid-animation),
      * its main window is the same window and is read instead.
+     *
+     * A sheet and an inline editor are surfaces of the window they were opened
+     * from, and macOS reports the rename editor as its own window with an empty
+     * title. That surface is resolved to the window that owns it; when no window
+     * can be proved the probe reports no number at all, so the recorder keeps
+     * the window the app already proved instead of inventing a scope no replay
+     * can find.
      */
     private func focusedWindowInfo(_ application: NSRunningApplication) -> FocusedWindow? {
         let axApp = AXUIElementCreateApplication(application.processIdentifier)
-        guard let axWindow = axElement(axApp, kAXFocusedWindowAttribute as String) ??
+        guard let reported = axElement(axApp, kAXFocusedWindowAttribute as String) ??
                 axElement(axApp, kAXMainWindowAttribute as String) else { return nil }
-        let title = axString(axWindow, kAXTitleAttribute as String) ?? ""
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
-                                                   kCGNullWindowID) as? [[String: Any]] else {
-            return FocusedWindow(number: nil, title: title)
+        let transient = isTransientSurface(reported, axApp: axApp)
+        guard let axWindow = transient ? owningWindow(reported) : reported else {
+            return FocusedWindow(number: nil, title: "")
         }
+        let title = axString(axWindow, kAXTitleAttribute as String) ?? ""
+        return FocusedWindow(number: windowNumber(for: axWindow, pid: application.processIdentifier),
+                             title: title)
+    }
+
+    /** The layer-0 CGWindow of one AX window, matched by its frame. */
+    private func windowNumber(for axWindow: AXUIElement, pid: Int32) -> Int? {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                   kCGNullWindowID) as? [[String: Any]] else { return nil }
         let owned = list.filter {
-            ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == application.processIdentifier &&
+            ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid &&
             ($0[kCGWindowLayer as String] as? NSNumber)?.intValue == 0
         }
         if let position = axPoint(axWindow, kAXPositionAttribute as String),
@@ -184,14 +199,45 @@ final class Capture {
                       abs(rect.minX - position.x) <= 4, abs(rect.minY - position.y) <= 4,
                       abs(rect.width - size.width) <= 8, abs(rect.height - size.height) <= 8,
                       let number = (entry[kCGWindowNumber as String] as? NSNumber)?.intValue else { continue }
-                return FocusedWindow(number: number, title: title)
+                return number
             }
         }
-        if owned.count == 1,
-           let number = (owned[0][kCGWindowNumber as String] as? NSNumber)?.intValue {
-            return FocusedWindow(number: number, title: title)
+        if owned.count == 1, let number = (owned[0][kCGWindowNumber as String] as? NSNumber)?.intValue {
+            return number
         }
-        return FocusedWindow(number: nil, title: title)
+        return nil
+    }
+
+    /**
+     * Whether the reported AX window is a surface of another window rather than
+     * a window the user can be sent back to. A sheet or a dialog always is, and
+     * an untitled one is when the app keeps a titled window it can belong to.
+     */
+    private func isTransientSurface(_ element: AXUIElement, axApp: AXUIElement) -> Bool {
+        let main = axElement(axApp, kAXMainWindowAttribute as String)
+        return FocusEvidence.isTransientSurface(
+            role: axString(element, kAXRoleAttribute as String),
+            subrole: axString(element, kAXSubroleAttribute as String),
+            title: axString(element, kAXTitleAttribute as String),
+            mainTitle: main.flatMap { axString($0, kAXTitleAttribute as String) },
+            isMainWindow: main.map { CFEqual($0, element) } ?? false)
+    }
+
+    /** The window a sheet or inline editor was opened from, when AX names one. */
+    private func owningWindow(_ element: AXUIElement) -> AXUIElement? {
+        if let window = axElement(element, kAXWindowAttribute as String), !CFEqual(window, element) {
+            let title = (axString(window, kAXTitleAttribute as String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !title.isEmpty { return window }
+        }
+        var node = axElement(element, kAXParentAttribute as String)
+        var depth = 0
+        while let current = node, depth < 4 {
+            if axString(current, kAXRoleAttribute as String) == "AXWindow" { return current }
+            node = axElement(current, kAXParentAttribute as String)
+            depth += 1
+        }
+        return nil
     }
 
     /**
@@ -328,6 +374,11 @@ final class Capture {
         var name: String?
         var windowTitle = isFocused ? (focusTitle ?? stackTitle) : stackTitle
         var pressable = false
+        var menuAction = false
+        // A menu is its own Quartz window with no relation to the window the
+        // user clicked in. Its item still names the action the user chose, and
+        // the action belongs to the app window that was in use when it opened.
+        var ownerWindow = stackWindow
         // A queued event can still prove its window after the live hit changed.
         // Only enrich it with AX while the same window is under the pointer.
         if targetMatches, target.canReadAX {
@@ -344,9 +395,19 @@ final class Capture {
                     // the element under the pointer, not by its named ancestor.
                     hitRole = axString(hit, kAXRoleAttribute as String)
                     subrole = axString(hit, kAXSubroleAttribute as String)
-                    let identity = pointerIdentity(hit)
-                    role = identity?.role ?? hitRole
-                    name = identity?.name
+                    if let identity = menuItemIdentity(hit) {
+                        menuAction = true
+                        role = identity.role
+                        name = identity.name
+                        if let stackPid,
+                           let number = menuScopeWindow(pid: stackPid, title: &windowTitle) {
+                            ownerWindow = number
+                        }
+                    } else {
+                        let identity = pointerIdentity(hit)
+                        role = identity?.role ?? hitRole
+                        name = identity?.name
+                    }
                     if windowTitle?.isEmpty != false, let axWindow = axElement(hit, kAXWindowAttribute as String) {
                         windowTitle = axString(axWindow, kAXTitleAttribute as String) ?? windowTitle
                     }
@@ -358,7 +419,7 @@ final class Capture {
         if let app = stackApp { owner["app"] = app }
         if let stackPid, stackPid > 0 { owner["pid"] = Int(stackPid) }
         if let instance = stackInstance { owner["processInstance"] = instance }
-        if let stackWindow { owner["windowNumber"] = stackWindow }
+        if let ownerWindow { owner["windowNumber"] = ownerWindow }
         if let windowTitle { owner["windowTitle"] = windowTitle }
         if let role { owner["role"] = role }
         if let name { owner["name"] = name }
@@ -370,7 +431,46 @@ final class Capture {
         // set; both are evidence, and neither reads the control's value.
         if secureControl(role: hitRole, subrole: subrole) { secureEvidence.append("secure_control") }
         return GlobalPointerEvidence(owner: owner, focusGeneration: focusGeneration, secureEvidence: secureEvidence,
-                                     targetMatches: targetMatches, isFocused: isFocused, axOwnerMatches: axOwnerMatches)
+                                     targetMatches: targetMatches, isFocused: isFocused,
+                                     axOwnerMatches: axOwnerMatches, menuAction: menuAction)
+    }
+
+    /**
+     * The menu item a click landed on, named by the item itself. The element
+     * under the pointer is usually the item's label, so the menu item above it
+     * is the thing a replay presses. A click on the menu's background is not an
+     * action and keeps whatever proof the generic path has.
+     */
+    private func menuItemIdentity(_ hit: AXUIElement) -> PointerIdentity? {
+        var node: AXUIElement? = hit
+        var depth = 0
+        while let current = node, depth < 4 {
+            let role = axString(current, kAXRoleAttribute as String)
+            if role == "AXMenuItem" {
+                return PointerIdentity(role: "AXMenuItem", name: pointerName(current, role: role))
+            }
+            // A menu surface only ever nests inside a menu, never a window.
+            if role == "AXWindow" || role == "AXApplication" || role == "AXMenuBar" { return nil }
+            node = axElement(current, kAXParentAttribute as String)
+            depth += 1
+        }
+        return nil
+    }
+
+    /**
+     * The app window a menu action belongs to: the window that had focus when
+     * the menu opened. A menu never becomes a scope of its own, so the window is
+     * proved the same way a focus probe would prove it.
+     */
+    private func menuScopeWindow(pid: Int32, title: inout String?) -> Int? {
+        if pid == focusPid {
+            if let focusTitle, !focusTitle.isEmpty { title = focusTitle }
+            if let number = focusWindowNumber { return number }
+        }
+        let axApp = AXUIElementCreateApplication(pid)
+        guard let main = axElement(axApp, kAXMainWindowAttribute as String) else { return nil }
+        if let label = axString(main, kAXTitleAttribute as String), !label.isEmpty { title = label }
+        return windowNumber(for: main, pid: pid)
     }
 
     /**

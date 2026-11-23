@@ -1148,7 +1148,7 @@ test('a failed focus probe keeps the window it proved, so typing stays bound', a
   assert.equal(flow.steps[1].input, 'input_1');
   assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
   assert.equal(flowV2Check.Check(flow), true);
-  assert.ok(recording.captureWarnings.some(warning => warning.code === 'TEXT_SCOPE_FROM_LAST_WINDOW'),
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'WINDOW_SCOPE_FROM_LAST_WINDOW'),
     'the reuse of a proved window must say why it happened');
   assert.ok(!JSON.stringify(flow).includes('NNNNN'));
 });
@@ -1731,4 +1731,109 @@ test('record --global --no-lifecycle writes no lifecycle file', { skip: process.
   assert.equal(run.code, 0, (run.stderr || '') + JSON.stringify(run.response));
   assert.equal(run.response.data.lifecycle, undefined);
   assert.equal(existsSync(join(run.dir, 'lifecycle.json')), false);
+});
+
+// The Finder session behind HAOC-148: right-click a file, choose 重命名 from the
+// context menu, type the new name and press Return.
+const FINDER_FOLDER = {
+  app: 'com.apple.finder', pid: 100, processInstance: 1_700_000_000_000,
+  windowNumber: 11, windowTitle: 'cuekeeper-demo',
+};
+
+test('a context-menu choice and the rename editor stay on the window that opened them', async () => {
+  const recording = new GlobalRecording(async () => {
+    throw new Error('every step carries its own element evidence');
+  }, { now: () => NOW });
+  const finderEvent = (kind, t, extra) => ({
+    kind, t, seen: NOW, focusGeneration: 1, secure: false, owner: FINDER_FOLDER, ...extra,
+  });
+  // The folder window is proved, then two clicks land in it: the view control,
+  // then the item the user picked from the context menu the right click opened.
+  await recording.add(parseCaptureEvent(finderEvent('click', 100, {
+    point: [700, 160], count: 1, button: 'right', decision: 'record',
+    owner: { ...FINDER_FOLDER, role: 'AXOutline', name: '列表视图', pressable: true },
+  })));
+  await recording.add(parseCaptureEvent(finderEvent('click', 900, {
+    point: [812, 214], count: 1, decision: 'record',
+    owner: { ...FINDER_FOLDER, role: 'AXMenuItem', name: '重命名', pressable: true },
+  })));
+  // Finder's inline rename editor is reported as an untitled window of its own.
+  // It is a surface of the folder window, never a scope a replay can navigate to.
+  const editor = {
+    app: 'com.apple.finder', pid: 100, processInstance: 1_700_000_000_000,
+    windowNumber: 12, windowTitle: '',
+  };
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 1000, seen: NOW, focusGeneration: 2, secure: false, owner: editor,
+  }));
+  const renameFocus = { role: 'AXTextField', editable: true, bounds: [620, 150, 180, 24] };
+  await recording.add(parseCaptureEvent({
+    kind: 'text', t: 1060, seen: NOW, focusGeneration: 2, secure: false,
+    owner: editor, focus: renameFocus, chars: 'Zq-renamed',
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'text', t: 1120, seen: NOW, focusGeneration: 2, secure: false,
+    owner: editor, focus: renameFocus, chars: 'Zq-2',
+  }));
+  // Return ends the rename; the folder window is focused again.
+  await recording.add(parseCaptureEvent({
+    kind: 'key', t: 1400, seen: NOW, focusGeneration: 3, secure: false,
+    owner: FINDER_FOLDER, key: 'return', modifiers: [],
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'click', 'type', 'key']);
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.equal(flow.steps.some(step => step.kind === 'focus_window'), false,
+    'an untitled surface must not add a navigation step');
+  // Every step stands in the folder window that was open the whole time.
+  assert.deepEqual([...new Set(flow.steps.map(step => step.scope?.windowKey))], ['finder-1']);
+  assert.deepEqual([...new Set(flow.steps.map(step => step.scope?.windowTitle))], ['cuekeeper-demo']);
+  // The menu press names the item, not the menu window it was drawn in.
+  assert.deepEqual(flow.steps[1].target, { kind: 'element', role: 'menuitem', name: '重命名' });
+  assert.equal(flow.steps[1].button, undefined);
+  assert.deepEqual(flow.steps[2].target, { kind: 'element', role: 'textfield' });
+  assert.equal(flowV2Check.Check(flow), true);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'WINDOW_SCOPE_FROM_LAST_WINDOW'));
+});
+
+test('a titleless event does not rename a window that was already proved', async () => {
+  const recording = new GlobalRecording(async () => {
+    throw new Error('no tree read');
+  }, { now: () => NOW });
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 100, seen: NOW, focusGeneration: 1, secure: false, owner: FINDER_FOLDER,
+  }));
+  // The menu surface carries no title of its own. The window it belongs to is
+  // already bound under its folder name, and the title must survive.
+  const { windowTitle: _title, ...titleless } = FINDER_FOLDER;
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 200, seen: NOW, focusGeneration: 1, secure: false, decision: 'record',
+    point: [812, 214], owner: { ...titleless, role: 'AXMenuItem', name: '重命名', pressable: true },
+  }));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
+  assert.deepEqual(flow.steps[0].scope, {
+    kind: 'window', app: 'com.apple.finder', windowKey: 'finder-1', windowTitle: 'cuekeeper-demo',
+  });
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'menuitem', name: '重命名' });
+});
+
+test('a window-less event never inherits a scope from another app', async () => {
+  const recording = new GlobalRecording(async () => {
+    throw new Error('no tree read');
+  }, { now: () => NOW });
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 100, seen: NOW, focusGeneration: 1, secure: false, decision: 'record',
+    point: [700, 160], owner: FINDER_FOLDER,
+  }));
+  // Another app that has proved no window of its own: the folder window the
+  // recording already knows must not be reached for.
+  await recording.add(parseCaptureEvent({
+    kind: 'key', t: 300, seen: NOW, focusGeneration: 2, secure: false,
+    owner: { app: 'com.apple.TextEdit', pid: 200, processInstance: 2 }, key: 'return', modifiers: [],
+  }));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'gap']);
+  assert.equal(flow.steps[1].code, 'CAPTURE_SCOPE_UNVERIFIED');
 });

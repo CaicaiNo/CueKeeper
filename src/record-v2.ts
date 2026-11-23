@@ -807,7 +807,7 @@ export class GlobalRecording {
   }
 
   private async onText(event: Extract<CaptureEvent, { kind: 'text' }>) {
-    const binding = this.bindingFor(event) ?? this.retainedWindow(event);
+    const binding = this.bindingFor(event);
     if (!binding) {
       this.pushGap('CAPTURE_SCOPE_UNVERIFIED');
       return;
@@ -1151,37 +1151,52 @@ export class GlobalRecording {
   private bindingFor(event: CaptureEvent): WindowBinding | undefined {
     const owner = event.owner;
     if (!owner?.app || !bundleIdPattern.test(owner.app)) return undefined;
-    if (!owner.pid || !owner.windowNumber) return undefined;
-    const id = `${owner.pid}:${owner.processInstance ?? 0}:${owner.windowNumber}`;
+    if (!owner.pid) return undefined;
     const title = displayTitle(owner.windowTitle);
-    const existing = this.bindings.get(id);
+    const existing = owner.windowNumber === undefined
+      ? undefined
+      : this.bindings.get(`${owner.pid}:${owner.processInstance ?? 0}:${owner.windowNumber}`);
     if (existing) {
-      // The same native window can retitle; the key keeps following it.
-      if (existing.title !== title) existing.title = title;
+      // The same native window can retitle; the key keeps following it. A
+      // surface that names no title says nothing about the window it proves.
+      if ((owner.windowTitle ?? '').trim() !== '' && existing.title !== title) existing.title = title;
       this.lastWindow = { binding: existing, generation: event.focusGeneration };
       return existing;
     }
+    // A surface that names no window (a sheet, a menu, a probe that read
+    // nothing) and an untitled one belong to the window the app is already
+    // using. Inventing a window key here records a navigation and a scope that
+    // no replay can find, which is worse than reusing the proved window.
+    if (owner.windowNumber === undefined || (owner.windowTitle ?? '').trim() === '') {
+      const inherited = this.inheritedWindow(event);
+      if (inherited) {
+        this.warn('WINDOW_SCOPE_FROM_LAST_WINDOW',
+          'An event named no window of its own; the window this app already proved was used instead');
+        return inherited;
+      }
+    }
+    if (owner.windowNumber === undefined) return undefined;
     if (this.bindings.size >= maxWindowBindings) return undefined;
     const binding: WindowBinding = {
       key: this.nextKey(owner.app), app: owner.app, title,
       pid: owner.pid, windowNumber: owner.windowNumber,
       ...(owner.processInstance === undefined ? {} : { processInstance: owner.processInstance }),
     };
-    this.bindings.set(id, binding);
+    this.bindings.set(`${owner.pid}:${owner.processInstance ?? 0}:${owner.windowNumber}`, binding);
     this.apps.add(owner.app);
     this.lastWindow = { binding, generation: event.focusGeneration };
     return binding;
   }
 
   /**
-   * The window a character event keeps when its own evidence lost the window
-   * number. The helper can fail one focus probe (Finder's inline rename field, a
-   * window mid-animation) without the app or its process changing; the window
-   * this recording already proved for that process is still the one receiving
-   * the characters. Another app, another process, or a generation that already
-   * named a different window never inherits it.
+   * The window an event keeps when its own evidence lost the window number or
+   * names an untitled surface. The helper can fail one focus probe (Finder's
+   * inline rename field, a sheet, a window mid-animation) without the app or its
+   * process changing; the window this recording already proved for that process
+   * is still the one receiving input. Another app, another process, or a
+   * generation that already named a different window never inherits it.
    */
-  private retainedWindow(event: CaptureEvent): WindowBinding | undefined {
+  private inheritedWindow(event: CaptureEvent): WindowBinding | undefined {
     const owner = event.owner;
     const last = this.lastWindow;
     if (!owner?.app || !owner.pid || !last) return undefined;
@@ -1193,8 +1208,6 @@ export class GlobalRecording {
     if (event.focusGeneration < last.generation) return undefined;
     const claimed = this.generationWindow.get(event.focusGeneration);
     if (claimed !== undefined && claimed !== this.bindingId(binding)) return undefined;
-    this.warn('TEXT_SCOPE_FROM_LAST_WINDOW',
-      'A text event lost its window number to a failed focus probe; the window this app already proved was used instead');
     return binding;
   }
 
