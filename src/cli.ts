@@ -761,7 +761,7 @@ async function main() {
       // Restore inside the finally: a normal stop, a local stop, a capture
       // failure and SIGINT all end here, and none of them may leave the user
       // on ABC. A restore problem is a warning, never a second failure.
-      const result = await (async () => {
+      const captureGlobal = async () => {
         try {
           await globalCountdown(countdownSeconds, signal);
           const options = {
@@ -773,7 +773,8 @@ async function main() {
         } finally {
           await ime.restore(true);
         }
-      })();
+      };
+      const result = await captureGlobal();
       const contents = JSON.stringify(result.flow, null, 2) + '\n';
       const saved = output ?? await writeRecording(directory!, recordingFileName(new Date()), contents);
       if (output) await writeNew(output, contents);
