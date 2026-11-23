@@ -5,7 +5,7 @@ import {
   shellDraft, shellSummary, dragSummary, undoCondition, visibleRows, locatorDetail, targetLabel,
   V2_COPYABLE_KINDS, V2_INSERT_KINDS, V2_TARGET_KINDS, assertCheck, checkLabel, diffSummary,
   filterStepsByScope, scopeKey, scopeOptions, statusMap, stepTemplate, stepTiming, v2StepLabel,
-  checkpointWaitFacts, pickCandidateLabel,
+  checkpointWaitFacts, pickCandidateLabel, durationLabel, sessionDurationLabel,
 } from './model.js';
 import { createAppPicker } from './picker.js';
 
@@ -54,7 +54,7 @@ function kindChip(action) {
     icon(KIND_ICONS[kind] ?? 'list', 14), el('span', {}, KIND_LABELS[kind] ?? kind));
 }
 
-const duration = ms => ms === undefined ? '—' : ms >= 1000 ? `${(ms / 1000).toFixed(2)} s` : `${ms} ms`;
+const duration = durationLabel;
 const timestamp = ms => ms === undefined ? '—' : `+${(ms / 1000).toFixed(2)} s`;
 /** The wait before a step, read from the two recorded step times. */
 const gapLabel = timing => timing?.sinceMs === undefined
@@ -241,7 +241,8 @@ function renderSummary() {
   const timing = { capture: '录制时间', replay: '回放时间', 'dry-run': '离线验证时间' }[session.timingSource];
   $('summary').replaceChildren(...[
     muted(short(session.directory.split('/').at(-1), 48)),
-    infoList([['时长', duration(session.durationMs)], ['动作', session.timeline.length],
+    infoList([['时长', sessionDurationLabel(session.durationMs, session.pausedMs)],
+      ['动作', session.timeline.length],
       ['应用', apps.size], [session.version === 2 ? '作用域' : '窗口',
         session.version === 2 ? groups.size : windows.size]], 'session-stats'),
     muted(timing ?? '未记录时间'),

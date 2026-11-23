@@ -398,6 +398,10 @@ async function loadV2Session(
       // step's time is how long the recording ran.
       : recordedTimes.length ? Math.max(...recordedTimes) : undefined;
   const apps = await describeApps([...appIds]);
+  // The times on screen are the recording's own unless a run report replaced
+  // them. Only then do the flow's wall-clock start and paused time describe the
+  // summary; a replay's summary is its own run.
+  const showsRecordedTimes = fromCapture || (report === undefined && recordedTimes.length > 0);
   return {
     directory, flow, images, snapshot: undefined,
     view: {
@@ -406,7 +410,8 @@ async function loadV2Session(
       timeline, scopeGroups: groups, candidates: [], durationMs,
       waitCandidates,
       timingSource: fromCapture ? 'capture' : report?.mode ?? (recordedTimes.length ? 'capture' : undefined),
-      startedAt: fromCapture ? undefined : report?.startedAt,
+      startedAt: showsRecordedTimes ? flow.startedAt : report?.startedAt,
+      pausedMs: showsRecordedTimes ? flow.pausedMs : undefined,
       hasSnapshot: false, snapshotAppPath: undefined, pathConflict: false,
       shell: { reachable: 0, definitions: 0, privileged: 0 },
       // The recording the editor loaded; a revision is written next to it.

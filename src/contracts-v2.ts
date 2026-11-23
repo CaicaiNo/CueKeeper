@@ -302,6 +302,17 @@ const intent = object({
 const appPath = T.String({ minLength: 1, maxLength: 4096, pattern: appPathPattern });
 export const flowV2Schema = object({
   version: T.Literal(2), id, name: label,
+  /**
+   * When the first retained step happened, as a wall clock. It is optional
+   * because an older recording has no absolute time to rebuild.
+   */
+  startedAt: T.Optional(timestamp),
+  /**
+   * How long the recording was paused. Step times are active time, so this is
+   * the paused span the timeline leaves out; absent means the recording never
+   * paused (or predates the field).
+   */
+  pausedMs: T.Optional(T.Integer({ minimum: 0, maximum: 86_400_000 })),
   appPaths: T.Optional(T.Record(bundleId, appPath, { additionalProperties: false, maxProperties: 32 })),
   inputs: T.Optional(T.Array(parameterName, { uniqueItems: true, maxItems: 64 })),
   intents: T.Optional(T.Array(intent, { maxItems: 100 })),

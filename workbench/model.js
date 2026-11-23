@@ -243,6 +243,21 @@ export function undoCondition(draft, id) {
 
 export const APP_ROW_LIMIT = 80;
 
+/** How a duration reads in the workbench; `undefined` means it was not timed. */
+export function durationLabel(ms) {
+  if (ms === undefined || ms === null) return '—';
+  return ms >= 1000 ? `${(ms / 1000).toFixed(2)} s` : `${ms} ms`;
+}
+
+/**
+ * The summary line for a recording's length: the net time it ran, with the
+ * paused span called out when the recording had one.
+ */
+export function sessionDurationLabel(durationMs, pausedMs) {
+  const net = durationLabel(durationMs);
+  return pausedMs > 0 ? `${net} · 含暂停 ${durationLabel(pausedMs)}` : net;
+}
+
 export function filterApps(catalog, query, limit = APP_ROW_LIMIT) {
   const value = query.trim().toLowerCase();
   return catalog.filter(app => !value ||

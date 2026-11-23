@@ -12,7 +12,7 @@ import {
 } from '../dist/flow-v2.js';
 import { loadSession } from '../dist/workbench-session.js';
 import { startWorkbench } from '../dist/workbench.js';
-import { scopeDescription } from '../workbench/model.js';
+import { scopeDescription, sessionDurationLabel } from '../workbench/model.js';
 
 const example = name => JSON.parse(readFileSync(new URL(`../examples/${name}.json`, import.meta.url), 'utf8'));
 const schema = name => JSON.parse(readFileSync(new URL(`../schemas/${name}.schema.json`, import.meta.url), 'utf8'));
@@ -441,6 +441,39 @@ test('a v2 file wait is a closed contract that only a wait may use', () => {
   const published = JSON.stringify(schema('flow-v2'));
   assert.match(published, /"file_stable"/);
   assert.match(published, /"file_exists"/);
+});
+
+test('the workbench shows a recording net of its pauses and keeps older flows valid', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'cuekeeper-paused-workbench-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const paused = join(root, 'paused');
+  mkdirSync(paused);
+  const flow = parseFlowV2(globalFlow());
+  flow.startedAt = '2026-11-22T10:00:00.000Z';
+  flow.pausedMs = 5000;
+  flow.steps.forEach((step, index) => { step.atMs = index * 620; });
+  writeFileSync(join(paused, 'flow.json'), JSON.stringify(flow));
+
+  const session = await loadSession(paused);
+  // The step times are the recording's own, so the summary can name when it
+  // started and how long it was paused.
+  assert.equal(session.view.timingSource, 'capture');
+  assert.equal(session.view.startedAt, '2026-11-22T10:00:00.000Z');
+  assert.equal(session.view.pausedMs, 5000);
+  // The duration is the net time; the paused span is called out beside it.
+  assert.equal(session.view.durationMs, flow.steps.at(-1).atMs);
+  assert.equal(sessionDurationLabel(session.view.durationMs, session.view.pausedMs), '4.34 s · 含暂停 5.00 s');
+
+  // A flow recorded before these fields existed still opens, with no pause claim.
+  const legacy = join(root, 'legacy');
+  mkdirSync(legacy);
+  const untimed = parseFlowV2(globalFlow());
+  writeFileSync(join(legacy, 'flow.json'), JSON.stringify(untimed));
+  const old = await loadSession(legacy);
+  assert.equal(old.view.startedAt, undefined);
+  assert.equal(old.view.pausedMs, undefined);
+  assert.equal(sessionDurationLabel(old.view.durationMs, old.view.pausedMs), '—');
 });
 
 test('the workbench loads a v2 timeline by scope and exposes the v2 editor contract', async t => {
