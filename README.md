@@ -139,6 +139,8 @@ node dist/cli.js workbench /path/to/run-directory
 
 v2 录制把每一步的时间写进 flow 自己的可选字段 `atMs`（相对第一步的毫秒数），因此目录里只有 flow 时，时间线的时间列与「距上一步」也按录制时间显示；没有 `atMs` 的旧 flow 照常打开，时间列与摘要显示「未记录时间」。回放报告里的 `atMs` 是执行时间，不是录制时间，两者不会混用。
 
+录制暂停不产生步骤，也不占步骤时间：`atMs` 是**活跃时间**，暂停期间的时长被扣除，所以暂停前后两步的间隔、时间线与摘要的时长都是净时长。flow 顶层另写两个可选字段还原墙钟：`startedAt`（第一个保留步骤的墙钟时间）与 `pausedMs`（整段录制暂停了多久，未暂停时省略）。摘要显示净时长，`pausedMs > 0` 时附「含暂停 X」。旧 flow 没有这两个字段照常打开。
+
 v2 会话可从 `lifecycle.json` 的下载、安装、卸载事件提出候选等待，在「前置条件」区逐个确认后写入 `flow.with-waits.json`，并保留原 `flow.json`。事件没有位置或时间证据时不提候选，空闲段不会被当作等待条件。`record --global` 默认在录制期间只读观察 `~/Downloads` 与 `~/Applications`、`/Applications`，把下载完成、安装、卸载写成 `lifecycle.json`（`--no-lifecycle` 关闭；目录可用 `CUEKEEPER_LIFECYCLE_DOWNLOAD_DIRS`、`CUEKEEPER_LIFECYCLE_APP_DIRS` 指定），每条事件带 `afterStepId`，因此无需手写。下载完成会提出等待文件本身（`file_stable`）的候选，不依赖下载界面元素。等待执行、安装/下载证据与错误码见 [条件等待](docs/waiting.md)。
 
 在时间线勾选动作并「合并为行为」。可将输入提取为 `string` 或 `secret` 参数。行为库保存在 `~/.cuekeeper/behaviors`，可用 `--library <directory>` 切换。引用在草稿中保留行为标识，复制会为草稿生成独立定义。也可直接加入动作、添加断言或修改定位器，然后在草稿中调整顺序。

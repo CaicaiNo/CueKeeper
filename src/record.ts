@@ -684,6 +684,9 @@ export async function record(
         }
         continue;
       }
+      // Version 1 flows carry no recorded times, so the helper's closing
+      // summary is read and dropped rather than treated as an unknown event.
+      if (data.kind === 'stopped') continue;
       if (data.kind === 'drag_start') {
         endBursts();
         dragSnapshot = undefined;

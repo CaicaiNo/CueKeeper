@@ -280,10 +280,16 @@ export class GlobalRecording {
   private inputCount = 0;
   /** The event being consumed; every step it produces is stamped with its time. */
   private eventAt = 0;
+  /** The wall clock of the event being consumed. */
+  private eventSeen = 0;
   /** The first retained step's event time; step times are relative to it. */
   private firstStepAt?: number;
+  /** The wall clock of the first retained step: the flow's `startedAt`. */
+  private firstStepWall?: number;
   /** The last step time written, so the timeline never reads backwards. */
   private lastStepAt = 0;
+  /** Paused time the helper reported when the session ended. */
+  private pausedMs = 0;
 
   constructor(private read: WindowReader, options: GlobalRecordingOptions = {}) {
     this.exclude = new Set(options.exclude ?? []);
@@ -341,6 +347,14 @@ export class GlobalRecording {
     if (!this.notes.has(code)) this.notes.set(code, message);
   }
 
+  /**
+   * Paused time the helper measured for this session. Step times already
+   * exclude it; recording it on the flow lets the workbench say so.
+   */
+  notePausedMs(ms: number) {
+    if (Number.isSafeInteger(ms) && ms >= 0) this.pausedMs = ms;
+  }
+
   /** Ends text and scroll merging, for pauses and helper boundaries. */
   endBursts() {
     this.textBurst = undefined;
@@ -354,6 +368,7 @@ export class GlobalRecording {
    */
   async add(event: CaptureEvent): Promise<void> {
     this.eventAt = event.t;
+    this.eventSeen = event.seen;
     if (event.kind === 'system_dialog') {
       if (event.visible === this.systemDialogVisible) return;
       this.systemDialogVisible = event.visible;
@@ -1401,6 +1416,9 @@ export class GlobalRecording {
    */
   private stepTime(at: number) {
     const first = this.firstStepAt ??= at;
+    // The step's own wall clock, so the flow can say when the recording began
+    // even though its step times are the recording's active clock.
+    this.firstStepWall ??= this.eventSeen - (this.eventAt - at);
     const atMs = Math.max(this.lastStepAt, Math.round(at - first));
     this.lastStepAt = atMs;
     return atMs;
@@ -1430,10 +1448,17 @@ export class GlobalRecording {
     if (!this.steps.length) throw new Fault('EMPTY_RECORDING', 'No supported actions were captured');
     if (this.truncated) this.warn('STEP_LIMIT', `The flow retains the first ${this.stepLimit} steps`);
     const id = randomUUID();
+    // The flow carries when the recording actually began and how long it was
+    // paused, so a net timeline can be read back as a wall-clock stretch. Both
+    // are optional: a flow recorded before these fields stays valid.
+    const startedAt = this.firstStepWall === undefined
+      ? undefined : new Date(this.firstStepWall).toISOString();
     const flow: FlowV2 = {
       version: 2,
       id: flowIdPattern.test(id) ? `global-${id.slice(0, 8)}` : 'global-recording',
       name: `${this.apps.size} 个 App / ${this.bindings.size} 个窗口的全局录制`,
+      ...(startedAt === undefined ? {} : { startedAt }),
+      ...(this.pausedMs > 0 ? { pausedMs: this.pausedMs } : {}),
       ...(this.inputs.size ? { inputs: [...this.inputs] } : {}),
       steps: this.steps,
     };
@@ -1478,6 +1503,18 @@ function indicatorConfirmed(value: unknown) {
   return [window, display, level].every(entry => typeof entry === 'number' && Number.isSafeInteger(entry) && entry > 0) &&
     Array.isArray(bounds) && bounds.length === 4 && bounds.every(Number.isFinite) &&
     (bounds[2] as number) > 0 && (bounds[3] as number) > 0;
+}
+
+/**
+ * Paused time from the helper's closing summary. A malformed number is a
+ * protocol error, not something to guess around: the flow's step times are
+ * already net of it.
+ */
+function sessionPausedMs(value: unknown) {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new Fault('CAPTURE_PROTOCOL', 'Capture helper reported an invalid paused time');
+  }
+  return value;
 }
 
 /**
@@ -1541,6 +1578,8 @@ export async function recordGlobal(
 
   let ready = false;
   let failure: Fault | undefined;
+  /** Paused time the helper reports when the session ends; zero if it never does. */
+  let pausedMs = 0;
   // Install lifecycle facts are observed while recording, not hand-written
   // afterwards. The watcher only lists directories and reads bundle IDs.
   const watcher = options.lifecycle === false ? undefined : new LifecycleWatcher(
@@ -1601,6 +1640,10 @@ export async function recordGlobal(
         continue;
       }
       if (!ready) throw new Fault('CAPTURE_PROTOCOL', 'Input arrived before the helper was ready');
+      if (data.kind === 'stopped') {
+        pausedMs = sessionPausedMs(data.pausedMs);
+        continue;
+      }
       if (data.kind === 'warning') {
         recording.warn(captureCode(data.code), `Some input may have been skipped: ${captureCode(data.code)}`);
         continue;
@@ -1637,6 +1680,7 @@ export async function recordGlobal(
   // A buffered text burst may still be waiting for its one fallback read; let it
   // land before the flow is built so its step is not lost.
   await recording.settlePending();
+  recording.notePausedMs(pausedMs);
   let flow: FlowV2;
   try {
     flow = recording.finish();

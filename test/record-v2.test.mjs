@@ -79,6 +79,41 @@ test('every recorded step carries the time it happened, counted from the first s
   assert.deepEqual(parseFlowV2(flow).steps.map(step => step.atMs), [0, 100, 300, 400, 600, 700, 900, 1000]);
 });
 
+test('a pause is not billed into the step times or the timeline', async () => {
+  const data = fixture('two-apps-three-windows');
+  // The helper stamps `t` with the recording clock, which freezes while paused,
+  // and `seen` with the wall clock, which keeps running. A five-second pause
+  // happened after the merged text burst and before the next focus.
+  const pauseMs = 5000;
+  const events = data.events.map(event => ({
+    ...event, ...(event.t > 260 ? { seen: event.seen + pauseMs } : {}),
+  }));
+  const recording = new GlobalRecording(readerFor(data), { now: () => NOW });
+  for (const event of events) await recording.add(parseCaptureEvent(event));
+  recording.notePausedMs(pauseMs);
+  const flow = recording.finish();
+
+  // The gap between the burst (100 ms) and the next step (300 ms) is 200 ms;
+  // the pause is not part of any interval.
+  assert.deepEqual(flow.steps.map(step => step.atMs), [0, 100, 300, 400, 600, 700, 900, 1000]);
+  assert.equal(flow.pausedMs, pauseMs);
+  // The flow also remembers where it started on the wall clock.
+  assert.equal(flow.startedAt, new Date(events[0].seen).toISOString());
+  assert.equal(flowV2Check.Check(flow), true);
+  const parsed = parseFlowV2(flow);
+  assert.equal(parsed.pausedMs, pauseMs);
+  assert.equal(parsed.startedAt, flow.startedAt);
+});
+
+test('a recording with no pause carries no paused time', async () => {
+  // The same fixture, unchanged: nothing paused, so the flow keeps its old
+  // shape and every step time is exactly what the helper stamped.
+  const flow = (await recordFixture('two-apps-three-windows')).finish();
+  assert.equal('pausedMs' in flow, false);
+  assert.equal(flow.startedAt, new Date(NOW).toISOString());
+  assert.deepEqual(flow.steps.map(step => step.atMs), [0, 100, 300, 400, 600, 700, 900, 1000]);
+});
+
 test('same-title windows stay distinct and a retitled window keeps its key', async () => {
   const flow = (await recordFixture('same-title-windows')).finish();
   const keys = flow.steps
@@ -1516,6 +1551,22 @@ test('record --global leaves an already-ASCII source alone', { skip: process.pla
   assert.deepEqual(run.imeCurrent, ABC_SOURCE);
   assert.deepEqual(run.response.data.inputSource, ABC_SOURCE);
   assert.equal(run.response.data.warnings, undefined);
+});
+
+test('record --global keeps the paused time the helper reports when it stops', {
+  skip: process.platform !== 'darwin',
+}, t => {
+  const data = fixture('two-apps-three-windows');
+  const run = globalCliFixture(t, {
+    events: [data.events[0], data.events[3], { kind: 'stopped', pausedMs: 5000 }],
+    snapshots: data.snapshots,
+  });
+  assert.equal(run.code, 0, (run.stderr || '') + JSON.stringify(run.response));
+  const flow = JSON.parse(run.written);
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'activate_app']);
+  // The closing summary is the only place the paused time comes from.
+  assert.equal(flow.pausedMs, 5000);
+  assert.match(flow.startedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
 });
 
 test('a helper that does not confirm global mode is refused', { skip: process.platform !== 'darwin' }, t => {

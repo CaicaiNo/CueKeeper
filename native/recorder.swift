@@ -260,9 +260,18 @@ final class Capture {
         Int(Date().timeIntervalSince1970 * 1000)
     }
 
+    /** Event time: the recording's active clock, with every pause removed. */
     private func elapsedMs() -> Int {
         guard let started else { return 0 }
-        return Int((ProcessInfo.processInfo.systemUptime - started) * 1000)
+        return RecordingClock.activeMs(now: ProcessInfo.processInfo.systemUptime, started: started,
+                                       pausedAt: pausedAt, totalPaused: totalPaused)
+    }
+
+    /** How long the user was paused, reported once the session ends. */
+    private func pausedTotalMs() -> Int {
+        guard let started else { return 0 }
+        return RecordingClock.pausedMs(now: ProcessInfo.processInfo.systemUptime, started: started,
+                                       pausedAt: pausedAt, totalPaused: totalPaused)
     }
 
     private func excluded(_ app: String?) -> Bool {
@@ -567,6 +576,9 @@ final class Capture {
             error["detail"] = detail
             emit(error)
         }
+        // The session summary closes the stream: the engine needs the paused time
+        // to tell the recording's net length from its wall-clock length.
+        if started != nil { emit(["kind": "stopped", "pausedMs": pausedTotalMs()]) }
         guard let application = NSApp else { return }
         application.stop(nil)
         // Wake only the helper's own AppKit event queue.
@@ -674,8 +686,9 @@ final class Capture {
     private func updateIndicator() {
         guard let started else { return }
         let now = ProcessInfo.processInfo.systemUptime
-        let activeTime = (pausedAt ?? now) - started - totalPaused
-        indicator?.update(elapsed: Int(max(0, activeTime)), paused: pausedAt != nil,
+        let activeMs = RecordingClock.activeMs(now: now, started: started,
+                                               pausedAt: pausedAt, totalPaused: totalPaused)
+        indicator?.update(elapsed: activeMs / 1000, paused: pausedAt != nil,
                           starting: pausedAt == nil && now - started < 3)
     }
 
@@ -852,7 +865,7 @@ final class Capture {
         default:
             break
         }
-        guard let started, !stopped, stopReleaseDeadline == nil else { return }
+        guard started != nil, !stopped, stopReleaseDeadline == nil else { return }
         // The session timer repairs a disabled tap while permission is still valid.
         guard type != .tapDisabledByTimeout && type != .tapDisabledByUserInput else { return }
         flushPauseBoundary()
@@ -901,7 +914,7 @@ final class Capture {
         }
         if repeating { warn("KEY_REPEAT"); return }
         guard registerEvent() else { return }
-        let t = Int((ProcessInfo.processInfo.systemUptime - started) * 1000)
+        let t = elapsedMs()
         let seen = Int(Date().timeIntervalSince1970 * 1000)
         guard type == .keyDown else { warn("UNSUPPORTED_EVENT"); return }
 
@@ -1112,7 +1125,13 @@ final class Capture {
         case .accepted:
             guard started != nil, let click, registerEvent() else { return }
             if click.truncated { warn("MULTI_CLICK_TRUNCATED") }
-            let captureTime = global ? click.elapsedMilliseconds(since: startedUptimeNs) : nil
+            // A pointer timestamp is wall uptime, so the paused time has to be
+            // removed here too: a click after a pause belongs on the same active
+            // clock as the keys and scrolls around it.
+            let captureTime = global
+                ? click.elapsedMilliseconds(since: startedUptimeNs)
+                    .map { max(0, $0 - Int((totalPaused * 1000).rounded())) }
+                : nil
             let evidence = global ? (pendingPointEvidence ?? unresolvedPointerEvidence()) : nil
             pendingPointEvidence = nil
             var emitted = click.payload(t: captureTime ?? elapsedMs(), seen: wallClockMs(), evidence: evidence)
@@ -1128,7 +1147,7 @@ final class Capture {
             guard started != nil else { return }
             emit(["kind": "drag_start"])
         case .dragAccepted:
-            guard let started, let drag, registerEvent() else { return }
+            guard started != nil, let drag, registerEvent() else { return }
             var emitted: [String: Any] = [
                 "kind": "drag",
                 "from": [Int(drag.from.location.x.rounded()), Int(drag.from.location.y.rounded())],
@@ -1137,7 +1156,7 @@ final class Capture {
                 "durationMs": drag.durationMs,
                 "modifiers": drag.modifiers,
                 "button": drag.button == 1 ? "right" : "left",
-                "t": Int((ProcessInfo.processInfo.systemUptime - started) * 1000),
+                "t": elapsedMs(),
                 "seen": Int(Date().timeIntervalSince1970 * 1000),
             ]
             if global {
@@ -1230,12 +1249,12 @@ final class Capture {
     }
 
     private func emitHover(_ dwellMs: Int, point: NSPoint) {
-        guard let started, registerEvent() else { return }
+        guard started != nil, registerEvent() else { return }
         var payload: [String: Any] = [
             "kind": "hover",
             "point": [Int(point.x.rounded()), Int(point.y.rounded())],
             "dwellMs": max(300, min(60_000, dwellMs)),
-            "t": Int((ProcessInfo.processInfo.systemUptime - started) * 1000),
+            "t": elapsedMs(),
             "seen": Int(Date().timeIntervalSince1970 * 1000),
         ]
         if global {
@@ -1250,7 +1269,7 @@ final class Capture {
     /// Wheel input is scoped to the selected window and recorded as line deltas,
     /// which replay posts back through the driver's wheel command.
     private func receiveScroll(_ event: CGEvent) {
-        guard let started, !stopped, stopReleaseDeadline == nil, pausedAt == nil else { return }
+        guard started != nil, !stopped, stopReleaseDeadline == nil, pausedAt == nil else { return }
         flushPauseBoundary()
         let destination = event.getIntegerValueField(.eventTargetUnixProcessID)
         guard destination != ownPID, event.getIntegerValueField(.eventSourceUnixProcessID) != ownPID else { return }
@@ -1284,7 +1303,7 @@ final class Capture {
             "deltaX": Int(deltaX.clamped(to: -scrollDeltaLimit...scrollDeltaLimit)),
             "deltaY": Int(deltaY.clamped(to: -scrollDeltaLimit...scrollDeltaLimit)),
             "phase": scrollPhase(event.getIntegerValueField(.scrollWheelEventScrollPhase)),
-            "t": Int((ProcessInfo.processInfo.systemUptime - started) * 1000),
+            "t": elapsedMs(),
             "seen": Int(Date().timeIntervalSince1970 * 1000),
         ]
         if global {

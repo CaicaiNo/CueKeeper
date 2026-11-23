@@ -17,6 +17,15 @@
       "maxLength": 256,
       "type": "string"
     },
+    "startedAt": {
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+      "type": "string"
+    },
+    "pausedMs": {
+      "minimum": 0,
+      "maximum": 86400000,
+      "type": "integer"
+    },
     "appPaths": {
       "additionalProperties": false,
       "maxProperties": 32,
