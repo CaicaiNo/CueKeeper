@@ -2,7 +2,7 @@ import { createDom } from './dom.js';
 import {
   KIND_LABELS, SURFACE_LABELS, actionKind, canUndo, changeTarget, compileDraft, confirmCondition, confirmedSetup,
   deleteCondition, id, makeBehavior, retargetCondition, sameTarget, scopeDescription, scrollLabel, setupDraft,
-  shellDraft, shellSummary, dragSummary, undoCondition, visibleRows, locatorDetail, targetLabel,
+  shellDraft, shellSummary, dragSummary, undoCondition, visibleRows, locatorDetail, targetLabel, roleLabel,
   V2_COPYABLE_KINDS, V2_INSERT_KINDS, V2_TARGET_KINDS, assertCheck, checkLabel, diffSummary,
   filterStepsByScope, scopeKey, scopeOptions, statusMap, stepTemplate, stepTiming, v2StepLabel,
   checkpointWaitFacts, pickCandidateLabel, durationLabel, sessionDurationLabel,
@@ -993,7 +993,7 @@ function v2TargetDialog(step) {
     : step.kind === 'hover' ? '编辑悬停目标' : '编辑点击目标';
   openDialog(withStepId(title, step), [
     ...picker.controls,
-    muted('v2 流程只保存元素定位器；坐标必须先解析成元素。'),
+    muted('v2 流程只保存元素定位器：纯坐标的点击不能回放，干跑会报 UNSAFE_POINT，用「从窗口拾取」换成具体控件后才能通过。'),
   ], '应用', () => v2Edit({ kind: 'update', id: step.id, patch: { target: picker.value() } }));
 }
 
@@ -1554,12 +1554,17 @@ function candidateLabel(candidate) {
   return `${candidate.interactive ? '可交互' : '容器'} · ${targetLabel(candidate.locator)} · ${frameLabel(candidate)}`;
 }
 
+/**
+ * The accessibility locator editor shared by the v1 and v2 target dialogs.
+ * Picking the control from the window is the reliable path; the fields below
+ * are macOS's description of that control, so each one says what it means.
+ */
 function locatorFields(original) {
   const initial = original?.kind === 'element' ? original : undefined;
-  const role = input({ required: true, maxLength: 256, value: initial?.role ?? '' });
-  const name = input({ maxLength: 256, value: initial?.name ?? '' });
+  const role = input({ required: true, maxLength: 256, value: initial?.role ?? '', placeholder: '例如 textfield' });
+  const name = input({ maxLength: 256, value: initial?.name ?? '', placeholder: '例如 保存' });
   const exactName = el('input', { type: 'checkbox', className: 'checkbox checkbox-sm', checked: initial?.name !== undefined });
-  const path = input({ value: initial?.path?.join(' / ') ?? '', placeholder: 'window / scrollarea / textfield' });
+  const path = input({ value: initial?.path?.join(' / ') ?? '', placeholder: '例如 window / toolbar / button' });
   const index = el('input', { type: 'number', className: 'input input-sm', min: '0', step: '1', value: initial?.index ?? '' });
   const candidates = state.session.candidates;
   const detail = el('p', { className: 'muted' });
@@ -1578,23 +1583,50 @@ function locatorFields(original) {
       index.value = target.index ?? '';
       detail.textContent = `${candidate.ref} · ${frameLabel(candidate)}`;
     });
+  const locator = () => {
+    const segments = path.value.split('/').map(part => part.trim()).filter(Boolean);
+    return {
+      kind: 'element', role: role.value.trim(),
+      ...(exactName.checked ? { name: name.value } : {}),
+      ...(segments.length ? { path: segments } : {}),
+      ...(index.value === '' ? {} : { index: Number(index.value) }),
+    };
+  };
+  // Read the values back in product words: what a replay would look for.
+  const preview = el('p', { className: 'muted' });
+  const refresh = () => {
+    const current = locator();
+    const type = roleLabel(current.role) || current.role;
+    preview.textContent = !current.role
+      ? '还没填控件类型（role），回放找不到这个控件。'
+      : `按这些值回放会找：${type}${typeof current.name === 'string' ? `「${current.name || '没有名称'}」` : ''}` +
+        `${current.index === undefined ? '' : ` · 同名里的第 ${current.index} 个`}`;
+  };
+  for (const node of [role, name, path, index]) node.oninput = refresh;
+  exactName.onchange = refresh;
+  refresh();
   return {
     controls: [
-      candidates.length ? field('从快照拾取控件', picker) : muted('此目录没有可拾取的控件快照。可手动填写 AX 定位器。'),
+      muted('这些值来自 macOS 辅助功能（Accessibility），用来在窗口里认出同一个控件，一般不用手改。'),
+      candidates.length
+        ? field('从快照拾取控件', picker)
+        : muted('要换控件，请关掉对话框，在时间线点「从窗口拾取」，直接选中真实控件；下面只用于手动修正。'),
       candidates.length ? detail : undefined,
-      field('角色', role), field('名称', name), el('label', { className: 'check-row' }, exactName, '匹配名称（可匹配空名称）'),
-      field('角色路径，可选', path), field('匹配索引，从 0 开始，可选', index),
+      field('控件类型（role）', role, '控件的类别：button 按钮、textfield 输入框、menuitem 菜单项……'),
+      field('控件名称（name）', name, '界面上显示的文字，例如按钮「保存」、输入框标签「地址栏」'),
+      el('label', { className: 'check-row' }, exactName, '要求名称完全一致（勾选且名称留空 = 只匹配没有名称的控件）'),
+      field('层级路径（path，可选）', path, '从窗口往下的中间层类型，用 / 分隔；同名控件分不开时才填'),
+      field('同名控件序号（index，可选）', index, '类型和名称都相同的控件有多个时取第几个，从 0 开始'),
+      preview,
     ],
     value() {
-      const roles = path.value.split('/').map(part => part.trim()).filter(Boolean);
-      if (!role.value.trim() || roles.length > 51 || roles.some(part => part.length > 256) ||
-          (index.value !== '' && !Number.isSafeInteger(Number(index.value)))) throw new Error('检查定位器角色、路径和索引。');
-      return {
-        kind: 'element', role: role.value.trim(),
-        ...(exactName.checked ? { name: name.value } : {}),
-        ...(roles.length ? { path: roles } : {}),
-        ...(index.value === '' ? {} : { index: Number(index.value) }),
-      };
+      const current = locator();
+      const segments = current.path ?? [];
+      if (!current.role || segments.length > 51 || segments.some(part => part.length > 256) ||
+          (index.value !== '' && !Number.isSafeInteger(Number(index.value)))) {
+        throw new Error('检查定位器角色、路径和索引。');
+      }
+      return current;
     },
   };
 }

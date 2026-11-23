@@ -79,7 +79,8 @@ export function createDom(document) {
   const empty = text => el('p', { className: 'empty' }, text);
   const muted = text => el('p', { className: 'muted' }, text);
   const input = (options = {}) => el('input', { type: 'text', className: 'input input-sm', ...options });
-  const field = (label, control) => el('label', { className: 'field' }, label, control);
+  const field = (label, control, hint) => el('label', { className: 'field' }, label, control,
+    hint ? el('span', { className: 'muted' }, hint) : undefined);
   const select = (items, onchange) => el('select', { className: 'select select-sm', onchange },
     ...items.map(([value, label]) => el('option', { value }, label)));
 
