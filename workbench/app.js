@@ -201,7 +201,14 @@ async function api(route, data = {}) {
     body: JSON.stringify(data),
   });
   const result = await response.json();
-  if (!response.ok) throw new Error(result.error);
+  if (!response.ok) {
+    // The server answers a stable code plus the words that explain it. Show the
+    // words so a refusal is actionable instead of a bare code; keep the code on
+    // the error for callers that branch on it.
+    const error = new Error(result.message ?? result.error ?? '工作台请求失败');
+    if (result.error) error.code = result.error;
+    throw error;
+  }
   return result;
 }
 
@@ -988,12 +995,16 @@ function v2ScopeDialog(step) {
 }
 
 function v2TargetDialog(step) {
-  const picker = locatorFields(step.target ?? step.to);
+  const recorded = step.target ?? step.to;
+  const picker = locatorFields(recorded?.kind === 'element' ? recorded : undefined);
   const title = step.kind === 'scroll' ? '编辑滚动目标'
     : step.kind === 'hover' ? '编辑悬停目标' : '编辑点击目标';
   openDialog(withStepId(title, step), [
+    recorded?.kind === 'point'
+      ? muted(`这一步录的是屏幕坐标 (${recorded.point.join(', ')})：录制时那个位置没有可单独定位的控件（画布、空白或自绘区域）。` +
+        '直接实时回放就行，它会在该坐标上点；只有干跑会拦下它，因为坐标没法证明还是同一个控件。')
+      : muted('这一步用的是元素定位器：换成具体控件后干跑才能通过，实时回放对窗口内的坐标步骤照常执行。'),
     ...picker.controls,
-    muted('v2 流程只保存元素定位器：纯坐标的点击不能回放，干跑会报 UNSAFE_POINT，用「从窗口拾取」换成具体控件后才能通过。'),
   ], '应用', () => v2Edit({ kind: 'update', id: step.id, patch: { target: picker.value() } }));
 }
 

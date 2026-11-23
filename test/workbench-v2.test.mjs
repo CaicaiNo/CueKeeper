@@ -423,6 +423,10 @@ test('a point target is marked on the timeline and refused by the workbench dry 
   const refused = await post('run', { session: session.id, mode: 'dry-run' }, 400);
   assert.equal(refused.error, 'UNSAFE_POINT');
   assert.deepEqual(refused.detail.stepIds, ['click-1']);
+  // The refusal names the steps and says a live replay still handles the point,
+  // so the page never shows a bare code.
+  assert.match(refused.message, /click-1/);
+  assert.match(refused.message, /live replay still clicks it inside its window/);
 
   // Turning it into the element the recording already named unblocks the run.
   await edit(post, session, {

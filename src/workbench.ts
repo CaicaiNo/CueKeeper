@@ -623,7 +623,7 @@ export async function startWorkbench(options: {
             return send(response, 400, {
               error: 'UNSAFE_POINT',
               message: `Turn ${points.map(step => step.id).join(', ')} into element targets first; ` +
-                'a recorded screen point cannot pass a dry run',
+                'a recorded screen point cannot pass a dry run (a live replay still clicks it inside its window)',
               detail: { stepIds: points.map(step => step.id) },
             });
           }
