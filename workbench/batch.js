@@ -75,7 +75,7 @@ function span(ms) {
  * row per workflow with its latest result. It renders from `/api/batch/state`
  * so a reload keeps watching the run the server owns.
  */
-export function createBatchView({ api, status, dialog, setMode, appLabel = app => app }) {
+export function createBatchView({ api, status, dialog, setMode, openFlow, appLabel = app => app }) {
   const $ = id => document.getElementById(id);
   const state = { active: false, snapshot: null, timer: null, key: '', selected: null, picks: new Map(), busy: false };
 
@@ -284,8 +284,8 @@ export function createBatchView({ api, status, dialog, setMode, appLabel = app =
         ? `${categoryLabel(failure)} · ${failure.stepId ?? failure.code ?? '—'}`
         : (last?.status === 'passed' ? '—' : '')),
       el('span', { className: 'cell-report' },
-        button('详情', () => { state.selected = item.path; render(); }, {
-          style: 'small', disabled: !last?.reportPath, title: '打开这一轮的报告',
+        button('编辑', () => void openFlow(item.path), {
+          style: 'small', title: '在步骤编辑器里打开这个工作流',
         }))));
   }
 

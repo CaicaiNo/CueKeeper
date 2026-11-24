@@ -223,6 +223,25 @@ test('the summary is rewritten after every run, so a crash keeps finished rows',
   assert.equal(final.counts.completed, done.counts.completed);
 });
 
+test('a queued workflow opens in the editor without resetting the queue', async t => {
+  const { root, directory } = await fixture(t);
+  const { stub } = await stubCli(t, root);
+  const { post } = await server(t, { root, stub, directory });
+  const listed = await post('batch/state', {});
+  const item = listed.body.items.find(entry => entry.name === '登录并下单');
+
+  const opened = await post('batch/open', { path: item.path });
+  assert.equal(opened.status, 200);
+  assert.equal(opened.body.name, '登录并下单');
+  assert.match(opened.body.directory, /run$/);
+
+  const after = await post('batch/state', {});
+  assert.equal(after.body.items.length, 2, 'the queue is still there after editing one workflow');
+
+  const outside = await post('batch/open', { path: join(directory, 'flow.json') });
+  assert.equal(outside.status, 400);
+});
+
 test('an interactive root step is refused before the batch starts', async t => {
   const { root, directory } = await fixture(t);
   const { stub } = await stubCli(t, root);

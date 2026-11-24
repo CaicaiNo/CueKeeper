@@ -29,7 +29,7 @@ import {
 import { keepConfirmedSetup } from './setup.js';
 import { parseLibraryItem, parseTestItem, resolveSecrets } from './test-item.js';
 import { workbenchAssets } from './workbench-assets.js';
-import { BatchError, BatchRunner } from './workbench-batch.js';
+import { BatchError, BatchRunner, listBatchCandidates } from './workbench-batch.js';
 import { createRecordController } from './workbench-record.js';
 import type { RecordStatus } from './workbench-record.js';
 import { loadSession, sameTarget } from './workbench-session.js';
@@ -531,6 +531,23 @@ export async function startWorkbench(options: {
     }
     if (path === '/api/batch/state') {
       return send(response, 200, await batch.snapshot());
+    }
+    if (path === '/api/batch/open') {
+      // Opening a queued workflow is the edit entry from the batch list, not a
+      // new import: the queue and its results stay in place.
+      if (running) throw new Error('A test is running');
+      const directory = session?.directory;
+      if (!directory) throw new Error('Import a run directory first');
+      if (typeof data.path !== 'string') throw new Error('Choose a workflow');
+      const target = resolve(data.path);
+      const candidates = await listBatchCandidates(directory);
+      const found = candidates.find(candidate => candidate.path === target);
+      if (!found) throw new Error('That workflow is not in this queue');
+      const loaded = await loadSession(directory, { flowFile: found.file });
+      const nextEditable = await openEditor(loaded, join(directory, found.file));
+      session = loaded;
+      editable = nextEditable;
+      return send(response, 200, sessionView(loaded));
     }
     if (path === '/api/batch/start') {
       // A single replay owns the desktop too; a batch must wait for it.

@@ -364,6 +364,7 @@ export class BatchRunner {
   private stopRequested = false;
   private wake: (() => void) | undefined;
   private sequence = 0;
+  private finishing = false;
   private work: { begin: () => void; end: () => void };
   private host = {
     platform: process.platform,
@@ -481,6 +482,7 @@ export class BatchRunner {
       ...(stopAt ? { stopAt } : {}),
     };
     this.sequence = 0;
+    this.finishing = false;
     this.state = {
       running: true,
       allowLive: true,
@@ -620,7 +622,6 @@ export class BatchRunner {
   }
 
   private async finish(reason: 'operator' | 'time' | 'complete' | 'failure') {
-    this.state.running = false;
     this.state.finishedAt = Date.now();
     this.state.durationMs = this.state.startedAt === undefined ? undefined : this.state.finishedAt - this.state.startedAt;
     this.state.stopReason = reason;
@@ -628,8 +629,13 @@ export class BatchRunner {
     this.state.firstFailure = firstFailureOf(this.state);
     this.state.failureCounts = failureCountsOf(this.state);
     this.state.status = rootStatus(this.state);
-    this.work.end();
+    // Keep the batch "running" until the final summary is on disk: a page that
+    // sees running=false must be able to read the finished report immediately.
+    this.finishing = true;
     await this.writeSummary();
+    this.state.running = false;
+    this.finishing = false;
+    this.work.end();
   }
 
   /**
@@ -644,7 +650,7 @@ export class BatchRunner {
       format: 'cuekeeper-workbench-batch',
       version: 2,
       id: basename(batchDirectory.replace(/[\\/]$/, '')),
-      status: this.state.running ? 'running' : this.state.status,
+      status: this.state.running && !this.finishing ? 'running' : this.state.status,
       stopReason: this.state.stopReason,
       startedAt: this.state.startedAt,
       finishedAt: this.state.finishedAt,
@@ -792,7 +798,7 @@ function failureCountsOf(state: BatchSnapshot): Partial<Record<FailureCategory, 
 }
 
 function rootStatus(state: BatchSnapshot): BatchSnapshot['status'] {
-  if (state.running) return 'running';
+  if (state.running && state.finishedAt === undefined) return 'running';
   if (state.stopReason === 'operator' || state.stopReason === 'time') return 'stopped';
   if (state.counts.failed > 0 || state.counts.error > 0) return 'failed';
   if (state.counts.blocked > 0) return 'blocked';

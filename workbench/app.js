@@ -22,7 +22,20 @@ const state = {
 
 const dom = createDom(document);
 const { el, icon, button, empty, muted, input, field, select } = dom;
-const batchView = createBatchView({ api, status, dialog: openDialog, setMode, appLabel: app => state.appNames[app] });
+const batchView = createBatchView({
+  api, status, dialog: openDialog, setMode,
+  appLabel: app => state.appNames[app],
+  openFlow: async path => {
+    try {
+      const view = await api('batch/open', { path });
+      setSession(view);
+      setMode('edit');
+      status('已打开工作流，可在草稿区继续编辑', 'success');
+    } catch (error) {
+      status(error.message, 'error');
+    }
+  },
+});
 
 const KIND_ICONS = {
   click: 'pointer', doubleClick: 'pointerDouble', tripleClick: 'pointerDouble', rightClick: 'pointerRight',
