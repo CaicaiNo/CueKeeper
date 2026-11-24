@@ -283,7 +283,6 @@ export class GlobalRecording {
   private cacheOrder: string[] = [];
   private snapshotReads = 0;
   private truncated = false;
-  private inputCount = 0;
   /** The event being consumed; every step it produces is stamped with its time. */
   private eventAt = 0;
   /** The wall clock of the event being consumed. */
@@ -586,7 +585,16 @@ export class GlobalRecording {
           }
         }
       } else {
-        target = this.nativeTarget(event);
+        // The helper could not read the tree for this click. When it also saw
+        // no element role, one read here can still name the element and record
+        // the path/index that tells two same-named controls apart.
+        if (!nativeLabel(event.owner?.role)) {
+          const captured = await this.snapshot(binding, { gapOnFailure: false });
+          const hit = captured ? this.hit(captured.snapshot, event.point) : undefined;
+          target = hit && hit.node.ref ? toLocator(captured!.snapshot, hit) : this.nativeTarget(event);
+        } else {
+          target = this.nativeTarget(event);
+        }
       }
     }
     if (button === 'left' && target.kind === 'element' && editableRole(target.role)) {
@@ -868,9 +876,26 @@ export class GlobalRecording {
     await this.bufferText(binding, key, scope, scopeId, event);
   }
 
+  /**
+   * A readable parameter name for the characters just typed. A rename keys the
+   * value as `filename`, so the replay dialog asks for a file name; any other
+   * text is `text_1`, `text_2`, ... The value itself is never stored.
+   */
+  private nextInputName() {
+    const last = this.steps[this.steps.length - 1];
+    const renaming = (last?.kind === 'key' && last.key === 'r' &&
+        (last.modifiers ?? []).includes('meta')) ||
+      (last?.kind === 'click' && last.target?.kind === 'element' &&
+        last.target.role === 'menuitem' && /重命名|rename/i.test(last.target.name ?? ''));
+    const base = renaming ? 'filename' : 'text';
+    let name = renaming ? base : `${base}_1`;
+    let suffix = 2;
+    while (this.inputs.has(name)) name = `${base}_${suffix++}`;
+    return name;
+  }
+
   /** Records one text event against a proven control, merging a running burst. */
-  private bindText(
-    scope: WindowScope, scopeId: string, at: number, target: ElementLocator, snapshot?: Snapshot,
+  private bindText(    scope: WindowScope, scopeId: string, at: number, target: ElementLocator, snapshot?: Snapshot,
   ) {
     const locatorId = locatorKey(target);
     const burst = this.textBurst;
@@ -883,7 +908,7 @@ export class GlobalRecording {
       return;
     }
     this.endBursts();
-    const input = `input_${++this.inputCount}`;
+    const input = this.nextInputName();
     this.inputs.add(input);
     this.push({ kind: 'type', scope, target, input }, at);
     if (!this.steps.length || this.steps[this.steps.length - 1].kind !== 'type') return;

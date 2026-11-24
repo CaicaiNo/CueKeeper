@@ -2,7 +2,8 @@ import { execFile } from 'node:child_process';
 import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { Fault, contains, object, parseSnapshot } from './locator.js';
+import { promisify } from 'node:util';
+import { Fault, contains, object, parseSnapshot, parseSurface } from './locator.js';
 import type { Node, Point, Snapshot } from './locator.js';
 import type { Delivery, Ensure, Target } from './contracts.js';
 import { createDesktopWorkdir } from './workdir.js';
@@ -96,6 +97,14 @@ export interface Desktop {
   listApps(timeoutMs?: number): Promise<RunningApp[]>;
   /** Window-only calls; no bundle ID is resolved by the driver. */
   snapshotWindow(windowId: string, title?: string, timeoutMs?: number): Promise<Snapshot>;
+  /** Menu/menubar surfaces, which have no window of their own. */
+  snapshotSurface(surface: 'menu' | 'menubar', timeoutMs?: number): Promise<Snapshot>;
+  /** A physical click at a screen point, with no window binding of its own. */
+  clickScreen(point: Point, options?: { button?: 'left' | 'right' }): Promise<Delivery | undefined>;
+  /** Type into the keyboard focus, for controls that AX does not expose. */
+  typeFocused(text: string, app?: string, options?: { selectAll?: boolean }): Promise<void>;
+  /** Semantic AX press with no physical delivery, for transient menus. */
+  clickSemantic(ref: string): Promise<Delivery | undefined>;
   focusWindow(windowId: string, timeoutMs?: number): Promise<void>;
   screenshotWindow(windowId: string, timeoutMs?: number): Promise<Uint8Array>;
   /** Capture the whole window as PNG bytes without touching the window. */
@@ -284,6 +293,9 @@ export async function withDesktop<T>(
     }
 
     const act = async (command: string, args: string[], input?: string, headed = options.headed, timeout = 15_000) => {
+      if (process.env.CUEKEEPER_TRACE_DESKTOP) {
+        process.stderr.write(`[desktop] ${command} ${headed ? '--headed ' : ''}${args.join(' ')}\n`);
+      }
       const result = delivery(object(await call(command, [...(headed ? ['--headed'] : []), ...args],
         input, timeout + (input?.length ?? 0) * 30)));
       if (result === 'not_delivered') throw new DesktopFault('NOT_DELIVERED', command, result);
@@ -417,6 +429,47 @@ export async function withDesktop<T>(
             `${error.message} (${describeWindow({ ...observed, id: observed.id || windowId }, title)})`,
             error.dependency);
         }
+      },
+      clickSemantic(ref) {
+        // A context menu is transient: physical delivery races the menu, while
+        // the semantic AX press lands inside it.
+        return act('click', [ref], undefined, false);
+      },
+      async typeFocused(text, app, { selectAll = false } = {}) {
+        // Finder's rename editor is not in the accessibility tree, so the
+        // driver cannot address it. System Events types into whatever holds
+        // keyboard focus, which is the editor the menu item just opened — but
+        // only when the app is frontmost: a replay runs from a terminal that
+        // would otherwise receive the keystrokes.
+        if (app) {
+          await promisify(execFile)('/usr/bin/osascript', [
+            '-e', `tell application id "${app}" to activate`,
+            '-e', 'delay 0.2',
+          ]).catch(() => undefined);
+        }
+        // Cmd+A must be a real key event. The driver's `press meta+a` resolves
+        // the app's Select All menu item and would select files, not the text.
+        if (selectAll) {
+          await promisify(execFile)('/usr/bin/osascript', [
+            '-e', 'tell application "System Events" to keystroke "a" using command down',
+            '-e', 'delay 0.1',
+          ]);
+        }
+        const escaped = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+        await promisify(execFile)('/usr/bin/osascript', [
+          '-e', `tell application "System Events" to keystroke "${escaped}"`,
+        ]);
+      },
+      clickScreen(point, { button = 'left' } = {}) {
+        return act('mouse-click', [
+          '--xy', point.join(','), ...(button === 'right' ? ['--button', 'right'] : []),
+        ]);
+      },
+      async snapshotSurface(surface, timeoutMs = 3000) {
+        const data = await call('snapshot', [
+          '--surface', surface, '--include-bounds', '--max-depth', '20', '--timeout-ms', String(timeoutMs),
+        ], undefined, timeoutMs + 3000);
+        return parseSurface(data);
       },
       async focusWindow(windowId, timeoutMs = 5000) {
         const result = object(await call('focus-window', ['--window-id', windowId], undefined, timeoutMs));
@@ -587,6 +640,10 @@ export function offlineDesktop(data: unknown, expected: Target): Desktop {
     async listApps() {
       throw new Fault('WINDOW_MISMATCH', 'Offline fixtures do not include an application inventory');
     },
+    async snapshotSurface() { throw new Fault('WINDOW_MISMATCH', 'Offline fixtures do not include menus'); },
+    async clickScreen() { throw new Fault('WINDOW_MISMATCH', 'Offline fixtures cannot click screen points'); },
+    async typeFocused() { throw new Fault('WINDOW_MISMATCH', 'Offline fixtures cannot type into the desktop'); },
+    async clickSemantic() { throw new Fault('WINDOW_MISMATCH', 'Offline fixtures cannot click menus'); },
     async snapshotWindow(windowId, title) {
       if (windowId !== snap.windowId) {
         throw new Fault('WINDOW_CHANGED', 'Offline fixture does not cover the requested window');

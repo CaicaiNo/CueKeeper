@@ -18,6 +18,7 @@ const state = {
   running: false, setup: null, appPaths: {}, catalog: null, catalogAt: 0, catalogError: null, appNames: {},
   v2: null, v2Report: null, v2Selected: null, v2Filter: '', v2Busy: false,
   v2Running: false, v2Checkpoint: null, mode: 'edit',
+  templateMode: null, templateCandidates: [],
 };
 
 const dom = createDom(document);
@@ -236,6 +237,7 @@ function setSession(session) {
     appNames: Object.fromEntries(Object.entries(session?.apps ?? {}).map(([id, app]) => [id, app.name])),
     v2: session?.v2 ?? null, v2Report: null, v2Selected: null, v2Filter: '', v2Busy: false,
     v2Running: false, v2Checkpoint: null,
+    templateMode: null, templateCandidates: [],
   });
   $('show-ignored').checked = false;
   $('test-name').value = session ? `${session.name.slice(0, 248)} 测试` : '';
@@ -704,6 +706,14 @@ async function v2Call(route, payload = {}) {
       // A new edit invalidates the last run's per-step marks.
       state.v2Report = null;
     }
+    const editedFlow = result?.v2?.flow ?? result?.flow;
+    if (editedFlow && state.templateMode) {
+      // Keep variable marks pointing at steps that still exist; a deleted step
+      // must not turn into a save-time error the page cannot explain.
+      const ids = new Set(editedFlow.steps.map(step => step.id));
+      state.templateMode.selections = state.templateMode.selections
+        .filter(selection => ids.has(selection.stepId));
+    }
     return result;
   } catch (error) {
     status(error.message, 'error');
@@ -723,7 +733,7 @@ async function v2Save() {
     state.v2 = result.v2;
     renderV2();
     renderTimeline();
-    status(`已保存 revision · ${result.output}`, 'success');
+    status(`已保存工作流 · ${result.output}`, 'success');
   } catch (error) {
     status(error.message, 'error');
   }
@@ -777,6 +787,251 @@ function v2Copy(step) {
   const copy = { ...structuredClone(step), id: id(step.kind) };
   void v2Edit({ kind: 'insert', index: index + 1, step: copy }).catch(() => {});
 }
+
+// --- Templates -----------------------------------------------------------------
+// A template is the current workflow with some string values replaced by
+// `{{name}}` placeholders. Marking happens on the timeline; applying a template
+// writes a new workflow and switches the session, so the template stays a
+// reusable source instead of being edited in place.
+
+const templateFieldLabels = {
+  'target.name': '点击目标', 'from.name': '拖拽起点', 'to.name': '拖拽终点',
+  'check.target.name': '检查目标', 'scope.windowTitle': '窗口标题',
+  'scope.fileName': '文件名', text: '输入文本', expect: '期望值',
+};
+
+function templateSelectionsFor(stepId) {
+  return state.templateMode?.selections.filter(selection => selection.stepId === stepId) ?? [];
+}
+
+async function v2StartTemplate() {
+  if (!state.v2) {
+    status('先打开一条版本 2 工作流，再创建模板。', 'error');
+    return;
+  }
+  try {
+    const result = await api('templates/candidates', { session: state.session.id });
+    const candidates = result.candidates ?? [];
+    if (!candidates.length) {
+      status('这条工作流没有可变成变量的文本值。', 'error');
+      return;
+    }
+    state.templateCandidates = candidates;
+    state.templateMode = { selections: [] };
+    state.v2Selected = null;
+    renderV2();
+    status('模板标记：点步骤前的图标，选要变成变量的值。标好后点「保存模板」。');
+  } catch (error) {
+    status(error.message, 'error');
+  }
+}
+
+function v2CancelTemplate() {
+  state.templateMode = null;
+  state.templateCandidates = [];
+  renderV2();
+  status('已退出模板标记，工作流没有改变。');
+}
+
+function v2TemplateStepDialog(step) {
+  const candidates = state.templateCandidates.filter(candidate => candidate.stepId === step.id);
+  if (!candidates.length) {
+    status('这一步没有可变成变量的文本值。', 'error');
+    return;
+  }
+  const marked = templateSelectionsFor(step.id);
+  const rows = candidates.map(candidate => {
+    const existing = marked.find(selection => selection.field === candidate.field);
+    const checked = el('input', {
+      type: 'checkbox', className: 'checkbox checkbox-sm', checked: Boolean(existing),
+    });
+    const name = input({ value: existing?.parameter ?? candidate.suggested, maxLength: 64 });
+    name.disabled = !existing;
+    checked.onchange = () => { name.disabled = !checked.checked; };
+    return {
+      candidate, checked, name,
+      node: el('div', { className: 'template-field' },
+        el('label', { className: 'check-row' },
+          checked,
+          el('span', {}, `${templateFieldLabels[candidate.field] ?? candidate.field} · `),
+          el('span', { className: 'muted' }, short(candidate.value, 90))),
+        field('变量名', name, '在模板里写作 {{变量名}}；留空会使用建议名')),
+    };
+  });
+  openDialog(withStepId('标记模板变量', step), [
+    muted('勾选要变成变量的值。同一个变量名可以出现在多个步骤里，但它们的值必须一致。'),
+    ...rows.map(row => row.node),
+  ], '应用标记', () => {
+    const parameterPattern = /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/;
+    const rest = state.templateMode.selections.filter(selection => selection.stepId !== step.id);
+    const added = rows.filter(row => row.checked.checked).map(row => {
+      const parameter = row.name.value.trim();
+      if (!parameterPattern.test(parameter)) {
+        throw new Error('变量名以字母开头，只含字母、数字与下划线。');
+      }
+      return {
+        stepId: step.id, field: row.candidate.field, parameter,
+        label: templateFieldLabels[row.candidate.field] ?? row.candidate.field,
+      };
+    });
+    state.templateMode.selections = [...rest, ...added];
+    renderV2();
+    status(added.length
+      ? `已标记「${v2StepLabel(step, appLabel)}」的 ${added.length} 处变量。`
+      : `已取消「${v2StepLabel(step, appLabel)}」的变量标记。`, 'success');
+  });
+}
+
+function v2SaveTemplate() {
+  const mode = state.templateMode;
+  if (!mode) return;
+  if (!mode.selections.length) {
+    status('至少标记一处变量再保存模板。', 'error');
+    return;
+  }
+  const name = input({ required: true, maxLength: 256, placeholder: '例如 登录后台并导出报表' });
+  const description = el('textarea', { className: 'textarea', rows: 3, maxLength: 2000 });
+  const names = [...new Set(mode.selections.map(selection => selection.parameter))];
+  openDialog('保存模板', [
+    field('模板名称', name),
+    field('说明（可选）', description),
+    muted(`已标记 ${mode.selections.length} 处变量：${names.join('、')}`),
+    muted('模板只保存变量占位符和默认值；当前工作流与原始录制都不会改变。'),
+  ], '保存模板', async () => {
+    const saved = await api('templates/create', {
+      session: state.session.id,
+      name: name.value.trim(),
+      description: description.value.trim(),
+      selections: mode.selections,
+    });
+    state.templateMode = null;
+    state.templateCandidates = [];
+    renderV2();
+    status(`已保存模板「${saved.template.name}」· ${saved.path}`, 'success');
+  });
+}
+
+function downloadTemplate(template) {
+  const blob = new Blob([`${JSON.stringify(template, null, 2)}\n`], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = el('a', { href: url, download: `${template.id}.template.json` });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  // Revoke after the download starts; an immediate revoke can cancel it.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  status(`已导出模板「${template.name}」`, 'success');
+}
+
+function applyTemplateDialog(template) {
+  const values = template.parameters.map(parameter => ({
+    parameter,
+    control: input({
+      value: parameter.defaultValue ?? '', maxLength: 4000,
+      required: parameter.defaultValue === undefined,
+    }),
+  }));
+  const name = input({ value: template.name, maxLength: 256 });
+  openDialog(`应用模板 · ${template.name}`, [
+    ...values.map(({ parameter, control }) =>
+      field(`${parameter.label}（${parameter.name}）`, control)),
+    field('新工作流名称', name),
+    state.v2?.dirty
+      ? muted('当前工作流有未保存修改；应用模板会切换到新会话，请先保存要保留的修改。')
+      : undefined,
+    muted('应用会写入一条新的 v2 工作流并切换当前会话；模板文件与原始录制都不会改变。'),
+  ], '应用', async () => {
+    const map = {};
+    for (const { parameter, control } of values) {
+      const value = control.value;
+      if (!value.trim()) throw new Error(`填写「${parameter.label}」。`);
+      map[parameter.name] = value;
+    }
+    const applied = await api('templates/apply', {
+      templateId: template.id, values: map,
+      name: name.value.trim() || template.name, discardEdits: true,
+    });
+    setSession(applied.session);
+    status(`已应用模板「${template.name}」· 新工作流 ${applied.output}`, 'success');
+  });
+}
+
+function deleteTemplateDialog(template) {
+  openDialog('删除模板', [
+    muted(`确认删除模板「${template.name}」？`),
+    muted(`文件 ${template.id}.template.json 会从模板目录移除；已经应用生成的工作流不受影响。`),
+  ], '删除', async () => {
+    await api('templates/delete', { templateId: template.id });
+    status(`已删除模板「${template.name}」`, 'success');
+    // Re-open the list after this dialog closes; the caller owns that close.
+    setTimeout(() => void templateDialog(), 0);
+  });
+}
+
+async function templateDialog() {
+  let result;
+  try {
+    result = await api('templates/list', { session: state.session?.id });
+  } catch (error) {
+    status(error.message, 'error');
+    return;
+  }
+  const templates = result.templates ?? [];
+  const file = el('input', { type: 'file', accept: '.json,application/json', hidden: true });
+  file.onchange = async () => {
+    const chosen = file.files?.[0];
+    if (!chosen) return;
+    try {
+      const parsed = JSON.parse(await chosen.text());
+      const imported = await api('templates/import', { template: parsed });
+      status(imported.renamed
+        ? `模板 id 已存在，导入为「${imported.template.name}」· ${imported.template.id}`
+        : `已导入模板「${imported.template.name}」· ${imported.path}`, 'success');
+      dialog.close();
+      await templateDialog();
+    } catch (error) {
+      status(`导入失败：${error.message}`, 'error');
+      file.value = '';
+    }
+  };
+  const rows = templates.map(template => el('div', { className: 'template-row' },
+    el('div', { className: 'template-copy' },
+      el('strong', {}, template.name),
+      template.description ? el('small', { className: 'muted' }, template.description) : undefined,
+      el('span', { className: 'muted' },
+        `${template.parameters.length} 个变量 · ${template.parameters.map(parameter => parameter.name).join('、')}` +
+        (template.createdAt ? ` · ${template.createdAt.slice(0, 10)}` : ''))),
+    el('div', { className: 'template-actions' },
+      button('应用', () => {
+        dialog.close();
+        applyTemplateDialog(template);
+      }, { style: 'small primary', icon: 'play' }),
+      button('导出', () => downloadTemplate(template), { style: 'small', icon: 'download' }),
+      button('删除', () => {
+        dialog.close();
+        deleteTemplateDialog(template);
+      }, { style: 'small danger', icon: 'trash', iconOnly: true, title: '删除模板' }))));
+  openDialog('本地模板', [
+    muted(`模板存放在 ${result.directory}。应用模板会生成新的工作流，不会修改模板本身。`),
+    templates.length
+      ? el('div', { className: 'template-list stack-list' }, ...rows)
+      : empty('还没有模板。打开一条 v2 工作流后，在时间线里点「创建模板」。'),
+    el('div', { className: 'actions' },
+      button('从当前工作流创建', () => {
+        if (!state.v2) {
+          status('先打开一条版本 2 工作流。', 'error');
+          return;
+        }
+        dialog.close();
+        void v2StartTemplate();
+      }, { style: 'small primary', icon: 'braces', disabled: !state.v2 }),
+      button('导入模板', () => file.click(), { style: 'small', icon: 'upload' })),
+    file,
+  ], undefined, undefined, { wide: true });
+}
+
+$('template-button').addEventListener('click', () => void templateDialog());
+
 
 function renderV2() {
   // The batch view owns the page; the v2 editor belongs to the edit mode only.
@@ -839,6 +1094,9 @@ function renderV2() {
   const rows = visible.map(step => {
     const index = steps.findIndex(entry => entry.id === step.id);
     const entry = statuses.get(step.id);
+    const marked = templateSelectionsFor(step.id);
+    const candidateCount = state.templateCandidates
+      .filter(candidate => candidate.stepId === step.id).length;
     return el('article', {
       className: `v2-row${selected === step.id ? ' selected' : ''}`,
       draggable: !busy,
@@ -854,6 +1112,17 @@ function renderV2() {
       },
       onclick: () => { state.v2Selected = step.id; renderV2(); },
     },
+    state.templateMode
+      ? candidateCount
+        ? el('button', {
+          type: 'button', className: `v2-mark${marked.length ? ' marked' : ''}`,
+          title: marked.length ? '已标记变量 · 点击修改' : '标记模板变量',
+          'aria-label': marked.length ? `已标记 ${marked.length} 处变量，点击修改` : '标记模板变量',
+          onclick: event => { event.stopPropagation(); v2TemplateStepDialog(step); },
+        }, icon('braces', 14),
+        marked.length ? el('span', { className: 'count' }, String(marked.length)) : undefined)
+        : el('span', { className: 'v2-mark empty', title: '这一步没有可标记的文本值' })
+      : undefined,
     el('span', { className: 'v2-index' },
       el('span', { className: 'v2-ordinal' }, String(index + 1)),
       el('span', { className: 'step-id', title: `步骤 ${step.id}` }, step.id)),
@@ -871,33 +1140,55 @@ function renderV2() {
   const validation = editor.validation ?? { ok: true, errors: [] };
   v2Section.replaceChildren(
     el('div', { className: 'v2-header' },
-      el('h2', { className: 'card-title' }, el('span', { className: 'sec' }, '03'), ' v2 时间线编辑'),
+      el('h2', { className: 'card-title' }, el('span', { className: 'sec' }, '03'), ' 时间线'),
       stateChip(dirty ? 'inferred' : 'confirmed',
-        dirty ? '未保存修改' : diff.changed ? '已保存 revision' : '与录制一致'),
+        dirty ? '未保存修改' : diff.changed ? '已保存工作流' : '与录制一致'),
       state.v2Running
         ? stateChip(state.v2Checkpoint ? 'inferred' : 'confirmed',
           state.v2Checkpoint ? '等待人工授权' : '回放中')
+        : undefined,
+      state.templateMode
+        ? stateChip('inferred',
+          `模板标记 · ${state.templateMode.selections.length} 处变量`)
         : undefined,
       el('span', { className: 'trailing' }),
       filter,
       button('撤销', () => void v2Undo(), { style: 'small', icon: 'undo', disabled: busy || !editor.canUndo }),
       button('重做', () => void v2Redo(), { style: 'small', icon: 'refresh', disabled: busy || !editor.canRedo }),
       button('插入步骤', () => v2InsertDialog(), { style: 'small', icon: 'plus', disabled: busy }),
-      button('保存 revision', () => void v2Save(), {
+      button('保存工作流', () => void v2Save(), {
         style: 'small', icon: 'save', disabled: busy || !dirty,
       }),
+      state.templateMode
+        ? button('保存模板', () => v2SaveTemplate(), {
+          style: 'small primary', icon: 'braces',
+          disabled: busy || !state.templateMode.selections.length,
+          title: '把已标记的值保存为可复用模板',
+        })
+        : button('创建模板', () => void v2StartTemplate(), {
+          style: 'small', icon: 'braces', disabled: busy, title: '把这条工作流里的值变成模板变量',
+        }),
+      state.templateMode
+        ? button('取消标记', () => v2CancelTemplate(), { style: 'small', icon: 'x', disabled: busy })
+        : undefined,
       button('dry-run', () => void v2DryRun(), { style: 'small', icon: 'checkCircle', disabled: busy }),
-      button(state.v2Running ? '停止回放' : '实时回放', () => state.v2Running ? void v2StopRun() : v2LiveDialog(), {
-        style: 'small primary', icon: state.v2Running ? 'x' : 'play',
+      button(state.v2Running ? '回放中' : '实时回放', () => state.v2Running ? void v2StopRun() : v2LiveDialog(), {
+        style: 'small primary', icon: 'play', loading: state.v2Running,
+        title: state.v2Running ? '点击停止回放' : undefined,
         disabled: !state.v2Running && (busy || !state.allowLive),
       })),
     checkpointPanel() ?? '',
-    rows.length ? el('div', { className: 'v2-rows' }, ...rows) : empty('当前作用域筛选下没有步骤。'),
+    rows.length
+      ? el('div', { className: `v2-rows${state.templateMode ? ' marking' : ''}` }, ...rows)
+      : empty('当前作用域筛选下没有步骤。'),
     el('div', { className: 'v2-footer' },
       muted(diff.changed ? `与录制相比：${diff.lines.join('；')}` : '与录制一致，尚未修改。'),
-      saved ? muted(`最近保存：${saved.path}`) : muted('保存会在录制旁写一个新的 revision 文件，原始录制不变。'),
+      saved ? muted(`最近保存的工作流：${saved.path}`) : muted('保存会在录制旁写一份工作流副本，原始录制保持不变。'),
       validation.ok ? undefined : el('ul', { className: 'v2-errors' }, ...validation.errors.map(error =>
         el('li', {}, `${error.stepId ? `${error.stepId} · ` : ''}${error.code} · ${error.message}`))),
+      state.templateMode
+        ? muted('模板标记模式：每行左侧的 {} 图标用来选中要变成变量的值；保存模板只生成副本，当前工作流不变。')
+        : undefined,
       muted('拖拽行可排序；点击行后「插入步骤」接在其后。未保存的修改在离开页面前会提示。')));
 }
 
@@ -920,11 +1211,14 @@ function v2LiveDialog() {
   // recording itself when nothing was edited.
   const live = state.v2?.live;
   const confirmed = el('input', { type: 'checkbox', className: 'checkbox checkbox-sm' });
-  const values = new Map((flow.inputs ?? []).map(name => [name, input({ maxLength: 4000, spellcheck: false, autocomplete: 'off' })]));
+  const values = new Map((flow.inputs ?? []).map(name => [name, input({
+    maxLength: 4000, spellcheck: false, autocomplete: 'off',
+    placeholder: '填写本次回放使用的值',
+  })]));
   const checkpoints = flow.steps.filter(step => step.kind === 'manual_checkpoint');
   openDialog('实时回放 v2 流程', [
     muted(!live
-      ? '当前有未保存的修改，请先保存 revision。'
+      ? '当前有未保存的修改，请先保存工作流。'
       : live.revision
         ? `将回放已保存的 revision：${live.path}`
         : `将直接回放导入的录制文件：${live.path}`),
@@ -941,7 +1235,10 @@ function v2LiveDialog() {
   ], '开始回放', () => {
     if (!confirmed.checked) throw new Error('确认后才会开始实时回放。');
     if (!state.v2?.live) throw new Error('当前有未保存的修改，请先保存 revision。');
-    const inputs = Object.fromEntries([...values.entries()].map(([name, node]) => [name, node.value]));
+    const filled = [...values.entries()].map(([name, node]) => [name, node.value.trim()]);
+    const missing = filled.filter(([, value]) => !value).map(([name]) => name);
+    if (missing.length) throw new Error(`请先填写运行参数：${missing.join('、')}`);
+    const inputs = Object.fromEntries(filled);
     // The replay may pause at a checkpoint; close the dialog and keep the page
     // live so the waiting panel can be answered.
     dialog.close();
@@ -950,23 +1247,41 @@ function v2LiveDialog() {
 }
 
 function showV2Result(report) {
-  openDialog('v2 回放结果', [
-    el('h3', { className: `badge badge-soft badge-sm badge-${STATUS_TONES[report.status] ?? 'ghost'}` },
-      resultStatus[report.status] ?? report.status),
+  const counts = report.entries.reduce((memo, entry) => {
+    memo[entry.status] = (memo[entry.status] ?? 0) + 1;
+    return memo;
+  }, {});
+  const rows = report.entries.map(entry => {
+    const step = v2Step(entry.id);
+    return el('tr', {},
+      el('td', { className: 'mono' }, entry.id),
+      el('td', {}, step ? v2StepLabel(step, appLabel) : KIND_LABELS[entry.kind] ?? entry.kind),
+      el('td', {}, el('span', { className: statusBadge(entry.status) }, resultStatus[entry.status] ?? entry.status)),
+      el('td', { className: 'mono' }, `${entry.durationMs} ms`),
+      el('td', { className: 'report-detail' },
+        entry.code ? `${entry.code}${entry.message ? ` · ${entry.message}` : ''}` : ''));
+  });
+  const exportReport = () => {
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = el('a', { href: url, download: `report-${report.flowId}-${Date.now()}.json` });
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  openDialog('回放报告', [
+    el('p', { className: 'report-summary' },
+      `共 ${report.entries.length} 步 · 通过 ${counts.passed ?? 0} · 失败 ${counts.failed ?? 0}` +
+      ` · 跳过 ${counts.skipped ?? 0}${report.stopped ? ' · 已停止' : ''}`),
+    el('div', { className: 'report-table' },
+      el('table', { className: 'table table-sm' },
+        el('thead', {}, el('tr', {},
+          el('th', {}, '步骤'), el('th', {}, '动作'), el('th', {}, '结果'),
+          el('th', {}, '耗时'), el('th', {}, '详情'))),
+        el('tbody', {}, ...rows))),
     ...(report.appIdentities ?? []).map(identity => muted(
       `${identity.app} · ${identity.status}${identity.code ? ` · ${identity.code}` : ''}` +
       (identity.reason ? ` · ${identity.reason}` : ''))),
-    el('ol', { className: 'stack-list report-list' }, ...report.entries.map(entry => {
-      const step = v2Step(entry.id);
-      return el('li', { className: 'report-row' },
-        el('button', {
-          type: 'button', className: 'btn btn-ghost btn-xs',
-          onclick: () => { state.v2Selected = entry.id; dialog.close(); renderV2(); },
-        }, `${entry.id} · ${step ? v2StepLabel(step, appLabel) : KIND_LABELS[entry.kind] ?? entry.kind}`),
-        el('span', { className: statusBadge(entry.status) }, resultStatus[entry.status] ?? entry.status),
-        entry.code ? muted(`${entry.code}${entry.message ? ` · ${entry.message}` : ''}`) : undefined);
-    })),
-  ]);
+  ], '导出报告', exportReport);
 }
 
 /** Every v2 detail panel names the flow step it edits, so the id matches the row. */
@@ -1405,6 +1720,16 @@ async function v2StartLive(inputs) {
   const timer = setInterval(async () => {
     try {
       const info = await api('run/status', { session: state.session.id });
+      // Steps arrive one at a time; paint them onto the timeline as they land
+      // so the replay reads like the editor selecting each row in turn.
+      if (Array.isArray(info.entries) && info.entries.length) {
+        state.v2Report = { ...(state.v2Report ?? { version: 2 }), entries: info.entries };
+        renderV2();
+        renderTimeline();
+        const last = info.entries[info.entries.length - 1];
+        const row = typeof last?.id === 'string' ? document.getElementById(`select-${last.id}`) : null;
+        row?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }
       const next = info.running ? info.checkpoint ?? null : null;
       if (JSON.stringify(next) === JSON.stringify(state.v2Checkpoint)) return;
       state.v2Checkpoint = next;
@@ -1493,23 +1818,32 @@ function setMode(mode) {
 
 function render() {
   const focus = document.activeElement?.id;
+  // Selecting a row re-renders every pane; keep the scroll position of the two
+  // long lists so a click near the bottom does not jump back to the top.
+  const timeline = $('timeline');
+  const timelineTop = timeline?.scrollTop ?? 0;
+  const v2Rows = document.querySelector('.v2-rows');
+  const v2Top = v2Rows?.scrollTop ?? 0;
   renderSummary();
   renderSetup();
   renderTimeline();
   renderInspector();
   renderDraft();
   renderV2();
+  if (timeline) timeline.scrollTop = timelineTop;
+  const nextV2 = document.querySelector('.v2-rows');
+  if (nextV2) nextV2.scrollTop = v2Top;
   if (focus && !dialog.open) $(focus)?.focus({ preventScroll: true });
 }
 
-function openDialog(title, content, submitLabel, submit) {
+function openDialog(title, content, submitLabel, submit, options = {}) {
   let busy = false;
   const error = el('p', { className: 'form-error alert alert-soft alert-error', role: 'alert' });
   const dismiss = button('关闭', () => dialog.close(), { icon: 'x', iconOnly: true, title: '关闭' });
   const confirm = submit && el('button', { className: 'btn btn-primary', type: 'submit' },
     icon('check'), el('span', {}, submitLabel));
   const form = el('form', {
-    className: 'modal-box stack-list',
+    className: `modal-box stack-list${options.wide ? ' modal-wide' : ''}`,
     onsubmit: async event => {
       event.preventDefault();
       if (!submit || busy) return;
@@ -1538,10 +1872,10 @@ function openDialog(title, content, submitLabel, submit) {
 }
 
 function importDialog() {
-  const directory = input({ required: true, placeholder: '/…/sandbox/运行目录' });
-  openDialog('导入运行目录', [
-    field('本地目录路径', directory),
-    muted('读取 flow.json 或 recorded.flow.json。report.json、actions.json 与 snapshot.json 存在时一并导入。'),
+  const directory = input({ required: true, placeholder: '/…/recording-xxx.flow.json 或 /…/运行目录' });
+  openDialog('导入工作流', [
+    field('工作流文件或运行目录', directory),
+    muted('可以直接填一个 .flow.json 文件，也可以填包含 flow.json 的运行目录。同目录的 report.json、actions.json 与 snapshot.json 存在时一并导入。'),
     state.draft.length ? muted('成功导入后将切换会话。请先保存要保留的草稿。') : undefined,
   ], '导入', async () => {
     const imported = await api('import', { directory: directory.value.trim() });

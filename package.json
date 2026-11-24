@@ -5,8 +5,12 @@
   "description": "Deterministic desktop test recording and replay",
   "type": "module",
   "license": "Apache-2.0",
-  "bin": { "cuekeeper": "dist/cli.js" },
-  "engines": { "node": ">=22" },
+  "bin": {
+    "cuekeeper": "dist/cli.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
   "packageManager": "pnpm@10.28.2",
   "scripts": {
     "build": "tsc && node scripts/schemas.mjs --check",
@@ -17,7 +21,8 @@
     "test:clock": "sh scripts/test-recording-clock.sh",
     "test:focus": "sh scripts/test-recording-focus.sh",
     "build:recorder": "sh scripts/build-recorder.sh",
-    "package": "node scripts/package.mjs"
+    "package": "node scripts/package.mjs",
+    "quickstart": "sh scripts/quickstart.sh"
   },
   "dependencies": {
     "@sinclair/typebox": "0.34.41",

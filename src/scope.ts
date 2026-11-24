@@ -5,7 +5,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { AppIdentitySession, parseWindowId } from './app-identity.js';
 import type { WindowScope } from './contracts-v2.js';
 import type { Desktop, WindowInfo } from './desktop.js';
-import { Fault } from './locator.js';
+import { Fault, flatten } from './locator.js';
 import type { Snapshot } from './locator.js';
 
 // A v2 step names a scope, not a window title: the resolver binds a window key
@@ -28,6 +28,8 @@ export interface WindowBinding {
   observedTitle: string;
   /** Incremented each time this run brings the window to the front. */
   focusGeneration: number;
+  /** The recorded title no longer matched; the app's only window was used. */
+  rebound?: boolean;
 }
 
 export interface AppBinding {
@@ -129,10 +131,34 @@ export class ScopeResolver {
     if (matches.length > 1) {
       throw new Fault('AMBIGUOUS_TARGET', `More than one window titled "${scope.windowTitle}" belongs to ${scope.app}`);
     }
-    if (!matches.length) {
-      throw new Fault('WINDOW_NOT_FOUND', `No window titled "${scope.windowTitle}" belongs to ${scope.app}`);
+    let chosen = matches[0];
+    let rebound = false;
+    if (!chosen && scope.app === 'com.apple.finder') {
+      // Finder's sidebar view ("最近使用") is a window title the replay can
+      // reopen: the recorded click on that view only exists because the view
+      // was already open. Pressing the sidebar item is preparation, not a
+      // recorded step, so it is best-effort and never fails the run by itself.
+      await this.openFinderSidebar(scope.windowTitle);
+      const refreshed = await identity.ownedWindows(this.desktop);
+      const retry = refreshed.filter(window => window.title === scope.windowTitle);
+      if (retry.length === 1) {
+        chosen = retry[0];
+        rebound = true;
+      }
     }
-    const windowNumber = parseWindowId(matches[0].id);
+    if (!chosen) {
+      // Finder and editors retitle their window as the user navigates
+      // ("最近使用" → a folder name, "untitled" → a file name). When the app
+      // has exactly one window, that window is the recorded one; refusing it
+      // would block a replay whose target is still there.
+      if (owned.length === 1) {
+        chosen = owned[0];
+        rebound = true;
+      } else {
+        throw new Fault('WINDOW_NOT_FOUND', `No window titled "${scope.windowTitle}" belongs to ${scope.app}`);
+      }
+    }
+    const windowNumber = parseWindowId(chosen.id);
     if (windowNumber === undefined) {
       throw new Fault('WINDOW_CHANGED', 'The driver reported a window ID that is not a native window number');
     }
@@ -142,28 +168,64 @@ export class ScopeResolver {
       pid: app.pid,
       processInstance: app.processInstance,
       windowNumber,
-      windowId: matches[0].id,
+      windowId: chosen.id,
       title: scope.windowTitle,
-      observedTitle: titleOf(matches[0]),
+      observedTitle: titleOf(chosen),
       focusGeneration: 0,
+      ...(rebound ? { rebound: true } : {}),
     };
     this.windows.set(scope.windowKey, binding);
     return binding;
   }
 
   /** Re-proves the bound window still exists inside the same process. */
+  /** Press Finder's sidebar item for a view the flow expects to be open. */
+  private async openFinderSidebar(title: string) {
+    try {
+      const windows = await this.desktop.listWindows('com.apple.finder');
+      const window = windows[0];
+      if (!window) return;
+      const snapshot = await this.desktop.snapshotWindow(window.id, undefined, 3000);
+      const item = flatten(snapshot.tree).find(({ node }) =>
+        /^(treeitem|row|cell)$/.test(node.role) && node.ref &&
+        (node.name === title || node.value === title));
+      if (item?.node.ref) await this.desktop.click(item.node.ref);
+    } catch {
+      // Best-effort preparation; the caller reports a missing window.
+    }
+  }
+
   private async refresh(binding: WindowBinding): Promise<WindowBinding> {
     const identity = this.identityFor(binding.app);
     // The inventory already proves the instance and every window's owner, so a
     // single read decides whether the bound window is still open.
     const owned = await identity.ownedWindows(this.desktop);
     const found = owned.find(window => window.id === binding.windowId);
-    if (!found) {
+    if (found) {
+      binding.pid = identity.pid ?? binding.pid;
+      binding.processInstance = identity.processInstance ?? binding.processInstance;
+      binding.observedTitle = titleOf(found);
+      return binding;
+    }
+    // The recorded window was closed or recreated (Finder reopens a window when
+    // the folder is reopened). Rebind the same app's window when the recorded
+    // title matches, or when that app has exactly one window, and mark the
+    // binding so the report can say a rebind happened.
+    const byTitle = owned.filter(window => titleOf(window) === binding.title);
+    const chosen = byTitle.length === 1 ? byTitle[0] : owned.length === 1 ? owned[0] : undefined;
+    if (!chosen) {
       throw new Fault('WINDOW_CHANGED', 'The bound window is no longer open; the run does not rebind to another window');
+    }
+    const windowNumber = parseWindowId(chosen.id);
+    if (windowNumber === undefined) {
+      throw new Fault('WINDOW_CHANGED', 'The driver reported a window ID that is not a native window number');
     }
     binding.pid = identity.pid ?? binding.pid;
     binding.processInstance = identity.processInstance ?? binding.processInstance;
-    binding.observedTitle = titleOf(found);
+    binding.windowId = chosen.id;
+    binding.windowNumber = windowNumber;
+    binding.observedTitle = titleOf(chosen);
+    binding.rebound = true;
     return binding;
   }
 

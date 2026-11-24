@@ -7,7 +7,7 @@ import { AppIdentitySession } from '../dist/app-identity.js';
 import { reportV2Check } from '../dist/contracts-v2.js';
 import { DesktopFault } from '../dist/desktop.js';
 import { parseFlowV2 } from '../dist/flow-v2.js';
-import { Fault, parseSnapshot } from '../dist/locator.js';
+import { Fault, parseSnapshot, parseSurface } from '../dist/locator.js';
 import { runFlowV2 } from '../dist/run-v2.js';
 import { RunLease } from '../dist/scope.js';
 
@@ -84,6 +84,7 @@ function fakeWorld(options = {}) {
     calls: [],
     hooks: options.hooks ?? {},
     delivery: options.delivery ?? (() => 'delivered_verified'),
+    menu: options.menu,
   };
   const byId = id => state.windows.find(window => window.id === id);
   const instanceOf = pid => [...state.apps.values()].flat().find(instance => instance.pid === pid);
@@ -149,6 +150,24 @@ function fakeWorld(options = {}) {
       state.calls.push(['type', ref, text]);
       state.hooks.beforeType?.(state);
       return delivered('type');
+    },
+    async typeFocused(text, app, options) {
+      state.calls.push(['typeFocused', text, app, options]);
+      return delivered('type');
+    },
+    async clickSemantic(ref) {
+      state.calls.push(['clickSemantic', ref]);
+      return delivered('click');
+    },
+    async snapshotSurface(surface) {
+      state.calls.push(['snapshotSurface', surface]);
+      if (!state.menu) throw new Fault('NO_SURFACE', 'no menu is open');
+      return parseSurface(state.menu);
+    },
+    async clickScreen(point, clickOptions = {}) {
+      if (!options.headed) throw new Fault('HEADED_REQUIRED', 'Physical coordinate input requires --headed');
+      state.calls.push(['clickScreen', point, clickOptions.button ?? 'left']);
+      return delivered('click');
     },
     async press(combo, snapshot) {
       state.calls.push(['press', combo, snapshot.windowId]);
@@ -1164,4 +1183,125 @@ test('a deferred app is verified only after its window is bound', async t => {
   assert.equal(report.status, 'passed', JSON.stringify(report.entries, null, 2));
   assert.deepEqual(report.appIdentities, [{ app: target, mode: 'bundle_path', status: 'verified' }]);
   assert.deepEqual(callsOf(world.world, 'click'), [['click', '@w51:e9']]);
+});
+
+// --- Finder-style rename -------------------------------------------------------
+
+/** A Finder list view: the file name is a textfield value inside the first cell. */
+function renameWindow() {
+  return {
+    id: 'w-1', app: textedit, pid: 601, title: 'cuekeeper-demo',
+    data: {
+      complete: true,
+      window: { id: 'w-1', title: 'cuekeeper-demo' },
+      tree: {
+        role: 'window', name: 'cuekeeper-demo', ref_id: '@w1:e1',
+        bounds: { x: 100, y: 100, width: 800, height: 600 },
+        children: [{
+          role: 'outline', name: '列表视图', ref_id: '@w1:e2',
+          bounds: { x: 110, y: 150, width: 700, height: 400 },
+          children: [{
+            role: 'treeitem', ref_id: '@w1:e3',
+            bounds: { x: 110, y: 160, width: 700, height: 20 },
+            available_actions: ['Click'],
+            children: [
+              {
+                role: 'cell', ref_id: '@w1:e4', bounds: { x: 130, y: 160, width: 300, height: 20 },
+                children: [
+                  { role: 'image', ref_id: '@w1:e5', bounds: { x: 130, y: 162, width: 16, height: 16 } },
+                  {
+                    role: 'textfield', ref_id: '@w1:e6', value: 'manifest.json',
+                    bounds: { x: 150, y: 160, width: 120, height: 20 },
+                    available_actions: ['Click', 'SetValue'],
+                  },
+                ],
+              },
+              {
+                role: 'cell', name: '今天 10:00', ref_id: '@w1:e7',
+                bounds: { x: 500, y: 160, width: 120, height: 20 },
+                children: [{
+                  role: 'statictext', name: '今天 10:00', ref_id: '@w1:e8',
+                  bounds: { x: 500, y: 160, width: 100, height: 20 },
+                }],
+              },
+            ],
+          }],
+        }, {
+          role: 'textfield', name: 'notes', ref_id: '@w1:e9',
+          bounds: { x: 200, y: 500, width: 300, height: 24 },
+          available_actions: ['Click', 'SetValue'], states: ['focused'],
+        }],
+      },
+    },
+  };
+}
+
+const renameScope = {
+  kind: 'window', app: textedit, windowKey: 'demo', windowTitle: 'cuekeeper-demo',
+};
+
+test('a recorded rename replays through the menu and focuses the inline editor', async t => {
+  const menu = {
+    complete: true,
+    tree: {
+      role: 'menu', name: '列表视图',
+      children: [{
+        role: 'menuitem', name: '重新命名', ref_id: '@menu:e1',
+        bounds: { x: 300, y: 300, width: 120, height: 22 },
+        available_actions: ['Click'],
+      }],
+    },
+  };
+  const world = harness(t, {
+    headed: true,
+    windows: [renameWindow()],
+    focused: 'w-1',
+    menu,
+    apps: {
+      [textedit]: [{ pid: 601, startedAt: '601.1', bundleId: textedit, bundlePath: appPaths[textedit] }],
+    },
+  });
+  const flow = parseFlowV2({
+    version: 2, id: 'rename-replay', name: 'Rename replay',
+    steps: [
+      {
+        id: 'click-file', kind: 'click', scope: renameScope,
+        // Finder reports AXRow to the helper but treeitem in the snapshot.
+        target: { kind: 'element', role: 'row', name: 'manifest.json' },
+      },
+      {
+        id: 'open-menu', kind: 'click', scope: renameScope,
+        target: { kind: 'element', role: 'outline', name: '列表视图' }, button: 'right',
+      },
+      {
+        id: 'rename', kind: 'click', scope: renameScope,
+        target: { kind: 'element', role: 'menuitem', name: '重新命名' },
+      },
+      {
+        id: 'type-name', kind: 'type', scope: renameScope,
+        target: { kind: 'element', role: 'textfield' }, text: 'manifest-e2e.json',
+      },
+      { id: 'commit', kind: 'key', scope: renameScope, key: 'return' },
+      {
+        id: 'type-normal', kind: 'type', scope: renameScope,
+        target: { kind: 'element', role: 'textfield', name: 'notes' }, text: 'plain',
+      },
+    ],
+  });
+
+  const report = await world.run(flow);
+
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries, null, 2));
+  // The row click and the right-click both address the treeitem through the
+  // row-role family; the recorded role was `row`.
+  assert.deepEqual(callsOf(world.world, 'click'),
+    [['click', '@w1:e3'], ['click', '@w1:e3']]);
+  assert.deepEqual(callsOf(world.world, 'clickSemantic'), [['clickSemantic', '@menu:e1']]);
+  // The rename editor is focused at the name column, not at a neighbouring row.
+  assert.deepEqual(callsOf(world.world, 'clickScreen'), [['clickScreen', [174, 170], 'left']]);
+  assert.deepEqual(callsOf(world.world, 'typeFocused'),
+    [['typeFocused', 'manifest-e2e.json', textedit, { selectAll: true }]]);
+  assert.deepEqual(callsOf(world.world, 'press'), [['press', 'return', 'w-1']]);
+  // Return ended rename mode: a named field afterwards types normally.
+  assert.deepEqual(callsOf(world.world, 'type'), [['type', '@w1:e9', 'plain']]);
 });

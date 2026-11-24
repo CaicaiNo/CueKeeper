@@ -42,6 +42,11 @@ import { pickWindowCandidates } from './workbench-pick.js';
 import type { WindowPickResult } from './workbench-pick.js';
 import { confirmWaitCandidate } from './wait-candidates.js';
 import type { WaitCandidate } from './wait-candidates.js';
+import {
+  applyTemplate, createTemplate, deleteTemplate, listTemplates, parseTemplate, saveTemplate,
+  templateCandidates, templateDirectory,
+} from './templates.js';
+import type { TemplateSelection } from './templates.js';
 import { createDesktopWorkdir, prepareWorkdir, workdirEnv, workdirRoot } from './workdir.js';
 
 const staticFiles = new Map(workbenchAssets.map(asset => [asset.path, [asset.file, asset.type] as const]));
@@ -117,6 +122,24 @@ async function writeProposedWaitFlow(directory: string, flow: FlowV2): Promise<s
   }
   throw new Error('No free flow.with-waits name left in this run directory');
 }
+
+/**
+ * An applied template becomes an ordinary workflow in its own directory, so it
+ * is saved, edited and replayed exactly like a recording. Nothing is written
+ * back into the template or the recording it came from.
+ */
+async function writeAppliedTemplate(flow: FlowV2, root: string, directoryName: string): Promise<string> {
+  const directory = join(root, directoryName);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const path = join(directory, 'flow.json');
+  await writeFile(path, `${JSON.stringify(flow, null, 2)}\n`, { mode: 0o600 });
+  return path;
+}
+
+function newTemplateId(): string {
+  return `tpl-${Date.now().toString(36)}-${randomUUID().slice(0, 6)}`;
+}
+
 
 interface ConfirmationToken {
   sessionId: string;
@@ -209,6 +232,10 @@ export async function startWorkbench(options: {
   sudoStore?: SudoKeychainStore;
   /** Tests replace the batch's blue overlay; the release spawns the helper. */
   startIndicator?: (onCancel: () => void) => ReplayIndicator;
+  /** Where saved templates live; defaults to ~/.cuekeeper/templates. */
+  templates?: string;
+  /** Where an applied template writes its new workflow; defaults to ~/.cuekeeper/applied. */
+  applied?: string;
 }) {
   let session = options.directory ? await loadSession(options.directory) : undefined;
   let importedRecording: string | undefined;
@@ -222,6 +249,8 @@ export async function startWorkbench(options: {
   };
   let editable = await openEditor(session);
   const library = resolve(options.library ?? join(homedir(), '.cuekeeper', 'behaviors'));
+  const templateRoot = resolve(options.templates ?? templateDirectory());
+  const appliedRoot = resolve(options.applied ?? join(homedir(), '.cuekeeper', 'applied'));
   const allowLive = options.allowLive && process.platform === 'darwin';
   const allowShell = options.allowShell ?? false;
   const allowSudo = options.allowSudo ?? false;
@@ -242,6 +271,8 @@ export async function startWorkbench(options: {
   let running = false;
   let currentRun: AbortController | undefined;
   let currentChild: ChildProcess | undefined;
+  /** Step entries the replay has already finished, for the live timeline. */
+  let liveEntries: Record<string, unknown>[] = [];
   let childStopped = false;
   /** The checkpoint the waiting CLI child announced, while the page may answer. */
   let checkpointWait: CheckpointState | undefined;
@@ -327,13 +358,32 @@ export async function startWorkbench(options: {
         env: { ...process.env, [workdirEnv]: workRoot },
       });
       currentChild = child;
+      liveEntries = [];
       let stdout = '';
       let stderr = '';
       let pending = '';
       const readLine = (line: string) => {
         if (options.onStderrLine && line) options.onStderrLine(line);
       };
-      child.stdout?.on('data', chunk => { stdout += String(chunk); });
+      let pendingStdout = '';
+      child.stdout?.on('data', chunk => {
+        const text = String(chunk);
+        stdout += text;
+        pendingStdout += text;
+        const lines = pendingStdout.split('\n');
+        pendingStdout = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const parsed = object(JSON.parse(line));
+            if (parsed.kind === 'step' && parsed.entry !== undefined) {
+              liveEntries.push(object(parsed.entry));
+            }
+          } catch {
+            // The final report line is parsed once the process exits.
+          }
+        }
+      });
       child.stderr?.on('data', chunk => {
         const text = String(chunk);
         stderr += text;
@@ -496,11 +546,18 @@ export async function startWorkbench(options: {
       return send(response, 200, { ...result, ...(view ? { session: view } : {}) });
     }
     if (path === '/api/import') {
-      if (typeof data.directory !== 'string' || !data.directory.trim()) throw new Error('Enter a run directory');
+      if (typeof data.directory !== 'string' || !data.directory.trim()) throw new Error('Enter a workflow file or run directory');
       if (running) throw new Error('A test is running');
       if (recorder.recording) throw new Error('Stop the recording before importing another run directory');
-      const path = data.directory.trim();
-      const imported = await loadSession(path.startsWith('~/') ? join(homedir(), path.slice(2)) : path);
+      const requested = data.directory.trim();
+      const expanded = requested.startsWith('~/') ? join(homedir(), requested.slice(2)) : requested;
+      // Share one flow file without building a directory around it: a path to
+      // flow.json is imported from its own folder.
+      const info = await lstat(expanded).catch(() => undefined);
+      const isFile = info?.isFile() === true;
+      const directory = isFile ? dirname(expanded) : expanded;
+      const flowFile = isFile ? basename(expanded) : undefined;
+      const imported = await loadSession(directory, flowFile ? { flowFile } : {});
       if (running) throw new Error('A test is running');
       const nextEditable = await openEditor(imported);
       session = imported;
@@ -608,6 +665,104 @@ export async function startWorkbench(options: {
       if (!currentRun) return send(response, 200, { stopped: false });
       currentRun.abort(new Error('Stopped from the workbench'));
       return send(response, 200, { stopped: true });
+    }
+    // Templates are saved workflows with `{{name}}` placeholders. They live
+    // outside any run directory, so listing one never depends on the open
+    // session. Applying one writes an ordinary flow and switches the session.
+    if (path.startsWith('/api/templates/')) {
+      const failTemplate = (error: unknown) => send(response, 400, {
+        error: error instanceof Fault ? error.code : 'TEMPLATE_INVALID',
+        message: error instanceof Error ? error.message : 'Template request failed',
+      });
+      if (path === '/api/templates/list') {
+        return send(response, 200, {
+          templates: await listTemplates(templateRoot), directory: templateRoot,
+        });
+      }
+      if (path === '/api/templates/create') {
+        if (running) return send(response, 409, { error: 'A test is running' });
+        if (recorder.recording) return send(response, 409, { error: 'Stop the recording before creating a template' });
+        if (!editable) return send(response, 409, { error: 'Open a version 2 workflow before creating a template' });
+        try {
+          const template = createTemplate({
+            id: newTemplateId(),
+            name: typeof data.name === 'string' ? data.name : '',
+            description: typeof data.description === 'string' ? data.description : undefined,
+            flow: editable.flow,
+            selections: Array.isArray(data.selections) ? data.selections as TemplateSelection[] : [],
+          });
+          const saved = await saveTemplate(template, templateRoot);
+          return send(response, 201, { template, path: saved });
+        } catch (error) {
+          return failTemplate(error);
+        }
+      }
+      if (path === '/api/templates/import') {
+        try {
+          const parsed = parseTemplate(data.template);
+          // An import never overwrites an existing template; the same id from
+          // another machine gets a fresh one and the page says so.
+          const existing = (await listTemplates(templateRoot)).some(item => item.id === parsed.id);
+          const template = existing ? { ...parsed, id: newTemplateId() } : parsed;
+          const saved = await saveTemplate(template, templateRoot);
+          return send(response, 201, { template, path: saved, renamed: existing });
+        } catch (error) {
+          return failTemplate(error);
+        }
+      }
+      if (path === '/api/templates/candidates') {
+        if (!editable) return send(response, 409, { error: 'Open a version 2 workflow first' });
+        return send(response, 200, { candidates: templateCandidates(editable.flow) });
+      }
+      if (path === '/api/templates/delete') {
+        if (typeof data.templateId !== 'string') {
+          return send(response, 400, { error: 'TEMPLATE_ID_INVALID', message: 'Delete needs a template id' });
+        }
+        try {
+          await deleteTemplate(data.templateId, templateRoot);
+        } catch (error) {
+          return failTemplate(error);
+        }
+        return send(response, 200, { deleted: true });
+      }
+      if (path === '/api/templates/apply') {
+        if (running) return send(response, 409, { error: 'A test is running' });
+        if (recorder.recording) return send(response, 409, { error: 'Stop the recording before applying a template' });
+        if (typeof data.templateId !== 'string' || !data.templateId) {
+          return send(response, 400, { error: 'TEMPLATE_ID_INVALID', message: 'Apply needs a template id' });
+        }
+        if (editable && v2View()?.dirty && data.discardEdits !== true) {
+          return send(response, 409, {
+            error: 'UNSAVED_EDITS',
+            message: '保存当前工作流，或确认应用模板会切换会话',
+          });
+        }
+        const template = (await listTemplates(templateRoot)).find(item => item.id === data.templateId);
+        if (!template) return send(response, 404, { error: 'TEMPLATE_NOT_FOUND', message: 'Template not found' });
+        try {
+          const rawValues = data.values;
+          const values: Record<string, string> = {};
+          if (rawValues && typeof rawValues === 'object' && !Array.isArray(rawValues)) {
+            for (const [key, value] of Object.entries(rawValues)) {
+              if (typeof value === 'string') values[key] = value;
+            }
+          }
+          const flow = applyTemplate(template, values, {
+            id: randomUUID(),
+            name: typeof data.name === 'string' && data.name.trim() ? data.name : template.name,
+          });
+          const output = await writeAppliedTemplate(flow, appliedRoot,
+            `${template.id}-${Date.now().toString(36)}-${flow.id.slice(0, 8)}`);
+          const imported = await loadSession(dirname(output));
+          const nextEditable = await openEditor(imported, output);
+          session = imported;
+          editable = nextEditable;
+          return send(response, 201, { session: sessionView(imported), output });
+        } catch (error) {
+          return failTemplate(error);
+        }
+      }
+      return send(response, 404, { error: 'Unknown template endpoint' });
     }
     const current = session;
     if (!current || data.session !== current.view.id) return send(response, 409, { error: 'Reload the current session' });
@@ -776,7 +931,7 @@ export async function startWorkbench(options: {
         const inputs = (flow.inputs ?? []).length
           ? inputValues(flow.inputs as string[], data.inputs)
           : undefined;
-        const args = ['run', live.path, '--foreground', '--headed', '--json'];
+        const args = ['run', live.path, '--foreground', '--headed', '--json', '--progress'];
         // A checkpoint flow uses the machine channel: the CLI announces the
         // wait on stderr and reads one answer line from stdin.
         if (checkpoints.length) args.push('--checkpoint-events');
@@ -825,7 +980,7 @@ export async function startWorkbench(options: {
       // The page polls while /api/run is in flight: a waiting checkpoint is
       // reported here instead of as a hard --json refusal.
       if (path === '/api/run/status') {
-        return send(response, 200, { running, checkpoint: checkpointWait });
+        return send(response, 200, { running, checkpoint: checkpointWait, entries: liveEntries });
       }
       if (path === '/api/run/checkpoint') {
         if (data.answer !== 'continue' && data.answer !== 'cancel') {

@@ -60,7 +60,7 @@ const help = `Cuekeeper ${buildInfo().version}
   cuekeeper ime set <id> [--json]
   cuekeeper ime restore --run <run-directory> [--strict-ime] [--json]
   cuekeeper ime unlock --run <run-id> [--json]
-  cuekeeper workbench [run-directory] [--port <port>] [--library <directory>] [--allow-live-replay] [--allow-shell] [--allow-sudo]
+  cuekeeper workbench [run-directory] [--port <port>] [--library <directory>] [--no-live-replay] [--allow-shell] [--allow-sudo]
   cuekeeper pick --app <bundle-id> --window <title> [--app-path <path>] [--select <ref>] [--snapshot <snapshot.json>] [--json]
   cuekeeper record [--seconds 25] [--countdown 3] [--no-indicator] [--sound] [--clipboard] [--trace-clicks] [--json]
   cuekeeper record --app <bundle-id> [--window <title>] [--out <flow.json>] [--app-path <path>] [--seconds 25] [--countdown 0] [--json]
@@ -408,6 +408,7 @@ async function main() {
         'input-source-switch': { type: 'boolean' },
         'strict-ime': { type: 'boolean' },
         'checkpoint-events': { type: 'boolean' }, 'no-indicator': { type: 'boolean' },
+        progress: { type: 'boolean' },
       },
     });
     checkPositionals(positionals, 1);
@@ -491,6 +492,13 @@ async function main() {
             checkpoints: checkpointEvents ? eventsCheckpointChannel() : terminalCheckpointChannel(),
             secureInputActive: nativeSecureInputProbe(),
             systemDialogVisible: nativeSystemDialogProbe(),
+            // Machine output streams one line per finished step so a parent can
+            // follow the replay live; the final report stays the last line.
+            ...(machine && values.progress ? {
+              onEntry: (entry: import('./contracts-v2.js').ReportV2Entry) => {
+                process.stdout.write(`${JSON.stringify({ kind: 'step', entry })}\n`);
+              },
+            } : {}),
           }));
       } finally {
         indicator.stop();
@@ -699,7 +707,8 @@ async function main() {
     const { positionals, values } = parseArgs({
       args: rest, allowPositionals: true, options: {
         ...common, port: { type: 'string', default: '0' }, library: { type: 'string' },
-        'allow-live-replay': { type: 'boolean' }, 'allow-shell': { type: 'boolean' },
+        'allow-live-replay': { type: 'boolean', default: true },
+        'no-live-replay': { type: 'boolean' }, 'allow-shell': { type: 'boolean' },
         'allow-sudo': { type: 'boolean' },
       },
     });
@@ -708,7 +717,9 @@ async function main() {
     if (!/^\d+$/.test(values.port) || !Number.isInteger(port) || port > 65535) throw new Error('Invalid port');
     const workbench = await startWorkbench({
       directory: positionals[0], port, library: values.library,
-      allowLive: values['allow-live-replay'] ?? false,
+      // Live replay is on by default; pass --no-live-replay to serve a
+      // read-only workbench.
+      allowLive: values['allow-live-replay'] === true && values['no-live-replay'] !== true,
       allowShell: values['allow-shell'] ?? false,
       allowSudo: values['allow-sudo'] ?? false,
       signal,

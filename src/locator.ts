@@ -12,6 +12,8 @@ export interface Node {
   states: string[];
   secure: boolean;
   bounds?: Bounds;
+  /** Actions the driver reports for this node (e.g. ["Click"], ["Press"]). */
+  actions?: string[];
   children: Node[];
 }
 
@@ -64,6 +66,9 @@ function parseNode(input: unknown, depth: number): Node {
     throw new Fault('BAD_RESPONSE', 'Invalid snapshot node');
   }
   const states = Array.isArray(node.states) ? node.states.filter((state): state is string => typeof state === 'string') : [];
+  const actions = Array.isArray(node.available_actions)
+    ? node.available_actions.filter((action): action is string => typeof action === 'string')
+    : undefined;
   return {
     role: node.role,
     name: optionalString(node.name),
@@ -72,14 +77,14 @@ function parseNode(input: unknown, depth: number): Node {
     ref: typeof node.ref_id === 'string' && /^@[a-z\d]+:e\d+$/i.test(node.ref_id) ? node.ref_id : undefined,
     bounds: parseBounds(node.bounds),
     states,
+    actions,
     secure: node.secure === true || node.protected === true || states.includes('secure') ||
       states.includes('protected') || /password|secure/i.test(`${node.role} ${node.subrole ?? ''}`),
     children: (node.children ?? []).map((child: unknown) => parseNode(child, depth + 1)),
   };
 }
 
-export function parseSnapshot(data: unknown, target: Target): Snapshot {
-  const input = object(data);
+export function parseSnapshot(data: unknown, target: Target): Snapshot {  const input = object(data);
   if (input.complete !== true || input.truncated === true || Boolean(input.identity_unproven)) {
     throw new Fault('INCOMPLETE_TREE', 'Window snapshot is incomplete');
   }
@@ -91,6 +96,16 @@ export function parseSnapshot(data: unknown, target: Target): Snapshot {
     throw new Fault('BAD_RESPONSE', 'Missing or invalid window ID');
   }
   return { windowId: window.id, tree: parseNode(input.tree, 0) };
+}
+
+/** A menu or menubar surface has no window title; parse it without one. */
+export function parseSurface(data: unknown): Snapshot {
+  const input = object(data);
+  if (input.complete !== true || input.truncated === true) {
+    throw new Fault('INCOMPLETE_TREE', 'Surface snapshot is incomplete');
+  }
+  if (input.tree === undefined) throw new Fault('BAD_RESPONSE', 'Surface snapshot has no tree');
+  return { windowId: '', tree: parseNode(input.tree, 0) };
 }
 
 export function flatten(tree: Node): Located[] {
@@ -224,11 +239,17 @@ export function clickIdentity(tree: Node, hit: Located): Located | undefined {
 }
 
 function matches(tree: Node, locator: ElementLocator, names = elementNames(tree)): Located[] {
+  // Finder reports a file row as AXRow to the capture helper but as a
+  // `treeitem` in a window snapshot, and other AX versions use `row` or
+  // `outlinerow` for the same item. The row family is one addressable role;
+  // the name still has to match exactly.
+  const family = (role: string) => rowRoles.has(role) ? 'row' : role;
   return flatten(tree).filter(entry =>
-    entry.node.role === locator.role &&
+    family(entry.node.role) === family(locator.role) &&
     (locator.name === undefined || (names.get(entry.node) ?? '') === locator.name) &&
     (locator.path === undefined ||
-      (locator.path.length === entry.path.length && locator.path.every((role, index) => role === entry.path[index]))),
+      (locator.path.length === entry.path.length &&
+        locator.path.every((role, index) => family(role) === family(entry.path[index])))),
   );
 }
 

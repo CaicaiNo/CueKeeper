@@ -407,6 +407,10 @@ dialog .modal-box {
   border-radius: var(--radius-box);
   box-shadow: var(--shadow-2), 0 0 0 100vmax oklch(0% 0 0 / 0.5);
 }
+dialog .modal-box.modal-wide {
+  width: min(720px, calc(100vw - 32px));
+  max-width: min(720px, calc(100vw - 32px));
+}
 .dialog-head { display: flex; align-items: center; gap: 10px; justify-content: space-between; }
 #dialog .actions { justify-content: flex-end; }
 .dialog-head h2 { font-size: 17px; font-weight: 600; }
@@ -512,6 +516,41 @@ body.v2-mode .draft { display: none; }
 }
 .v2-row:hover { background: var(--color-base-300); }
 .v2-row.selected { outline: 2px solid var(--color-primary); outline-offset: -2px; background: var(--color-base-300); }
+.v2-rows.marking .v2-row { grid-template-columns: 26px 40px 72px minmax(0, 1fr) auto auto; }
+.v2-mark {
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; padding: 0; cursor: pointer;
+  color: var(--muted); background: transparent;
+  border: 1px dashed color-mix(in oklab, var(--color-base-content) 25%, transparent);
+  border-radius: 8px;
+}
+.v2-mark:hover { color: var(--color-primary); border-color: var(--color-primary); }
+.v2-mark.empty { border-color: transparent; cursor: default; }
+.v2-mark.marked {
+  color: var(--color-primary); border-style: solid;
+  background: color-mix(in oklab, var(--color-primary) 12%, transparent);
+}
+.v2-mark .count {
+  position: absolute; top: -5px; right: -5px; min-width: 14px; height: 14px; padding: 0 3px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 999px; background: var(--color-primary); color: var(--color-primary-content);
+  font: 9px/1 var(--mono);
+}
+.template-list { display: grid; gap: 8px; }
+.template-row {
+  display: flex; align-items: center; gap: 12px; padding: 10px 12px;
+  border: 1px solid var(--line-soft); border-radius: 14px; background: var(--color-base-200);
+}
+.template-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.template-copy strong { font-size: 13px; font-weight: 600; }
+.template-copy .muted { margin: 0; font-size: 11px; overflow-wrap: anywhere; }
+.template-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.template-field {
+  display: grid; gap: 4px; padding: 10px 12px;
+  border: 1px solid var(--line-soft); border-radius: 14px; background: var(--color-base-200);
+}
+.template-field .check-row { align-items: center; }
+.template-field .field { margin: 0; }
 .v2-index {
   display: flex; flex-direction: column; gap: 1px; min-width: 0;
   color: var(--muted); font: 10px var(--mono);
@@ -711,6 +750,7 @@ body.batch-view { grid-template-rows: 64px minmax(0, 1fr) 222px 30px; }
   .row-duration { grid-column: 3; text-align: left; }
   .row-description strong, .row-description small { white-space: normal; }
   .v2-row { grid-template-columns: 40px 52px minmax(0, 1fr); }
+  .v2-rows.marking .v2-row { grid-template-columns: 24px 40px minmax(0, 1fr); }
   .v2-row-actions { grid-column: 2 / -1; }
   .record-message { display: none; }
 }
@@ -723,3 +763,9 @@ body.batch-view { grid-template-rows: 64px minmax(0, 1fr) 222px 30px; }
     scroll-behavior: auto !important;
   }
 }
+
+/* Replay report: a read-only table, sized to the dialog. */
+.report-table { max-height: 52vh; overflow: auto; border: 1px solid var(--line); border-radius: 12px; }
+.report-table table { width: 100%; }
+.report-detail { max-width: 380px; word-break: break-word; font-family: var(--mono); font-size: 11.5px; }
+.report-summary { font-weight: 600; }

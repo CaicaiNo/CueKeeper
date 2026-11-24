@@ -1,6 +1,75 @@
-# Cuekeeper
+<div align="center">
 
-Cuekeeper 把桌面操作录成可编辑的 JSON 流程，再按可访问性树定位控件、回放并生成离线报告。M1 提供命令行入口，目标平台为 macOS。执行器固定使用 agent-desktop 1.3.1。流程、报告和离线验证可跨平台使用。
+# CueKeeper
+
+**录制整个桌面的操作，编辑成可回放的测试，跑完给一份可导出的报告。**
+
+不用写选择器，不用预先指定 App。点开始录制，正常操作 Finder、Chrome、企业微信，停止后就是一个可编辑、可断言、可回放的流程。
+
+[![CI](https://github.com/CaicaiNo/CueKeeper/actions/workflows/ci.yml/badge.svg)](https://github.com/CaicaiNo/CueKeeper/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/CaicaiNo/CueKeeper?style=flat)](LICENSE)
+
+[快速开始](#快速开始第一次接入) · [工作台](#本地工作台) · [支持矩阵](docs/support-matrix.md) · [架构](docs/architecture.md)
+
+</div>
+
+<p align="center">
+  <img src="docs/assets/workbench.png" alt="CueKeeper 工作台：录制会话、动作时间线、目标详情和运行报告" width="100%">
+</p>
+
+---
+
+## 为什么用它
+
+- **记录目标，不记坐标**：按可访问性树定位控件，窗口移动、改名都不影响回放；坐标只在无法命名时兜底，并明确标记。
+- **跨 App**：Finder、浏览器、Electron 应用可以在一条流程里连续操作，切换 App 自动记录激活步骤。
+- **可编辑**：改目标、调顺序、删步骤、插等待和断言；原始录制永远不改，保存时写工作流副本。
+- **可复用**：把工作流里会变的值（地址、文件名、窗口标题）标成变量存成模板，填值后生成一条新工作流。
+- **可回放**：dry-run 先校验，实时回放逐步高亮结果，失败停在具体步骤并给出错误码。
+- **可交付**：报告是离线 JSON 或 ZIP，能直接发给别人排查。
+
+## 快速开始（第一次接入）
+
+源码运行，一条命令：
+
+```sh
+git clone git@github.com:CaicaiNo/CueKeeper.git
+cd CueKeeper
+pnpm quickstart
+```
+
+`pnpm quickstart` 会自动完成：
+
+1. 安装依赖并构建（`pnpm install` / `pnpm build`）；
+2. 编译录制器（`pnpm build:recorder`）；
+3. 运行 `doctor` 检查环境；
+4. 启动工作台并打开浏览器 `http://127.0.0.1:17899`。
+
+`doctor` 会检查三件事，缺任何一项都会给出系统设置入口：
+
+- 辅助功能权限（录制/回放需要）；
+- 输入监控权限（全局键盘事件）；
+- `agent-desktop` 1.3.1（版本锁定）。
+
+授权后重新执行 `pnpm quickstart` 即可。
+
+### 第一次录制与回放
+
+1. 工作台点「**开始录制**」，倒计时 3 秒后开始；
+2. 正常操作要录制的 App（跨 App、系统弹框都可以）；点「**停止录制**」结束；
+3. 时间线里可以改目标、调顺序、删步骤、插等待/断言；
+4. 先点「**dry-run**」确认定位器，再点「**实时回放**」；
+5. 回放结束弹出只读报告，可导出 JSON 排查。
+
+录制文件默认在 `~/.cuekeeper/recordings/`；工作流副本（编辑后保存）在同一目录，文件名 `flow.edited-<时间>.json`。
+
+### 用发布包（没有 Node/pnpm）
+
+```sh
+cuekeeper workbench
+```
+
+终端会打印 `http://127.0.0.1:17899`，手动打开即可。
 
 ## 安装
 
@@ -206,6 +275,35 @@ node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --selec
 
 不带 `--select` 时按可交互元素优先列出候选，每项含 `ref`、`role`、`name`、`path`、`bounds` 和 `point`。`ref` 可用完整值（`@scuekeeper:e1`）或结尾序号（`e1`）。带 `--select` 时输出 `locator`，可直接作为 `click.target`、`type.target` 或 `scroll.target` 写入 flow，并通过 `flow validate`；`point` 和 `frame` 只用于核对位置。加 `--snapshot <snapshot.json>` 可对保存的快照离线拾取，便于先在没有图形界面时检查候选。工作台动作详情的「重新拾取」使用同一套候选与定位器逻辑。
 
+### 模板（变量化工作流）
+
+模板是「工作流 + 变量」的副本：把流程里会变的字符串标成变量，保存到 `~/.cuekeeper/templates/<id>.template.json`。应用时填写变量值，生成一条新的可回放工作流；模板文件和原始录制都不会改变。
+
+1. 打开 v2 工作流，点时间线右上「创建模板」；
+2. 每行左侧出现 `{}` 图标，点它勾选要变成变量的值并命名（图标上的数字是已标记数）；可标记的值包括输入文本、点击/拖拽/检查目标名称、窗口标题、下载文件名和断言期望值；
+3. 点「保存模板」，填名称与说明；
+4. 顶栏「模板」打开本地列表：应用、导出 JSON、删除、从文件导入；也可以从当前工作流直接创建。
+
+<p align="center">
+  <img src="docs/assets/templates.png" alt="模板标记：时间线每行左侧的 {} 图标用来选择变量" width="100%">
+</p>
+
+模板文件只是数据，不含表达式：
+
+```json
+{
+  "version": 1,
+  "id": "tpl-report",
+  "name": "打开报表",
+  "parameters": [
+    { "name": "url", "label": "报表地址", "defaultValue": "https://example.test" }
+  ],
+  "flow": { "version": 2, "steps": ["…"] }
+}
+```
+
+flow 里写作 `{{url}}`。变量名以字母开头，只含字母、数字与下划线；同一个变量名可以复用在多处，但值必须一致（否则应用时会互相覆盖，保存时直接拒绝）。安全输入框（secure text field）不会出现在变量候选里，密码与授权仍走人工 checkpoint。导入会校验模板版本、flow schema 与占位符：未声明的 `{{…}}`、脚本形状的字段都会被拒绝，替换只发生在上述字符串上，不执行任何代码。应用生成的工作流写在 `~/.cuekeeper/applied/<模板id>-<时间>/flow.json`，之后照常保存、dry-run 和实时回放。
+
 ## 在 macOS 录制和回放
 
 现场步骤和权限清单见 [TextEdit 验收](docs/textedit.md)。录制器单独构建。普通 `pnpm build` 只编译 TypeScript 并核对发布的 JSON Schema。实时 `--dry-run` 读取桌面可访问性树。带 `--snapshot` 的离线运行只读样本文件。
@@ -253,3 +351,18 @@ node dist/cli.js report pack out/demo/batch.json.rows/row-000001/report.json \
 所有命令支持 `--json`，标准输出提供单个 JSON 对象。错误有 `error.code` 和 `error.message`。生成的运行报告放在 `data` 中，失败报告的 `ok` 为 `false`。录制状态提示写标准错误。正常结束且有有效动作时，CLI 返回 `ok: true`，跳过的事件记录在 `data.warnings`。录制失败或中断时，已有步骤保存至 `--out`，CLI 返回 `data.partial: true` 及原因。没有有效动作时返回错误。退出码为 `0` 完成、`1` 失败、阻塞或部分录制、`2` 输入文件或依赖错误、`130` 中断。`doctor` 用 `0` 表示全部检查通过、`1` 表示有检查失败；`record` 的启动自检使用 `2`，错误码为 `RECORDER_MISSING`、`RECORDER_UNUSABLE` 或 `PERMISSIONS_REQUIRED`。
 
 [架构与里程碑](docs/architecture.md)说明 schema、适配接口、录制限制与后续工作。每个输入操作的录制、回放、离线测试、真机状态与错误码见[输入操作支持矩阵](docs/support-matrix.md)。报告上传的配置、队列与 CLI 用法见[报告上传客户端](docs/upload-client.md)。中文输入法对录制与物理按键的影响、默认不管理输入法的取舍与 `--input-source-switch` 的切换/恢复规则见[输入法守卫](docs/ime.md)。
+
+## 文档
+
+- [架构与里程碑](docs/architecture.md) — schema、适配接口、录制限制
+- [输入操作支持矩阵](docs/support-matrix.md) — 每种操作的录制/回放/错误码
+- [离线报告包](docs/report.md) — 报告 ZIP 的目录结构与查看器
+- [输入法守卫](docs/ime.md) — 录制与回放的输入源规则
+- [参数化批量执行](docs/batch-run.md) — `--data` 与批量报告
+- [打包与分发](docs/packaging.md) — 发布产物、校验和、签名边界
+- [报告上传客户端](docs/upload-client.md) — 上传队列与配置
+- [上传服务](docs/server.md) — 自建服务的接口
+
+## License
+
+见 [LICENSE](LICENSE)。

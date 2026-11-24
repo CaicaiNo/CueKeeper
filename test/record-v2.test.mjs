@@ -50,17 +50,17 @@ test('one recording spans two apps and three windows with one scope per step', a
   });
   // Two keystrokes in the same field are one text step, stored as a parameter.
   assert.equal(flow.steps[1].kind, 'type');
-  assert.equal(flow.steps[1].input, 'input_1');
+  assert.equal(flow.steps[1].input, 'text_1');
   assert.equal(flow.steps[2].scope.app, 'com.apple.TextEdit');
   assert.equal(flow.steps[2].focusAfter.windowKey, 'textedit-1');
-  assert.equal(flow.steps[3].input, 'input_2');
+  assert.equal(flow.steps[3].input, 'text_2');
   // The second window of the same process gets its own window key.
   assert.equal(flow.steps[4].kind, 'focus_window');
   assert.equal(flow.steps[4].scope.windowKey, 'textedit-2');
-  assert.equal(flow.steps[5].input, 'input_3');
+  assert.equal(flow.steps[5].input, 'text_3');
   assert.equal(flow.steps[6].focusAfter.windowKey, 'finder-1');
   assert.equal(flow.steps[7].scope.windowKey, 'finder-1');
-  assert.deepEqual(flow.inputs, ['input_1', 'input_2', 'input_3']);
+  assert.deepEqual(flow.inputs, ['text_1', 'text_2', 'text_3']);
   // Text is never stored: only parameter names appear in the flow.
   const json = JSON.stringify(flow);
   assert.ok(!json.includes('Zq-file'));
@@ -591,8 +591,8 @@ test('an editor click inside the focused textfield records the field, not the gr
   assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'textfield', name: 'manifest.json' });
   // Both keystrokes are one parameterised type step against the same field.
   assert.deepEqual(flow.steps[1].target, flow.steps[0].target);
-  assert.equal(flow.steps[1].input, 'input_1');
-  assert.deepEqual(flow.inputs, ['input_1']);
+  assert.equal(flow.steps[1].input, 'text_1');
+  assert.deepEqual(flow.inputs, ['text_1']);
   assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
   assert.ok(recording.captureWarnings.some(warning => warning.code === 'FOCUSED_EDITABLE_TARGET'));
   assert.ok(!JSON.stringify(flow).includes('Zq-vs'));
@@ -1145,7 +1145,7 @@ test('a failed focus probe keeps the window it proved, so typing stays bound', a
     windowTitle: 'manifest.json — saio_副本',
   });
   assert.deepEqual(flow.steps[1].target, { kind: 'element', role: 'textfield', name: 'manifest.json' });
-  assert.equal(flow.steps[1].input, 'input_1');
+  assert.equal(flow.steps[1].input, 'text_1');
   assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
   assert.equal(flowV2Check.Check(flow), true);
   assert.ok(recording.captureWarnings.some(warning => warning.code === 'WINDOW_SCOPE_FROM_LAST_WINDOW'),
@@ -1527,7 +1527,7 @@ test('record --global writes a v2 flow with scopes and no typed content', { skip
   const flow = JSON.parse(run.written);
   assert.equal(flow.version, 2);
   assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'type', 'activate_app', 'type']);
-  assert.equal(flow.steps[1].input, 'input_1');
+  assert.equal(flow.steps[1].input, 'text_1');
   assert.equal(flow.steps[3].scope.app, 'com.apple.TextEdit');
   assert.ok(!run.written.includes(secret));
   assert.ok(!run.stderr.includes(secret));

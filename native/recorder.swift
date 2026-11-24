@@ -484,6 +484,50 @@ final class Capture {
     private func pointerIdentity(_ hit: AXUIElement) -> PointerIdentity? {
         // A file item is named by its file, not by the columns its row shows.
         if let identity = fileItemIdentity(hit) { return identity }
+        // Prefer the element that actually accepts the press. Finder's sidebar
+        // item is a named static text inside a clickable tree item; recording
+        // the label alone makes the replay walk up again and again.
+        var probe: AXUIElement? = hit
+        var level = 0
+        var best: (rank: Int, identity: PointerIdentity)?
+        let traceIdentity = ProcessInfo.processInfo.environment["CUEKEEPER_TRACE_IDENTITY"] == "1"
+        while let current = probe, level < 6 {
+            let currentRole = axString(current, kAXRoleAttribute as String)
+            if traceIdentity {
+                let actions = axActions(current).joined(separator: ",")
+                let name = pointerName(current, role: currentRole) ?? ""
+                let line = "[identity] \(currentRole ?? "?") actions=[\(actions)] name=\(name)\n"
+                let path = "/tmp/cuekeeper-identity.log"
+                if let handle = FileHandle(forWritingAtPath: path) {
+                    handle.seekToEndOfFile()
+                    handle.write(Data(line.utf8))
+                    handle.closeFile()
+                } else {
+                    FileManager.default.createFile(atPath: path, contents: Data(line.utf8))
+                }
+            }
+            if currentRole == "AXWindow" || currentRole == "AXApplication" { break }
+            if let currentRole, axActions(current).contains(kAXPressAction),
+               let name = pointerName(current, role: currentRole), !name.isEmpty {
+                // Rank by how much the role means "the item the user clicked":
+                // a row owns the click, its cell is close, its label is only
+                // text that happens to answer a press.
+                let rank: Int
+                switch currentRole {
+                case "AXTreeItem", "AXRow", "AXListItem", "AXOutlineRow", "AXOutlineItem": rank = 4
+                case "AXCell": rank = 3
+                case "AXButton", "AXLink", "AXImage": rank = 2
+                case "AXStaticText", "AXText": rank = 1
+                default: rank = 2
+                }
+                if best == nil || rank > best!.rank {
+                    best = (rank, PointerIdentity(role: currentRole, name: name))
+                }
+            }
+            probe = axElement(current, kAXParentAttribute as String)
+            level += 1
+        }
+        if let best { return best.identity }
         let role = axString(hit, kAXRoleAttribute as String)
         let element = PointerElement(role: role, name: pointerName(hit, role: role))
         // The common case is a named hit; do not touch its ancestry then.

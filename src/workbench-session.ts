@@ -161,7 +161,8 @@ export async function loadSession(path: string, options: { flowFile?: string } =
       .map(name => readArtifact(directory, name)),
   );
   let source = options.flowFile ? await readArtifact(directory, options.flowFile) : primary ?? recorded;
-  let flowPath = primary !== undefined ? join(directory, 'flow.json')
+  let flowPath = options.flowFile !== undefined ? join(directory, options.flowFile)
+    : primary !== undefined ? join(directory, 'flow.json')
     : recorded !== undefined ? join(directory, 'recorded.flow.json') : undefined;
   if (source === undefined && options.flowFile) throw new Error('The requested flow file is missing');
   if (source === undefined) {

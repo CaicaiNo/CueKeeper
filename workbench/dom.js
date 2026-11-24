@@ -33,6 +33,9 @@ const ICONS = {
   terminal: '<path d="m4 17 6-6-6-6"/><path d="M12 19h8"/>',
   stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
   lock: '<rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  braces: '<path d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1"/><path d="M16 21h1a2 2 0 0 0 2-2v-5c0-1.1.9-2 2-2a2 2 0 0 1-2-2V5a2 2 0 0 0-2-2h-1"/>',
+  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
+  upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/>',
 };
 
 export function createDom(document) {
@@ -60,9 +63,10 @@ export function createDom(document) {
   // Every button in the page is a daisyUI `btn`; the workbench keeps its own
   // `style` words (primary / danger / small) and they map to daisyUI variants.
   const buttonStyles = { primary: 'btn-primary', danger: 'btn-soft btn-error', small: 'btn-xs' };
-  const button = (label, onclick, { style = '', disabled = false, key, title, icon: iconName, iconOnly = false } = {}) => {
+  const button = (label, onclick, { style = '', disabled = false, key, title, icon: iconName, iconOnly = false, loading = false } = {}) => {
     const children = [];
-    if (iconName) children.push(icon(iconName));
+    if (loading) children.push(el('span', { className: 'loading loading-spinner loading-xs' }));
+    else if (iconName) children.push(icon(iconName));
     if (!iconOnly && label) children.push(el('span', {}, label));
     const styles = style.split(/\s+/).filter(Boolean).map(word => buttonStyles[word] ?? word);
     // One size class only: btn-sm and btn-xs both set --size, and the later

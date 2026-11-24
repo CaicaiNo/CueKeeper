@@ -28,7 +28,7 @@ export class ReportV2Session {
   readonly report: ReportV2;
   private readonly startedAt: number;
 
-  constructor(flow: FlowV2) {
+  constructor(flow: FlowV2, private readonly onEntry?: (entry: ReportV2Entry) => void) {
     this.flow = flow;
     this.startedAt = performance.now();
     this.report = {
@@ -64,6 +64,7 @@ export class ReportV2Session {
       ...(result.input === undefined ? {} : { input: result.input }),
     };
     this.report.entries.push(entry);
+    this.onEntry?.(entry);
   }
 
   /** A step that never ran because an earlier step stopped the run. */
