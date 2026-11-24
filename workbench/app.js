@@ -13,7 +13,7 @@ import { createBatchView } from './batch.js';
 const $ = name => document.getElementById(name);
 const dialog = $('dialog');
 const state = {
-  session: null, library: [], allowLive: false, app: '', selected: new Set(), ignored: new Set(),
+  session: null, library: [], allowLive: false, allowSudo: false, app: '', selected: new Set(), ignored: new Set(),
   expanded: new Set(), showIgnored: false, focused: null, draft: [], tab: 'actions', saving: false,
   running: false, setup: null, appPaths: {}, catalog: null, catalogAt: 0, catalogError: null, appNames: {},
   v2: null, v2Report: null, v2Selected: null, v2Filter: '', v2Busy: false,
@@ -632,6 +632,7 @@ function renderDraft() {
   $('draft-count').textContent = `${draft.length} 项`;
   $('save-button').disabled = !draft.length || saving || state.running;
   $('shell-button').disabled = saving || state.running || state.session?.version === 2;
+  $('privilege-button').disabled = saving || state.running || state.session?.version === 2;
   $('run-button').disabled = (!draft.length && !state.running) || saving || state.session?.version === 2;
   const runLabel = state.running ? '停止' : '运行测试项';
   const runButton = $('run-button');
@@ -1867,7 +1868,7 @@ function addEnvRow(container) {
   container.append(row);
 }
 
-function shellDialog() {
+function shellDialog(preset = {}) {
   const mode = select([['argv', '逐项参数'], ['script', 'Shell 脚本']]);
   const argvRows = el('div', { className: 'stack-list' });
   const addArg = (value = '') => {
@@ -1898,17 +1899,79 @@ function shellDialog() {
     envRows, button('添加环境变量', () => addEnvRow(envRows), { style: 'small', icon: 'plus' }));
   const userBox = el('div', { className: 'stack-list' },
     field('工作目录', cwd), field('超时（毫秒）', timeout), field('预期退出码', expected), envBlock);
+  const sudoConfigured = muted('正在读取钥匙串状态…');
+  const password = el('input', {
+    type: 'password', className: 'input input-sm', maxLength: 1024,
+    autocomplete: 'new-password', placeholder: '管理员密码',
+  });
+  const refreshSudo = async () => {
+    if (!state.allowSudo) {
+      sudoConfigured.textContent = '启动工作台时加 --allow-sudo 才能保存或使用管理员密码。';
+      return;
+    }
+    try {
+      const credential = await api('sudo/status');
+      sudoConfigured.textContent = credential.configured
+        ? `已保存管理员密码（登录钥匙串 · ${credential.account}）`
+        : '尚未保存管理员密码';
+    } catch (error) {
+      sudoConfigured.textContent = error.message;
+    }
+  };
+  const storePassword = button('保存到钥匙串', async () => {
+    if (!password.value) {
+      status('先填写管理员密码', 'error');
+      return;
+    }
+    try {
+      await api('sudo/set', { password: password.value, confirm: true });
+      password.value = '';
+      status('管理员密码已保存到登录钥匙串', 'success');
+      await refreshSudo();
+    } catch (error) {
+      status(error.message, 'error');
+    }
+  }, { icon: 'save' });
+  const clearPassword = button('清除已保存密码', async () => {
+    try {
+      await api('sudo/clear', { confirm: true });
+      status('已清除登录钥匙串里的管理员密码', 'success');
+      await refreshSudo();
+    } catch (error) {
+      status(error.message, 'error');
+    }
+  }, { style: 'small danger' });
+  const passwordBox = el('div', { className: 'stack-list' },
+    field('管理员密码', password),
+    el('div', { className: 'actions' }, storePassword, clearPassword),
+    muted('密码只写入登录钥匙串，不进入流程文件、报告或日志；它等价于完整管理员密码，仅限可信单机使用。'));
+  passwordBox.hidden = true;
   const rootBox = el('div', { className: 'stack-list' },
     field('授权方式', rootMode),
-    muted('Root 步骤只接受逐项参数，不接受 Shell 脚本或环境变量。运行前会展示完整命令与工作目录，密码只通过弹框交给 sudo。'));
+    sudoConfigured, passwordBox,
+    muted('Root 步骤只接受逐项参数，不接受 Shell 脚本或环境变量。运行前会展示完整命令与工作目录。'));
   const sudoBox = el('div', { className: 'stack-list' },
     field('固定任务路径', task),
     muted('固定任务由管理员预配置，不接受工作目录、环境变量、超时或脚本。'));
   rootBox.hidden = true;
   sudoBox.hidden = true;
+  if (preset.root) {
+    privilege.value = 'root';
+    rootMode.value = 'keychain';
+    rootBox.hidden = false;
+    userBox.hidden = true;
+    envBlock.hidden = true;
+    mode.disabled = true;
+    passwordBox.hidden = false;
+    void refreshSudo();
+  }
   mode.onchange = () => {
     commandBox.hidden = mode.value !== 'script';
     argvBox.hidden = mode.value === 'script';
+  };
+  rootMode.onchange = () => {
+    passwordBox.hidden = rootMode.value !== 'keychain';
+    if (!passwordBox.hidden) void refreshSudo();
   };
   privilege.onchange = () => {
     const selected = privilege.value;
@@ -1916,6 +1979,10 @@ function shellDialog() {
     const root = selected === 'root';
     sudoBox.hidden = !sudo;
     rootBox.hidden = !root;
+    if (root) {
+      passwordBox.hidden = rootMode.value !== 'keychain';
+      void refreshSudo();
+    }
     userBox.hidden = sudo;
     envBlock.hidden = root;
     if (root && mode.value === 'script') mode.value = 'argv';
@@ -1923,7 +1990,7 @@ function shellDialog() {
     commandBox.hidden = sudo || root || mode.value !== 'script';
     argvBox.hidden = sudo || mode.value === 'script';
   };
-  openDialog('插入 Shell 步骤', [
+  openDialog(preset.root ? '插入提权步骤' : '插入 Shell 步骤', [
     field('形态', mode), argvBox, commandBox, field('权限', privilege), userBox, rootBox, sudoBox,
     muted('保存与预览都不会执行。含 Shell 的测试项不能打包为离线报告。'),
   ], '加入草稿', () => {
@@ -2127,7 +2194,7 @@ function runDialog() {
 }
 
 for (const [id, name] of [['import-button', 'folder'], ['save-button', 'save'], ['run-button', 'play'],
-  ['shell-button', 'terminal'], ['actions-tab', 'list'], ['library-tab', 'layers']]) {
+  ['shell-button', 'terminal'], ['privilege-button', 'lock'], ['actions-tab', 'list'], ['library-tab', 'layers']]) {
   const node = $(id);
   if (node && !node.querySelector('svg')) node.prepend(icon(name));
 }
@@ -2138,7 +2205,8 @@ $('app-picker').onclick = openAppPicker;
 $('import-button').onclick = importDialog;
 $('show-ignored').onchange = event => { state.showIgnored = event.target.checked; render(); };
 $('save-button').onclick = saveTest;
-$('shell-button').onclick = shellDialog;
+$('shell-button').onclick = () => shellDialog();
+$('privilege-button').onclick = () => shellDialog({ root: true });
 $('run-button').onclick = () => state.running ? stopRun() : runDialog();
 for (const tab of ['actions', 'library']) $(`${tab}-tab`).onclick = () => { state.tab = tab; renderInspector(); };
 
@@ -2146,6 +2214,7 @@ try {
   const initial = await api('state');
   state.library = initial.library ?? { builtin: [], custom: [] };
   state.allowLive = initial.allowLive;
+  state.allowSudo = initial.allowSudo === true;
   setSession(initial.session ?? null);
   status(initial.session ? '已导入本地会话' : '会话与测试项保存在本机');
   if (location.hash === '#batch') setMode('batch');

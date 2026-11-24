@@ -12,6 +12,11 @@ const itemNotFound = 44;
 export interface SudoKeychainStore {
   /** Adds or replaces the item; `security` prompts for the password itself. */
   set(): Promise<{ account: string; service: string }>;
+  /**
+   * Stores a password supplied by the local workbench. The two prompt lines
+   * travel over stdin so the password never enters argv, a file or a log.
+   */
+  setWithPassword(password: string): Promise<{ account: string; service: string }>;
   /** Metadata only: never asks `security` to print the password. */
   status(): Promise<{ account: string; service: string; configured: boolean }>;
   clear(): Promise<{ account: string; service: string; removed: boolean }>;
@@ -43,6 +48,29 @@ function assertPlatform(platform: NodeJS.Platform) {
       'The login-keychain credential store is only available on macOS; use a sudoers policy elsewhere',
     );
   }
+}
+
+function runSecurityWithPassword(
+  launch: typeof nodeSpawn, program: string, args: string[], password: string,
+): Promise<SecurityResult> {
+  return new Promise(resolvePromise => {
+    let child;
+    try {
+      child = launch(program, args, { stdio: ['pipe', 'ignore', 'ignore'] });
+    } catch {
+      return readStartFailure('security');
+    }
+    let spawnError = false;
+    child.once('error', () => { spawnError = true; });
+    // A closed pipe means security exited early; its exit code carries the error.
+    child.stdin?.on('error', () => {});
+    // `security` prompts for the new item and its confirmation; both lines are
+    // the same value. They exist only in this pipe.
+    child.stdin?.end(`${password}\n${password}\n`);
+    child.once('close', code => {
+      resolvePromise({ code: spawnError ? null : code, startFailed: spawnError });
+    });
+  });
 }
 
 function runSecurity(
@@ -93,6 +121,26 @@ export function createSudoKeychainStore(options: SudoKeychainOptions = {}): Sudo
       const result = await runSecurity(launch, security, [
         'add-generic-password', '-U', '-s', service, '-a', account, '-T', security, '-w',
       ], { inherit: true });
+      if (result.startFailed) readStartFailure('security');
+      if (result.code !== 0) {
+        throw new Fault(
+          'SUDO_CREDENTIAL_UNAVAILABLE',
+          `The administrator password was not stored (security exited with ${result.code ?? 'a signal'})`,
+          true,
+        );
+      }
+      return { account, service };
+    },
+
+    async setWithPassword(password: string) {
+      assertPlatform(platform);
+      if (typeof password !== 'string' || password.length === 0 || password.length > 1024 ||
+          /[\r\n\0]/.test(password)) {
+        throw new Fault('SUDO_PASSWORD_INVALID', 'The administrator password is empty, too long, or contains a line break');
+      }
+      const result = await runSecurityWithPassword(launch, security, [
+        'add-generic-password', '-U', '-s', service, '-a', account, '-T', security, '-w',
+      ], password);
       if (result.startFailed) readStartFailure('security');
       if (result.code !== 0) {
         throw new Fault(

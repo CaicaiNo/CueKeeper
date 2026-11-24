@@ -185,7 +185,8 @@ node dist/cli.js run /path/to/root.flow.json --allow-shell --allow-sudo --non-in
 - `--dry-run` 只输出静态计划（步骤 ID、模式、权限），不解析秘密、不启动 shell 或 sudo；纯 Shell 流程无需 `--snapshot`。
 - 输出文本默认不采集；`--capture-shell-output` 单次开启。存在秘密引用或提权步骤时只保留元数据。
 - 含 Shell 定义的 flow 不能 `report pack`，仍可 `--report` 写 JSON 并在工作台查看。
-- 工作台启动加 `--allow-shell`（提权再要 `--allow-sudo`），运行前展示展开计划并用一次性令牌确认；「停止」取消当前运行与剩余步骤。
+- 工作台启动加 `--allow-shell`（提权再要 `--allow-sudo`），运行前展示展开计划并用一次性令牌确认；「停止」取消当前运行与剩余步骤。草稿区的「插入提权」预置 Root + 登录钥匙串：填一次管理员密码保存到本机钥匙串，后续运行（含批量）不再弹框。密码不进入 flow、报告或日志；等价于完整管理员密码，只用于可信单机。Shell 与提权步骤目前属于 v1 flow，v2 会话没有 shell 步骤。
+
 
 ### 从快照拾取元素
 

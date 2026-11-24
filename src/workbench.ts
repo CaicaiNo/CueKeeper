@@ -21,6 +21,8 @@ import { crop, decodePng, encodePng } from './png.js';
 import { runFlow } from './run.js';
 import type { ShellRunOptions } from './run.js';
 import { createRootPrivilegeRunner } from './shell-privilege.js';
+import { createSudoKeychainStore } from './sudo-credential.js';
+import type { SudoKeychainStore } from './sudo-credential.js';
 import {
   describeShellStep, hasShellSecrets, reachableShells, shellGate, shellPrivilege,
 } from './shell.js';
@@ -201,6 +203,8 @@ export async function startWorkbench(options: {
    */
   pickWindow?: (scope: WindowScope, signal: AbortSignal) => Promise<WindowPickResult>;
   record?: { cli?: string; recordings?: string; stopTimeoutMs?: number };
+  /** The login-keychain store the page writes an administrator password to. */
+  sudoStore?: SudoKeychainStore;
 }) {
   let session = options.directory ? await loadSession(options.directory) : undefined;
   let importedRecording: string | undefined;
@@ -227,6 +231,7 @@ export async function startWorkbench(options: {
   }
   const tokens = new Map<string, ConfirmationToken>();
   const cliPath = options.cliPath ?? fileURLToPath(new URL('./cli.js', import.meta.url));
+  const sudoStore = options.sudoStore ?? createSudoKeychainStore();
   // A pick reads one window snapshot; it never focuses, captures or types.
   const pickWindow = options.pickWindow ?? ((scope: WindowScope, signal: AbortSignal) =>
     withDesktop({ headed: false, signal, workRoot }, desktop => pickWindowCandidates(desktop, scope)));
@@ -499,6 +504,30 @@ export async function startWorkbench(options: {
       // with an empty one instead of listing another session's saved items.
       batch.reset();
       return send(response, 200, sessionView(imported));
+    }
+    if (path === '/api/sudo/status') {
+      return send(response, 200, await sudoStore.status());
+    }
+    if (path === '/api/sudo/set') {
+      // Storing the credential is only meaningful (and only allowed) when the
+      // workbench can use it, and never while a replay owns the keychain.
+      if (!allowSudo) throw new Error('Storing an administrator password needs --allow-sudo');
+      if (running) throw new Error('A test is running');
+      if (data.confirm !== true) {
+        throw new Error('Confirm that the password may be stored in the login keychain');
+      }
+      const password = data.password;
+      if (typeof password !== 'string' || password.length === 0 || password.length > 1024 ||
+          /[\r\n\0]/.test(password)) {
+        throw new Error('Enter the administrator password');
+      }
+      const stored = await sudoStore.setWithPassword(password);
+      return send(response, 201, { ...stored, configured: true });
+    }
+    if (path === '/api/sudo/clear') {
+      if (running) throw new Error('A test is running');
+      if (data.confirm !== true) throw new Error('Confirm removal of the stored password');
+      return send(response, 200, await sudoStore.clear());
     }
     if (path === '/api/batch/state') {
       return send(response, 200, await batch.snapshot());

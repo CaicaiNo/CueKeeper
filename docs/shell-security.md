@@ -50,6 +50,7 @@ cuekeeper sudo status   # 只查元数据，不读取密码
 cuekeeper sudo clear    # 删除钥匙串项
 ```
 
+- 工作台也可以不走终端：草稿区「插入提权」会预置 Root + 登录钥匙串，直接填管理员密码并保存。密码只经本机回环请求进入工作台进程，再通过 stdin 交给 `security`，不写入 flow、报告、日志或临时文件；作用等同于 `cuekeeper sudo set`。工作台启动时仍需 `--allow-sudo`。
 - 保存的是**管理员密码本身**，等价于完整 root 权限。只用于可信、单人使用的机器；不要在多用户共享、远程或不受控的机器上启用。
 - 钥匙串项固定为服务 `com.cuekeeper.sudo`、账号 `$USER`，ACL 只信任 `/usr/bin/security`。`cuekeeper sudo set` 调用 `security add-generic-password -U -s com.cuekeeper.sudo -a "$USER" -T /usr/bin/security -w`：`-w` 放在最后且不带值，由 `security` 自己提示输入，密码不进入 argv、环境变量、文件、报告或日志。读取路径同样经 `security find-generic-password -w`，只把结果写进 sudo 的管道。
 - 修改管理员密码后必须重新执行 `cuekeeper sudo set`（旧密码会被 sudo 拒绝，步骤报 `SHELL_PRIVILEGE_REQUIRED`）；离职、转借或怀疑泄漏时执行 `cuekeeper sudo clear` 并轮换系统密码。

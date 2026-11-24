@@ -132,6 +132,39 @@ test('set, status and clear drive security without ever putting the password in 
   }
 });
 
+test('a password supplied by the workbench travels over stdin, never argv', async t => {
+  const root = await scratch(t);
+  const state = join(root, 'item');
+  const log = join(root, 'argv.log');
+  const security = join(root, 'stdin-security.mjs');
+  await writeFile(security, `#!${process.execPath}
+import { appendFileSync, writeFileSync } from 'node:fs';
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\\n');
+if (args[0] !== 'add-generic-password') process.exit(2);
+let input = '';
+process.stdin.on('data', chunk => { input += String(chunk); });
+process.stdin.on('end', () => {
+  const lines = input.split('\\n');
+  if (lines[0] !== lines[1] || !lines[0]) process.exit(9);
+  writeFileSync(${JSON.stringify(state)}, lines[0]);
+  process.exit(0);
+});
+`, { mode: 0o700 });
+  const store = createSudoKeychainStore({ securityPath: security, platform: 'darwin', account: 'tester' });
+
+  await store.setWithPassword('workbench-password-42');
+  assert.equal(await readFile(state, 'utf8'), 'workbench-password-42');
+
+  // A line break would let the second prompt line differ from the first.
+  await assert.rejects(store.setWithPassword('two\nlines'), error =>
+    error.code === 'SUDO_PASSWORD_INVALID');
+  await assert.rejects(store.setWithPassword(''), error => error.code === 'SUDO_PASSWORD_INVALID');
+
+  const recorded = await readFile(log, 'utf8');
+  assert.doesNotMatch(recorded, /workbench-password-42/, 'the password never enters argv');
+});
+
 test('a denied, unreadable or unsupported keychain fails closed', async t => {
   for (const behavior of ['denied', 'error']) {
     const { store } = await storeFixture(t, { behavior });
