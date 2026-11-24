@@ -246,7 +246,7 @@ export function createBatchView({ api, status, dialog, setMode, openFlow, appLab
     }),
     el('span', { className: 'queue-copy' },
       el('strong', {}, item.name),
-      el('small', {}, `${appText(item.app)} · ${item.steps} 步`)),
+      el('small', {}, `${appText(item.app)} · ${item.steps} 步${item.root ? ' · 提权' : ''}`)),
     el('span', { className: 'queue-rounds' }, `${item.runs.length}/${roundsOf()}`),
     dot(last));
     return row;
@@ -272,7 +272,8 @@ export function createBatchView({ api, status, dialog, setMode, openFlow, appLab
           render();
         },
       }),
-      el('div', { className: 'batch-name' }, el('strong', {}, item.name), el('small', {}, item.file)),
+      el('div', { className: 'batch-name' }, el('strong', {}, item.name),
+        el('small', {}, `${item.file}${item.root ? ' · 提权' : ''}`)),
       el('span', { className: 'cell-app', title: item.window }, appText(item.app)),
       el('span', { className: 'cell-num' }, planned ? `${total}/${planned}` : String(total)),
       el('span', { className: 'status-stack' }, badge(last?.status ?? 'pending')),
@@ -310,7 +311,7 @@ export function createBatchView({ api, status, dialog, setMode, openFlow, appLab
     el('span', { className: 'idx' }, String(index + 1).padStart(2, '0')),
     el('div', { className: 'step-copy' },
       el('strong', {}, entry.id),
-      el('span', { className: 'step-id' }, [entry.kind, entry.code].filter(Boolean).join(' · ') || entry.status)),
+      el('span', { className: 'step-id' }, [entry.kind, entry.privilege, entry.code].filter(Boolean).join(' · ') || entry.status)),
     badge(entry.status)));
     return [
       el('div', { className: 'inspector-head' },

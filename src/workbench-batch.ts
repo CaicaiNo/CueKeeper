@@ -31,6 +31,8 @@ export interface BatchCandidate {
   checkpoint: boolean;
   /** An interactive `root` step needs a password dialog, which a batch cannot show. */
   rootPrompt: boolean;
+  /** Any root shell step; the list marks these so elevation is visible up front. */
+  root: boolean;
   modifiedAt: number;
 }
 
@@ -204,6 +206,7 @@ function candidateOf(path: string, file: string, document: unknown, modifiedAt: 
       steps: flow.steps.length,
       checkpoint: flow.steps.some(step => step.kind === 'manual_checkpoint'),
       rootPrompt: false,
+      root: false,
     };
   }
   const { flow } = parseTestItem(document);
@@ -218,6 +221,7 @@ function candidateOf(path: string, file: string, document: unknown, modifiedAt: 
     checkpoint: false,
     rootPrompt: reachableShells(plan(flow)).some(({ action }) =>
       shellPrivilege(action) === 'root' && effectiveRootMode(action) === 'prompt'),
+    root: reachableShells(plan(flow)).some(({ action }) => shellPrivilege(action) === 'root'),
   };
 }
 
@@ -258,11 +262,14 @@ function stepsOf(report: Record<string, unknown>): BatchStepResult[] {
     try {
       const entry = object(raw);
       if (typeof entry.id !== 'string') return [];
+      const shell = entry.shell && typeof entry.shell === 'object' && !Array.isArray(entry.shell)
+        ? entry.shell as Record<string, unknown> : undefined;
       return [{
         id: entry.id,
         status: typeof entry.status === 'string' ? entry.status : 'unknown',
         ...(typeof entry.kind === 'string' ? { kind: entry.kind } : {}),
         ...(typeof entry.code === 'string' ? { code: entry.code } : {}),
+        ...(typeof shell?.privilege === 'string' ? { privilege: shell.privilege } : {}),
       }];
     } catch {
       return [];
@@ -419,6 +426,7 @@ export class BatchRunner {
         saved.steps = candidate.steps;
         saved.checkpoint = candidate.checkpoint;
         saved.rootPrompt = candidate.rootPrompt;
+        saved.root = candidate.root;
         saved.modifiedAt = candidate.modifiedAt;
         saved.reproduce = this.reproduceCommand(candidate);
       }

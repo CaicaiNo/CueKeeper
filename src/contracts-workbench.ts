@@ -39,6 +39,7 @@ const step = T.Object({
   kind: T.Optional(T.String()),
   status: T.String(),
   code: T.Optional(T.String()),
+  privilege: T.Optional(T.String()),
 }, { additionalProperties: false });
 
 const run = T.Object({

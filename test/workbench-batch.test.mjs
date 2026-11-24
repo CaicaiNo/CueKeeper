@@ -260,7 +260,9 @@ test('an interactive root step is refused before the batch starts', async t => {
   const prompt = listed.body.items.find(item => item.name === 'root prompt');
   const keychain = listed.body.items.find(item => item.name === 'root keychain');
   assert.equal(prompt.rootPrompt, true);
+  assert.equal(prompt.root, true);
   assert.equal(keychain.rootPrompt, false, 'keychain root steps can run unattended');
+  assert.equal(keychain.root, true);
 
   const refused = await post('batch/start', { items: [prompt.path], rounds: 1, intervalMs: 0 });
   assert.equal(refused.status, 400);
