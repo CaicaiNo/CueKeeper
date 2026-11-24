@@ -23,6 +23,7 @@ import type { ShellRunOptions } from './run.js';
 import { createRootPrivilegeRunner } from './shell-privilege.js';
 import { createSudoKeychainStore } from './sudo-credential.js';
 import { startReplayIndicator } from './indicator.js';
+import type { ReplayIndicator } from './indicator.js';
 import type { SudoKeychainStore } from './sudo-credential.js';
 import {
   describeShellStep, hasShellSecrets, reachableShells, shellGate, shellPrivilege,
@@ -206,6 +207,8 @@ export async function startWorkbench(options: {
   record?: { cli?: string; recordings?: string; stopTimeoutMs?: number };
   /** The login-keychain store the page writes an administrator password to. */
   sudoStore?: SudoKeychainStore;
+  /** Tests replace the batch's blue overlay; the release spawns the helper. */
+  startIndicator?: (onCancel: () => void) => ReplayIndicator;
 }) {
   let session = options.directory ? await loadSession(options.directory) : undefined;
   let importedRecording: string | undefined;
@@ -255,6 +258,7 @@ export async function startWorkbench(options: {
     allowSudo: () => allowSudo,
     begin: () => { running = true; },
     end: () => { running = false; },
+    ...(options.startIndicator ? { startIndicator: options.startIndicator } : {}),
   });
   let origin: string;
   const recorder = createRecordController({

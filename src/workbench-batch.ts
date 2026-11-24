@@ -12,6 +12,8 @@ import { parseTestItem } from './test-item.js';
 import { plan } from './flow.js';
 import { effectiveRootMode, reachableShells, shellPrivilege } from './shell.js';
 import { agentDesktopVersion } from './desktop.js';
+import { startReplayIndicator } from './indicator.js';
+import type { ReplayIndicator } from './indicator.js';
 import { buildInfo } from './version.js';
 import { workdirEnv } from './workdir.js';
 
@@ -372,6 +374,8 @@ export class BatchRunner {
   private wake: (() => void) | undefined;
   private sequence = 0;
   private finishing = false;
+  /** One overlay for the whole queue; individual replays stay silent. */
+  private indicator: ReplayIndicator | undefined;
   private work: { begin: () => void; end: () => void };
   private host = {
     platform: process.platform,
@@ -391,6 +395,8 @@ export class BatchRunner {
     allowSudo: () => boolean;
     begin: () => void;
     end: () => void;
+    /** Tests replace the native overlay; the release spawns the shipped helper. */
+    startIndicator?: (onCancel: () => void) => ReplayIndicator;
   }) {
     this.work = { begin: options.begin, end: options.end };
     this.state = emptyState(options.allowLive());
@@ -509,6 +515,17 @@ export class BatchRunner {
       summaryPath: join(batchDirectory, 'batch.json'),
     };
     this.stopRequested = false;
+    // One overlay covers the whole queue: the per-row CLI runs stay silent
+    // (--no-indicator), so the edge does not flash on every workflow. ⌃⌥X on
+    // that overlay stops the batch exactly like the page's stop button.
+    try {
+      const startIndicator = this.options.startIndicator ??
+        ((onCancel: () => void) => startReplayIndicator({ onCancel }));
+      this.indicator = startIndicator(() => { this.stop(); });
+    } catch {
+      // A missing overlay never blocks a batch; the page still stops it.
+      this.indicator = undefined;
+    }
     this.work.begin();
     await this.writeSummary();
     void this.run(selected, batchDirectory, config);
@@ -531,20 +548,28 @@ export class BatchRunner {
       await this.finish('operator');
       return;
     }
-    for (let round = 1; round <= config.rounds; round += 1) {
-      for (const [index, item] of selected.entries()) {
-        if (this.stopRequested) return this.finish('operator');
-        if (config.stopAt !== undefined && Date.now() >= config.stopAt) return this.finish('time');
-        const detail = await this.runOne(item, round, index, batchDirectory);
-        if (!config.continueOnFailure && detail.status !== 'passed') return this.finish('failure');
-        if (config.stopAt !== undefined && Date.now() >= config.stopAt) return this.finish('time');
-        if (this.stopRequested) return this.finish('operator');
-        if (config.intervalMs > 0 && !(round === config.rounds && index === selected.length - 1)) {
-          await this.sleep(config.intervalMs);
+    try {
+      for (let round = 1; round <= config.rounds; round += 1) {
+        for (const [index, item] of selected.entries()) {
+          if (this.stopRequested) return await this.finish('operator');
+          if (config.stopAt !== undefined && Date.now() >= config.stopAt) return await this.finish('time');
+          const detail = await this.runOne(item, round, index, batchDirectory);
+          if (!config.continueOnFailure && detail.status !== 'passed') return await this.finish('failure');
+          if (config.stopAt !== undefined && Date.now() >= config.stopAt) return await this.finish('time');
+          if (this.stopRequested) return await this.finish('operator');
+          if (config.intervalMs > 0 && !(round === config.rounds && index === selected.length - 1)) {
+            await this.sleep(config.intervalMs);
+          }
         }
       }
+      return await this.finish('complete');
+    } catch (error) {
+      // An unexpected throw must not leave the overlay on screen forever.
+      this.state.error = `批次运行异常：${error instanceof Error ? error.message : 'unknown error'}`;
+      if (this.state.running) await this.finish('operator');
+    } finally {
+      this.stopIndicator();
     }
-    return this.finish('complete');
   }
 
   private async runOne(
@@ -644,6 +669,14 @@ export class BatchRunner {
     this.state.running = false;
     this.finishing = false;
     this.work.end();
+    this.stopIndicator();
+  }
+
+  /** Removing the batch overlay is idempotent: stop, finish and a crash all call it. */
+  private stopIndicator() {
+    const indicator = this.indicator;
+    this.indicator = undefined;
+    indicator?.stop();
   }
 
   /**

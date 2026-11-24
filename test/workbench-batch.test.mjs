@@ -27,9 +27,15 @@ async function fixture(t) {
 async function stubCli(t, root) {
   const stub = join(root, 'stub-batch-cli.mjs');
   const log = join(root, 'runs.log');
+  const argvLog = join(root, 'argv.log');
   await writeFile(stub, [
     "import { appendFile, readFile, writeFile } from 'node:fs/promises';",
     'const args = process.argv.slice(2);',
+    'if (process.env.CUEKEEPER_BATCH_ARGV_LOG) {',
+    '  await appendFile(process.env.CUEKEEPER_BATCH_ARGV_LOG, JSON.stringify(args) + "\\n");',
+    '}',
+    'const delay = Number(process.env.CUEKEEPER_BATCH_DELAY ?? 0);',
+    'if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));',
     'const path = args[1];',
     'const document = JSON.parse(await readFile(path, "utf8"));',
     'const flow = document.flow ?? document;',
@@ -49,15 +55,19 @@ async function stubCli(t, root) {
     '',
   ].join('\n'));
   process.env.CUEKEEPER_BATCH_LOG = log;
-  t.after(() => { delete process.env.CUEKEEPER_BATCH_LOG; });
-  return { stub, log };
+  process.env.CUEKEEPER_BATCH_ARGV_LOG = argvLog;
+  t.after(() => {
+    delete process.env.CUEKEEPER_BATCH_LOG;
+    delete process.env.CUEKEEPER_BATCH_ARGV_LOG;
+  });
+  return { stub, log, argvLog };
 }
 
-async function server(t, { root, stub, directory }) {
+async function server(t, { root, stub, directory }, extra = {}) {
   const cancellation = new AbortController();
   const started = await startWorkbench({
     port: 0, allowLive: true, library: join(root, 'library'),
-    signal: cancellation.signal, cliPath: stub, directory,
+    signal: cancellation.signal, cliPath: stub, directory, ...extra,
   });
   t.after(async () => { cancellation.abort(); await started.closed; });
   async function post(route, payload) {
@@ -175,6 +185,66 @@ test('stopping a batch keeps finished rows and never starts another round', asyn
   assert.equal(done.stopReason, 'operator');
   assert.ok(done.counts.completed < 20, 'the stop ends the queue instead of finishing every round');
   assert.ok(done.items.every(item => item.runs.length <= 10));
+});
+
+test('one overlay covers the whole batch while the per-row replays stay silent', async t => {
+  const { root, directory } = await fixture(t);
+  const { stub, argvLog } = await stubCli(t, root);
+  const overlay = { started: 0, stopped: 0, cancel: undefined };
+  const { post } = await server(t, { root, stub, directory }, {
+    startIndicator: onCancel => {
+      overlay.started += 1;
+      overlay.cancel = onCancel;
+      return { stop() { overlay.stopped += 1; } };
+    },
+  });
+  const listed = await post('batch/state', {});
+  assert.equal(overlay.started, 0, 'opening the queue shows no overlay');
+
+  await post('batch/start', {
+    items: listed.body.items.map(item => item.path), rounds: 3, intervalMs: 80, continueOnFailure: true,
+  });
+  assert.equal(overlay.started, 1, 'the batch creates exactly one overlay at start');
+
+  await waitFor(post, state => state.counts.completed >= 1 && state.running);
+  assert.equal(overlay.stopped, 0, 'the overlay keeps covering the batch after the first row finished');
+
+  const done = await waitFor(post, state => !state.running);
+  assert.equal(done.counts.completed, 6);
+  assert.equal(overlay.stopped, 1, 'the overlay is removed when the batch finishes');
+  assert.equal(overlay.started, 1, 'no overlay is created per row');
+
+  const argv = (await readFile(argvLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(argv.length, 6);
+  assert.ok(argv.every(args => args.includes('--no-indicator')),
+    'each row suppresses its own overlay so only the batch edge is on screen');
+});
+
+test('⌃⌥X on the batch overlay stops the whole queue', async t => {
+  process.env.CUEKEEPER_BATCH_DELAY = '120';
+  t.after(() => { delete process.env.CUEKEEPER_BATCH_DELAY; });
+  const { root, directory } = await fixture(t);
+  const { stub } = await stubCli(t, root);
+  const overlay = { started: 0, stopped: 0, cancel: undefined };
+  const { post } = await server(t, { root, stub, directory }, {
+    startIndicator: onCancel => {
+      overlay.started += 1;
+      overlay.cancel = onCancel;
+      return { stop() { overlay.stopped += 1; } };
+    },
+  });
+  const listed = await post('batch/state', {});
+  await post('batch/start', {
+    items: listed.body.items.map(item => item.path), rounds: 10, intervalMs: 0, continueOnFailure: true,
+  });
+  await waitFor(post, state => state.counts.completed >= 1);
+  assert.equal(typeof overlay.cancel, 'function', 'the overlay receives a cancel handler');
+  overlay.cancel();
+
+  const done = await waitFor(post, state => !state.running);
+  assert.equal(done.stopReason, 'operator', 'the overlay cancel ends the batch like the stop button');
+  assert.ok(done.counts.completed < 20, 'the remaining rounds never start');
+  assert.equal(overlay.stopped, 1);
 });
 
 test('a failing row stops the batch when the operator chose that policy', async t => {
