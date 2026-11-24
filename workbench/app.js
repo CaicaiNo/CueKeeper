@@ -2230,7 +2230,8 @@ try {
   state.allowSudo = initial.allowSudo === true;
   setSession(initial.session ?? null);
   status(initial.session ? '已导入本地会话' : '会话与测试项保存在本机');
-  if (location.hash === '#batch') setMode('batch');
+  // The workbench opens on the queue: most sessions are overnight batches.
+  setMode(location.hash === '#edit' ? 'edit' : 'batch');
 } catch (error) {
   render();
   status(error.message, 'error');
