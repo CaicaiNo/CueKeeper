@@ -217,8 +217,18 @@ export class ScopeResolver {
   }
 
   /** Focuses a bound window and proves its owner after the driver call. */
-  private async focus(binding: WindowBinding): Promise<void> {    const identity = this.identityFor(binding.app);
-    await identity.focusOwnedWindow(this.desktop, binding.windowId, this.focusTimeoutMs);
+  private async focus(binding: WindowBinding): Promise<void> {
+    const identity = this.identityFor(binding.app);
+    try {
+      await identity.focusOwnedWindow(this.desktop, binding.windowId, this.focusTimeoutMs);
+    } catch (error) {
+      // Some Electron windows do come forward while the driver's own settle
+      // check still reports ACTION_FAILED. The observed inventory is the
+      // authority: accept the call only when it names this window as focused.
+      if (!(error instanceof Fault) || error.code !== 'ACTION_FAILED') throw error;
+      const windows = await identity.ownedWindows(this.desktop, this.focusTimeoutMs);
+      if (!windows.some(window => window.id === binding.windowId && window.isFocused === true)) throw error;
+    }
     binding.pid = identity.pid ?? binding.pid;
     binding.processInstance = identity.processInstance ?? binding.processInstance;
     binding.focusGeneration += 1;
