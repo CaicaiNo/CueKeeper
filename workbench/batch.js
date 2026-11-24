@@ -144,7 +144,7 @@ export function createBatchView({ api, status, dialog, setMode, appLabel = app =
   }
 
   function selectedPaths() {
-    return (state.snapshot?.items ?? []).filter(item => pickOf(item.path) && !item.checkpoint).map(item => item.path);
+    return (state.snapshot?.items ?? []).filter(item => pickOf(item.path) && !item.checkpoint && !item.rootPrompt).map(item => item.path);
   }
 
   async function start() {
@@ -228,14 +228,16 @@ export function createBatchView({ api, status, dialog, setMode, appLabel = app =
 
   function queueRow(item) {
     const last = item.last?.status;
+    const locked = item.checkpoint || item.rootPrompt;
     const row = el('label', {
-      className: `queue-item ${state.selected === item.path ? 'active' : ''} ${item.checkpoint ? 'unsupported' : ''}`,
-      title: item.checkpoint ? '含需要人工确认的步骤，不能放进无人值守批次' : item.file,
+      className: `queue-item ${state.selected === item.path ? 'active' : ''} ${locked ? 'unsupported' : ''}`,
+      title: item.checkpoint ? '含需要人工确认的步骤，不能放进无人值守批次'
+        : item.rootPrompt ? '含交互式 root 步骤；批量需要改用 keychain 或预配置 sudoers' : item.file,
       onclick: () => { state.selected = item.path; render(); },
     },
     el('input', {
       type: 'checkbox', className: 'checkbox checkbox-sm',
-      checked: pickOf(item.path), disabled: item.checkpoint || state.snapshot?.running,
+      checked: pickOf(item.path), disabled: locked || state.snapshot?.running,
       onchange: event => {
         event.stopPropagation();
         state.picks.set(item.path, event.target.checked);
@@ -262,7 +264,7 @@ export function createBatchView({ api, status, dialog, setMode, appLabel = app =
     el('div', { className: 'batch-row-line' },
       el('input', {
         type: 'checkbox', className: 'checkbox checkbox-sm', checked: pickOf(item.path),
-        disabled: item.checkpoint || state.snapshot?.running,
+        disabled: item.checkpoint || item.rootPrompt || state.snapshot?.running,
         'aria-label': item.name,
         onchange: event => {
           event.stopPropagation();
@@ -367,7 +369,7 @@ export function createBatchView({ api, status, dialog, setMode, appLabel = app =
   function counts() {
     const snapshot = state.snapshot;
     const items = snapshot?.items ?? [];
-    const selected = items.filter(item => pickOf(item.path) && !item.checkpoint);
+    const selected = items.filter(item => pickOf(item.path) && !item.checkpoint && !item.rootPrompt);
     const planned = snapshot?.counts.planned ?? selected.length * roundsOf();
     const done = snapshot?.counts.completed ?? 0;
     const percent = planned ? Math.min(100, Math.round((done / planned) * 100)) : 0;
@@ -389,7 +391,7 @@ export function createBatchView({ api, status, dialog, setMode, appLabel = app =
     $('batch-open-summary').disabled = !snapshot?.summaryPath || snapshot.running;
     $('batch-export').disabled = !snapshot;
     $('batch-select-all').checked = selected.length > 0 &&
-      selected.length === (snapshot?.items ?? []).filter(item => !item.checkpoint).length;
+      selected.length === (snapshot?.items ?? []).filter(item => !item.checkpoint && !item.rootPrompt).length;
     $('batch-count').textContent = planned ? `${done} / ${planned} 次` : '';
     $('batch-progress-bar').style.width = `${percent}%`;
     const elapsed = snapshot?.startedAt

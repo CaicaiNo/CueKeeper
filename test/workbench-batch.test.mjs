@@ -223,6 +223,32 @@ test('the summary is rewritten after every run, so a crash keeps finished rows',
   assert.equal(final.counts.completed, done.counts.completed);
 });
 
+test('an interactive root step is refused before the batch starts', async t => {
+  const { root, directory } = await fixture(t);
+  const { stub } = await stubCli(t, root);
+  const shell = privilegeMode => ({
+    version: 1, id: `root-${privilegeMode}`, name: `root ${privilegeMode}`,
+    target: { app: 'com.apple.finder', window: 'Finder' },
+    steps: [{
+      id: 'whoami-root', kind: 'shell', argv: ['/usr/bin/id', '-u'],
+      privilege: 'root', privilegeMode, expectedExitCode: 0,
+    }],
+  });
+  await writeJson(join(directory, 'test-3333.test.json'), shell('prompt'));
+  await writeJson(join(directory, 'test-4444.test.json'), shell('keychain'));
+  const { post } = await server(t, { root, stub, directory });
+  const listed = await post('batch/state', {});
+  const prompt = listed.body.items.find(item => item.name === 'root prompt');
+  const keychain = listed.body.items.find(item => item.name === 'root keychain');
+  assert.equal(prompt.rootPrompt, true);
+  assert.equal(keychain.rootPrompt, false, 'keychain root steps can run unattended');
+
+  const refused = await post('batch/start', { items: [prompt.path], rounds: 1, intervalMs: 0 });
+  assert.equal(refused.status, 400);
+  assert.equal(refused.body.error, 'ROOT_PROMPT_ITEM');
+  assert.match(refused.body.message, /keychain/);
+});
+
 test('an unattended batch refuses a manual checkpoint and an unknown path', async t => {
   const { root, directory } = await fixture(t);
   const { stub } = await stubCli(t, root);

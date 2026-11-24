@@ -9,6 +9,8 @@ import { flowV2Check } from './contracts-v2.js';
 import { isFlowV2 } from './flow-v2.js';
 import { object } from './locator.js';
 import { parseTestItem } from './test-item.js';
+import { plan } from './flow.js';
+import { effectiveRootMode, reachableShells, shellPrivilege } from './shell.js';
 import { agentDesktopVersion } from './desktop.js';
 import { buildInfo } from './version.js';
 import { workdirEnv } from './workdir.js';
@@ -27,6 +29,8 @@ export interface BatchCandidate {
   steps: number;
   /** A manual checkpoint has no operator in an unattended batch. */
   checkpoint: boolean;
+  /** An interactive `root` step needs a password dialog, which a batch cannot show. */
+  rootPrompt: boolean;
   modifiedAt: number;
 }
 
@@ -199,6 +203,7 @@ function candidateOf(path: string, file: string, document: unknown, modifiedAt: 
       version: 2,
       steps: flow.steps.length,
       checkpoint: flow.steps.some(step => step.kind === 'manual_checkpoint'),
+      rootPrompt: false,
     };
   }
   const { flow } = parseTestItem(document);
@@ -211,6 +216,8 @@ function candidateOf(path: string, file: string, document: unknown, modifiedAt: 
     steps: flow.steps.length,
     // Version 1 has no manual checkpoint action; only v2 steps wait for a person.
     checkpoint: false,
+    rootPrompt: reachableShells(plan(flow)).some(({ action }) =>
+      shellPrivilege(action) === 'root' && effectiveRootMode(action) === 'prompt'),
   };
 }
 
@@ -410,6 +417,7 @@ export class BatchRunner {
         saved.window = candidate.window;
         saved.steps = candidate.steps;
         saved.checkpoint = candidate.checkpoint;
+        saved.rootPrompt = candidate.rootPrompt;
         saved.modifiedAt = candidate.modifiedAt;
         saved.reproduce = this.reproduceCommand(candidate);
       }
@@ -443,6 +451,14 @@ export class BatchRunner {
     if (blocked.length) {
       throw new BatchError('CHECKPOINT_ITEM',
         `${blocked.map(item => item.name).join('、')} 含需要人工确认的步骤，不能放进无人值守批次`);
+    }
+    // Batch always runs the CLI with --json, which cannot be combined with
+    // --interactive; a prompt-mode root step would block every night. Refuse
+    // it up front, before any replay starts.
+    const interactiveRoot = selected.filter(item => item.rootPrompt);
+    if (interactiveRoot.length) {
+      throw new BatchError('ROOT_PROMPT_ITEM',
+        `${interactiveRoot.map(item => item.name).join('、')} 含交互式 root 步骤；批量只能跑 keychain 模式或预配置 sudoers`);
     }
     const rounds = input.rounds;
     if (typeof rounds !== 'number' || !Number.isInteger(rounds) || rounds < 1 || rounds > 500) {

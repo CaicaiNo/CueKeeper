@@ -164,7 +164,7 @@ node dist/cli.js run /path/to/test.flow.json --dry-run --snapshot /path/to/snaps
 
 队列严格串行：一条跑完才启动下一条，因为回放需要独占前台窗口。轮次、轮次间隔、失败后继续或停止、以及「跑到某个时刻」都在表头上方设置。每轮重新建立窗口绑定并复查前置条件，但应用状态在轮次之间延续；需要独立初始状态时把清场步骤写在 flow 开头。含 `manual_checkpoint` 的项需要人工确认，不能进入无人值守批次，队列里会置灰拒绝。
 
-每一轮的 CLI 报告写在运行目录的 `batch-<时间>-<随机>/round-NN-MM/report.json`；同目录的 `batch.json` 是批次汇总，**每跑完一行就原子重写一次**，所以崩溃、休眠或手动停止都不会丢掉已完成的行。汇总包含逐行的失败类别、步骤 ID、错误码、断言期望/实际、逐轮报告路径、复现命令与环境版本，结构见 [批量运行报告](docs/batch-report.md)（`schemas/workbench-batch.schema.json`）。批次与单次运行互斥；「停止」向当前子进程发 `SIGINT`，已开始的一轮记为中断，未开始的行不再启动。
+每一轮的 CLI 报告写在运行目录的 `batch-<时间>-<随机>/round-NN-MM/report.json`；同目录的 `batch.json` 是批次汇总，**每跑完一行就原子重写一次**，所以崩溃、休眠或手动停止都不会丢掉已完成的行。汇总包含逐行的失败类别、步骤 ID、错误码、断言期望/实际、逐轮报告路径、复现命令与环境版本，结构见 [批量运行报告](docs/batch-report.md)（`schemas/workbench-batch.schema.json`）。批次与单次运行互斥；「停止」向当前子进程发 `SIGINT`，已开始的一轮记为中断，未开始的行不再启动。批量固定以 `--json` 启动 CLI，而交互式 root 需要 `--interactive`，两者互斥：含 `privilege: "root"` + `privilegeMode: "prompt"` 的流程会在开始前以 `ROOT_PROMPT_ITEM` 拒绝，请改用 `keychain` 或预配置 `sudoers`。密码只能由操作者输入，Cuekeeper 不接收、不转存、不代输。
 
 ### Shell 步骤
 
