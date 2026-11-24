@@ -1,6 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { schemas } from '../dist/contracts.js';
 import { schemasV2 } from '../dist/contracts-v2.js';
+import { schemasWorkbench } from '../dist/contracts-workbench.js';
 
 // Both contract generations are published. Version 1 keeps its existing paths
 // and byte-identical files; version 2 adds versioned `-v2` filenames so an old
@@ -8,6 +9,7 @@ import { schemasV2 } from '../dist/contracts-v2.js';
 const published = [
   ...Object.entries(schemas).map(([name, schema]) => [`${name}.schema.json`, `Cuekeeper ${name} v1`, schema]),
   ...Object.entries(schemasV2).map(([name, schema]) => [`${name}.schema.json`, `Cuekeeper ${name} v2`, schema]),
+  ...Object.entries(schemasWorkbench).map(([name, schema]) => [`${name}.schema.json`, `Cuekeeper ${name} v2`, schema]),
 ];
 
 for (const [file, title, schema] of published) {

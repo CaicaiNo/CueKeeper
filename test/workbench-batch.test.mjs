@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { startWorkbench } from '../dist/workbench.js';
+import { workbenchBatchCheck } from '../dist/contracts-workbench.js';
 
 const example = async name => JSON.parse(await readFile(new URL(`../examples/${name}.json`, import.meta.url), 'utf8'));
 const writeJson = (path, value) => writeFile(path, JSON.stringify(value));
@@ -37,7 +38,8 @@ async function stubCli(t, root) {
     'const entries = flow.steps.map((step, index) => ({',
     '  id: step.id, kind: step.kind, atMs: index * 10, durationMs: 5,',
     '  status: fail && index === 1 ? "failed" : index > 1 && fail ? "skipped" : "passed",',
-    '  ...(fail && index === 1 ? { code: "ASSERTION_FALSE" } : {}),',
+    '  ...(fail && index === 1 ? { code: "ASSERTION_FALSE", message: "期望「退款成功」可见",',
+    '    assertion: { expected: { property: "text", equals: "退款成功" }, actual: "待退款" } } : {}),',
     '}));',
     'const report = { version: 1, flowId: flow.id, flowSha256: "a".repeat(64),',
     '  startedAt: new Date().toISOString(), mode: "replay", status: fail ? "failed" : "passed", entries };',
@@ -99,7 +101,7 @@ test('a batch lists saved items, runs them serially for every round and reports 
   assert.equal(started.body.running, true);
 
   const done = await waitFor(post, state => !state.running);
-  assert.equal(done.counts.total, 4);
+  assert.equal(done.counts.completed, 4);
   assert.equal(done.counts.passed, 2);
   assert.equal(done.counts.failed, 2);
   assert.equal(done.stopReason, 'complete');
@@ -108,8 +110,14 @@ test('a batch lists saved items, runs them serially for every round and reports 
   const refund = done.items.find(item => item.name === '退款流程');
   assert.deepEqual(login.runs.map(run => run.status), ['passed', 'passed']);
   assert.deepEqual(refund.runs.map(run => run.status), ['failed', 'failed']);
-  assert.equal(refund.last.code, 'ASSERTION_FALSE');
-  assert.equal(refund.last.stepId, refund.last.entries[1].id);
+  assert.equal(refund.last.failure.code, 'ASSERTION_FALSE');
+  assert.equal(refund.last.failure.category, 'assertion');
+  assert.equal(refund.last.failure.stepId, refund.last.entries[1].id);
+  assert.deepEqual(refund.last.failure.expected, { property: 'text', equals: '退款成功' });
+  assert.equal(refund.last.failure.actual, '待退款');
+  assert.match(refund.last.report, /^round-\d\d-\d\d\/report\.json$/);
+  assert.ok(Array.isArray(refund.last.steps), 'a failed run keeps its step results in the summary');
+  assert.equal(login.last.steps, undefined, 'a passed run does not duplicate its steps into the summary');
   assert.equal(refund.runs[0].round, 1);
   assert.equal(refund.runs[1].round, 2);
 
@@ -121,12 +129,25 @@ test('a batch lists saved items, runs them serially for every round and reports 
   assert.equal(done.log.length, 4);
   const failedRun = done.log.find(entry => entry.name === '退款流程' && entry.round === 1);
   assert.equal(failedRun.status, 'failed');
+  assert.equal(failedRun.failure.category, 'assertion');
+  assert.equal(done.firstFailure.item, '退款流程');
+  assert.equal(done.firstFailure.failure.code, 'ASSERTION_FALSE');
+  assert.equal(done.failureCounts.assertion, 2);
 
   const summary = JSON.parse(await readFile(done.summaryPath, 'utf8'));
   assert.equal(summary.format, 'cuekeeper-workbench-batch');
-  assert.equal(summary.counts.total, 4);
+  assert.equal(summary.version, 2);
+  assert.equal(summary.status, 'failed');
+  assert.equal(summary.counts.completed, 4);
   assert.equal(summary.items.length, 2);
   assert.ok(summary.items.every(item => item.runs.length === 2));
+  assert.equal(summary.firstFailure.item, '退款流程');
+  assert.match(summary.host.driver, /^agent-desktop /);
+  assert.match(summary.items[0].reproduce, /^cuekeeper run /);
+  const summaryRefund = summary.items.find(item => item.name === '退款流程');
+  assert.equal(summaryRefund.runs[0].failure.category, 'assertion');
+  assert.ok(summaryRefund.runs[0].report.endsWith('/report.json'));
+  assert.ok(workbenchBatchCheck.Check(summary), 'the written summary matches the published schema');
 
   // The per-run report the CLI wrote is readable through the guarded endpoint.
   const report = await post('batch/report', { path: refund.last.reportPath });
@@ -152,7 +173,7 @@ test('stopping a batch keeps finished rows and never starts another round', asyn
 
   const done = await waitFor(post, state => !state.running);
   assert.equal(done.stopReason, 'operator');
-  assert.ok(done.counts.total < 20, 'the stop ends the queue instead of finishing every round');
+  assert.ok(done.counts.completed < 20, 'the stop ends the queue instead of finishing every round');
   assert.ok(done.items.every(item => item.runs.length <= 10));
 });
 
@@ -170,8 +191,36 @@ test('a failing row stops the batch when the operator chose that policy', async 
 
   const done = await waitFor(post, state => !state.running);
   assert.equal(done.stopReason, 'failure');
-  assert.equal(done.counts.total, 1, 'the failing row ends the queue before the next item starts');
+  assert.equal(done.status, 'failed');
+  assert.equal(done.counts.completed, 1, 'the failing row ends the queue before the next item starts');
   assert.equal(done.items.find(item => item.name === '登录并下单').runs.length, 0);
+});
+
+test('the summary is rewritten after every run, so a crash keeps finished rows', async t => {
+  const { root, directory } = await fixture(t);
+  const { stub } = await stubCli(t, root);
+  const { post } = await server(t, { root, stub, directory });
+  const listed = await post('batch/state', {});
+  const login = listed.body.items.find(item => item.name === '登录并下单');
+  const started = await post('batch/start', {
+    items: [login.path], rounds: 3, intervalMs: 800, continueOnFailure: true,
+  });
+  assert.equal(started.status, 202);
+
+  const running = await waitFor(post, state => state.counts.completed >= 1);
+  await sleep(150);
+  const partial = JSON.parse(await readFile(running.summaryPath, 'utf8'));
+  assert.equal(partial.status, 'running');
+  assert.ok(partial.counts.completed >= 1, 'the first finished row is already on disk while the batch runs');
+  const partialItem = partial.items.find(item => item.name === '登录并下单');
+  assert.equal(partialItem.runs.length, partial.counts.completed);
+
+  await post('batch/stop', {});
+  const done = await waitFor(post, state => !state.running);
+  const final = JSON.parse(await readFile(done.summaryPath, 'utf8'));
+  assert.notEqual(final.status, 'running');
+  assert.ok(final.counts.completed >= partial.counts.completed);
+  assert.equal(final.counts.completed, done.counts.completed);
 });
 
 test('an unattended batch refuses a manual checkpoint and an unknown path', async t => {

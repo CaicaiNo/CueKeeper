@@ -6,6 +6,42 @@ const TONES = { passed: 'success', failed: 'error', blocked: 'warning', error: '
 const LABELS = {
   passed: '通过', failed: '失败', blocked: '阻塞', error: '错误', interrupted: '已中断', pending: '待运行',
 };
+const CATEGORY_LABELS = {
+  assertion: '断言未通过', locator: '定位不到', focus: '焦点被抢', permission: '权限不足',
+  timeout: '超时', identity: '应用身份异常', driver: '驱动失败', artifact: '产物写入失败',
+  shell: '脚本失败', unknown: '其他错误',
+};
+
+const categoryLabel = failure => failure ? CATEGORY_LABELS[failure.category] ?? failure.category : '';
+
+const PROPERTY_LABELS = {
+  text: '文本', value: '值', title: '标题', exists: '存在', visible: '可见',
+  screenshot: '截图', exitCode: '退出码',
+};
+
+/** Expected/actual arrive as whatever the report wrote: strings, objects or numbers. */
+function printable(value) {
+  if (value === undefined || value === null) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'boolean') return value ? '是' : '否';
+  if (typeof value === 'number') return String(value);
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    const record = value;
+    // Assertion expectations read as product words instead of raw schema JSON.
+    if (typeof record.property === 'string') {
+      const label = PROPERTY_LABELS[record.property] ?? record.property;
+      if (record.equals !== undefined) return `${label} = ${printable(record.equals)}`;
+      if (record.contains !== undefined) return `${label} 包含 ${printable(record.contains)}`;
+      if (record.matches !== undefined) return `${label} 匹配 ${printable(record.matches)}`;
+      return label;
+    }
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
 
 const badge = status => el('span', {
   className: `run-status badge badge-soft badge-sm badge-${TONES[status] ?? 'ghost'} ${status}`,
@@ -218,7 +254,7 @@ export function createBatchView({ api, status, dialog, setMode, appLabel = app =
     const total = item.runs.length;
     const planned = roundsOf();
     const last = item.last;
-    const failure = last?.stepId;
+    const failure = last?.failure;
     return el('div', {
       className: `batch-row ${state.selected === item.path ? 'active' : ''}`,
       onclick: () => { state.selected = item.path; render(); },
@@ -239,8 +275,12 @@ export function createBatchView({ api, status, dialog, setMode, appLabel = app =
       el('span', { className: 'cell-num' }, planned ? `${total}/${planned}` : String(total)),
       el('span', { className: 'status-stack' }, badge(last?.status ?? 'pending')),
       el('span', { className: 'cell-time' }, last ? duration(last.durationMs) : '—'),
-      el('span', { className: `cell-fail ${last && last.status !== 'passed' ? 'bad' : ''}` },
-        failure ?? (last?.status === 'passed' ? '—' : '')),
+      el('span', {
+        className: `cell-fail ${failure ? 'bad' : ''}`,
+        title: failure?.message ?? undefined,
+      }, failure
+        ? `${categoryLabel(failure)} · ${failure.stepId ?? failure.code ?? '—'}`
+        : (last?.status === 'passed' ? '—' : '')),
       el('span', { className: 'cell-report' },
         button('详情', () => { state.selected = item.path; render(); }, {
           style: 'small', disabled: !last?.reportPath, title: '打开这一轮的报告',
@@ -273,18 +313,37 @@ export function createBatchView({ api, status, dialog, setMode, appLabel = app =
     return [
       el('div', { className: 'inspector-head' },
         el('h3', {}, item.name, badge(last.status)),
-        el('span', { className: 'step-id' }, `第 ${last.round} 轮 · ${clock(last.at)} 开始`),
+        el('span', { className: 'step-id' }, `第 ${last.round} 轮 · ${clock(last.startedAt)} 开始`),
         el('dl', { className: 'meta-grid' },
           el('dt', {}, '应用'), el('dd', {}, appText(item.app)),
           el('dt', {}, '耗时'), el('dd', {}, `${duration(last.durationMs)} · ${last.entries.length} 步`))),
       last.status === 'passed' ? undefined : el('div', { className: 'failure' },
-        el('strong', {}, [last.code, last.stepId].filter(Boolean).join(' · ') || '未通过'),
-        last.message ?? '这一步没有通过，后面的步骤按规则处理。'),
+        el('strong', {}, [categoryLabel(last.failure), last.failure?.code, last.failure?.stepId]
+          .filter(Boolean).join(' · ') || '未通过'),
+        el('p', {}, last.failure?.message ?? '这一步没有通过，后面的步骤按规则处理。'),
+        last.failure?.expected === undefined && last.failure?.actual === undefined
+          ? undefined
+          : el('dl', { className: 'failure-facts' },
+            last.failure?.expected === undefined ? undefined : el('dt', {}, '期望'),
+            last.failure?.expected === undefined ? undefined : el('dd', {}, printable(last.failure.expected)),
+            last.failure?.actual === undefined ? undefined : el('dt', {}, '实际'),
+            last.failure?.actual === undefined ? undefined : el('dd', {}, printable(last.failure.actual))),
+        last.failure?.screenshots ? el('p', { className: 'muted' }, '报告内含截图证据，可在「打开报告」里查看。') : undefined),
       el('div', { className: 'step-list' }, ...steps),
       el('div', { className: 'inspector-actions' },
-        button('打开报告', () => void openReport(item), { disabled: !last.reportPath }),
-        button('只重跑这一轮', () => void rerun(item), { disabled: state.snapshot?.running })),
+        button('打开报告', () => void openReport(item), { style: 'btn-soft', disabled: !last.reportPath }),
+        button('复制复现命令', () => void copyCommand(item), { style: 'btn-soft', title: item.reproduce }),
+        button('只重跑这一轮', () => void rerun(item), { style: 'btn-soft', disabled: state.snapshot?.running })),
     ];
+  }
+
+  async function copyCommand(item) {
+    try {
+      await navigator.clipboard.writeText(item.reproduce);
+      status('已复制复现命令', 'success');
+    } catch {
+      status(`复制失败，命令：${item.reproduce}`, 'error');
+    }
   }
 
   async function rerun(item) {
@@ -309,8 +368,8 @@ export function createBatchView({ api, status, dialog, setMode, appLabel = app =
     const snapshot = state.snapshot;
     const items = snapshot?.items ?? [];
     const selected = items.filter(item => pickOf(item.path) && !item.checkpoint);
-    const planned = selected.length * roundsOf();
-    const done = snapshot?.counts.total ?? 0;
+    const planned = snapshot?.counts.planned ?? selected.length * roundsOf();
+    const done = snapshot?.counts.completed ?? 0;
     const percent = planned ? Math.min(100, Math.round((done / planned) * 100)) : 0;
     return { selected, planned, done, percent, ...(snapshot?.counts ?? {}) };
   }
@@ -343,6 +402,23 @@ export function createBatchView({ api, status, dialog, setMode, appLabel = app =
           : snapshot.stopReason === 'operator' ? '手动停止'
             : snapshot.stopReason === 'failure' ? '失败后停止' : '已完成'}`;
 
+    const first = snapshot?.firstFailure;
+    const banner = $('batch-first-failure');
+    banner.hidden = !first;
+    if (first) {
+      banner.replaceChildren(
+        el('strong', {}, '首个失败'),
+        el('span', {}, `${first.item} · 第 ${first.round} 轮`),
+        el('span', { className: 'mono' },
+          [categoryLabel(first.failure), first.failure.stepId, first.failure.code].filter(Boolean).join(' · ')),
+        el('span', { className: 'muted' }, first.failure.message ?? ''),
+      );
+      banner.onclick = () => { state.selected = first.path; render(); };
+    } else {
+      banner.onclick = undefined;
+      banner.replaceChildren();
+    }
+
     $('batch-queue').replaceChildren(...(
       snapshot?.items.length
         ? snapshot.items.map(queueRow)
@@ -373,7 +449,9 @@ export function createBatchView({ api, status, dialog, setMode, appLabel = app =
           el('span', { className: 't' }, clock(entry.at)),
           el('span', { className: 'flow' }, `${entry.name} · 第 ${entry.round} 轮`),
           el('span', { className: tone }, LABELS[entry.status] ?? entry.status),
-          `  ${entry.detail ?? ''} ${duration(entry.durationMs)}\n`,
+          `  ${entry.failure
+            ? [categoryLabel(entry.failure), entry.failure.stepId, entry.failure.code].filter(Boolean).join(' · ')
+            : ''} ${duration(entry.durationMs)}\n`,
         );
       }
       body.replaceChildren(fragment);

@@ -1,0 +1,727 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Cuekeeper workbench-batch v2",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "format": {
+      "const": "cuekeeper-workbench-batch",
+      "type": "string"
+    },
+    "version": {
+      "const": 2,
+      "type": "number"
+    },
+    "id": {
+      "minLength": 1,
+      "maxLength": 256,
+      "type": "string"
+    },
+    "status": {
+      "anyOf": [
+        {
+          "const": "running",
+          "type": "string"
+        },
+        {
+          "const": "passed",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "type": "string"
+        },
+        {
+          "const": "blocked",
+          "type": "string"
+        },
+        {
+          "const": "stopped",
+          "type": "string"
+        }
+      ]
+    },
+    "stopReason": {
+      "anyOf": [
+        {
+          "const": "operator",
+          "type": "string"
+        },
+        {
+          "const": "time",
+          "type": "string"
+        },
+        {
+          "const": "complete",
+          "type": "string"
+        },
+        {
+          "const": "failure",
+          "type": "string"
+        }
+      ]
+    },
+    "startedAt": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "finishedAt": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "durationMs": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "host": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "platform": {
+          "type": "string"
+        },
+        "arch": {
+          "type": "string"
+        },
+        "release": {
+          "type": "string"
+        },
+        "node": {
+          "type": "string"
+        },
+        "cuekeeper": {
+          "type": "string"
+        },
+        "driver": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "platform",
+        "arch",
+        "release",
+        "node",
+        "cuekeeper",
+        "driver"
+      ]
+    },
+    "config": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "rounds": {
+          "minimum": 1,
+          "maximum": 500,
+          "type": "integer"
+        },
+        "intervalMs": {
+          "minimum": 0,
+          "maximum": 3600000,
+          "type": "integer"
+        },
+        "continueOnFailure": {
+          "type": "boolean"
+        },
+        "stopAt": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "rounds",
+        "intervalMs",
+        "continueOnFailure"
+      ]
+    },
+    "counts": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "planned": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "completed": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "passed": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failed": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "blocked": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "interrupted": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "notCompleted": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "planned",
+        "completed",
+        "passed",
+        "failed",
+        "blocked",
+        "error",
+        "interrupted",
+        "notCompleted"
+      ]
+    },
+    "failureCounts": {
+      "type": "object",
+      "patternProperties": {
+        "^(.*)$": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      }
+    },
+    "firstFailure": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "run": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "item": {
+          "minLength": 1,
+          "maxLength": 256,
+          "type": "string"
+        },
+        "round": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "const": "passed",
+              "type": "string"
+            },
+            {
+              "const": "failed",
+              "type": "string"
+            },
+            {
+              "const": "blocked",
+              "type": "string"
+            },
+            {
+              "const": "error",
+              "type": "string"
+            },
+            {
+              "const": "interrupted",
+              "type": "string"
+            }
+          ]
+        },
+        "failure": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "category": {
+              "anyOf": [
+                {
+                  "const": "assertion",
+                  "type": "string"
+                },
+                {
+                  "const": "locator",
+                  "type": "string"
+                },
+                {
+                  "const": "focus",
+                  "type": "string"
+                },
+                {
+                  "const": "permission",
+                  "type": "string"
+                },
+                {
+                  "const": "timeout",
+                  "type": "string"
+                },
+                {
+                  "const": "identity",
+                  "type": "string"
+                },
+                {
+                  "const": "driver",
+                  "type": "string"
+                },
+                {
+                  "const": "artifact",
+                  "type": "string"
+                },
+                {
+                  "const": "shell",
+                  "type": "string"
+                },
+                {
+                  "const": "unknown",
+                  "type": "string"
+                }
+              ]
+            },
+            "code": {
+              "type": "string"
+            },
+            "stepId": {
+              "type": "string"
+            },
+            "stepKind": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "expected": {},
+            "actual": {},
+            "screenshots": {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "baseline": {
+                  "type": "string"
+                },
+                "actual": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "required": [
+            "category"
+          ]
+        }
+      },
+      "required": [
+        "run",
+        "path",
+        "item",
+        "round",
+        "status",
+        "failure"
+      ]
+    },
+    "error": {
+      "type": "string"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "name": {
+            "minLength": 1,
+            "maxLength": 256,
+            "type": "string"
+          },
+          "file": {
+            "minLength": 1,
+            "maxLength": 256,
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "version": {
+            "minimum": 1,
+            "maximum": 2,
+            "type": "integer"
+          },
+          "app": {
+            "type": "string"
+          },
+          "window": {
+            "type": "string"
+          },
+          "selected": {
+            "type": "boolean"
+          },
+          "reproduce": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "runs": {
+            "type": "array",
+            "items": {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "run": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "round": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "status": {
+                  "anyOf": [
+                    {
+                      "const": "passed",
+                      "type": "string"
+                    },
+                    {
+                      "const": "failed",
+                      "type": "string"
+                    },
+                    {
+                      "const": "blocked",
+                      "type": "string"
+                    },
+                    {
+                      "const": "error",
+                      "type": "string"
+                    },
+                    {
+                      "const": "interrupted",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "startedAt": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "finishedAt": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "durationMs": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "exitCode": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "signal": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "failure": {
+                  "additionalProperties": false,
+                  "type": "object",
+                  "properties": {
+                    "category": {
+                      "anyOf": [
+                        {
+                          "const": "assertion",
+                          "type": "string"
+                        },
+                        {
+                          "const": "locator",
+                          "type": "string"
+                        },
+                        {
+                          "const": "focus",
+                          "type": "string"
+                        },
+                        {
+                          "const": "permission",
+                          "type": "string"
+                        },
+                        {
+                          "const": "timeout",
+                          "type": "string"
+                        },
+                        {
+                          "const": "identity",
+                          "type": "string"
+                        },
+                        {
+                          "const": "driver",
+                          "type": "string"
+                        },
+                        {
+                          "const": "artifact",
+                          "type": "string"
+                        },
+                        {
+                          "const": "shell",
+                          "type": "string"
+                        },
+                        {
+                          "const": "unknown",
+                          "type": "string"
+                        }
+                      ]
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "stepId": {
+                      "type": "string"
+                    },
+                    "stepKind": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "expected": {},
+                    "actual": {},
+                    "screenshots": {
+                      "additionalProperties": false,
+                      "type": "object",
+                      "properties": {
+                        "baseline": {
+                          "type": "string"
+                        },
+                        "actual": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "required": [
+                    "category"
+                  ]
+                },
+                "report": {
+                  "type": "string"
+                },
+                "steps": {
+                  "maxItems": 500,
+                  "type": "array",
+                  "items": {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "kind": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "type": "string"
+                      },
+                      "code": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "status"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "run",
+                "round",
+                "status",
+                "startedAt",
+                "finishedAt",
+                "durationMs",
+                "exitCode",
+                "signal"
+              ]
+            }
+          }
+        },
+        "required": [
+          "name",
+          "file",
+          "path",
+          "version",
+          "app",
+          "window",
+          "selected",
+          "reproduce",
+          "runs"
+        ]
+      }
+    },
+    "log": {
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "at": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "run": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "name": {
+            "minLength": 1,
+            "maxLength": 256,
+            "type": "string"
+          },
+          "round": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "const": "passed",
+                "type": "string"
+              },
+              {
+                "const": "failed",
+                "type": "string"
+              },
+              {
+                "const": "blocked",
+                "type": "string"
+              },
+              {
+                "const": "error",
+                "type": "string"
+              },
+              {
+                "const": "interrupted",
+                "type": "string"
+              }
+            ]
+          },
+          "durationMs": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "failure": {
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "category": {
+                "anyOf": [
+                  {
+                    "const": "assertion",
+                    "type": "string"
+                  },
+                  {
+                    "const": "locator",
+                    "type": "string"
+                  },
+                  {
+                    "const": "focus",
+                    "type": "string"
+                  },
+                  {
+                    "const": "permission",
+                    "type": "string"
+                  },
+                  {
+                    "const": "timeout",
+                    "type": "string"
+                  },
+                  {
+                    "const": "identity",
+                    "type": "string"
+                  },
+                  {
+                    "const": "driver",
+                    "type": "string"
+                  },
+                  {
+                    "const": "artifact",
+                    "type": "string"
+                  },
+                  {
+                    "const": "shell",
+                    "type": "string"
+                  },
+                  {
+                    "const": "unknown",
+                    "type": "string"
+                  }
+                ]
+              },
+              "code": {
+                "type": "string"
+              },
+              "stepId": {
+                "type": "string"
+              },
+              "stepKind": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "expected": {},
+              "actual": {},
+              "screenshots": {
+                "additionalProperties": false,
+                "type": "object",
+                "properties": {
+                  "baseline": {
+                    "type": "string"
+                  },
+                  "actual": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "required": [
+              "category"
+            ]
+          }
+        },
+        "required": [
+          "at",
+          "run",
+          "name",
+          "round",
+          "status",
+          "durationMs"
+        ]
+      }
+    }
+  },
+  "required": [
+    "format",
+    "version",
+    "id",
+    "status",
+    "host",
+    "counts",
+    "failureCounts",
+    "items",
+    "log"
+  ]
+}
