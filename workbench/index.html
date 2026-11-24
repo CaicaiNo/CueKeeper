@@ -14,11 +14,15 @@
     <div class="brand"><span class="mark" aria-hidden="true"></span>CueKeeper</div>
     <span class="topbar-divider" aria-hidden="true"></span>
     <h1>工作台</h1>
+    <div class="tabs tabs-box mode-switch" role="tablist" aria-label="工作台模式">
+      <button id="mode-edit" class="tab tab-active" type="button" role="tab" aria-selected="true">编辑流程</button>
+      <button id="mode-batch" class="tab" type="button" role="tab" aria-selected="false">批量运行</button>
+    </div>
     <span id="session-name" class="session-name"></span>
     <button id="import-button" class="btn btn-primary btn-sm trailing" type="button">导入运行目录</button>
   </header>
 
-  <main class="workspace">
+  <main id="edit-workspace" class="workspace">
     <aside class="summary pane card" aria-labelledby="session-title">
       <h2 id="session-title" class="section-title card-title"><span class="sec">01</span>录制会话</h2>
       <div id="summary"></div>
@@ -55,7 +59,74 @@
     </aside>
   </main>
 
-  <section class="draft card" aria-labelledby="draft-title">
+  <main id="batch-workspace" class="workspace" hidden>
+    <aside class="summary pane card queue" aria-labelledby="queue-title">
+      <div class="queue-head">
+        <h2 id="queue-title" class="section-title card-title"><span class="sec">01</span>工作流队列</h2>
+        <label class="check-row"><input id="batch-select-all" type="checkbox" class="checkbox checkbox-sm" checked>全选</label>
+      </div>
+      <div id="batch-queue" class="queue-list"></div>
+      <p class="hint">串行执行：一条跑完才起下一条；每轮重新绑定窗口、复查前置条件，不复用上一轮状态。</p>
+      <button id="batch-add" class="btn btn-sm queue-add" type="button">添加工作流</button>
+    </aside>
+
+    <section class="batch-panel pane card" aria-labelledby="batch-title">
+      <div class="pane-header">
+        <h2 id="batch-title" class="card-title">批次执行</h2>
+        <span id="batch-count" class="muted"></span>
+        <div class="button-group trailing">
+          <button id="batch-export" class="btn btn-sm" type="button">导出汇总</button>
+          <button id="batch-stop" class="btn btn-sm" type="button" disabled>停止</button>
+          <button id="batch-start" class="btn btn-primary btn-sm" type="button">开始批次</button>
+        </div>
+      </div>
+      <div class="batch-progress">
+        <div class="track" role="progressbar" aria-label="批次进度"><span id="batch-progress-bar"></span></div>
+        <span id="batch-progress-text" class="muted"></span>
+      </div>
+      <div class="batch-settings">
+        <label class="field">轮次
+          <input id="batch-rounds" class="input input-sm" type="number" min="1" max="500" step="1" value="20">
+        </label>
+        <label class="field">轮次间隔（秒）
+          <input id="batch-interval" class="input input-sm" type="number" min="0" max="3600" step="1" value="2">
+        </label>
+        <label class="field">失败后
+          <select id="batch-failure" class="select select-sm">
+            <option value="continue" selected>继续下一轮</option>
+            <option value="stop">停止批次</option>
+          </select>
+        </label>
+        <label class="field">跑到
+          <input id="batch-stop-at" class="input input-sm" type="time" aria-label="停止时间（可选）">
+        </label>
+      </div>
+      <div class="batch-columns" aria-hidden="true">
+        <span></span><span>工作流</span><span>应用</span><span>轮次</span><span>状态</span><span>最近耗时</span><span>最近失败步骤</span><span>报告</span>
+      </div>
+      <div id="batch-rows" class="batch-body" aria-label="批次执行"></div>
+    </section>
+
+    <aside class="inspector pane card" aria-label="运行详情">
+      <div class="tabs tabs-box" aria-label="右侧面板">
+        <button class="tab tab-active" type="button">运行详情</button>
+      </div>
+      <div id="batch-detail" class="inspector-body"></div>
+    </aside>
+  </main>
+
+  <section id="batch-log" class="draft card log" aria-labelledby="batch-log-title" hidden>
+    <div class="draft-header">
+      <h2 id="batch-log-title" class="card-title">批次日志</h2>
+      <span id="batch-log-counts" class="log-counts"></span>
+      <div class="button-group trailing">
+        <button id="batch-open-summary" class="btn btn-sm" type="button" disabled>打开汇总 JSON</button>
+      </div>
+    </div>
+    <pre id="batch-log-body" class="log-body"></pre>
+  </section>
+
+  <section id="draft-section" class="draft card" aria-labelledby="draft-title">
     <div class="draft-header">
       <h2 id="draft-title" class="card-title">测试项草稿</h2>
       <input id="test-name" class="test-name input input-sm" aria-label="测试项名称" placeholder="测试项名称" maxlength="256" required>

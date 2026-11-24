@@ -158,6 +158,14 @@ node dist/cli.js run /path/to/test.flow.json --dry-run --snapshot /path/to/snaps
 
 工作台在本机监听。离线模式只读快照。实时回放需要 macOS、`--allow-live-replay` 启动选项和界面中的目标窗口确认。含坐标点击的测试项由 CLI 使用 `--headed` 回放。
 
+### 批量运行
+
+顶部模式切到「批量运行」后，工作台把当前运行目录里保存的测试项排成队列：`test-*.flow.json`、`test-*.test.json` 与 v2 修订 `flow.edited-*.json`，按保存时间从新到旧。左栏是队列，可以逐条勾选；中间是每个工作流最近一轮的结果，右栏是选中那一轮的逐步结果，底部是批次日志。
+
+队列严格串行：一条跑完才启动下一条，因为回放需要独占前台窗口。轮次、轮次间隔、失败后继续或停止、以及「跑到某个时刻」都在表头上方设置。每轮重新建立窗口绑定并复查前置条件，但应用状态在轮次之间延续；需要独立初始状态时把清场步骤写在 flow 开头。含 `manual_checkpoint` 的项需要人工确认，不能进入无人值守批次，队列里会置灰拒绝。
+
+每一轮的 CLI 报告写在运行目录的 `batch-<时间>-<随机>/round-NN-MM/report.json`，批次结束再写一份 `batch.json` 汇总（`format: "cuekeeper-workbench-batch"`）。批次与单次运行互斥；「停止」向当前子进程发 `SIGINT`，已开始的一轮记为中断，未开始的行不再启动。
+
 ### Shell 步骤
 
 `kind: "shell"` 的步骤在用户态串行执行命令，可与 UI 动作混排。默认形态 `argv` 把数组逐项交给 `spawn`，不经过 shell；`shell: true` 时必须用 `command`，固定通过 `/bin/sh -c` 启动非登录 shell。契约见 [Shell 步骤设计](docs/shell-steps.md)，命令与参数不写入报告。
@@ -217,7 +225,7 @@ node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --selec
 | `report upload [--queue <dir>] [--retry-paused]` | 处理本地上传队列；暂停项修复原因后用 `--retry-paused` 手动继续 |
 | `serve --config <server.json> --data <dir>` | 启动自建上传服务；列表、下载、查看器接口见[上传服务](docs/server.md) |
 
-v2 flow 顶层没有 `target`，每一步用 `scope` 声明窗口、应用或系统界面；`windowKey` 在 flow 内绑定一个 App，标题变化后仍跟随同一窗口。契约、报告和哈希定义见 `schemas/flow-v2.schema.json` 与 `schemas/report-v2.schema.json`。批量、报告打包和工作台运行仍只支持 v1，遇到 v2 会以 `UNSUPPORTED_FLOW_VERSION` 停止；工作台可以按 scope 分组复盘 v2 时间线。
+v2 flow 顶层没有 `target`，每一步用 `scope` 声明窗口、应用或系统界面；`windowKey` 在 flow 内绑定一个 App，标题变化后仍跟随同一窗口。契约、报告和哈希定义见 `schemas/flow-v2.schema.json` 与 `schemas/report-v2.schema.json`。数据表批量（`--data`）和报告打包仍只支持 v1；工作台可以按 scope 分组复盘 v2 时间线，批量队列也能直接回放 v2 修订。
 
 v2 实时回放需要显式 `--foreground`，因为它会跨 App 抢前台并注入输入。运行时一次只持有一个前台租约（`~/.cuekeeper/run.lock`，可用 `CUEKEEPER_STATE_DIR` 改目录），取消、失败和正常结束都会释放。每步先按 `windowKey` 绑定进程实例与原生窗口号，再确认前台；窗口被移动或改名不影响绑定，同名新窗口不会接管旧 `windowKey`，进程重启、路径错误副本和人工切走分别以 `APP_AMBIGUOUS`、`APP_PATH_INVALID`、`FOCUS_INTERRUPTED` 停在原步骤。
 

@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
-import { lstat, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listApps } from './app-catalog.js';
 import { appIconPng } from './apps.js';
@@ -27,6 +27,7 @@ import {
 import { keepConfirmedSetup } from './setup.js';
 import { parseLibraryItem, parseTestItem, resolveSecrets } from './test-item.js';
 import { workbenchAssets } from './workbench-assets.js';
+import { BatchError, BatchRunner } from './workbench-batch.js';
 import { createRecordController } from './workbench-record.js';
 import type { RecordStatus } from './workbench-record.js';
 import { loadSession, sameTarget } from './workbench-session.js';
@@ -237,6 +238,18 @@ export async function startWorkbench(options: {
   let checkpointWait: CheckpointState | undefined;
   /** Writes one answer line to the CLI child's stdin; only set for a checkpoint run. */
   let checkpointAnswer: ((line: string) => boolean) | undefined;
+  // The batch queue owns the same desktop as a single replay: beginning a batch
+  // flips the single-run guard too, so the two can never overlap.
+  const batch = new BatchRunner({
+    directory: () => session?.directory ?? '',
+    cliPath,
+    workRoot,
+    allowLive: () => allowLive,
+    allowShell: () => allowShell,
+    allowSudo: () => allowSudo,
+    begin: () => { running = true; },
+    end: () => { running = false; },
+  });
   let origin: string;
   const recorder = createRecordController({
     cli: options.record?.cli ?? fileURLToPath(new URL('./cli.js', import.meta.url)),
@@ -482,9 +495,52 @@ export async function startWorkbench(options: {
       const nextEditable = await openEditor(imported);
       session = imported;
       editable = nextEditable;
+      // The queue belongs to the previous run directory; a new import starts
+      // with an empty one instead of listing another session's saved items.
+      batch.reset();
       return send(response, 200, sessionView(imported));
     }
+    if (path === '/api/batch/state') {
+      return send(response, 200, await batch.snapshot());
+    }
+    if (path === '/api/batch/start') {
+      // A single replay owns the desktop too; a batch must wait for it.
+      if (running && !batch.running) {
+        return send(response, 409, { error: 'BUSY', message: 'A single test is running' });
+      }
+      if (recorder.recording) {
+        return send(response, 409, { error: 'RECORDING', message: 'Stop the recording before starting a batch' });
+      }
+      try {
+        return send(response, 202, await batch.start(data));
+      } catch (error) {
+        if (error instanceof BatchError) {
+          return send(response, 400, { error: error.code, message: error.message });
+        }
+        throw error;
+      }
+    }
+    if (path === '/api/batch/stop') {
+      return send(response, 200, { stopped: batch.stop() });
+    }
+    if (path === '/api/batch/report') {
+      // Only a report the batch itself wrote under this session may be read.
+      const raw = data.path;
+      const directory = session?.directory;
+      if (typeof raw !== 'string' || !directory) throw new Error('Choose a batch report');
+      const target = await realpath(resolve(raw));
+      const rel = relative(await realpath(directory), target);
+      if (!rel || rel.startsWith('..') || isAbsolute(rel) ||
+          !/(^|[\\/])batch-[^\\/]+[\\/]round-\d+-\d+[\\/]report\.json$/.test(rel)) {
+        throw new Error('That file is not a report from this batch');
+      }
+      const info = await lstat(target);
+      if (!info.isFile() || info.size > 16 * 1024 * 1024) throw new Error('The report is too large to open');
+      return send(response, 200, JSON.parse(await readFile(target, 'utf8')));
+    }
     if (path === '/api/stop') {
+      // A batch stops its own child and keeps the rows it already finished.
+      if (batch.running) return send(response, 200, { stopped: batch.stop() });
       // A live v2 replay is a CLI child process; stopping it signals the CLI so
       // its report still records which step was interrupted. A waiting
       // checkpoint ends with its own cancel answer so the report names it.
@@ -897,8 +953,9 @@ export async function startWorkbench(options: {
     });
   });
   const stop = () => {
-    // A recording outlives no server: stop it before the port closes.
+    // A recording or a batch outlives no server: stop it before the port closes.
     recorder.cancel();
+    batch.stop();
     server.close();
   };
   options.signal.addEventListener('abort', stop, { once: true });

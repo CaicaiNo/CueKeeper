@@ -8,6 +8,7 @@ import {
   checkpointWaitFacts, pickCandidateLabel, durationLabel, sessionDurationLabel,
 } from './model.js';
 import { createAppPicker } from './picker.js';
+import { createBatchView } from './batch.js';
 
 const $ = name => document.getElementById(name);
 const dialog = $('dialog');
@@ -21,6 +22,7 @@ const state = {
 
 const dom = createDom(document);
 const { el, icon, button, empty, muted, input, field, select } = dom;
+const batchView = createBatchView({ api, status, dialog: openDialog, setMode, appLabel: app => state.appNames[app] });
 
 const KIND_ICONS = {
   click: 'pointer', doubleClick: 'pointerDouble', tripleClick: 'pointerDouble', rightClick: 'pointerRight',
@@ -1446,6 +1448,22 @@ async function v2PickDialog(step) {
     v2Edit({ kind: 'update', id: step.id, patch: { target: candidates[Number(chooser.value)].locator } }));
 }
 
+/** Switches the workbench between editing one flow and running a queue. */
+function setMode(mode) {
+  const batch = mode === 'batch';
+  document.body.classList.toggle('batch-view', batch);
+  $('edit-workspace').hidden = batch;
+  $('draft-section').hidden = batch;
+  $('batch-workspace').hidden = !batch;
+  $('batch-log').hidden = !batch;
+  $('mode-edit').classList.toggle('tab-active', !batch);
+  $('mode-batch').classList.toggle('tab-active', batch);
+  $('mode-edit').setAttribute('aria-selected', String(!batch));
+  $('mode-batch').setAttribute('aria-selected', String(batch));
+  if (batch) batchView.enter();
+  else batchView.leave();
+}
+
 function render() {
   const focus = document.activeElement?.id;
   renderSummary();
@@ -2114,6 +2132,8 @@ for (const [id, name] of [['import-button', 'folder'], ['save-button', 'save'], 
   if (node && !node.querySelector('svg')) node.prepend(icon(name));
 }
 
+$('mode-edit').onclick = () => setMode('edit');
+$('mode-batch').onclick = () => setMode('batch');
 $('app-picker').onclick = openAppPicker;
 $('import-button').onclick = importDialog;
 $('show-ignored').onchange = event => { state.showIgnored = event.target.checked; render(); };
@@ -2128,6 +2148,7 @@ try {
   state.allowLive = initial.allowLive;
   setSession(initial.session ?? null);
   status(initial.session ? '已导入本地会话' : '会话与测试项保存在本机');
+  if (location.hash === '#batch') setMode('batch');
 } catch (error) {
   render();
   status(error.message, 'error');
