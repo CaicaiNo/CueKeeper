@@ -60,7 +60,7 @@ const help = `Cuekeeper ${buildInfo().version}
   cuekeeper ime set <id> [--json]
   cuekeeper ime restore --run <run-directory> [--strict-ime] [--json]
   cuekeeper ime unlock --run <run-id> [--json]
-  cuekeeper workbench [run-directory] [--port <port>] [--library <directory>] [--no-live-replay] [--allow-shell] [--allow-sudo]
+  cuekeeper workbench [run-directory] [--port <port>] [--library <directory>] [--no-live-replay] [--no-allow-shell] [--no-allow-sudo]
   cuekeeper pick --app <bundle-id> --window <title> [--app-path <path>] [--select <ref>] [--snapshot <snapshot.json>] [--json]
   cuekeeper record [--seconds 25] [--countdown 3] [--no-indicator] [--sound] [--clipboard] [--trace-clicks] [--json]
   cuekeeper record --app <bundle-id> [--window <title>] [--out <flow.json>] [--app-path <path>] [--seconds 25] [--countdown 0] [--json]
@@ -710,6 +710,7 @@ async function main() {
         'allow-live-replay': { type: 'boolean', default: true },
         'no-live-replay': { type: 'boolean' }, 'allow-shell': { type: 'boolean' },
         'allow-sudo': { type: 'boolean' },
+        'no-allow-shell': { type: 'boolean' }, 'no-allow-sudo': { type: 'boolean' },
       },
     });
     if (positionals.length > 1) throw new Error('Specify at most one run directory');
@@ -720,8 +721,13 @@ async function main() {
       // Live replay is on by default; pass --no-live-replay to serve a
       // read-only workbench.
       allowLive: values['allow-live-replay'] === true && values['no-live-replay'] !== true,
-      allowShell: values['allow-shell'] ?? false,
-      allowSudo: values['allow-sudo'] ?? false,
+      // Shell and privileged steps are on by default. The run preview plus
+      // the one-time plan token (and, for root steps, the password dialog)
+      // remain the gate; --no-allow-shell / --no-allow-sudo serve a
+      // restricted workbench. --allow-shell / --allow-sudo stay accepted as
+      // no-ops for existing launch scripts.
+      allowShell: values['no-allow-shell'] !== true,
+      allowSudo: values['no-allow-sudo'] !== true,
       signal,
     });
     success({ url: workbench.url }, workbench.url);

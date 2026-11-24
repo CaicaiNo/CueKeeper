@@ -13,7 +13,7 @@ import { createBatchView } from './batch.js';
 const $ = name => document.getElementById(name);
 const dialog = $('dialog');
 const state = {
-  session: null, library: [], allowLive: false, allowSudo: false, app: '', selected: new Set(), ignored: new Set(),
+  session: null, library: [], allowLive: false, allowShell: true, allowSudo: false, app: '', selected: new Set(), ignored: new Set(),
   expanded: new Set(), showIgnored: false, focused: null, draft: [], tab: 'actions', saving: false,
   running: false, setup: null, appPaths: {}, catalog: null, catalogAt: 0, catalogError: null, appNames: {},
   v2: null, v2Report: null, v2Selected: null, v2Filter: '', v2Busy: false,
@@ -1887,9 +1887,9 @@ function importDialog() {
         el('h3', {}, `Shell 定义 ${shell.reachable + shell.definitions} 个`),
         muted(`可执行 ${shell.reachable} 个 · 行为定义内 ${shell.definitions} 个（含尚未调用的行为）`),
         shell.privileged
-          ? muted(`其中 ${shell.privileged} 个是提权步骤，实时运行还需 --allow-sudo；密码授权型 Root 步骤还会在运行确认后弹框，钥匙串模式需先执行 cuekeeper sudo set。`)
+          ? muted(`其中 ${shell.privileged} 个是提权步骤；密码授权型 Root 步骤会在运行确认后弹框，钥匙串模式需先执行 cuekeeper sudo set。${state.allowSudo ? '' : ' 本次启动用 --no-allow-sudo 关闭了提权，运行会被拒绝。'}`)
           : muted('全部是用户态步骤。'),
-        muted('保存、校验和离线预览都不会执行；实时运行需要启动参数 --allow-shell。'),
+        muted(`保存、校验和离线预览都不会执行；实时运行需在运行前确认。${state.allowShell ? '' : ' 本次启动用 --no-allow-shell 关闭了 Shell 执行。'}`),
       ]), 0);
     }
   });
@@ -2028,7 +2028,7 @@ function behaviorDialog(item, copy, entry) {
   const shellSteps = behavior.steps.filter(step => step.kind === 'shell').length;
   openDialog(entry ? '编辑行为参数' : copy ? '复制行为' : '引用行为', [
     name ? field('副本名称', name) : muted(`${behavior.name} · ${behavior.steps.length} 步`),
-    shellSteps ? muted(`该行为含 ${shellSteps} 个 Shell 步骤，加入草稿后仍需 --allow-shell 才能实时运行。`) : undefined,
+    shellSteps ? muted(`该行为含 ${shellSteps} 个 Shell 步骤，加入草稿后可实时运行（运行前需确认）。${state.allowShell ? '' : ' 本次启动用 --no-allow-shell 关闭了 Shell 执行。'}`) : undefined,
     ...fields.map(({ param, secret, node }) => field(secret ? `${param} · 环境变量名` : param, node)),
   ], entry ? '应用参数' : '加入草稿', () => {
     for (const { secret, node } of fields) {
@@ -2266,7 +2266,7 @@ function shellDialog(preset = {}) {
   });
   const refreshSudo = async () => {
     if (!state.allowSudo) {
-      sudoConfigured.textContent = '启动工作台时加 --allow-sudo 才能保存或使用管理员密码。';
+      sudoConfigured.textContent = '本次启动用 --no-allow-sudo 关闭了提权，无法保存或使用管理员密码。';
       return;
     }
     try {
@@ -2527,10 +2527,10 @@ function runDialog() {
     if (selected === 'live' && !confirmed.checked) throw new Error('确认目标窗口后开始回放。');
     if (!plan) throw new Error('执行计划尚未生成，请稍候再试。');
     if (selected === 'live' && plan.shell.reachable && !plan.allowShell) {
-      throw new Error('实时运行 Shell 步骤需要启动参数 --allow-shell。');
+      throw new Error('本次启动以 --no-allow-shell 关闭了 Shell 执行，无法实时运行 Shell 步骤。');
     }
     if (selected === 'live' && plan.shell.privileged && !plan.allowSudo) {
-      throw new Error('含提权步骤，需要启动参数 --allow-sudo。');
+      throw new Error('含提权步骤，本次启动以 --no-allow-sudo 关闭了提权。');
     }
     const payload = {
       ...currentTest(), mode: selected, confirm: confirmed.checked, captureOutput: capture.checked,
@@ -2574,7 +2574,8 @@ try {
   const initial = await api('state');
   state.library = initial.library ?? { builtin: [], custom: [] };
   state.allowLive = initial.allowLive;
-  state.allowSudo = initial.allowSudo === true;
+  state.allowShell = initial.allowShell !== false;
+  state.allowSudo = initial.allowSudo !== false;
   setSession(initial.session ?? null);
   status(initial.session ? '已导入本地会话' : '会话与测试项保存在本机');
   // The workbench opens on the queue: most sessions are overnight batches.

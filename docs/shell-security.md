@@ -32,7 +32,7 @@ HAOC-82 · 风险说明 · 契约见 [Shell 步骤设计](shell-steps.md)
 | --- | --- | --- |
 | CLI | `--allow-shell --allow-sudo --interactive` | `--interactive` 与 `--json` 互斥（`--dry-run` 预览除外），机器模式不静默降级。 |
 | CLI（Keychain） | `--allow-shell --allow-sudo --non-interactive` | 只从登录钥匙串读取已保存的管理员密码，不弹框；缺凭据时阻塞。 |
-| 工作台 | 启动参数 `--allow-shell --allow-sudo`，且运行确认 `confirm: true` + 一次性计划令牌 | 预览已展示完整命令、目录与权限；令牌绑定会话、flow 摘要与计划。 |
+| 工作台 | 默认开启（`--no-allow-shell` / `--no-allow-sudo` 可关闭），且运行确认 `confirm: true` + 一次性计划令牌 | 预览已展示完整命令、目录与权限；令牌绑定会话、flow 摘要与计划。 |
 | 非交互（CI） | `privilegeMode: "sudoers"` | 只走 `sudo -n`，不做任何弹框；未获授权时明确失败。 |
 | 工作台批量 | `keychain` 或预配置 `sudoers` | 批量固定加 `--json`，与 `--interactive` 互斥；`prompt` 模式在开始前以 `ROOT_PROMPT_ITEM` 拒绝，不会跑到一半弹框。 |
 
@@ -50,7 +50,7 @@ cuekeeper sudo status   # 只查元数据，不读取密码
 cuekeeper sudo clear    # 删除钥匙串项
 ```
 
-- 工作台也可以不走终端：草稿区「插入提权」会预置 Root + 登录钥匙串，直接填管理员密码并保存。密码只经本机回环请求进入工作台进程，再通过 stdin 交给 `security`，不写入 flow、报告、日志或临时文件；作用等同于 `cuekeeper sudo set`。工作台启动时仍需 `--allow-sudo`。
+- 工作台也可以不走终端：草稿区「插入提权」会预置 Root + 登录钥匙串，直接填管理员密码并保存。密码只经本机回环请求进入工作台进程，再通过 stdin 交给 `security`，不写入 flow、报告、日志或临时文件；作用等同于 `cuekeeper sudo set`。工作台默认开启提权；用 `--no-allow-sudo` 启动时该入口会被拒绝。
 - 保存的是**管理员密码本身**，等价于完整 root 权限。只用于可信、单人使用的机器；不要在多用户共享、远程或不受控的机器上启用。
 - 钥匙串项固定为服务 `com.cuekeeper.sudo`、账号 `$USER`，ACL 只信任 `/usr/bin/security`。`cuekeeper sudo set` 调用 `security add-generic-password -U -s com.cuekeeper.sudo -a "$USER" -T /usr/bin/security -w`：`-w` 放在最后且不带值，由 `security` 自己提示输入，密码不进入 argv、环境变量、文件、报告或日志。读取路径同样经 `security find-generic-password -w`，只把结果写进 sudo 的管道。
 - 修改管理员密码后必须重新执行 `cuekeeper sudo set`（旧密码会被 sudo 拒绝，步骤报 `SHELL_PRIVILEGE_REQUIRED`）；离职、转借或怀疑泄漏时执行 `cuekeeper sudo clear` 并轮换系统密码。
