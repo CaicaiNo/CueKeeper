@@ -34,6 +34,7 @@ HAOC-82 · 风险说明 · 契约见 [Shell 步骤设计](shell-steps.md)
 | CLI（Keychain） | `--allow-shell --allow-sudo --non-interactive` | 只从登录钥匙串读取已保存的管理员密码，不弹框；缺凭据时阻塞。 |
 | 工作台 | 启动参数 `--allow-shell --allow-sudo`，且运行确认 `confirm: true` + 一次性计划令牌 | 预览已展示完整命令、目录与权限；令牌绑定会话、flow 摘要与计划。 |
 | 非交互（CI） | `privilegeMode: "sudoers"` | 只走 `sudo -n`，不做任何弹框；未获授权时明确失败。 |
+| 工作台批量 | `keychain` 或预配置 `sudoers` | 批量固定加 `--json`，与 `--interactive` 互斥；`prompt` 模式在开始前以 `ROOT_PROMPT_ITEM` 拒绝，不会跑到一半弹框。 |
 
 `privilegeMode` 省略时是 `"prompt"`（每次弹框）。`"sudoers"` 需要管理员预装 `NOPASSWD` 策略，用于无人值守；本仓库在 HAOC-76 真机验收通过前把 `sudoers` 执行保持在禁用状态，任何尝试都以 `SHELL_PRIVILEGE_REQUIRED` 明确阻塞，不会回退到弹框。`"keychain"` 见下一节。
 
