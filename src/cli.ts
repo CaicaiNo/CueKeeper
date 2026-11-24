@@ -33,6 +33,7 @@ import {
   eventsCheckpointChannel, nativeSecureInputProbe, nativeSystemDialogProbe, terminalCheckpointChannel,
 } from './manual-checkpoint.js';
 import { blockedShellReport, runFlow } from './run.js';
+import { startReplayIndicator } from './indicator.js';
 import type { ShellRunOptions } from './run.js';
 import { runFlowV2 } from './run-v2.js';
 import { createRootPrivilegeRunner } from './shell-privilege.js';
@@ -406,7 +407,7 @@ async function main() {
         'no-input-source-switch': { type: 'boolean' }, 'input-source': { type: 'string' },
         'input-source-switch': { type: 'boolean' },
         'strict-ime': { type: 'boolean' },
-        'checkpoint-events': { type: 'boolean' },
+        'checkpoint-events': { type: 'boolean' }, 'no-indicator': { type: 'boolean' },
       },
     });
     checkPositionals(positionals, 1);
@@ -477,14 +478,23 @@ async function main() {
       macOnly();
       const inputs = values.inputs ? await readInputs(values.inputs) : undefined;
       const baselineDir = resolve(dirname(resolve(positionals[0])), 'baselines');
-      const report = await withDesktop({ headed: values.headed ?? false, signal }, desktop =>
-        runFlowV2(flow, {
-          desktop, signal, baselineDir,
-          ...(inputs ? { inputs } : {}),
-          checkpoints: checkpointEvents ? eventsCheckpointChannel() : terminalCheckpointChannel(),
-          secureInputActive: nativeSecureInputProbe(),
-          systemDialogVisible: nativeSystemDialogProbe(),
-        }));
+      const indicator = startReplayIndicator({
+        enabled: values['no-indicator'] !== true,
+        onCancel: () => cancellation.abort(new Error('Cancelled from the replay overlay')),
+      });
+      let report;
+      try {
+        report = await withDesktop({ headed: values.headed ?? false, signal }, desktop =>
+          runFlowV2(flow, {
+            desktop, signal, baselineDir,
+            ...(inputs ? { inputs } : {}),
+            checkpoints: checkpointEvents ? eventsCheckpointChannel() : terminalCheckpointChannel(),
+            secureInputActive: nativeSecureInputProbe(),
+            systemDialogVisible: nativeSystemDialogProbe(),
+          }));
+      } finally {
+        indicator.stop();
+      }
       if (values.report) await writeNew(values.report, JSON.stringify(report, null, 2) + '\n');
       const details = report.entries.map(entry =>
         `${entry.id} ${entry.kind}${entry.delivery ? ` ${entry.delivery}` : ''} ${entry.status}` +
@@ -607,6 +617,12 @@ async function main() {
       // No desktop adapter and no shell process is created for a blocked run.
       report = blockedShellReport(flow, planned, gate, { nonInteractive });
     } else {
+      // Live replay gets the blue edge overlay; dry runs and snapshots do not.
+      const indicator = startReplayIndicator({
+        enabled: !dryRun && !values.snapshot && values['no-indicator'] !== true,
+        onCancel: () => cancellation.abort(new Error('Cancelled from the replay overlay')),
+      });
+      try {
       const needsDesktop = (flow.setup?.length ?? 0) > 0 ||
         planned.some(step => step.action.kind !== 'shell' || (step.action.setup?.length ?? 0) > 0);
       if (!needsDesktop) {
@@ -621,6 +637,9 @@ async function main() {
         macOnly();
         report = await withDesktop({ headed: values.headed ?? false, signal },
           desktop => runFlow(flow, desktop, options));
+      }
+      } finally {
+        indicator.stop();
       }
     }
     if (values.report) await writeNew(values.report, JSON.stringify(report, null, 2) + '\n');

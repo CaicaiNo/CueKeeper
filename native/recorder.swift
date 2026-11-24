@@ -1466,6 +1466,60 @@ let namedKeys: [Int: String] = [
     120:"f2", 121:"pagedown", 122:"f1", 123:"left", 124:"right", 125:"down", 126:"up"
 ]
 
+
+@MainActor
+private enum ReplayIndicatorMode {
+    static func run() {
+        let application = NSApplication.shared
+        _ = application.setActivationPolicy(.accessory)
+        application.finishLaunching()
+        let indicator = RecordingIndicator(mode: .replay)
+        if let detail = indicator.show() {
+            FileHandle.standardError.write(Data("replay indicator: \(detail)\n".utf8))
+        }
+        indicator.update(elapsed: 0, paused: false, starting: false)
+        let hotkey = installHotkey()
+        FileHandle.standardOutput.write(Data("{\"event\":\"ready\",\"hotkey\":\(hotkey)}\n".utf8))
+        signal(SIGTERM) { _ in exit(0) }
+        signal(SIGINT) { _ in exit(0) }
+        let start = Date()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 1, repeating: 1)
+        timer.setEventHandler {
+            MainActor.assumeIsolated {
+                indicator.update(elapsed: Int(Date().timeIntervalSince(start)), paused: false, starting: false)
+            }
+        }
+        timer.resume()
+        application.run()
+    }
+
+    /// ⌃⌥X cancels the replay; the chord comes from the recording controls.
+    private static func installHotkey() -> Bool {
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: 1 << CGEventType.keyDown.rawValue,
+            callback: { _, type, event, _ in
+                if type == .keyDown,
+                   event.getIntegerValueField(.keyboardEventKeycode) == 7,
+                   event.flags.contains([.maskControl, .maskAlternate]) {
+                    FileHandle.standardOutput.write(Data("{\"event\":\"cancel\"}\n".utf8))
+                    exit(0)
+                }
+                return Unmanaged.passUnretained(event)
+            },
+            userInfo: nil
+        ), let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
+            return false
+        }
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        return CGEvent.tapIsEnabled(tap: tap)
+    }
+}
+
 @main
 struct RecorderCommand {
     @MainActor
@@ -1488,6 +1542,12 @@ struct RecorderCommand {
             guard let visible = SystemDialog.isVisible() else { exit(1) }
             print("{\"visible\":\(visible)}")
             exit(0)
+        }
+        // Replay overlay: edge particles in blue, cancelled only by ⌃⌥X.
+        // It shares this binary so it reuses the recorder's TCC grants.
+        if args.count == 2, args[1] == "--replay-indicator" {
+            ReplayIndicatorMode.run()
+            return
         }
         let global = args.count >= 2 && args[1] == "--global"
         var app = ""

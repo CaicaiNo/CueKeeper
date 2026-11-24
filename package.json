@@ -11,7 +11,7 @@
   "scripts": {
     "build": "tsc && node scripts/schemas.mjs --check",
     "schemas:write": "tsc && node scripts/schemas.mjs --write",
-    "test": "node --test test/*.test.mjs",
+    "test": "CUEKEEPER_NO_INDICATOR=1 node --test test/*.test.mjs",
     "test:hotkeys": "sh scripts/test-recording-hotkeys.sh",
     "test:pointer": "sh scripts/test-recording-pointer.sh",
     "test:clock": "sh scripts/test-recording-clock.sh",

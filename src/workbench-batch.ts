@@ -555,7 +555,7 @@ export class BatchRunner {
     const reportPath = join(runDirectory, 'report.json');
     const startedAt = Date.now();
     this.sequence += 1;
-    const args = ['run', item.path, '--headed', '--json', '--report', reportPath];
+    const args = ['run', item.path, '--headed', '--json', '--no-indicator', '--report', reportPath];
     if (item.version === 2) args.push('--foreground');
     if (this.options.allowShell()) args.push('--allow-shell');
     if (this.options.allowSudo()) args.push('--allow-sudo');

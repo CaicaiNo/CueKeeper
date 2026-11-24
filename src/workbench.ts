@@ -22,6 +22,7 @@ import { runFlow } from './run.js';
 import type { ShellRunOptions } from './run.js';
 import { createRootPrivilegeRunner } from './shell-privilege.js';
 import { createSudoKeychainStore } from './sudo-credential.js';
+import { startReplayIndicator } from './indicator.js';
 import type { SudoKeychainStore } from './sudo-credential.js';
 import {
   describeShellStep, hasShellSecrets, reachableShells, shellGate, shellPrivilege,
@@ -964,17 +965,27 @@ export async function startWorkbench(options: {
       // A live workbench replay manages no input source: the default is to
       // leave the user's IME alone, so no TIS read, no switch and no report
       // `ime` field. Unicode injection delivers the recorded text anyway.
-      const report = dryRun
-        ? await runFlow(flow, needsDesktop ? offlineDesktop(current.snapshot, flow.target) : undefined, {
-          dryRun, signal, baselineDir, shell, offline: true,
-          ...(needsDesktop && current.snapshot !== undefined && fixtureAppPath(current.snapshot)
-            ? { fixtureAppPath: fixtureAppPath(current.snapshot)! } : {}),
-        })
-        : await (needsDesktop
-          ? withDesktop({ headed: true, signal, workRoot },
-            desktop => runFlow(flow, desktop, { dryRun, signal, secretTexts, baselineDir, shell }))
-          : runFlow(flow, undefined, { dryRun, signal, secretTexts, baselineDir, shell }));
-      return send(response, 200, { ...report, stopped: currentRun.signal.aborted });
+      // A live v1 replay gets the same blue overlay the CLI shows; a dry run
+      // only reads fixtures and needs no indicator.
+      const indicator = startReplayIndicator({
+        enabled: !dryRun,
+        onCancel: () => currentRun?.abort(new Error('Cancelled from the replay overlay')),
+      });
+      try {
+        const report = dryRun
+          ? await runFlow(flow, needsDesktop ? offlineDesktop(current.snapshot, flow.target) : undefined, {
+            dryRun, signal, baselineDir, shell, offline: true,
+            ...(needsDesktop && current.snapshot !== undefined && fixtureAppPath(current.snapshot)
+              ? { fixtureAppPath: fixtureAppPath(current.snapshot)! } : {}),
+          })
+          : await (needsDesktop
+            ? withDesktop({ headed: true, signal, workRoot },
+              desktop => runFlow(flow, desktop, { dryRun, signal, secretTexts, baselineDir, shell }))
+            : runFlow(flow, undefined, { dryRun, signal, secretTexts, baselineDir, shell }));
+        return send(response, 200, { ...report, stopped: currentRun.signal.aborted });
+      } finally {
+        indicator.stop();
+      }
     } finally {
       running = false;
       currentRun = undefined;

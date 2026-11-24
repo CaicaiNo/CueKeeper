@@ -9,8 +9,18 @@ final class RecordingIndicator {
         case confirmed([String: Any])
     }
 
+    enum Mode {
+        case recording
+        case replay
+    }
+
+    private let mode: Mode
     private var panel: IndicatorPanel?
     private var displayID = CGMainDisplayID()
+
+    init(mode: Mode = .recording) {
+        self.mode = mode
+    }
 
     func show() -> String? {
         hide()
@@ -19,9 +29,12 @@ final class RecordingIndicator {
         guard let screen = NSScreen.screens.first(where: {
             ($0.deviceDescription[key] as? NSNumber)?.uint32Value == displayID
         }) else { return "Primary display is unavailable to AppKit" }
-        guard let panel = IndicatorPanel(screen: screen) else { return "AppKit did not create the indicator backing layer" }
+        guard let panel = IndicatorPanel(screen: screen, mode: mode) else {
+            return "AppKit did not create the indicator backing layer"
+        }
         self.panel = panel
-        panel.update(text: "正在准备录制", paused: false, starting: false)
+        panel.update(text: mode == .recording ? "正在准备录制" : "正在准备回放",
+                     paused: false, starting: true)
         panel.orderFrontRegardless()
         panel.displayIfNeeded()
         CATransaction.flush()
@@ -58,9 +71,15 @@ final class RecordingIndicator {
 
     func update(elapsed: Int, paused: Bool, starting: Bool) {
         let time = String(format: "%02d:%02d", elapsed / 60, elapsed % 60)
-        let state = paused ? "已暂停" : starting ? "录制就绪" : "录制中"
-        let action = paused ? "继续" : "暂停"
-        panel?.update(text: "\(state)  \(time)     ⌃⌥P \(action)   ⌃⌥X 停止", paused: paused, starting: starting)
+        let text: String
+        if mode == .replay {
+            text = "回放中  \(time)     ⌃⌥X 取消"
+        } else {
+            let state = paused ? "已暂停" : starting ? "录制就绪" : "录制中"
+            let action = paused ? "继续" : "暂停"
+            text = "\(state)  \(time)     ⌃⌥P \(action)   ⌃⌥X 停止"
+        }
+        panel?.update(text: text, paused: paused, starting: starting)
     }
 
     func covers(_ point: NSPoint) -> Bool {
@@ -75,23 +94,27 @@ final class RecordingIndicator {
 
 @MainActor
 private final class IndicatorPanel: NSPanel {
-    private static let accent = NSColor(srgbRed: 1, green: 0.24, blue: 0.34, alpha: 1)
-    private let borderWidth: CGFloat = 3
-    private let edgeInset: CGFloat = 2
+    private static let recordingAccent = NSColor(srgbRed: 1, green: 0.24, blue: 0.34, alpha: 1)
+    private static let replayAccent = NSColor(srgbRed: 0.24, green: 0.62, blue: 1, alpha: 1)
+    private let accent: NSColor
+    private let mode: RecordingIndicator.Mode
+    /// The glow reaches this far inside the screen edge. Static, gradient-only.
+    private let glowWidth: CGFloat = 48
     private let hud: NSRect
     private let label = NSTextField(labelWithString: "")
-    private let border = CAShapeLayer()
+    private var glow: [CAGradientLayer] = []
     private let badge = CALayer()
     private let dot = CALayer()
-    private let highlight = CAShapeLayer()
 
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
-    init?(screen: NSScreen) {
+    init?(screen: NSScreen, mode: RecordingIndicator.Mode) {
+        self.mode = mode
+        self.accent = mode == .replay ? Self.replayAccent : Self.recordingAccent
         let frame = screen.frame
         let size = frame.size
-        let hudWidth = min(360, size.width - 20)
+        let hudWidth = min(380, size.width - 20)
         hud = NSRect(x: (size.width - hudWidth) / 2, y: screen.visibleFrame.maxY - frame.minY - 58,
                      width: hudWidth, height: 46)
         super.init(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel],
@@ -101,7 +124,10 @@ private final class IndicatorPanel: NSPanel {
         hasShadow = false
         hidesOnDeactivate = false
         ignoresMouseEvents = true
-        sharingType = .none
+        // Excluded from screen capture so the indicator never appears in a recording.
+        // The QA preview can opt in to verify the particles themselves.
+        sharingType = ProcessInfo.processInfo.environment["CUEKEEPER_INDICATOR_CAPTURE"] == "1"
+            ? .readOnly : .none
         level = .statusBar
         collectionBehavior = [.ignoresCycle]
         setFrame(frame, display: false)
@@ -111,64 +137,81 @@ private final class IndicatorPanel: NSPanel {
         view.wantsLayer = true
         guard let backing = view.layer else { return nil }
 
-        let strokeInset = edgeInset + borderWidth / 2
-        let path = CGPath(rect: view.bounds.insetBy(dx: strokeInset, dy: strokeInset), transform: nil)
-        for layer in [border, highlight] {
-            layer.frame = view.bounds
-            layer.path = path
-            layer.fillColor = nil
-            layer.lineWidth = borderWidth
-            backing.addSublayer(layer)
-        }
-        highlight.strokeColor = Self.accent.cgColor
-        let perimeter = 2 * (size.width + size.height - 4 * strokeInset)
-        let segment = min(160, perimeter / 12)
-        highlight.lineDashPattern = [NSNumber(value: Double(segment)), NSNumber(value: Double(perimeter - segment))]
-        let sweep = CABasicAnimation(keyPath: "lineDashPhase")
-        sweep.fromValue = 0
-        sweep.toValue = -perimeter
-        sweep.duration = 7
-        sweep.repeatCount = .infinity
-        highlight.add(sweep, forKey: "sweep")
+        // A static edge gradient replaces the old solid border. It is twice the
+        // old particle spread and fades inward, so no animation is needed.
+        glow = Self.edgeGlow(accent: accent, size: size, width: glowWidth)
+        for layer in glow { backing.addSublayer(layer) }
 
         badge.frame = hud
         badge.cornerRadius = 14
         badge.borderWidth = 1
-        badge.borderColor = Self.accent.cgColor
+        badge.borderColor = accent.cgColor
         dot.frame = CGRect(x: 16, y: 18, width: 10, height: 10)
         dot.cornerRadius = 5
-        dot.backgroundColor = Self.accent.cgColor
+        dot.backgroundColor = accent.cgColor
         badge.addSublayer(dot)
         backing.addSublayer(badge)
 
         label.frame = NSRect(x: hud.minX + 32, y: hud.midY - 9, width: hud.width - 48, height: 20)
         label.font = .monospacedDigitSystemFont(ofSize: 14, weight: .semibold)
-        label.textColor = .white
+        label.textColor = mode == .replay ? accent : .white
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.55)
+        shadow.shadowBlurRadius = 3
+        shadow.shadowOffset = NSSize(width: 0, height: -1)
+        label.shadow = shadow
         label.alignment = .center
         view.addSubview(label)
+    }
+
+    private static func edgeGlow(accent: NSColor, size: CGSize, width: CGFloat) -> [CAGradientLayer] {
+        let edge = accent.withAlphaComponent(0.62).cgColor
+        let mid = accent.withAlphaComponent(0.16).cgColor
+        let clear = accent.withAlphaComponent(0).cgColor
+        func strip(_ frame: CGRect, _ start: CGPoint, _ end: CGPoint) -> CAGradientLayer {
+            let layer = CAGradientLayer()
+            layer.frame = frame
+            layer.colors = [edge, mid, clear]
+            layer.locations = [0, 0.4, 1]
+            layer.startPoint = start
+            layer.endPoint = end
+            return layer
+        }
+        return [
+            strip(CGRect(x: 0, y: size.height - width, width: size.width, height: width),
+                  CGPoint(x: 0.5, y: 1), CGPoint(x: 0.5, y: 0)),
+            strip(CGRect(x: 0, y: 0, width: size.width, height: width),
+                  CGPoint(x: 0.5, y: 0), CGPoint(x: 0.5, y: 1)),
+            strip(CGRect(x: 0, y: 0, width: width, height: size.height),
+                  CGPoint(x: 0, y: 0.5), CGPoint(x: 1, y: 0.5)),
+            strip(CGRect(x: size.width - width, y: 0, width: width, height: size.height),
+                  CGPoint(x: 1, y: 0.5), CGPoint(x: 0, y: 0.5)),
+        ]
     }
 
     func update(text: String, paused: Bool, starting: Bool) {
         if label.stringValue != text { label.stringValue = text }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        badge.backgroundColor = starting
-            ? NSColor(srgbRed: 0.40, green: 0.055, blue: 0.105, alpha: 1).cgColor
-            : NSColor(white: 0.08, alpha: 0.98).cgColor
-        badge.borderWidth = starting ? 2 : 1
-        border.strokeColor = Self.accent.withAlphaComponent(starting ? 1 : 0.86).cgColor
+        if mode == .replay {
+            // Replay is ambient: no dark plate, just the accent text.
+            badge.backgroundColor = NSColor.clear.cgColor
+            badge.borderWidth = 0
+        } else {
+            badge.backgroundColor = starting
+                ? accent.withAlphaComponent(0.22).cgColor
+                : NSColor(white: 0.08, alpha: 0.98).cgColor
+            badge.borderWidth = starting ? 2 : 1
+        }
         dot.opacity = paused ? 0.4 : 1
-        highlight.isHidden = paused
+        // A paused recording keeps a faint edge; a replay always shows the glow.
+        for layer in glow { layer.opacity = mode == .replay ? 1 : (paused ? 0.35 : 1) }
         CATransaction.commit()
     }
 
     func covers(_ point: NSPoint) -> Bool {
         guard frame.contains(point) else { return false }
         let local = convertPoint(fromScreen: point)
-        let bounds = NSRect(origin: .zero, size: frame.size)
-        let outsideStroke = bounds.insetBy(dx: edgeInset, dy: edgeInset)
-        let strokeInnerEdge = edgeInset + borderWidth
-        let insideStroke = bounds.insetBy(dx: strokeInnerEdge, dy: strokeInnerEdge)
-        return hud.contains(local) || (outsideStroke.contains(local) && !insideStroke.contains(local))
+        return hud.contains(local)
     }
 }

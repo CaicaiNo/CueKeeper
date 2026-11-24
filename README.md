@@ -66,6 +66,8 @@ node dist/cli.js record --app com.apple.TextEdit --window "无标题" --out out/
 # 只给 --app 时录该 App 的前台窗口；指定安装副本时加 --app-path "/Applications/TextEdit.app"
 ```
 
+录制与实时回放共用屏幕边缘的状态光晕：录制为红色，回放为蓝色，从屏幕四边向内渐隐，静态不闪烁。回放浮层不接收鼠标点击，也没有取消按钮；按 `⌃⌥X` 取消。批量运行默认不显示浮层（CLI `--no-indicator`），避免整晚反复出现。
+
 `--seconds` 默认 25（范围 1–90）。倒计时结束时没有前台窗口报 `WINDOW_NOT_FOUND`，无法确认窗口所属应用的 bundle ID 报 `APP_NOT_FOUND`。当前仍是单窗口录制：切到其他 App 后，那些窗口的输入会被跳过；跨 App 全局录制见 HAOC-108。
 
 回放与报告。下面的离线命令使用仓库自带样本，不需要桌面权限，可直接验证安装：
