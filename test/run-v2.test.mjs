@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -151,24 +152,6 @@ function fakeWorld(options = {}) {
       state.hooks.beforeType?.(state);
       return delivered('type');
     },
-    async typeFocused(text, app, options) {
-      state.calls.push(['typeFocused', text, app, options]);
-      return delivered('type');
-    },
-    async clickSemantic(ref) {
-      state.calls.push(['clickSemantic', ref]);
-      return delivered('click');
-    },
-    async snapshotSurface(surface) {
-      state.calls.push(['snapshotSurface', surface]);
-      if (!state.menu) throw new Fault('NO_SURFACE', 'no menu is open');
-      return parseSurface(state.menu);
-    },
-    async clickScreen(point, clickOptions = {}) {
-      if (!options.headed) throw new Fault('HEADED_REQUIRED', 'Physical coordinate input requires --headed');
-      state.calls.push(['clickScreen', point, clickOptions.button ?? 'left']);
-      return delivered('click');
-    },
     async press(combo, snapshot) {
       state.calls.push(['press', combo, snapshot.windowId]);
       return delivered('press');
@@ -299,6 +282,8 @@ function harness(t, options = {}) {
       overrides.identityOptions ?? options.identityOptions ?? {}),
     leaseDirectory: dir,
     inputs: overrides.inputs ?? inputs,
+    finderRenameMenu: overrides.finderRenameMenu,
+    renameCommitTimeoutMs: 50,
     ...(overrides.installState === undefined ? {} : { installState: overrides.installState }),
     ...((overrides.launchTimeoutMs ?? options.launchTimeoutMs) === undefined
       ? {} : { launchTimeoutMs: overrides.launchTimeoutMs ?? options.launchTimeoutMs }),
@@ -1190,7 +1175,7 @@ test('a deferred app is verified only after its window is bound', async t => {
 /** A Finder list view: the file name is a textfield value inside the first cell. */
 function renameWindow() {
   return {
-    id: 'w-1', app: textedit, pid: 601, title: 'cuekeeper-demo',
+    id: 'w-1', app: 'com.apple.finder', pid: 601, title: 'cuekeeper-demo',
     data: {
       complete: true,
       window: { id: 'w-1', title: 'cuekeeper-demo' },
@@ -1236,72 +1221,261 @@ function renameWindow() {
   };
 }
 
-const renameScope = {
-  kind: 'window', app: textedit, windowKey: 'demo', windowTitle: 'cuekeeper-demo',
-};
+const finder = 'com.apple.finder';
+const renameScope = { kind: 'window', app: finder, windowKey: 'demo', windowTitle: 'cuekeeper-demo' };
 
-test('a recorded rename replays through the menu and focuses the inline editor', async t => {
-  const menu = {
-    complete: true,
-    tree: {
-      role: 'menu', name: '列表视图',
-      children: [{
-        role: 'menuitem', name: '重新命名', ref_id: '@menu:e1',
-        bounds: { x: 300, y: 300, width: 120, height: 22 },
-        available_actions: ['Click'],
-      }],
-    },
-  };
-  const world = harness(t, {
-    headed: true,
-    windows: [renameWindow()],
-    focused: 'w-1',
-    menu,
-    apps: {
-      [textedit]: [{ pid: 601, startedAt: '601.1', bundleId: textedit, bundlePath: appPaths[textedit] }],
-    },
-  });
-  const flow = parseFlowV2({
+function renameFlow() {
+  return parseFlowV2({
     version: 2, id: 'rename-replay', name: 'Rename replay',
     steps: [
-      {
-        id: 'click-file', kind: 'click', scope: renameScope,
-        // Finder reports AXRow to the helper but treeitem in the snapshot.
-        target: { kind: 'element', role: 'row', name: 'manifest.json' },
-      },
-      {
-        id: 'open-menu', kind: 'click', scope: renameScope,
-        target: { kind: 'element', role: 'outline', name: '列表视图' }, button: 'right',
-      },
-      {
-        id: 'rename', kind: 'click', scope: renameScope,
-        target: { kind: 'element', role: 'menuitem', name: '重新命名' },
-      },
-      {
-        id: 'type-name', kind: 'type', scope: renameScope,
-        target: { kind: 'element', role: 'textfield' }, text: 'manifest-e2e.json',
-      },
+      { id: 'select', kind: 'click', scope: renameScope, target: { kind: 'element', role: 'row', name: 'manifest.json' } },
+      { id: 'open-menu', kind: 'click', scope: renameScope, button: 'right',
+        target: { kind: 'element', role: 'outline', name: '列表视图' } },
+      { id: 'rename', kind: 'click', scope: renameScope, recordedWindowNumber: 1,
+        target: { kind: 'element', role: 'menuitem', name: '重新命名' } },
+      { id: 'type-name', kind: 'type', scope: renameScope, target: { kind: 'element', role: 'textfield' },
+        text: 'manifest-e2e.json' },
       { id: 'commit', kind: 'key', scope: renameScope, key: 'return' },
-      {
-        id: 'type-normal', kind: 'type', scope: renameScope,
-        target: { kind: 'element', role: 'textfield', name: 'notes' }, text: 'plain',
-      },
+      { id: 'type-normal', kind: 'type', scope: renameScope, target: { kind: 'element', role: 'textfield', name: 'notes' },
+        text: 'plain' },
     ],
   });
+}
 
-  const report = await world.run(flow);
+function renameCase(t, options = {}) {
+  const directory = mkdtempSync(join(tmpdir(), 'cuekeeper-rename-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const oldPath = join(directory, 'manifest.json');
+  const newPath = join(directory, 'manifest-e2e.json');
+  writeFileSync(oldPath, 'fixed contents\n');
+  const stamp = 1700000000;
+  utimesSync(oldPath, stamp, stamp);
+  const bundlePath = '/System/Library/CoreServices/Finder.app';
+  const { world, run } = harness(t, {
+    windows: [renameWindow()], focused: 'w-1',
+    apps: { [finder]: [{ pid: 601, startedAt: '601.1', bundleId: finder, bundlePath }] },
+    identityOptions: { appPath: () => bundlePath, pathToBundle: { [bundlePath]: finder } },
+  });
+  let editing = false, opened = false, text = 'manifest.json', tries = 0;
+  let selected = !options.unselected;
+  const calls = [];
+  const probes = [];
+  const states = [...(options.states ?? [])];
+  const driver = world.desktop;
+  driver.click = async (ref, opts) => {
+    calls.push([opts?.button === 'right' ? 'right-click' : 'click', ref]);
+    opened = opts?.button === 'right';
+    if (!opened) selected = true;
+  };
+  driver.waitMenu = async (app, open) => {
+    calls.push(['waitMenu', app, open]);
+    if (options.waitFail) throw new Fault('TIMEOUT', 'menu wait expired');
+    assert.equal(opened, open);
+  };
+  driver.snapshotSurface = async (surface, timeout, app) => {
+    calls.push(['snapshotSurface', surface, app]);
+    if (surface === 'menu') {
+      assert.equal(opened, true);
+      return parseSurface({ complete: true, tree: { role: 'menu', children: options.items ?? [{
+        role: 'menuitem', name: 'Rename', ref_id: '@menu:e' + (tries + 1), available_actions: ['Click'],
+      }] } });
+    }
+    if (options.steal) world.state.focused = 'w-99';
+    const field = { role: 'textfield', states: ['focused'], value: text,
+      bounds: { x: options.otherField ? 600 : 150, y: 160, width: 150, height: 20 } };
+    if (options.focusTree) return parseSurface({ complete: true, tree: options.focusTree(field) });
+    return parseSurface({ complete: true, tree: options.cellOnly || options.nativeOnly ? { role: 'cell', states: ['focused'] } : field });
+  };
+  driver.clickSemantic = async ref => {
+    calls.push(['clickSemantic', ref]);
+    tries++;
+    opened = false;
+    if (options.clickError) throw options.clickError;
+    if (tries <= (options.refFailures ?? 0)) throw new DesktopFault('NOT_DELIVERED', 'click', 'not_delivered');
+    editing = true;
+  };
+  driver.finderRenameState = async req => {
+    probes.push({ ...req });
+    assert.deepEqual(req.point, [162, 170]);
+    assert.equal(req.pid, 601);
+    assert.equal(req.windowNumber, 1);
+    if (world.state.focused !== 'w-1') throw new Fault('FOCUS_INTERRUPTED', 'Finder lost focus');
+    return { directory: options.missingDir ? join(directory, 'missing') : directory,
+      selectedCount: options.multi ? 2 : Number(selected), targetSelected: selected, listFocused: true,
+      editor: editing && !options.cellOnly && req.expected === text, ...states.shift() };
+  };
+  driver.typeFocused = async (replacement, req) => {
+    assert.equal(editing, true);
+    assert.equal(req.expected, text);
+    assert.equal(req.directory, directory);
+    calls.push(['typeFocused', replacement]);
+    if (options.selectAllFailed) throw new Fault('RENAME_EDITOR_UNPROVEN', 'full selection missing');
+    text = replacement;
+    if (options.loseAfterType) world.state.focused = 'w-99';
+  };
+  driver.press = async (key, snap, mode) => {
+    calls.push(['press', key, snap.windowId, mode]);
+    if (!editing) editing = true;
+    else {
+      editing = false;
+      if (!options.noCommit) renameSync(oldPath, join(directory, options.misdirect ? 'unexpected.json' : text));
+      if (options.corrupt) {
+        writeFileSync(newPath, 'wrong contents\n');
+        utimesSync(newPath, stamp, stamp);
+      }
+    }
+  };
+  const flow = renameFlow();
+  return { oldPath, newPath, directory, calls, probes, flow, world, run: () => run(flow, { finderRenameMenu: options.menu }) };
+}
 
-  assert.equal(report.status, 'passed', JSON.stringify(report.entries, null, 2));
-  // The row click and the right-click both address the treeitem through the
-  // row-role family; the recorded role was `row`.
-  assert.deepEqual(callsOf(world.world, 'click'),
-    [['click', '@w1:e3'], ['click', '@w1:e3']]);
-  assert.deepEqual(callsOf(world.world, 'clickSemantic'), [['clickSemantic', '@menu:e1']]);
-  // The rename editor is focused at the name column, not at a neighbouring row.
-  assert.deepEqual(callsOf(world.world, 'clickScreen'), [['clickScreen', [174, 170], 'left']]);
-  assert.deepEqual(callsOf(world.world, 'typeFocused'),
-    [['typeFocused', 'manifest-e2e.json', textedit, { selectAll: true }]]);
-  assert.deepEqual(callsOf(world.world, 'press'), [['press', 'return', 'w-1']]);
-  // Return ended rename mode: a named field afterwards types normally.
-  assert.deepEqual(callsOf(world.world, 'type'), [['type', '@w1:e9', 'plain']]);
+test('Finder keyboard rename uses two window-bound Returns and verifies the complete new filename on disk', async t => {
+  const c = renameCase(t);
+  const sha = path => createHash('sha256').update(readFileSync(path)).digest('hex');
+  const before = sha(c.oldPath);
+  const report = await c.run();
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(c.calls, [
+    ['press', 'return', 'w-1', { headed: false }], ['snapshotSurface', 'focused', finder],
+    ['typeFocused', 'manifest-e2e.json'], ['snapshotSurface', 'focused', finder], ['press', 'return', 'w-1', { headed: false }],
+  ]);
+  assert.deepEqual(readdirSync(c.directory), ['manifest-e2e.json']);
+  assert.equal(readFileSync(c.newPath, 'utf8'), 'fixed contents\n');
+  assert.equal(sha(c.newPath), before);
+  assert.equal(c.probes.length, 5);
+  assert.deepEqual(callsOf(c.world, 'type'), [['type', '@w1:e9', 'plain']]);
+  assert.deepEqual(callsOf(c.world, 'focusWindow'), []);
+});
+
+test('Finder selects the recorded row before keyboard rename and takes its full new name from runtime input', async t => {
+  const c = renameCase(t, { unselected: true });
+  Object.assign(c.flow.steps[3], { input: 'note' });
+  delete c.flow.steps[3].text;
+  c.flow.inputs = ['note'];
+  const report = await c.run();
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(c.calls[0], ['click', '@w1:e3']);
+  assert.ok(c.calls.some(([command, value]) => command === 'typeFocused' && value === inputs.note));
+  assert.deepEqual(readdirSync(c.directory), [inputs.note]);
+});
+
+test('an older recording without a window number replays the localized menu', async t => {
+  const c = renameCase(t);
+  delete c.flow.steps[2].recordedWindowNumber;
+  assert.equal((await c.run()).status, 'passed');
+  assert.deepEqual(c.calls[0], ['right-click', '@w1:e3']);
+  assert.equal(c.calls.filter(call => call[0] === 'press').length, 1);
+  assert.deepEqual(readdirSync(c.directory), ['manifest-e2e.json']);
+});
+
+for (const failures of [0, 1, 2]) test('Finder menu rename with ' + failures + ' stale references', async t => {
+  const c = renameCase(t, { menu: true, refFailures: failures, nativeOnly: true });
+  const report = await c.run();
+  const picks = Array.from({ length: Math.min(2, failures + 1) }, (_, i) => [
+    ['right-click', '@w1:e3'], ['waitMenu', finder, true], ['snapshotSurface', 'menu', finder],
+    ['clickSemantic', '@menu:e' + (i + 1)],
+  ]).flat();
+  assert.deepEqual(c.calls, failures === 2 ? picks : [...picks, ['waitMenu', finder, false],
+    ['snapshotSurface', 'focused', finder], ['typeFocused', 'manifest-e2e.json'],
+    ['snapshotSurface', 'focused', finder], ['press', 'return', 'w-1', { headed: false }]]);
+  assert.equal(entry(report, 'rename').code, failures === 2 ? 'NOT_DELIVERED' : undefined);
+  assert.deepEqual(callsOf(c.world, 'clickPoint'), []);
+  assert.equal(report.status === 'passed', failures < 2, JSON.stringify(report.entries));
+  assert.deepEqual(readdirSync(c.directory), [failures === 2 ? 'manifest.json' : 'manifest-e2e.json']);
+});
+
+for (const [name, opts, setup, code] of [
+  ['unreadable directory', { missingDir: true }, () => {}, 'RENAME_DIRECTORY_UNPROVEN'],
+  ['relative directory', { states: [{ directory: 'relative' }] }, () => {}, 'RENAME_DIRECTORY_UNPROVEN'],
+  ['multi-select', { multi: true }, () => {}, 'RENAME_SELECTION_UNPROVEN'],
+  ['conflicting name', {}, c => writeFileSync(c.newPath, 'existing'), 'RENAME_DESTINATION_EXISTS'],
+  ['another window', {}, c => { c.world.state.focused = 'w-99'; }, 'FOCUS_INTERRUPTED'],
+  ['recreated window', {}, c => { c.flow.steps[2].recordedWindowNumber = 12; }, 'FOCUS_INTERRUPTED'],
+  ['intervening click', {}, c => { c.flow.steps.splice(2, 0, { ...c.flow.steps[0], id: 'interruption' }); }, 'RENAME_SEQUENCE_UNPROVEN'],
+]) test('Finder refuses ' + name + ' before rename input', async t => {
+  const c = renameCase(t, opts);
+  setup(c);
+  const report = await c.run();
+  assert.ok(report.entries.some(e => e.code === code), JSON.stringify(report.entries));
+  if (name === 'intervening click') assert.equal(c.calls.filter(call => call[0] === 'typeFocused').length, 0);
+  else assert.deepEqual(c.calls, []);
+  if (name === 'conflicting name') assert.equal(readFileSync(c.newPath, 'utf8'), 'existing');
+  assert.equal(readFileSync(c.oldPath, 'utf8'), 'fixed contents\n');
+});
+
+for (const [name, opts, code] of [
+  ['two focused fields', { focusTree: f => ({ role: 'window', children: [f, f] }) }, 'RENAME_EDITOR_UNPROVEN'],
+  ['protected field', { focusTree: f => ({ ...f, secure: true }) }, 'RENAME_EDITOR_UNPROVEN'],
+  ['different filename', { focusTree: f => ({ ...f, value: 'other.json' }) }, 'RENAME_EDITOR_UNPROVEN'],
+  ['notes field', { focusTree: f => ({ ...f, name: 'notes', role: 'textarea' }) }, 'RENAME_EDITOR_UNPROVEN'],
+  ['changed directory', { states: [{}, {}, { directory: '/other' }] }, 'RENAME_DIRECTORY_UNPROVEN'],
+  ['cell alone', { cellOnly: true }, 'RENAME_EDITOR_UNPROVEN'],
+  ['unrelated field', { otherField: true }, 'RENAME_EDITOR_UNPROVEN'],
+  ['stolen focus', { steal: true }, 'FOCUS_INTERRUPTED'],
+]) test('Finder stops before typing into ' + name, async t => {
+  const c = renameCase(t, { ...opts, menu: true });
+  const report = await c.run();
+  assert.equal(entry(report, 'type-name').code, code);
+  assert.equal(c.calls.some(call => ['typeFocused', 'press'].includes(call[0])), false);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+for (const opts of [{ noCommit: true }, { misdirect: true }, { corrupt: true }, { loseAfterType: true }]) {
+  test('Finder rejects an unverified commit ' + JSON.stringify(opts), async t => {
+    const c = renameCase(t, opts);
+    const report = await c.run();
+    assert.equal(entry(report, 'commit').code, opts.loseAfterType ? 'FOCUS_INTERRUPTED' : 'RENAME_DISK_MISMATCH');
+    assert.notEqual(report.status, 'passed');
+    const name = opts.misdirect ? 'unexpected.json' : opts.corrupt ? 'manifest-e2e.json' : 'manifest.json';
+    assert.deepEqual(readdirSync(c.directory), [name]);
+    assert.equal(readFileSync(join(c.directory, name), 'utf8'), opts.corrupt ? 'wrong contents\n' : 'fixed contents\n');
+    assert.equal(c.calls.filter(call => call[0] === 'press').length, opts.loseAfterType ? 1 : 2);
+  });
+}
+
+test('loss of list focus before context chooses a menu, and before entry stops keyboard delivery', async t => {
+  for (const phase of ['context', 'entry']) {
+    const states = phase === 'context' ? [{}, { listFocused: false }] : [{}, {}, { listFocused: false }];
+    const c = renameCase(t, { states });
+    const report = await c.run();
+    if (phase === 'context') {
+      assert.equal(report.status, 'passed');
+      assert.equal(c.calls.filter(x => x[0] === 'clickSemantic').length, 1);
+      assert.equal(c.calls.filter(x => x[0] === 'press').length, 1);
+      assert.deepEqual(readdirSync(c.directory), ['manifest-e2e.json']);
+    } else {
+      assert.equal(entry(report, 'rename').code, 'FOCUS_INTERRUPTED');
+      assert.deepEqual(c.calls, []);
+      assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+    }
+  }
+});
+
+const menuItem = { role: 'menuitem', name: 'Rename', ref_id: '@menu:e1', available_actions: ['Click'] };
+for (const [name, opts, code, clicks] of [
+  ['empty menu', { items: [] }, 'RENAME_MENU_UNPROVEN', 0],
+  ['ambiguous menu', { items: [menuItem, { ...menuItem, ref_id: '@menu:e2' }] }, 'RENAME_MENU_UNPROVEN', 0],
+  ['disabled menu item', { items: [{ ...menuItem, states: ['disabled'] }] }, 'RENAME_MENU_UNPROVEN', 0],
+  ['wait timeout', { waitFail: true }, 'TIMEOUT', 0],
+  ['uncertain delivery', { clickError: new DesktopFault('DELIVERY_UNCERTAIN', 'click', 'delivery_uncertain') },
+    'DELIVERY_UNCERTAIN', 1],
+  ['unexpected error', { clickError: new Error('unexpected response') }, 'ACTION_FAILED', 1],
+]) test('Finder menu stops on ' + name, async t => {
+  const c = renameCase(t, { ...opts, menu: true });
+  const report = await c.run();
+  assert.equal(entry(report, 'rename').code, code);
+  assert.equal(c.calls.filter(([command]) => command === 'right-click').length, 1);
+  assert.equal(c.calls.filter(([command]) => command === 'clickSemantic').length, clicks);
+  assert.equal(c.calls.filter(([command]) => command === 'typeFocused' || command === 'press').length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+test('an unverified Cmd+A selection leaves the file intact and sends no commit', async t => {
+  const c = renameCase(t, { selectAllFailed: true });
+  const report = await c.run();
+  assert.equal(entry(report, 'type-name').code, 'RENAME_EDITOR_UNPROVEN');
+  assert.equal(c.calls.filter(x => x[0] === 'typeFocused').length, 1);
+  assert.equal(c.calls.filter(x => x[0] === 'press').length, 1);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+  assert.equal(readFileSync(c.oldPath, 'utf8'), 'fixed contents\n');
 });

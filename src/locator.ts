@@ -101,7 +101,7 @@ export function parseSnapshot(data: unknown, target: Target): Snapshot {  const 
 /** A menu or menubar surface has no window title; parse it without one. */
 export function parseSurface(data: unknown): Snapshot {
   const input = object(data);
-  if (input.complete !== true || input.truncated === true) {
+  if (input.complete !== true || input.truncated === true || Boolean(input.identity_unproven)) {
     throw new Fault('INCOMPLETE_TREE', 'Surface snapshot is incomplete');
   }
   if (input.tree === undefined) throw new Fault('BAD_RESPONSE', 'Surface snapshot has no tree');

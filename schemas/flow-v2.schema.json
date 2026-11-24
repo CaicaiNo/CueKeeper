@@ -1041,6 +1041,10 @@
                   }
                 ]
               },
+              "recordedWindowNumber": {
+                "minimum": 1,
+                "type": "integer"
+              },
               "target": {
                 "anyOf": [
                   {

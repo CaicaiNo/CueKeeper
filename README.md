@@ -304,6 +304,12 @@ node dist/cli.js pick --app com.apple.TextEdit --window Cuekeeper-M1.txt --selec
 
 flow 里写作 `{{url}}`。变量名以字母开头，只含字母、数字与下划线；同一个变量名可以复用在多处，但值必须一致（否则应用时会互相覆盖，保存时直接拒绝）。安全输入框（secure text field）不会出现在变量候选里，密码与授权仍走人工 checkpoint。导入会校验模板版本、flow schema 与占位符：未声明的 `{{…}}`、脚本形状的字段都会被拒绝，替换只发生在上述字符串上，不执行任何代码。应用生成的工作流写在 `~/.cuekeeper/applied/<模板id>-<时间>/flow.json`，之后照常保存、dry-run 和实时回放。
 
+## Finder 列表中的文件改名
+
+录制时先单击文件行，再右键选“重新命名”，输入**带扩展名的完整新名称**并按一次 Return。回放时保持原 Finder 文件夹窗口处于前台。若录制保存了窗口编号，且文件列表获得焦点、只选中了目标文件，回放会用 Return 进入编辑。需要复现菜单操作时，设置 `CUEKEEPER_FINDER_RENAME_MENU=1`。旧录制缺少窗口编号时使用菜单路径，仍需可识别的目标文件行。
+
+回放从 Finder 窗口的 AXDocument 读取目录，先检查旧文件和名称冲突。输入前检查文件名列上的聚焦文本框、旧名和文本可编辑性，通过后发送真实的 Cmd+A，向同一控件写入完整新名。只有读回完整新名才提交。磁盘上的旧名消失，且新名对应同一文件、大小和 SHA-256 均吻合，改名步骤才通过。确认不了编辑器时，报告记录 `RENAME_EDITOR_UNPROVEN`。本功能需要与该版本配套的 `cuekeeper-capture` 辅助程序。
+
 ## 在 macOS 录制和回放
 
 现场步骤和权限清单见 [TextEdit 验收](docs/textedit.md)。录制器单独构建。普通 `pnpm build` 只编译 TypeScript 并核对发布的 JSON Schema。实时 `--dry-run` 读取桌面可访问性树。带 `--snapshot` 的离线运行只读样本文件。
