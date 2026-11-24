@@ -194,9 +194,10 @@ private final class IndicatorPanel: NSPanel {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         if mode == .replay {
-            // Replay is ambient: no dark plate, just the accent text.
-            badge.backgroundColor = NSColor.clear.cgColor
-            badge.borderWidth = 0
+            // Replay stays ambient but keeps a legible translucent plate.
+            badge.backgroundColor = NSColor(white: 0.05, alpha: 0.38).cgColor
+            badge.borderWidth = 0.5
+            badge.borderColor = accent.withAlphaComponent(0.45).cgColor
         } else {
             badge.backgroundColor = starting
                 ? accent.withAlphaComponent(0.22).cgColor
