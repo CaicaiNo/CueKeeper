@@ -17,7 +17,7 @@ const state = {
   expanded: new Set(), showIgnored: false, focused: null, draft: [], tab: 'actions', saving: false,
   running: false, setup: null, appPaths: {}, catalog: null, catalogAt: 0, catalogError: null, appNames: {},
   v2: null, v2Report: null, v2Selected: null, v2Filter: '', v2Busy: false,
-  v2Running: false, v2Checkpoint: null,
+  v2Running: false, v2Checkpoint: null, mode: 'edit',
 };
 
 const dom = createDom(document);
@@ -779,6 +779,12 @@ function v2Copy(step) {
 }
 
 function renderV2() {
+  // The batch view owns the page; the v2 editor belongs to the edit mode only.
+  if (state.mode === 'batch') {
+    v2Section.hidden = true;
+    document.body.classList.remove('v2-mode');
+    return;
+  }
   const editor = state.v2;
   if (!state.session || state.session.version !== 2 || !editor) {
     v2Section.hidden = true;
@@ -1465,6 +1471,7 @@ async function v2PickDialog(step) {
 /** Switches the workbench between editing one flow and running a queue. */
 function setMode(mode) {
   const batch = mode === 'batch';
+  state.mode = batch ? 'batch' : 'edit';
   document.body.classList.toggle('batch-view', batch);
   $('edit-workspace').hidden = batch;
   $('draft-section').hidden = batch;
@@ -1474,8 +1481,14 @@ function setMode(mode) {
   $('mode-batch').classList.toggle('tab-active', batch);
   $('mode-edit').setAttribute('aria-selected', String(!batch));
   $('mode-batch').setAttribute('aria-selected', String(batch));
-  if (batch) batchView.enter();
-  else batchView.leave();
+  if (batch) {
+    v2Section.hidden = true;
+    document.body.classList.remove('v2-mode');
+    batchView.enter();
+  } else {
+    batchView.leave();
+    renderV2();
+  }
 }
 
 function render() {
