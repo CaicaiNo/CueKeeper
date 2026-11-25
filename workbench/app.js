@@ -551,11 +551,7 @@ function renderInspector() {
               el('span', {
                 className: `badge badge-soft badge-sm ${item.group === 'finder' ? 'badge-info' : 'badge-ghost'}`,
               }, item.appLabel)),
-            el('p', { className: 'builtin-steps' }, item.steps.map(step => step.label).join(' → ')),
-            item.parameters.length
-              ? muted(`参数 · ${item.parameters.map(parameter => parameter.name).join(' / ')}`)
-              : undefined,
-            muted('不可编辑、不可删除；插入后就是时间线里的普通步骤，参数值在运行时填写。'),
+            muted(item.summary),
             el('div', { className: 'actions' },
               button('插入', () => builtinInsertDialog(item), {
                 style: 'small primary', icon: 'plus', disabled: !canInsert,
@@ -566,13 +562,16 @@ function renderInspector() {
       el('h3', { className: 'inspector-heading library-group-heading' }, '我的行为'),
       ...(custom.length ? custom.map(item => {
         const compatible = state.session?.version === 1 && sameTarget(item.target, state.session.target);
-        const { behavior, parameterTypes } = item;
+        const { behavior } = item;
         const shell = item.shell ?? { steps: 0, privileged: 0 };
         return el('article', { className: 'library-item stack-list card bg-base-300' },
-          el('h3', { className: 'card-title' }, behavior.name),
-          muted(`${behavior.steps.length} 步 · ${item.target.app} · ${item.target.window}`),
-          shell.steps ? muted(`含 ${shell.steps} 个 Shell 步骤${shell.privileged ? ` · ${shell.privileged} 个提权步骤` : ''}`) : undefined,
-          behavior.parameters.length ? muted(behavior.parameters.map(param => `${param} · ${parameterTypes[param]}`).join(' / ')) : undefined,
+          el('h3', { className: 'card-title' }, behavior.name,
+            shell.privileged
+              ? el('span', { className: 'badge badge-soft badge-sm badge-warning' }, '提权')
+              : shell.steps
+                ? el('span', { className: 'badge badge-soft badge-sm badge-ghost' }, 'Shell')
+                : undefined),
+          muted(`${behavior.steps.length} 步 · ${appLabel(item.target.app)}`),
           el('div', { className: 'actions' },
             button('引用', () => behaviorDialog(item, false), { style: 'small', icon: 'plus', disabled: !compatible }),
             button('复制到草稿', () => behaviorDialog(item, true), { style: 'small', icon: 'copy', disabled: !compatible })),
