@@ -721,6 +721,12 @@ final class Capture {
         let expected: String
         let replacement: String?
         let directory: String?
+        /**
+         * Set while a context menu holds the foreground. The folder window is
+         * then no longer the app's focused window, so it is found by the number
+         * the caller bound instead of by focus; every other check stays.
+         */
+        let menu: Bool?
     }
 
     func finderRename(_ request: RenameRequest) -> [String: Any] {
@@ -733,8 +739,18 @@ final class Capture {
         }
         let axApp = AXUIElementCreateApplication(request.pid)
         func folderWindow() -> AXUIElement? {
-            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == request.pid,
-                  let focused = axElement(axApp, kAXFocusedWindowAttribute as String) else { return nil }
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == request.pid else { return nil }
+            if request.menu == true {
+                // A menu surface takes focus, so the bound window is located in
+                // the application's own window list. Exactly one window of this
+                // process may carry the recorded number.
+                let windows = axElements(axApp, kAXWindowsAttribute as String)
+                let matches = windows.filter {
+                    windowNumber(for: $0, pid: request.pid, exact: true) == request.windowNumber
+                }
+                return matches.count == 1 ? matches[0] : nil
+            }
+            guard let focused = axElement(axApp, kAXFocusedWindowAttribute as String) else { return nil }
             let owner = isTransientSurface(focused, axApp: axApp) ? owningWindow(focused) : focused
             guard let owner, windowNumber(for: owner, pid: request.pid, exact: true) == request.windowNumber
                 else { return nil }
@@ -765,21 +781,61 @@ final class Capture {
             guard let url, url.isFileURL else { return nil }
             return url.path
         }
+        /**
+         * The one row of the bound window that contains the recorded point, and
+         * the list that reports the selection for it. Reading the tree instead
+         * of hit-testing is what lets the same evidence be collected while a
+         * context menu covers the point. None or more than one match proves
+         * nothing.
+         */
+        func treeRowAndList() -> (row: AXUIElement, list: AXUIElement)? {
+            var found: [(AXUIElement, AXUIElement)] = []
+            func walk(_ element: AXUIElement, _ list: AXUIElement?, _ depth: Int) {
+                guard depth < 48, found.count < 2 else { return }
+                let role = axString(element, kAXRoleAttribute as String)
+                var currentList = list
+                if role == "AXOutline" || role == "AXTable" || role == "AXList" { currentList = element }
+                if (role == "AXRow" || role == "AXOutlineRow"), let currentList,
+                   let position = axPoint(element, kAXPositionAttribute as String),
+                   let size = axSize(element, kAXSizeAttribute as String),
+                   CGRect(origin: position, size: size).contains(point) {
+                    found.append((element, currentList))
+                }
+                for child in axElements(element, kAXChildrenAttribute as String) {
+                    walk(child, currentList, depth + 1)
+                    if found.count > 1 { return }
+                }
+            }
+            walk(folder, nil, 0)
+            return found.count == 1 ? found[0] : nil
+        }
         func rowEvidence() -> RenameDirectory.RowEvidence? {
-            var hit: AXUIElement?
-            AXUIElementCopyElementAtPosition(axApp, Float(point.x), Float(point.y), &hit)
-            guard let hit else { return nil }
-            var node: AXUIElement? = hit
             var row: AXUIElement?
             var list: AXUIElement?
-            var depth = 0
-            while let current = node, depth < 12 {
-                let role = axString(current, kAXRoleAttribute as String)
-                if row == nil, role == "AXRow" || role == "AXOutlineRow" { row = current }
-                if role == "AXOutline" || role == "AXTable" || role == "AXList" { list = current; break }
-                if role == "AXWindow" || role == "AXApplication" { break }
-                node = axElement(current, kAXParentAttribute as String)
-                depth += 1
+            var name: String?
+            if request.menu == true {
+                // The open menu covers the recorded point, so hit-testing answers
+                // a menu item. The row is found in the bound window's own tree
+                // instead: exactly one row may contain the point.
+                guard let found = treeRowAndList() else { return nil }
+                row = found.row
+                list = found.list
+                name = fileItemIdentity(found.row)?.name
+            } else {
+                var hit: AXUIElement?
+                AXUIElementCopyElementAtPosition(axApp, Float(point.x), Float(point.y), &hit)
+                guard let hit else { return nil }
+                var node: AXUIElement? = hit
+                var depth = 0
+                while let current = node, depth < 12 {
+                    let role = axString(current, kAXRoleAttribute as String)
+                    if row == nil, role == "AXRow" || role == "AXOutlineRow" { row = current }
+                    if role == "AXOutline" || role == "AXTable" || role == "AXList" { list = current; break }
+                    if role == "AXWindow" || role == "AXApplication" { break }
+                    node = axElement(current, kAXParentAttribute as String)
+                    depth += 1
+                }
+                name = fileItemIdentity(hit)?.name
             }
             guard let row, let list else { return nil }
             // The same point can fall on an overlapping window of the same
@@ -792,11 +848,12 @@ final class Capture {
             let file = (raw as? URL) ?? (raw as? String).flatMap { URL(string: $0) }
             return RenameDirectory.RowEvidence(
                 url: file?.isFileURL == true ? file?.path : nil,
-                name: fileItemIdentity(hit)?.name,
+                name: name,
                 selectedCount: selected?.count,
                 targetSelected: selected?.contains { CFEqual($0, row) } == true,
                 inBoundWindow: bound)
         }
+
         let document = documentPath()
         // A document that parses as a URL but does not name an absolute path
         // (`file:Downloads`) proves nothing. The row fallback below is the same
@@ -858,6 +915,18 @@ final class Capture {
             return result
         }
         if request.replacement != nil { return unproven }
+        if request.menu == true {
+            // The menu covers the point and holds focus, so the selection is
+            // read from the bound window's tree: the same single row and list
+            // the folder fallback would use. Missing evidence leaves both keys
+            // out, which the caller reads as unproven.
+            if let found = treeRowAndList() {
+                let selected = axAttribute(found.list, kAXSelectedRowsAttribute as String) as? [AXUIElement]
+                result["selectedCount"] = selected?.count
+                result["targetSelected"] = selected?.contains { CFEqual($0, found.row) } == true
+            }
+            return result
+        }
 
         var hit: AXUIElement?
         AXUIElementCopyElementAtPosition(axApp, Float(point.x), Float(point.y), &hit)
@@ -894,6 +963,32 @@ final class Capture {
             hit = axElement(element, kAXParentAttribute as String)
         }
         return result
+    }
+
+    /**
+     * The windows one process owns, read from its own accessibility tree.
+     *
+     * The system's on-screen window list drops windows it does not draw (an
+     * offscreen, minimized or hidden one), so it cannot prove that no other
+     * window of the process could own an application-level menu. The app's AX
+     * window list is that process's own answer; `complete` is false when the
+     * list itself could not be read, and every window is reported by number so
+     * a caller can compare it against the driver's inventory.
+     */
+    func appWindowEvidence(pid: Int32) -> [String: Any] {
+        let app = AXUIElementCreateApplication(pid)
+        guard let raw = axAttribute(app, kAXWindowsAttribute as String),
+              CFGetTypeID(raw) == CFArrayGetTypeID() else {
+            return ["complete": false, "count": 0, "numbers": [Int](), "titles": [String]()]
+        }
+        let windows = (raw as? [AXUIElement]) ?? []
+        var numbers: [Int] = []
+        var titles: [String] = []
+        for window in windows {
+            titles.append(axString(window, kAXTitleAttribute as String) ?? "")
+            if let number = windowNumber(for: window, pid: pid, exact: true) { numbers.append(number) }
+        }
+        return ["complete": true, "count": windows.count, "numbers": numbers, "titles": titles]
     }
 
     /** The bound instance, or nil when no path identity was requested. */
@@ -1770,13 +1865,21 @@ struct RecorderCommand {
             capture.emit(capture.finderRename(request))
             return
         }
+        // Read-only window inventory of one process, used to prove that an
+        // application-level menu cannot belong to another of its windows. It
+        // reads the app's own AX window list and never moves focus.
+        if args.count == 3, args[1] == "--app-windows", let pid = Int32(args[2]), pid > 0 {
+            let capture = Capture(app: "com.apple.finder", window: 0, pid: pid, bundlePath: nil,
+                                  showIndicator: false, sound: false, traceClicks: false)
+            capture.emit(capture.appWindowEvidence(pid: pid))
+            return
+        }
         // Read-only frontmost application probe. A Finder context menu is its
         // own surface, so the folder window stops being the focused window even
         // though Finder still owns the foreground; this answers who is in front
         // without requiring a focused window. Needs no TCC grant and moves
         // nothing.
-        if args.count == 2, args[1] == "--frontmost" {
-            let app = NSWorkspace.shared.frontmostApplication
+        if args.count == 2, args[1] == "--frontmost" {            let app = NSWorkspace.shared.frontmostApplication
             let pid = app?.processIdentifier ?? 0
             let bundle = (app?.bundleIdentifier ?? "").replacingOccurrences(of: "\"", with: "")
             print("{\"pid\":\(pid),\"bundleId\":\"\(bundle)\"}")

@@ -21,7 +21,8 @@ struct RecordingFocusTests {
         aZeroSelectionOnlyProvesTheFolderBeforeSelecting()
         onlyAnAbsolutePathIsAUsableFolder()
         aFolderNameKeepsItsCharacters()
-        print("Recording focus: 19/19 passed")
+        aRelativeSegmentProvesNoFolder()
+        print("Recording focus: 20/20 passed")
     }
 
     /// Finder's inline rename field makes the window probe fail. The app and its
@@ -230,6 +231,23 @@ struct RecordingFocusTests {
             document: nil, row: selectedRow(url: spaced + "/manifest.json"), expected: nil,
             pinned: "/Users/qa/Downloads/Folder")
         precondition(unpinned == nil, "a trimmed pin was accepted as \(String(describing: unpinned))")
+    }
+
+    /// A folder path with a `.` or `..` segment is refused rather than
+    /// normalised. With a symlink in the path, folding `..` textually and
+    /// resolving it through the file system name two different folders, so the
+    /// caller must report `RENAME_DIRECTORY_UNPROVEN` instead of choosing one.
+    static func aRelativeSegmentProvesNoFolder() {
+        for path in ["/Users/qa/link/../Downloads", "/Users/qa/./Downloads", "/Users/qa/../qa/Downloads"] {
+            precondition(RenameDirectory.absolutePath(path) == nil,
+                         "\(path) was usable as a rename folder")
+            let resolved = RenameDirectory.resolve(document: path, row: nil, expected: nil, pinned: nil)
+            precondition(resolved == nil, "\(path) resolved to \(String(describing: resolved))")
+        }
+        // A folder whose name merely contains dots is still a real folder.
+        let dotted = "/Users/qa/Downloads/v1..2"
+        precondition(RenameDirectory.absolutePath(dotted) == dotted,
+                     "a dotted folder name was refused")
     }
 
     /// An app whose only window has no title yet keeps it: nothing else can own

@@ -74,6 +74,12 @@ export interface FinderRenameRequest {
   point: Point;
   expected: string;
   directory?: string;
+  /**
+   * Read the bound folder window while a context menu holds the foreground.
+   * The window is then located by its number instead of by focus; every other
+   * check (point, selection, folder, file identity) is unchanged.
+   */
+  menu?: boolean;
 }
 
 export interface FinderRenameState {
@@ -82,6 +88,18 @@ export interface FinderRenameState {
   selectedCount?: number;
   targetSelected?: boolean;
   listFocused?: boolean;
+}
+
+/**
+ * The windows one process owns, read from that process's own accessibility
+ * window list. `complete` is false when the list itself could not be read, in
+ * which case no conclusion about other windows may be drawn.
+ */
+export interface AppWindows {
+  complete: boolean;
+  count: number;
+  numbers: number[];
+  titles: string[];
 }
 
 export interface Desktop {
@@ -127,6 +145,12 @@ export interface Desktop {
    * so a caller could not attribute a surface to one instance.
    */
   listApps(timeoutMs?: number): Promise<RunningApp[]>;
+  /**
+   * The windows one process owns, read natively from its own AX window list so
+   * an offscreen window is not read as absent. Absent when the helper predates
+   * this probe, which a caller must treat as unproven rather than empty.
+   */
+  appWindows?(pid: number, timeoutMs?: number): Promise<AppWindows | undefined>;
   /** Window-only calls; no bundle ID is resolved by the driver. */
   snapshotWindow(windowId: string, title?: string, timeoutMs?: number): Promise<Snapshot>;
   snapshotSurface(surface: 'focused' | 'menu' | 'menubar', timeoutMs?: number, app?: string): Promise<Snapshot>;
@@ -484,6 +508,29 @@ export async function withDesktop<T>(
         const data = await call('list-apps', ['--timeout-ms', String(timeoutMs)],
           undefined, timeoutMs + 3000);
         return appList(data);
+      },
+      async appWindows(pid, timeoutMs = 2000) {
+        if (process.env.CUEKEEPER_TRACE_DESKTOP) process.stderr.write(`[desktop] app-windows ${pid}\n`);
+        const raw = await new Promise<string>((resolve, reject) => {
+          const child = execFile(captureHelperPath(), ['--app-windows', String(pid)], {
+            signal: options.signal, encoding: 'utf8', timeout: timeoutMs,
+          }, (error, stdout) => error ? reject(new Fault('APP_WINDOWS_UNAVAILABLE',
+            'The app window probe is unavailable; rebuild the recorder helper', true)) : resolve(stdout));
+          child.stdin?.on('error', () => {});
+          child.stdin?.end();
+        });
+        const data = object(JSON.parse(raw));
+        if (typeof data.count !== 'number' || !Number.isInteger(data.count) || data.count < 0) {
+          throw new Fault('BAD_RESPONSE', 'Missing app window count');
+        }
+        return {
+          complete: data.complete === true,
+          count: data.count,
+          numbers: Array.isArray(data.numbers)
+            ? data.numbers.filter((value): value is number => typeof value === 'number' && Number.isInteger(value)) : [],
+          titles: Array.isArray(data.titles)
+            ? data.titles.filter((value): value is string => typeof value === 'string') : [],
+        };
       },
       async snapshotWindow(windowId, title, timeoutMs = 3000) {
         const data = await call('snapshot', [

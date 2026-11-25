@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -1335,9 +1335,10 @@ function renameCase(t, options = {}) {
         complete: true,
         ...(options.menuSurfaceApp === null ? {} : { app: options.menuSurfaceApp ?? 'Finder' }),
         ...(options.menuSurfaceWindow ? { window: options.menuSurfaceWindow } : {}),
-        tree: { role: 'menu', children: options.items ?? [{
-          role: 'menuitem', name: 'Rename', ref_id: '@menu:e' + (tries + 1), available_actions: ['Click'],
-        }] },
+        tree: { role: 'menu', bounds: options.menuBounds ?? { x: 162, y: 170, width: 200, height: 140 },
+          children: options.items ?? [{
+            role: 'menuitem', name: 'Rename', ref_id: '@menu:e' + (tries + 1), available_actions: ['Click'],
+          }] },
       });
     }
     if (options.steal) world.state.focused = 'w-99';
@@ -1350,6 +1351,16 @@ function renameCase(t, options = {}) {
     if (options.frontmost === 'unavailable') return undefined;
     if (options.frontmost) return options.frontmost;
     return { pid: 601, bundleId: finder };
+  };
+  // The app's own AX window list: what the native probe answers for a process.
+  // A caller uses it to prove no other window of Finder could own an
+  // application-level menu.
+  driver.appWindows = async pid => {
+    if (options.appWindows) return options.appWindows;
+    const owned = world.state.windows.filter(window => window.pid === pid);
+    return { complete: true, count: owned.length,
+      numbers: owned.map(window => Number(window.id.slice(2))),
+      titles: owned.map(window => window.title) };
   };
   driver.clickSemantic = async ref => {
     calls.push(['clickSemantic', ref]);
@@ -1364,7 +1375,10 @@ function renameCase(t, options = {}) {
     assert.deepEqual(req.point, [162, 170]);
     assert.equal(req.pid, 601);
     assert.equal(req.windowNumber, 1);
-    if (world.state.focused !== 'w-1') throw new Fault('FOCUS_INTERRUPTED', 'Finder lost focus');
+    // While a context menu is open the folder window is not the focused
+    // window; the native probe is asked for the window by number then.
+    if (req.menu === true) assert.equal(menuOpen, true);
+    else if (world.state.focused !== 'w-1') throw new Fault('FOCUS_INTERRUPTED', 'Finder lost focus');
     // When AXDocument is missing the native probe derives the folder from the
     // target row's AXURL. It still reports a plain folder path; the tests below
     // only care that replay pins and uses exactly that answer.
@@ -1372,9 +1386,11 @@ function renameCase(t, options = {}) {
       throw new Fault('RENAME_DIRECTORY_UNPROVEN', 'The Finder folder could not be proven');
     }
     return { directory: options.missingDir ? join(directory, 'missing')
-      : options.documentMissing ? dirname(join(directory, 'manifest.json')) : directory,
+      : options.documentMissing ? dirname(join(directory, 'manifest.json'))
+      : typeof options.reportedDirectory === 'function' ? options.reportedDirectory(directory)
+      : options.reportedDirectory ?? directory,
       selectedCount: options.multi ? 2 : Number(selected), targetSelected: selected, listFocused: true,
-      editor: editing && !options.cellOnly && req.expected === text, ...states.shift() };
+      editor: editing && !options.cellOnly && req.expected === text, ...states.shift(), ...(req.menu === true ? options.menuState : {}) };
   };
   driver.typeFocused = async (replacement, req) => {
     assert.equal(editing, true);
@@ -1480,7 +1496,7 @@ for (const [name, opts, code] of [
   ['protected field', { focusTree: f => ({ ...f, secure: true }) }, 'RENAME_EDITOR_UNPROVEN'],
   ['different filename', { focusTree: f => ({ ...f, value: 'other.json' }) }, 'RENAME_EDITOR_UNPROVEN'],
   ['notes field', { focusTree: f => ({ ...f, name: 'notes', role: 'textarea' }) }, 'RENAME_EDITOR_UNPROVEN'],
-  ['changed directory', { states: [{}, {}, { directory: '/other' }] }, 'RENAME_DIRECTORY_UNPROVEN'],
+  ['changed directory', { states: [{}, {}, {}, { directory: '/other' }] }, 'RENAME_DIRECTORY_UNPROVEN'],
   ['cell alone', { cellOnly: true }, 'RENAME_EDITOR_UNPROVEN'],
   ['unrelated field', { otherField: true }, 'RENAME_EDITOR_UNPROVEN'],
   ['stolen focus', { steal: true }, 'FOCUS_INTERRUPTED'],
@@ -1657,8 +1673,111 @@ test('Finder presses no menu ref when the bound window no longer shows the targe
   assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
 });
 
-test('Finder replays with the folder the native probe derived from the target row AXURL', async t => {
-  const c = renameCase(t, { menu: true, documentMissing: true, nativeOnly: true });
+// Pressing the ref is the last step that can be taken back, so the evidence it
+// rests on is read again while the menu is open: the row still at the recorded
+// point, the menu anchored there, that row the only selected one, the folder
+// pinned and the source file on disk the same object.
+test('Finder presses no menu ref when the selection moves under the open menu', async t => {
+  const c = renameCase(t, { menu: true, nativeOnly: true, menuState: { selectedCount: 1, targetSelected: false } });
+  const report = await c.run();
+  assert.equal(entry(report, 'rename').code, 'RENAME_SELECTION_UNPROVEN');
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+test('Finder presses no menu ref when Finder changes folders under the open menu', async t => {
+  const c = renameCase(t, { menu: true, nativeOnly: true, menuState: { directory: '/other-folder' } });
+  const report = await c.run();
+  assert.equal(entry(report, 'rename').code, 'RENAME_DIRECTORY_UNPROVEN');
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+test('Finder presses no menu ref when the open menu is anchored elsewhere in the window', async t => {
+  // Same Finder process, same window, row still at the recorded point: a menu
+  // opened by another control does not grow out of that point, so it is not the
+  // menu this replay opened and its Rename item is not pressed.
+  const c = renameCase(t, { menu: true, nativeOnly: true, menuBounds: { x: 600, y: 420, width: 200, height: 140 } });
+  const report = await c.run();
+  assert.equal(entry(report, 'rename').code, 'RENAME_MENU_UNPROVEN');
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+test('Finder replays a menu that flipped around the recorded point', async t => {
+  // Near a screen edge macOS opens the menu up and to the left, so the recorded
+  // point sits on its bottom-right corner instead of its top-left one.
+  const c = renameCase(t, { menu: true, nativeOnly: true, menuBounds: { x: -38, y: 30, width: 200, height: 140 } });
+  const report = await c.run();
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.equal(c.calls.filter(call => call[0] === 'clickSemantic').length, 1);
+  assert.deepEqual(readdirSync(c.directory), ['manifest-e2e.json']);
+});
+
+test('Finder presses no menu ref when the native window list omits a driver window', async t => {
+  // The driver reports a second Finder window of the same process while the
+  // process's own AX list names only the bound one. Either answer could be the
+  // complete one, so the menu owner is unclear.
+  const c = renameCase(t, {
+    menu: true, nativeOnly: true,
+    extraWindows: [windowRecord({ id: 'w-2', app: finder, pid: 601, title: 'Finder 另一窗口', fields: [] })],
+    appWindows: { complete: true, count: 1, numbers: [1], titles: ['cuekeeper-demo'] },
+  });
+  const report = await c.run();
+  assert.equal(entry(report, 'rename').code, 'RENAME_MENU_UNPROVEN');
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+test('Finder presses no menu ref when the native window list cannot be read', async t => {
+  const c = renameCase(t, { menu: true, nativeOnly: true,
+    appWindows: { complete: false, count: 0, numbers: [], titles: [] } });
+  const report = await c.run();
+  assert.equal(entry(report, 'rename').code, 'RENAME_MENU_UNPROVEN');
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+test('Finder presses no menu ref when the native window list names a window the driver does not', async t => {
+  // The process's own list reports an offscreen second window that the system's
+  // on-screen inventory cannot see. Only the AX list can rule that window out as
+  // the menu's owner, so the press stops instead of reading the driver as whole.
+  const c = renameCase(t, { menu: true, nativeOnly: true,
+    appWindows: { complete: true, count: 2, numbers: [1, 7], titles: ['cuekeeper-demo', '未显示的窗口'] } });
+  const report = await c.run();
+  assert.equal(entry(report, 'rename').code, 'RENAME_MENU_UNPROVEN');
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+test('Finder stops when a relative segment would make the folder and its child name different folders', async t => {
+  // `link` points at `real`, so `<dir>/link/../child` reads two different
+  // folders depending on whether `..` is folded textually before or after the
+  // symlink. Both folders exist: only refusing the proof keeps the rename out of
+  // the wrong one.
+  const c = renameCase(t, { menu: true, nativeOnly: true, reportedDirectory: dir => {
+    if (!existsSync(join(dir, 'link'))) {
+      mkdirSync(join(dir, 'real', 'child'), { recursive: true });
+      symlinkSync('real', join(dir, 'link'));
+    }
+    // The textually folded folder exists and even holds a file of that name, so
+    // nothing but the segment rule stops replay from typing into it.
+    if (!existsSync(join(dir, 'child'))) {
+      mkdirSync(join(dir, 'child'), { recursive: true });
+      writeFileSync(join(dir, 'child', 'manifest.json'), 'wrong contents\n');
+    }
+    return `${dir}/link/../child`;
+  } });
+  const report = await c.run();
+  assert.equal(entry(report, 'select').code, 'RENAME_DIRECTORY_UNPROVEN', JSON.stringify(report.entries));
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.equal(c.calls.filter(call => call[0] === 'right-click').length, 0);
+  assert.equal(readFileSync(c.oldPath, 'utf8'), 'fixed contents\n');
+  assert.equal(readFileSync(join(c.directory, 'child', 'manifest.json'), 'utf8'), 'wrong contents\n');
+  assert.equal(existsSync(c.newPath), false);
+});
+
+test('Finder replays with the folder the native probe derived from the target row AXURL', async t => {  const c = renameCase(t, { menu: true, documentMissing: true, nativeOnly: true });
   const report = await c.run();
   assert.equal(report.status, 'passed', JSON.stringify(report.entries));
   // The first probe had no folder yet (no AXDocument); the fallback answer is

@@ -6,9 +6,9 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import type { ElementLocator } from './contracts.js';
 import type { StepV2 } from './contracts-v2.js';
 import { DesktopFault } from './desktop.js';
-import type { Desktop, FinderRenameRequest, RunningApp } from './desktop.js';
+import type { AppWindows, Desktop, FinderRenameRequest, RunningApp, WindowInfo } from './desktop.js';
 import { Fault, contains, flatten, resolve } from './locator.js';
-import type { Point, Snapshot } from './locator.js';
+import type { Node, Point, Snapshot } from './locator.js';
 import type { ScopeResolver, WindowBinding } from './scope.js';
 import type { StepResult } from './report-v2.js';
 
@@ -26,6 +26,45 @@ function filename(name: string) {
     throw new Fault('RENAME_INVALID_NAME', 'Expected a single Finder filename including the extension');
   }
   return name;
+}
+
+/**
+ * The folder the disk checks may use. It has to be absolute and free of `.` or
+ * `..` segments: with a symlink in the path, `readdir` on the literal folder and
+ * `join` on a normalised one can land in two different folders, so the source
+ * file and the destination would be proven in one folder and typed in another.
+ * Trailing spaces are a legal part of a folder name and are kept.
+ */
+function provenFolder(path: string | undefined) {
+  if (!path || !isAbsolute(path)) throw new Fault('RENAME_DIRECTORY_UNPROVEN', 'Missing folder path');
+  if (path.split('/').some(segment => segment === '.' || segment === '..')) {
+    throw new Fault('RENAME_DIRECTORY_UNPROVEN', 'The proven folder path contains a relative segment');
+  }
+  return path;
+}
+
+/**
+ * The box an open menu occupies: the union of the bounds its surface reported.
+ * A context menu is anchored at the pointer that opened it, so anchoring the
+ * recorded right-click point in that box is what ties this menu to the row the
+ * click was delivered to. A menu near a screen edge flips, so the anchor may be
+ * any corner of the box; the tolerance only covers that corner.
+ */
+function menuAnchor(tree: Node) {
+  let box: { x: number; y: number; width: number; height: number } | undefined;
+  const visit = (node: Node) => {
+    const b = node.bounds;
+    if (b) {
+      const x = box ? Math.min(box.x, b.x) : b.x;
+      const y = box ? Math.min(box.y, b.y) : b.y;
+      const right = box ? Math.max(box.x + box.width, b.x + b.width) : b.x + b.width;
+      const bottom = box ? Math.max(box.y + box.height, b.y + b.height) : b.y + b.height;
+      box = { x, y, width: right - x, height: bottom - y };
+    }
+    for (const child of node.children) visit(child);
+  };
+  visit(tree);
+  return box;
 }
 
 async function absent(path: string) {
@@ -187,8 +226,39 @@ class FinderRename {
       throw new Fault('RENAME_MENU_UNPROVEN', 'The open menu cannot be attributed to one Finder instance');
     }
     if (menu.ownerWindowId === undefined) {
-      const owned = await this.resolver.ownedWindows(binding);
-      if (owned.length !== 1 || owned[0].id !== binding.windowId) {
+      // A macOS context menu is application-owned and names no window, so the
+      // ref can only be tied to the bound window when this Finder process owns
+      // no other window that could own it. The app's own AX window list is read
+      // natively: unlike the system's on-screen list it is the process's own
+      // answer and does not lose a window it does not draw. A list that cannot
+      // be read, or a window the driver reports and that list omits, proves
+      // nothing, so the press stops.
+      let native: AppWindows | undefined;
+      try {
+        native = await this.desktop.appWindows?.(binding.pid);
+      } catch (error) {
+        if (error instanceof Fault && error.dependency) throw error;
+        throw new Fault('RENAME_MENU_UNPROVEN', 'The menu owner window inventory could not be read');
+      }
+      if (!native || !native.complete || native.numbers.length !== native.count) {
+        throw new Fault('RENAME_MENU_UNPROVEN', 'The menu owner window inventory is incomplete');
+      }
+      let owned: WindowInfo[];
+      try {
+        owned = await this.resolver.ownedWindows(binding);
+      } catch (error) {
+        if (error instanceof Fault && error.dependency) throw error;
+        throw new Fault('RENAME_MENU_UNPROVEN', 'The menu owner window inventory could not be cross-checked');
+      }
+      const numbers = new Set(native.numbers);
+      if (owned.some(window => {
+        const number = Number(window.id.startsWith('w-') ? window.id.slice(2) : NaN);
+        return !Number.isInteger(number) || !numbers.has(number);
+      })) {
+        throw new Fault('RENAME_MENU_UNPROVEN',
+          'The native window list omits a window the driver reports; the menu owner is unclear');
+      }
+      if (native.count !== 1 || native.numbers[0] !== binding.windowNumber) {
         throw new Fault('RENAME_MENU_UNPROVEN',
           'The open menu cannot be tied to the bound Finder window; another window could own it');
       }
@@ -197,21 +267,44 @@ class FinderRename {
 
   /**
    * The menu was opened by a right click on the recorded target row of the bound
-   * window. Right before its ref is pressed, prove that window still shows that
-   * row where the recording put it: a ref that can no longer be tied to the row
-   * it was opened from is not pressed.
+   * window. Right before its ref is pressed the same read-only evidence is
+   * collected again, without needing the folder window to hold focus: the row
+   * must still sit at the recorded point, the menu must be anchored there, that
+   * row must still be the only selected row, the folder must still be the pinned
+   * one, and the file on disk must still be the same object. Any missing answer
+   * stops before the press.
    */
-  private async proveMenuTarget(binding: WindowBinding) {
+  private async proveMenuTarget(menu: Snapshot, binding: WindowBinding) {
+    const request = this.request;
+    if (!request?.directory) throw new Fault('RENAME_DIRECTORY_UNPROVEN', 'The recorded folder was never proven');
     const snapshot = await this.resolver.snapshot(binding);
     const { point } = this.targetRow(snapshot);
-    if (!this.request || point[0] !== this.request.point[0] || point[1] !== this.request.point[1]) {
+    if (point[0] !== request.point[0] || point[1] !== request.point[1]) {
       throw new Fault('RENAME_MENU_UNPROVEN', 'The open menu cannot be tied to the recorded target row');
     }
+    const anchor = menuAnchor(menu.tree);
+    const tolerance = 8;
+    if (!anchor || point[0] < anchor.x - tolerance || point[0] > anchor.x + anchor.width + tolerance ||
+        point[1] < anchor.y - tolerance || point[1] > anchor.y + anchor.height + tolerance) {
+      throw new Fault('RENAME_MENU_UNPROVEN', 'The open menu is not anchored at the recorded target row');
+    }
+    const state = await this.desktop.finderRenameState({ ...request, menu: true });
+    if (state.editor) {
+      throw new Fault('RENAME_EDITOR_UNPROVEN', 'The folder window is already editing under the open menu');
+    }
+    if (state.selectedCount !== 1 || state.targetSelected !== true) {
+      throw new Fault('RENAME_SELECTION_UNPROVEN',
+        'The recorded row is no longer the only selected row under the open menu');
+    }
+    if (state.directory !== request.directory) {
+      throw new Fault('RENAME_DIRECTORY_UNPROVEN', 'Finder changed directories under the open menu');
+    }
+    await this.diskReady();
   }
 
   private async diskReady() {
-    const { directory, expected } = this.request!;
-    if (!directory || !isAbsolute(directory)) throw new Fault('RENAME_DIRECTORY_UNPROVEN', 'Missing folder path');
+    const directory = provenFolder(this.request!.directory);
+    const { expected } = this.request!;
     const entries = await readdir(directory).catch(() => {
       throw new Fault('RENAME_DIRECTORY_UNPROVEN', 'The Finder directory could not be read');
     });
@@ -231,7 +324,10 @@ class FinderRename {
     const snapshot = await this.resolver.snapshot(binding);
     const { row, expected, point } = this.targetRow(snapshot);
     this.request = { ...this.request, pid: binding.pid, windowNumber: binding.windowNumber, point, expected };
-    const state = await this.desktop.finderRenameState(this.request);
+    // A retry runs while the previous menu may still be open, so the folder
+    // window is located by number then; the point, selection, folder and file
+    // are read the same way either time.
+    const state = await this.desktop.finderRenameState(this.menuOpen ? { ...this.request, menu: true } : this.request);
     if (state.editor || (state.selectedCount !== 0 && state.selectedCount !== 1) ||
         (requireSelected && !(state.selectedCount === 1 && state.targetSelected))) {
       throw new Fault('RENAME_SELECTION_UNPROVEN', 'Could not verify a single selected target in the file list');
@@ -301,7 +397,7 @@ class FinderRename {
     if (matches.length !== 1 || !matches[0].node.ref) {
       throw new Fault('RENAME_MENU_UNPROVEN', 'Expected one enabled localized Rename item with a semantic reference');
     }
-    await this.proveMenuTarget(binding);
+    await this.proveMenuTarget(menu, binding);
     return matches[0].node.ref;
   }
 

@@ -65,20 +65,24 @@ enum RenameDirectory {
     }
 
     /**
-     * A path we can hand to `readdir`: absolute, NUL-free, not the root.
+     * A path we can hand to `readdir`: absolute, NUL-free, not the root, and
+     * free of `.` / `..` segments.
      *
      * The characters are kept exactly as the source decoded them. Trimming
      * whitespace would rewrite a real folder name — `Folder ` and `Folder` are
      * different folders — and silently move the rename to the wrong one.
      * Nothing here rewrites `..` either: with a symlink in the path that textual
-     * rewrite names a folder the source never pointed at, so a path that needs
-     * it is left for the caller's directory proof to refuse.
+     * rewrite names a folder the source never pointed at, so such a path is
+     * refused instead of normalised. The caller reports
+     * `RENAME_DIRECTORY_UNPROVEN` and sends no input.
      */
     static func absolutePath(_ raw: String?) -> String? {
         guard let raw, raw.hasPrefix("/"), !raw.contains("\0") else { return nil }
         var path = raw
         while path.count > 1 && path.hasSuffix("/") { path.removeLast() }
-        return path == "/" ? nil : path
+        guard path != "/", !path.split(separator: "/", omittingEmptySubsequences: false)
+            .contains(where: { $0 == "." || $0 == ".." }) else { return nil }
+        return path
     }
 }
 
