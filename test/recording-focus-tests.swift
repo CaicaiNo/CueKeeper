@@ -19,7 +19,9 @@ struct RecordingFocusTests {
         aRowOutsideTheBoundWindowProvesNoFolder()
         aPinnedFolderMustMatchTheFallback()
         aZeroSelectionOnlyProvesTheFolderBeforeSelecting()
-        print("Recording focus: 17/17 passed")
+        onlyAnAbsolutePathIsAUsableFolder()
+        aFolderNameKeepsItsCharacters()
+        print("Recording focus: 19/19 passed")
     }
 
     /// Finder's inline rename field makes the window probe fail. The app and its
@@ -197,6 +199,37 @@ struct RecordingFocusTests {
             document: nil, row: selectedRow(count: 0, selected: false, name: "other.json"),
             expected: "manifest.json", pinned: nil)
         precondition(otherRow == nil, "zero selection on another row produced \(String(describing: otherRow))")
+    }
+
+    /// A document that parses to a relative path cannot name a folder, and the
+    /// recorder uses this same answer to decide whether the validated row
+    /// fallback has to be read. Keeping the condition in one place is what lets
+    /// `file:Downloads` reach that fallback instead of failing alone.
+    static func onlyAnAbsolutePathIsAUsableFolder() {
+        precondition(RenameDirectory.absolutePath("Downloads") == nil,
+                     "a relative path was usable as a folder")
+        precondition(RenameDirectory.absolutePath("file:Downloads") == nil,
+                     "a file URL without a path was usable as a folder")
+        precondition(RenameDirectory.absolutePath("/") == nil,
+                     "the root was usable as a rename folder")
+        let usable = RenameDirectory.absolutePath("/Users/qa/Downloads")
+        precondition(usable == "/Users/qa/Downloads", "an absolute path became \(String(describing: usable))")
+    }
+
+    /// Finder can show a folder whose name ends in a space. Trimming the path
+    /// would resolve a sibling folder with the same name minus the space and
+    /// move the rename into it, so every character is kept.
+    static func aFolderNameKeepsItsCharacters() {
+        let spaced = "/Users/qa/Downloads/Folder "
+        let document = RenameDirectory.resolve(document: spaced, row: nil, expected: nil, pinned: nil)
+        precondition(document == spaced, "a spaced document folder became \(String(describing: document))")
+        let row = RenameDirectory.resolve(
+            document: nil, row: selectedRow(url: spaced + "/manifest.json"), expected: nil, pinned: spaced)
+        precondition(row == spaced, "a spaced row folder became \(String(describing: row))")
+        let unpinned = RenameDirectory.resolve(
+            document: nil, row: selectedRow(url: spaced + "/manifest.json"), expected: nil,
+            pinned: "/Users/qa/Downloads/Folder")
+        precondition(unpinned == nil, "a trimmed pin was accepted as \(String(describing: unpinned))")
     }
 
     /// An app whose only window has no title yet keeps it: nothing else can own

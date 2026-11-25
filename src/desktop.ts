@@ -121,7 +121,11 @@ export interface Desktop {
    * context menu) that is not a window of its own.
    */
   frontmostApp?(timeoutMs?: number): Promise<FrontmostApp | undefined>;
-  /** Read-only application inventory, for mapping a window's owner PID to a bundle ID. */
+  /**
+   * The complete application inventory, or a fault. A partial answer is
+   * refused: the processes it leaves out cannot be told apart from absent ones,
+   * so a caller could not attribute a surface to one instance.
+   */
   listApps(timeoutMs?: number): Promise<RunningApp[]>;
   /** Window-only calls; no bundle ID is resolved by the driver. */
   snapshotWindow(windowId: string, title?: string, timeoutMs?: number): Promise<Snapshot>;
@@ -181,13 +185,22 @@ function windowList(data: unknown): WindowInfo[] {
 function appList(data: unknown): RunningApp[] {
   const inventory = object(data);
   if (!Array.isArray(inventory.apps)) throw new Fault('BAD_RESPONSE', 'Expected an application inventory');
+  // A partial inventory cannot prove which process owns a surface: the
+  // processes it leaves out would read as absent. Refuse it instead of
+  // answering with the records that happen to be there.
+  if (inventory.complete === false) {
+    throw new Fault('APP_INVENTORY_INCOMPLETE', 'The application inventory is incomplete');
+  }
   const apps: RunningApp[] = [];
   for (const item of inventory.apps) {
     const app = object(item);
     const pid = positiveInteger(app.pid);
-    // An entry without a process ID cannot be joined to a window; skip it
-    // rather than failing the whole inventory on a partial record.
-    if (pid === undefined) continue;
+    // A record without a process ID cannot be joined to a window or to a
+    // surface. Skipping it would let the rest of the answer pass for a complete
+    // one, so the whole inventory is refused.
+    if (pid === undefined) {
+      throw new Fault('APP_INVENTORY_INCOMPLETE', 'An application record has no process ID');
+    }
     apps.push({
       pid,
       ...(typeof app.bundle_id === 'string' && app.bundle_id ? { bundleId: app.bundle_id } : {}),

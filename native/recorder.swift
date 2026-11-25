@@ -798,7 +798,12 @@ final class Capture {
                 inBoundWindow: bound)
         }
         let document = documentPath()
-        let rowSource = document == nil ? rowEvidence() : nil
+        // A document that parses as a URL but does not name an absolute path
+        // (`file:Downloads`) proves nothing. The row fallback below is the same
+        // validated one a missing document uses; a valid document still wins and
+        // a valid one that disagrees with the pinned folder is still refused by
+        // resolve without consulting the row.
+        let rowSource = RenameDirectory.absolutePath(document) == nil ? rowEvidence() : nil
         guard let directory = RenameDirectory.resolve(
                 document: document, row: rowSource,
                 expected: request.directory == nil ? request.expected : nil,

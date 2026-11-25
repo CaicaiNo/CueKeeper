@@ -244,6 +244,17 @@ export class ScopeResolver {
     return snapshot;
   }
 
+  /**
+   * Every window the bound process owns, read from the system and cross-checked
+   * against the driver. A partial answer faults instead of reading as fewer
+   * windows, so a caller may conclude that the bound window is the process's
+   * only one.
+   */
+  async ownedWindows(binding: WindowBinding, timeoutMs?: number): Promise<WindowInfo[]> {
+    this.signal.throwIfAborted();
+    return this.identityFor(binding.app).ownedWindows(this.desktop, timeoutMs);
+  }
+
   /** The window the driver reports in front, without moving focus. */
   private async observedForeground(): Promise<WindowInfo | undefined> {
     if (this.desktop.focusedWindow) return this.desktop.focusedWindow();

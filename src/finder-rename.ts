@@ -152,6 +152,11 @@ class FinderRename {
    * window of the same app is the menu of a different folder window, and a
    * surface that names no application cannot be attributed at all. Both stop
    * before the semantic press.
+   *
+   * A macOS context menu is application-owned, so the driver usually omits its
+   * window. The ref can still be tied to the bound window when that Finder
+   * process owns no other window the menu could belong to; once it has another
+   * one, the surface names no window and the ref is not pressed.
    */
   private async proveMenuOwner(menu: Snapshot, binding: WindowBinding) {
     if (!menu.ownerApp) {
@@ -160,19 +165,47 @@ class FinderRename {
     if (menu.ownerWindowId !== undefined && menu.ownerWindowId !== binding.windowId) {
       throw new Fault('FOCUS_INTERRUPTED', 'The open menu belongs to another Finder window');
     }
-    let named: RunningApp[];
+    let inventory: RunningApp[];
     try {
-      named = (await this.desktop.listApps()).filter(app => app.name === menu.ownerApp);
+      inventory = await this.desktop.listApps();
     } catch (error) {
       if (error instanceof Fault) throw error;
       throw new Fault('RENAME_MENU_UNPROVEN', 'The running applications could not be listed for the open menu');
     }
+    // A record with no name cannot be told apart from another instance of the
+    // menu's application, so the name join below could pass on an incomplete
+    // answer.
+    if (inventory.some(app => !app.name)) {
+      throw new Fault('RENAME_MENU_UNPROVEN', 'The running applications cannot all be attributed to the open menu');
+    }
+    const named = inventory.filter(app => app.name === menu.ownerApp);
     if (named.some(app => app.pid !== binding.pid ||
         (app.bundleId !== undefined && app.bundleId !== finder))) {
       throw new Fault('FOCUS_INTERRUPTED', 'The open menu belongs to another application');
     }
     if (named.length !== 1) {
       throw new Fault('RENAME_MENU_UNPROVEN', 'The open menu cannot be attributed to one Finder instance');
+    }
+    if (menu.ownerWindowId === undefined) {
+      const owned = await this.resolver.ownedWindows(binding);
+      if (owned.length !== 1 || owned[0].id !== binding.windowId) {
+        throw new Fault('RENAME_MENU_UNPROVEN',
+          'The open menu cannot be tied to the bound Finder window; another window could own it');
+      }
+    }
+  }
+
+  /**
+   * The menu was opened by a right click on the recorded target row of the bound
+   * window. Right before its ref is pressed, prove that window still shows that
+   * row where the recording put it: a ref that can no longer be tied to the row
+   * it was opened from is not pressed.
+   */
+  private async proveMenuTarget(binding: WindowBinding) {
+    const snapshot = await this.resolver.snapshot(binding);
+    const { point } = this.targetRow(snapshot);
+    if (!this.request || point[0] !== this.request.point[0] || point[1] !== this.request.point[1]) {
+      throw new Fault('RENAME_MENU_UNPROVEN', 'The open menu cannot be tied to the recorded target row');
     }
   }
 
@@ -196,14 +229,7 @@ class FinderRename {
   private async row(requireSelected: boolean) {
     const binding = await this.foreground();
     const snapshot = await this.resolver.snapshot(binding);
-    const row = resolve(snapshot, this.target).node;
-    const cell = row.children.find(node => node.role === 'cell');
-    const expected = filename(this.target.name!);
-    const label = cell && flatten(cell).find(({ node }) => node.bounds &&
-      /^(textfield|statictext|text)$/.test(node.role) && [node.value, node.name, node.text].includes(expected))?.node;
-    if (!rowRoles.test(row.role) || !row.ref || row.secure || !label?.bounds) throw invalidSequence();
-    const b = label.bounds;
-    const point: Point = [b.x + Math.min(12, b.width / 2), b.y + b.height / 2];
+    const { row, expected, point } = this.targetRow(snapshot);
     this.request = { ...this.request, pid: binding.pid, windowNumber: binding.windowNumber, point, expected };
     const state = await this.desktop.finderRenameState(this.request);
     if (state.editor || (state.selectedCount !== 0 && state.selectedCount !== 1) ||
@@ -219,6 +245,23 @@ class FinderRename {
     this.newName = filename(name);
     await this.diskReady();
     return { row, listFocused: state.listFocused, selected: state.selectedCount === 1 && state.targetSelected, snapshot };
+  }
+
+  /**
+   * The one recorded file row in a bound-window snapshot, with the point its
+   * name label occupies. The right click that opened the menu was delivered to
+   * this row, so the same read identifies the row the menu belongs to.
+   */
+  private targetRow(snapshot: Snapshot) {
+    const row = resolve(snapshot, this.target).node;
+    const cell = row.children.find(node => node.role === 'cell');
+    const expected = filename(this.target.name!);
+    const label = cell && flatten(cell).find(({ node }) => node.bounds &&
+      /^(textfield|statictext|text)$/.test(node.role) && [node.value, node.name, node.text].includes(expected))?.node;
+    if (!rowRoles.test(row.role) || !row.ref || row.secure || !label?.bounds) throw invalidSequence();
+    const b = label.bounds;
+    const point: Point = [b.x + Math.min(12, b.width / 2), b.y + b.height / 2];
+    return { row, expected, point };
   }
 
   async select() {
@@ -258,6 +301,7 @@ class FinderRename {
     if (matches.length !== 1 || !matches[0].node.ref) {
       throw new Fault('RENAME_MENU_UNPROVEN', 'Expected one enabled localized Rename item with a semantic reference');
     }
+    await this.proveMenuTarget(binding);
     return matches[0].node.ref;
   }
 

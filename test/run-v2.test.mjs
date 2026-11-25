@@ -1279,7 +1279,7 @@ function renameCase(t, options = {}) {
   utimesSync(oldPath, stamp, stamp);
   const bundlePath = '/System/Library/CoreServices/Finder.app';
   const { world, run } = harness(t, {
-    windows: [renameWindow()], focused: 'w-1',
+    windows: [renameWindow(), ...(options.extraWindows ?? [])], focused: 'w-1',
     apps: { [finder]: [{ pid: 601, startedAt: '601.1', bundleId: finder, bundlePath }] },
     identityOptions: { appPath: () => bundlePath, pathToBundle: { [bundlePath]: finder } },
   });
@@ -1318,11 +1318,19 @@ function renameCase(t, options = {}) {
   };
   // The driver names the application it read a surface from, but not its PID.
   // Replay joins that name to the running inventory, so the fake offers both.
-  driver.listApps = async () => options.menuApps ?? [{ pid: 601, bundleId: finder, name: 'Finder' }];
+  driver.listApps = async () => {
+    if (options.menuInventoryError) throw options.menuInventoryError;
+    return options.menuApps ?? [{ pid: 601, bundleId: finder, name: 'Finder' }];
+  };
   driver.snapshotSurface = async (surface, timeout, app) => {
     calls.push(['snapshotSurface', surface, app]);
     if (surface === 'menu') {
       assert.equal(opened, true);
+      // The row the menu was opened on moved on while the menu was open.
+      if (options.targetMoves) {
+        const row = world.state.windows[0].data.tree.children[0].children[0];
+        row.children[0].children[1].bounds = { x: 400, y: 160, width: 120, height: 20 };
+      }
       return parseSurface({
         complete: true,
         ...(options.menuSurfaceApp === null ? {} : { app: options.menuSurfaceApp ?? 'Finder' }),
@@ -1594,6 +1602,55 @@ test('Finder presses no menu ref when two Finder instances share the menu owner 
 
 test('Finder presses no menu ref when the menu owner is not a running application', async t => {
   const c = renameCase(t, { menu: true, nativeOnly: true, menuApps: [] });
+  const report = await c.run();
+  assert.equal(entry(report, 'rename').code, 'RENAME_MENU_UNPROVEN');
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+// A macOS context menu is application-owned, so the driver names the app and
+// omits the window. The ref can only be tied to the bound window while that
+// Finder process has no other window the menu could belong to.
+test('Finder presses no menu ref when another window of the same Finder could own the menu', async t => {
+  const other = renameWindow();
+  other.id = 'w-2';
+  other.title = 'second folder';
+  other.data.window = { id: 'w-2', title: 'second folder' };
+  other.data.tree.name = 'second folder';
+  const c = renameCase(t, { menu: true, nativeOnly: true, extraWindows: [other] });
+  const report = await c.run();
+  assert.equal(entry(report, 'rename').code, 'RENAME_MENU_UNPROVEN');
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+test('Finder presses no menu ref when the process inventory is incomplete', async t => {
+  const c = renameCase(t, {
+    menu: true, nativeOnly: true,
+    menuInventoryError: new Fault('APP_INVENTORY_INCOMPLETE', 'The application inventory is incomplete'),
+  });
+  const report = await c.run();
+  assert.equal(entry(report, 'rename').code, 'APP_INVENTORY_INCOMPLETE');
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+test('Finder presses no menu ref when a process in the inventory cannot be named', async t => {
+  const c = renameCase(t, {
+    menu: true, nativeOnly: true,
+    menuApps: [
+      { pid: 601, bundleId: finder, name: 'Finder' },
+      { pid: 602, bundleId: finder },
+    ],
+  });
+  const report = await c.run();
+  assert.equal(entry(report, 'rename').code, 'RENAME_MENU_UNPROVEN');
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+test('Finder presses no menu ref when the bound window no longer shows the target row', async t => {
+  const c = renameCase(t, { menu: true, nativeOnly: true, targetMoves: true });
   const report = await c.run();
   assert.equal(entry(report, 'rename').code, 'RENAME_MENU_UNPROVEN');
   assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);

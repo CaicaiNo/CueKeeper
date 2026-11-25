@@ -64,13 +64,21 @@ enum RenameDirectory {
         return parent == pinned ? parent : nil
     }
 
-    /** A path we can hand to `readdir`: absolute, NUL-free, not the root. */
-    private static func absolutePath(_ raw: String?) -> String? {
-        guard let raw else { return nil }
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix("/"), !trimmed.contains("\0") else { return nil }
-        let standard = (trimmed as NSString).standardizingPath
-        return standard.isEmpty || standard == "/" ? nil : standard
+    /**
+     * A path we can hand to `readdir`: absolute, NUL-free, not the root.
+     *
+     * The characters are kept exactly as the source decoded them. Trimming
+     * whitespace would rewrite a real folder name — `Folder ` and `Folder` are
+     * different folders — and silently move the rename to the wrong one.
+     * Nothing here rewrites `..` either: with a symlink in the path that textual
+     * rewrite names a folder the source never pointed at, so a path that needs
+     * it is left for the caller's directory proof to refuse.
+     */
+    static func absolutePath(_ raw: String?) -> String? {
+        guard let raw, raw.hasPrefix("/"), !raw.contains("\0") else { return nil }
+        var path = raw
+        while path.count > 1 && path.hasSuffix("/") { path.removeLast() }
+        return path == "/" ? nil : path
     }
 }
 
