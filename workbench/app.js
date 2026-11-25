@@ -1652,20 +1652,35 @@ function v2AssertFields(initial, options = {}) {
   const processNameBox = field('可执行文件名', processName);
   const processPathBox = field('可执行完整路径', processPath);
   const processMatchBox = field('匹配方式', processMatch);
+  // A hidden field is not part of this dialog's answer, and a hidden `required`
+  // input (the element locator's role) silently blocks the whole form: disable
+  // what is hidden so only the fields this mode uses take part in validation.
+  const setEnabled = (box, enabled) => {
+    for (const node of box.querySelectorAll('input, select, textarea')) node.disabled = !enabled;
+  };
+  // The whole group can be hidden too (a non-assert insert dialog).
+  let groupVisible = true;
+  const show = (box, visible) => {
+    const shown = visible && groupVisible;
+    box.hidden = !shown;
+    setEnabled(box, shown);
+  };
   const sync = () => {
     const mode = targetKind.value;
     const window = mode === 'window';
     const system = mode === 'file' || mode === 'process';
-    elementBox.hidden = mode !== 'element';
-    propertyBox.hidden = system;
-    fileBox.hidden = mode !== 'file';
-    processMatchBox.hidden = mode !== 'process';
-    processNameBox.hidden = mode !== 'process' || processMatch.value !== 'name';
-    processPathBox.hidden = mode !== 'process' || processMatch.value !== 'path';
-    argsBox.hidden = mode !== 'process' || processMatch.value !== 'name';
+    targetKind.disabled = !groupVisible;
+    toggle.disabled = !groupVisible;
+    show(elementBox, mode === 'element');
+    show(propertyBox, !system);
+    show(fileBox, mode === 'file');
+    show(processMatchBox, mode === 'process');
+    show(processNameBox, mode === 'process' && processMatch.value === 'name');
+    show(processPathBox, mode === 'process' && processMatch.value === 'path');
+    show(argsBox, mode === 'process' && processMatch.value === 'name');
     if (system) {
-      boolBox.hidden = false;
-      valueBox.hidden = true;
+      show(boolBox, true);
+      show(valueBox, false);
       return;
     }
     const wanted = property.value || initial?.expect?.property;
@@ -1675,14 +1690,19 @@ function v2AssertFields(initial, options = {}) {
         el('option', { value: 'text' }, '文本'), el('option', { value: 'value' }, '值')]));
     if (wanted && [...property.options].some(option => option.value === wanted)) property.value = wanted;
     const bool = property.value === 'exists' || property.value === 'visible';
-    boolBox.hidden = !bool;
-    valueBox.hidden = bool;
+    show(boolBox, bool);
+    show(valueBox, !bool);
   };
   targetKind.onchange = sync;
   property.onchange = sync;
   processMatch.onchange = sync;
   sync();
   return {
+    /** Show or hide the whole group; hidden controls are disabled too. */
+    setVisible(visible) {
+      groupVisible = visible;
+      sync();
+    },
     controls: [
       field('断言目标', targetKind), elementBox, propertyBox, boolBox, valueBox,
       fileBox, processMatchBox, processNameBox, processPathBox, argsBox,
@@ -1821,7 +1841,7 @@ function v2InsertDialog() {
     titleBox.hidden = appScope;
     keyBox.hidden = appScope;
     targetBox.hidden = !['click', 'type'].includes(kind.value);
-    assertBox.hidden = kind.value !== 'assert';
+    assertFields.setVisible(kind.value === 'assert');
     positionBox.hidden = kind.value !== 'assert';
     timeoutBox.hidden = kind.value !== 'wait';
   };
