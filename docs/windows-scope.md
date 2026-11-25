@@ -207,7 +207,7 @@ TextEdit 的等价物必须同时满足四条，全部可观察：
 
 ### 7.2 准备
 
-- Windows 10 1809+ / 11 x64；Node 22；npm 11；agent-desktop 1.3.1 原生 exe。
+- Windows 10 1809+ / 11 x64；Node 22；npm 10+；agent-desktop 1.3.1 原生 exe。
 - `set CUEKEEPER_AGENT_DESKTOP=C:\path\to\agent-desktop.exe`
 - 测试目录 `C:\cuekeeper-w1`，文件 `Cuekeeper-W1.rtf`（已存在），内容固定为 ASCII 字符串（例如 `Cuekeeper W1 round 01`）。每轮在编辑器里全选删除并 `Ctrl+S`，确认文件已空，再开始回放。
 - flow 三步：正文 click → type 固定字符串 → `ctrl+s`。定位器来自 `pick --select`；把结果手写进 `out\w1.flow.json` 后先 `flow validate`。

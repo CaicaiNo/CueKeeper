@@ -104,7 +104,7 @@ xattr -dr com.apple.quarantine ~/Applications/cuekeeper-<version>-macos-<arch>
 
 ### 从源码运行（开发者）
 
-需要 macOS、Node.js 22+ 和 npm 11。GitHub Actions 在 `macos-latest` 上执行相同的安装、构建、测试和录制器编译，工作流见 `.github/workflows/ci.yml`。
+需要 macOS、Node.js 22+（自带 npm 10+）。GitHub Actions 在 `macos-latest` 上执行相同的安装、构建、测试和录制器编译，工作流见 `.github/workflows/ci.yml`。
 
 ```sh
 git clone git@github.com:CaicaiNo/CueKeeper.git
@@ -170,7 +170,7 @@ node dist/cli.js workbench out/demo
 
 ## 构建与离线验证
 
-需要 Node.js 22+ 和 npm 11。以下命令使用仓库自带的 TextEdit 树样本检查定位器和报告。
+需要 Node.js 22+（自带 npm 10+）。以下命令使用仓库自带的 TextEdit 树样本检查定位器和报告。
 
 ```sh
 npm ci
