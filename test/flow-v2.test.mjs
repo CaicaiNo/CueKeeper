@@ -574,7 +574,12 @@ test('system file and process checks are closed, app-free v2 contracts', () => {
     {
       id: 'check-process-args', kind: 'assert',
       scope: { kind: 'process', name: 'controlled sleeper' },
-      check: { kind: 'process_running', equals: true, args: ['--profile', 'a b', '"quoted"'] },
+      check: {
+        kind: 'process_running', equals: true,
+        // 1400 CJK characters are 4200 UTF-8 bytes: the save limit is in code
+        // units, the probe must carry the whole value.
+        args: ['--profile', 'a b', '"quoted"', '汉'.repeat(1400)],
+      },
     },
   ];
   const flow = parseFlowV2({ version: 2, id: 'system-checks', name: 'System checks', steps });
@@ -588,7 +593,8 @@ test('system file and process checks are closed, app-free v2 contracts', () => {
   // Arguments refine the name check without entering its scope or label.
   assert.equal(scopeKey(steps[3].scope), 'process:name:controlled sleeper');
   assert.equal(scopeLabel(steps[3].scope), '进程 · controlled sleeper');
-  assert.deepEqual(steps[3].check.args, ['--profile', 'a b', '"quoted"']);
+  assert.deepEqual(steps[3].check.args, ['--profile', 'a b', '"quoted"', '汉'.repeat(1400)]);
+  assert.equal(Buffer.byteLength(steps[3].check.args[3], 'utf8'), 4200);
   assert.equal(scopeKey(steps[2].scope),
     'process:path:/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
 

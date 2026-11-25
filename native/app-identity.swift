@@ -95,9 +95,16 @@ func flag(_ name: String, _ args: [String]) -> String? {
 let maxProcessRows = 8192
 let maxExecutableBytes = 4096
 let maxArgvBytes = 256 * 1024
-let maxStdinBytes = 256 * 1024
+// A saved argument is at most 4096 UTF-16 code units, which is at most 12288
+// UTF-8 bytes (CJK BMP text); the transfer and the matcher accept that whole
+// value instead of rejecting a legal argument as unreadable.
+let maxExpectedArgBytes = 12_288
+// An observed argv element longer than any savable argument is carried as a
+// sentinel one byte longer than the limit: it can never equal a saved value,
+// and it does not stop a short argument elsewhere from matching.
+let maxCarriedArgBytes = maxExpectedArgBytes + 1
+let maxStdinBytes = 1024 * 1024
 let maxArgCount = 32
-let maxArgBytes = 4096
 
 struct ArgvRequest: Codable {
     let pid: Int32
@@ -117,7 +124,21 @@ struct IdentityRequest: Codable {
 struct ProcessRow {
     let pid: pid_t
     let executable: String?
+    /// Kernel short executable name (`pbi_name`), not the process's argv[0].
+    /// It survives an unlinked image, so a caller can exclude a live PID that
+    /// cannot be the one it asks about.
+    let name: String?
     let startedAt: String?
+}
+
+/// `pbi_name` is a fixed 32-byte field; a longer basename is truncated there.
+func kernelName(_ info: proc_bsdinfo) -> String? {
+    var field = info.pbi_name
+    let bytes = withUnsafeBytes(of: &field) { raw -> [UInt8] in
+        Array(raw.prefix { $0 != 0 })
+    }
+    guard !bytes.isEmpty, let value = String(bytes: bytes, encoding: .utf8) else { return nil }
+    return value
 }
 
 func processRow(_ pid: pid_t) -> ProcessRow? {
@@ -137,6 +158,7 @@ func processRow(_ pid: pid_t) -> ProcessRow? {
     return ProcessRow(
         pid: pid,
         executable: executable,
+        name: readableInfo ? kernelName(info) : nil,
         startedAt: readableInfo ? "\(info.pbi_start_tvsec).\(info.pbi_start_tvusec)" : nil
     )
 }
@@ -148,6 +170,7 @@ func processRows(_ pids: [Int32]) -> [[String: Any]] {
         guard pid > 0, let row = processRow(pid) else { continue }
         var record: [String: Any] = ["pid": Int(row.pid)]
         if let executable = row.executable { record["executable"] = executable }
+        if let name = row.name { record["name"] = name }
         // Only a readable generation marker can prove a PID was not reused.
         if let startedAt = row.startedAt { record["startedAt"] = startedAt }
         rows.append(record)
@@ -183,8 +206,14 @@ func readArguments(_ pid: pid_t) -> [String]? {
         while index < size, buffer[index] != 0 { index += 1 }
         guard index < size else { return nil }
         let slice = buffer[start..<index]
-        guard slice.count <= maxArgBytes, let value = String(bytes: slice, encoding: .utf8) else { return nil }
-        arguments.append(value)
+        if slice.count <= maxCarriedArgBytes, let value = String(bytes: slice, encoding: .utf8) {
+            arguments.append(value)
+        } else {
+            // Too long for any savable value (or not UTF-8): keep the position
+            // as a sentinel that cannot equal an expected argument, so an
+            // unrelated long element never makes a short one unreadable.
+            arguments.append(String(repeating: "\u{0}", count: maxCarriedArgBytes))
+        }
         index += 1
     }
     return arguments
@@ -225,7 +254,7 @@ func readBoundedStdin() -> Data? {
 func argvStatus(_ request: ArgvRequest) -> String {
     guard request.pid > 0, !request.args.isEmpty, request.args.count <= maxArgCount,
           request.args.allSatisfy({
-              !$0.isEmpty && $0.utf8.count <= maxArgBytes && !$0.contains("\0")
+              !$0.isEmpty && $0.utf8.count <= maxExpectedArgBytes && !$0.contains("\0")
           }) else { return "unknown" }
     guard let before = liveIdentity(request.pid),
           before.uid == geteuid(),

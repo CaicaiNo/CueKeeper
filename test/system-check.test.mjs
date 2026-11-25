@@ -260,7 +260,7 @@ test('a live process without a readable executable path stays unknown, never abs
   const mixed = new SystemChecks({
     probe: fakeProbe([
       process_(701, '/usr/bin/node'),
-      { pid: 702, uid: 501, live: true },
+      { pid: 702, uid: 501, live: true, nameHint: 'no-such-process' },
     ]).probe,
   });
   assert.equal(await mixed.processRunning({ kind: 'process', name: 'node' }), true);
@@ -281,7 +281,7 @@ test('a live process without a readable executable path stays unknown, never abs
   const args = new SystemChecks({
     probe: fakeProbe([
       process_(703, '/usr/bin/node'),
-      { pid: 704, uid: 501, live: true },
+      { pid: 704, uid: 501, live: true, nameHint: 'node' },
     ], async () => 'unmatched').probe,
   });
   await assert.rejects(args.processRunning({ kind: 'process', name: 'node' }, ['x']), error => {
@@ -291,10 +291,49 @@ test('a live process without a readable executable path stays unknown, never abs
   const proving = new SystemChecks({
     probe: fakeProbe([
       process_(705, '/usr/bin/node'),
-      { pid: 706, uid: 501, live: true },
+      { pid: 706, uid: 501, live: true, nameHint: 'node' },
     ], async () => 'matched').probe,
   });
   assert.equal(await proving.processRunning({ kind: 'process', name: 'node' }, ['x']), true);
+});
+
+test('the kernel short name excludes unrelated live processes with no readable path', async () => {
+  // The reviewer's case: one live test process lost its image. Checking a
+  // completely different target must stay false in all three forms.
+  const checks = new SystemChecks({
+    probe: fakeProbe([
+      { pid: 801, uid: 501, live: true, nameHint: 'controlled sleeper' },
+    ]).probe,
+  });
+  assert.equal(await checks.processRunning({ kind: 'process', name: 'never-ran' }), false);
+  assert.equal(await checks.processRunning({ kind: 'process', path: '/usr/bin/never-ran' }), false);
+  assert.equal(await checks.processRunning({ kind: 'process', name: 'never-ran' }, ['x']), false);
+  // The name that could still be the target stays unknown, never absent.
+  for (const [label, call] of [
+    ['name', () => checks.processRunning({ kind: 'process', name: 'controlled sleeper' })],
+    ['path', () => checks.processRunning({ kind: 'process', path: '/tmp/controlled sleeper' })],
+    ['args', () => checks.processRunning({ kind: 'process', name: 'controlled sleeper' }, ['--profile'])],
+  ]) {
+    await assert.rejects(call(), error => {
+      assert.equal(error.code, 'SYSTEM_CHECK_FAILED', label);
+      return true;
+    }, label);
+  }
+
+  // A missing kernel name leaves the process possible: no clue to exclude it.
+  const nameless = new SystemChecks({
+    probe: fakeProbe([{ pid: 802, uid: 501, live: true }]).probe,
+  });
+  await assert.rejects(
+    nameless.processRunning({ kind: 'process', name: 'never-ran' }),
+    error => error.code === 'SYSTEM_CHECK_FAILED');
+
+  // A kernel name truncated at 31 bytes is a prefix of the real basename.
+  const truncated = { pid: 803, uid: 501, live: true, nameHint: 'x'.repeat(31) };
+  const prefix = new SystemChecks({ probe: fakeProbe([truncated]).probe });
+  await assert.rejects(
+    prefix.processRunning({ kind: 'process', name: `${'x'.repeat(31)}-suffix` }),
+    error => error.code === 'SYSTEM_CHECK_FAILED');
 });
 
 test('a probe that exits before reading its request is an unknown, never a crash', async t => {
@@ -353,8 +392,11 @@ test('the real helper reads executable identity and bounded argv of a controlled
     // equality would consider equal to U+00E9; the bytes are not equal.
     const decomposed = 'e\u0301';
     const precomposed = '\u00e9';
+    // 1400 CJK characters are 4200 UTF-8 bytes: a legal 4096-code-unit value
+    // that the probe must carry whole instead of calling it unreadable.
+    const longArg = '汉'.repeat(1400);
     const child = spawn('/bin/sh', ['-c',
-      `exec -a /not-the-executable/haoc165 ${JSON.stringify(executable)} --profile "a b" ${JSON.stringify(decomposed)}`,
+      `exec -a /not-the-executable/haoc165 ${JSON.stringify(executable)} --profile "a b" ${JSON.stringify(decomposed)} --short ${JSON.stringify(longArg)}`,
     ], { stdio: 'ignore' });
     await Promise.race([
       new Promise((resolve, reject) => {
@@ -407,6 +449,16 @@ test('the real helper reads executable identity and bounded argv of a controlled
       ['--profile', 'a b', decomposed]), true);
     assert.equal(await checks.processRunning({ kind: 'process', name: 'controlled sleeper' },
       ['--profile', 'a b', precomposed]), false);
+    // A long legal argument is matched byte for byte, and it never stops a
+    // short argument elsewhere from matching.
+    assert.equal(await checks.processRunning({ kind: 'process', name: 'controlled sleeper' },
+      [longArg]), true);
+    assert.equal(await checks.processRunning({ kind: 'process', name: 'controlled sleeper' },
+      ['--short']), true);
+    assert.equal(await checks.processRunning({ kind: 'process', name: 'controlled sleeper' },
+      ['--short', longArg]), true);
+    assert.equal(await checks.processRunning({ kind: 'process', name: 'controlled sleeper' },
+      ['汉'.repeat(1399)]), false);
 
     // The helper's own response carries a status only: neither the expected
     // arguments nor the observed argv travel back to Node.
@@ -434,37 +486,33 @@ test('the real helper reads executable identity and bounded argv of a controlled
       pid: 1, executable: launchd.executable, startedAt: launchd.startedAt ?? 'unprovable',
     }, ['x']), 'unknown');
 
-    // A running image whose file is gone: the kernel may keep the old name for
-    // a while, but the PID is alive either way, so no check may answer false.
+    // A running image whose file is gone: wait for the kernel to drop the path,
+    // then the live PID is kept as an unknown candidate.
     await rm(executable);
-    await sleep(300);
-    assert.equal(child.exitCode, null, 'the controlled process is still alive without its file');
-    const goneImage = (await probe.identities()).find(identity => identity.pid === child.pid);
+    let goneImage;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      goneImage = (await probe.identities()).find(identity => identity.pid === child.pid);
+      if (goneImage && goneImage.executable === undefined) break;
+      await sleep(100);
+    }
     assert.ok(goneImage, 'the live PID is kept even without an executable path');
+    assert.equal(child.exitCode, null, 'the controlled process is still alive without its file');
+    assert.equal(goneImage.nameHint, 'controlled sleeper', 'the kernel name survives the unlink');
 
-    const verdict = call => call().then(value => ({ value }), error => ({ code: error.code }));
+    // Unrelated targets are excluded by that kernel name: one unreadable image
+    // must not turn every other check into an unknown.
+    assert.equal(await checks.processRunning({ kind: 'process', name: 'never-ran' }), false);
+    assert.equal(await checks.processRunning({ kind: 'process', path: '/usr/bin/never-ran' }), false);
+    assert.equal(await checks.processRunning({ kind: 'process', name: 'never-ran' }, ['x']), false);
+
     for (const [label, call] of [
-      ['forward name', () => checks.processRunning({ kind: 'process', name: 'controlled sleeper' })],
-      ['reverse name', () => checks.processRunning({ kind: 'process', name: 'controlled sleeper' }, ['--profile'])],
+      ['name', () => checks.processRunning({ kind: 'process', name: 'controlled sleeper' })],
+      ['reverse args', () => checks.processRunning({ kind: 'process', name: 'controlled sleeper' }, ['--profile'])],
       ['path', () => checks.processRunning({ kind: 'process', path: canonical })],
     ]) {
-      const answer = await verdict(call);
-      assert.ok(answer.value === true || answer.code === 'SYSTEM_CHECK_FAILED',
-        `${label} must never read as absent while the PID is alive: ${JSON.stringify(answer)}`);
-    }
-
-    // Once the system drops the name, every answer is unknown: forward and
-    // reverse alike, by name and by the old path.
-    if (goneImage.executable === undefined) {
-      for (const [label, call] of [
-        ['forward name', () => checks.processRunning({ kind: 'process', name: 'controlled sleeper' })],
-        ['reverse name', () => checks.processRunning({ kind: 'process', name: 'controlled sleeper' }, ['--profile'])],
-        ['forward path', () => checks.processRunning({ kind: 'process', path: canonical })],
-      ]) {
-        await assert.rejects(call(), error => {
-          assert.equal(error.code, 'SYSTEM_CHECK_FAILED', label);
-          return true;
-        }, label);
-      }
+      await assert.rejects(call(), error => {
+        assert.equal(error.code, 'SYSTEM_CHECK_FAILED', label);
+        return true;
+      }, label);
     }
   });

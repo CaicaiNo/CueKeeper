@@ -97,7 +97,7 @@ const systemPath = T.String({ minLength: 1, maxLength: 4096, pattern: systemPath
 const processName = T.String({ minLength: 1, maxLength: 255, pattern: processNamePattern });
 const processArg = T.String({
   minLength: 1, maxLength: 4096, pattern: processArgPattern,
-  description: '一个字面参数：空格与引号原样保留，按 UTF-8 字节比较，不能含 NUL 或控制字符',
+  description: '一个字面参数（最多 4096 个字符）：空格与引号原样保留，按 UTF-8 字节比较，不能含 NUL 或控制字符',
 });
 // One argv element is compared literally: the same characters in another
 // Unicode normalization form are a different argument. Matching is a

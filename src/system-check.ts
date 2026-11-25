@@ -46,6 +46,13 @@ export interface ProcessIdentity {
    * unproven candidate instead of disappearing.
    */
   executable?: string;
+  /**
+   * Kernel short executable name (`pbi_name`), never the process's argv[0].
+   * It outlives an unlinked image and lets an unmatched check exclude a live
+   * PID that cannot be the one the flow names. Absent when the kernel does not
+   * expose a name, which keeps that PID possible.
+   */
+  nameHint?: string;
   /** Generation marker; absent when the system will not prove identity. */
   startedAt?: string;
   /** False for a zombie: a corpse is not a running process. */
@@ -217,15 +224,19 @@ export function nativeProcessProbe(): ProcessProbe {
       if (!Array.isArray(record?.processes)) {
         throw new Fault('SYSTEM_CHECK_FAILED', 'The process probe returned no process table');
       }
-      const observed = new Map<number, { executable?: string; startedAt?: string }>();
+      const observed = new Map<number, {
+        executable?: string; nameHint?: string; startedAt?: string;
+      }>();
       for (const entry of record.processes) {
         if (entry === null || typeof entry !== 'object') continue;
-        const { pid, executable, startedAt } = entry as Record<string, unknown>;
+        const { pid, executable, name, startedAt } = entry as Record<string, unknown>;
         if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) continue;
         const path = typeof executable === 'string' && executable.startsWith('/') ? executable : undefined;
+        const hint = typeof name === 'string' && name ? name : undefined;
         const marker = typeof startedAt === 'string' && startedAt ? startedAt : undefined;
         observed.set(pid, {
           ...(path === undefined ? {} : { executable: path }),
+          ...(hint === undefined ? {} : { nameHint: hint }),
           ...(marker === undefined ? {} : { startedAt: marker }),
         });
       }
@@ -238,6 +249,7 @@ export function nativeProcessProbe(): ProcessProbe {
         return [{
           pid: row.pid, uid: row.uid, live: isLiveState(row.state),
           ...(seen.executable === undefined ? {} : { executable: seen.executable }),
+          ...(seen.nameHint === undefined ? {} : { nameHint: seen.nameHint }),
           ...(seen.startedAt === undefined ? {} : { startedAt: seen.startedAt }),
         }];
       });
@@ -252,6 +264,17 @@ export function nativeProcessProbe(): ProcessProbe {
       throw new Fault('SYSTEM_CHECK_FAILED', 'The process probe returned an unknown argument status');
     },
   };
+}
+
+/**
+ * A kernel short name is at most 31 bytes; a longer basename is truncated.
+ * Only a truncated hint is compared as a prefix, and an absent hint stays
+ * possible because the kernel gave no clue to exclude it.
+ */
+export function nameHintCouldMatch(hint: string | undefined, name: string): boolean {
+  if (hint === undefined) return true;
+  if (hint === name) return true;
+  return Buffer.byteLength(hint, 'utf8') >= 31 && name.startsWith(hint);
 }
 
 /**
@@ -286,27 +309,35 @@ export class SystemChecks {
    * candidates are read, one proven match is enough, and an unreadable
    * candidate that leaves every other candidate unmatched is an unknown.
    *
-   * A live process whose executable path the system cannot name is never
-   * treated as absent: it may be the process the flow means, so a negative
-   * answer needs every live candidate to be readable and unmatched.
+   * A live process whose executable path the system cannot name is not
+   * automatically absent: when no reliable kernel name excludes it, it stays a
+   * possible match and the answer is unknown. A different `pbi_name` excludes
+   * an unrelated process, so one unreadable image never blocks every check.
    */
   async processRunning(scope: ProcessScope, expectedArgs?: readonly string[]): Promise<boolean> {
     const identities = (await this.probe.identities()).filter(identity => identity.live);
     const named = identities.filter(
       (identity): identity is ProcessIdentity & { executable: string } => identity.executable !== undefined);
-    const unnameable = identities.length - named.length;
-    const unknownPath = () => new Fault('SYSTEM_CHECK_FAILED',
-      `${unnameable} live process(es) have no readable executable path`);
+    // A PID the system cannot name is only "possible" when a reliable kernel
+    // clue still could be the target: its `pbi_name`, the basename the flow
+    // asks for. An unrelated process with a different kernel name is excluded
+    // instead of turning every unmatched check into an unknown.
+    const possible = (name: string) => identities.filter(identity =>
+      identity.executable === undefined && nameHintCouldMatch(identity.nameHint, name));
+    const unknownPath = (count: number) => new Fault('SYSTEM_CHECK_FAILED',
+      `${count} live process(es) may match but have no readable executable path`);
     if ('path' in scope) {
       if (named.some(identity => identity.executable === scope.path)) return true;
-      if (unnameable) throw unknownPath();
+      const candidates = possible(basename(scope.path));
+      if (candidates.length) throw unknownPath(candidates.length);
       return false;
     }
     const sameName = named.filter(identity => basename(identity.executable) === scope.name);
     const args = expectedArgs;
     if (args === undefined || args.length === 0) {
       if (sameName.length) return true;
-      if (unnameable) throw unknownPath();
+      const candidates = possible(scope.name);
+      if (candidates.length) throw unknownPath(candidates.length);
       return false;
     }
     const uid = process.geteuid?.();
@@ -314,9 +345,9 @@ export class SystemChecks {
       throw new Fault('SYSTEM_CHECK_FAILED', 'The effective user id is unavailable on this platform');
     }
     const candidates = sameName.filter(identity => identity.uid === uid);
-    // The same UID's unnameable processes could be the target too.
-    const unresolved = unnameable
-      ? identities.filter(identity => identity.executable === undefined && identity.uid === uid).length : 0;
+    // The same UID's unnameable processes could be the target too, but only
+    // when their kernel name could still be this name.
+    const unresolved = possible(scope.name).filter(identity => identity.uid === uid).length;
     if (!candidates.length && !unresolved) return false;
     if (candidates.length + unresolved > maxArgCandidates) {
       throw new Fault('SYSTEM_CHECK_FAILED',
