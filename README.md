@@ -354,6 +354,10 @@ node dist/cli.js report pack out/demo/batch.json.rows/row-000001/report.json \
 
 [架构与里程碑](docs/architecture.md)说明 schema、适配接口、录制限制与后续工作。每个输入操作的录制、回放、离线测试、真机状态与错误码见[输入操作支持矩阵](docs/support-matrix.md)。报告上传的配置、队列与 CLI 用法见[报告上传客户端](docs/upload-client.md)。中文输入法对录制与物理按键的影响、默认不管理输入法的取舍与 `--input-source-switch` 的切换/恢复规则见[输入法守卫](docs/ime.md)。
 
+## 仓库里不跟踪的目录
+
+`.opencode/`、`.claude/` 这类 agent 配置与技能目录由各自的 harness 或 Multica runtime 注入，不入库、不参与构建；`.opencode/` 已在 `.gitignore` 里。共享的 agent 指令在 `AGENTS.md`（由 Multica runtime 自动维护，不要手改），改它会被下次同步覆盖。之前入库的 `.opencode/skills` 只是这两份技能的一份副本，与构建无关，且会随上游漂移，已移出仓库。
+
 ## 文档
 
 - [架构与里程碑](docs/architecture.md) — schema、适配接口、录制限制
