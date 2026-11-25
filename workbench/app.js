@@ -5,7 +5,8 @@ import {
   shellDraft, shellSummary, dragSummary, undoCondition, visibleRows, locatorDetail, targetLabel, roleLabel,
   V2_COPYABLE_KINDS, V2_INSERT_KINDS, V2_TARGET_KINDS, assertCheck, checkLabel, diffSummary,
   filterStepsByScope, scopeKey, scopeOptions, statusMap, stepTemplate, stepTiming, v2StepLabel,
-  checkpointWaitFacts, pickCandidateLabel, durationLabel, sessionDurationLabel,
+  checkpointWaitFacts, pickCandidateLabel, durationLabel, sessionDurationLabel, stateCheckLabel,
+  defaultLibraryExpanded, libraryGroups, toggleLibraryGroup,
 } from './model.js';
 import { createAppPicker } from './picker.js';
 import { createBatchView } from './batch.js';
@@ -15,6 +16,9 @@ const dialog = $('dialog');
 const state = {
   session: null, library: [], allowLive: false, allowShell: true, allowSudo: false, app: '', selected: new Set(), ignored: new Set(),
   expanded: new Set(), showIgnored: false, focused: null, draft: [], tab: 'actions', saving: false,
+  // Both library groups open collapsed on every page load; toggling survives a
+  // re-render but never a reload.
+  libraryExpanded: defaultLibraryExpanded(),
   running: false, setup: null, appPaths: {}, catalog: null, catalogAt: 0, catalogError: null, appNames: {},
   v2: null, v2Report: null, v2Selected: null, v2Filter: '', v2Busy: false,
   v2Running: false, v2Checkpoint: null, mode: 'edit',
@@ -556,58 +560,93 @@ function renderInspector() {
   if (state.tab === 'library') {
     const library = state.library ?? { builtin: [], custom: [] };
     const builtins = library.builtin ?? [];
-    const custom = [...(library.custom ?? [])].sort((a, b) => a.behavior.name.localeCompare(b.behavior.name));
     const canInsert = state.session?.version === 2;
+    const groups = libraryGroups(library, state.libraryExpanded);
+    const custom = groups.find(group => group.key === 'custom')?.items ?? [];
+    // Both groups start collapsed: only the title and count show until the
+    // operator opens one. The toggle is a real button, so it is keyboard
+    // operable; expansion is page memory and a reload returns to collapsed.
+    const section = (group, content) => {
+      const bodyId = `library-group-${group.key}`;
+      return el('section', { className: 'library-group' },
+        el('button', {
+          type: 'button', className: 'library-group-toggle',
+          'aria-expanded': String(group.expanded), 'aria-controls': bodyId,
+          'data-library-group': group.key,
+          onclick: () => {
+            state.libraryExpanded = toggleLibraryGroup(state.libraryExpanded, group.key);
+            // Remember which toggle was operated so the redrawn button gets the
+            // focus back and the operator can keep pressing Space/Enter.
+            state.libraryFocus = group.key;
+            renderInspector();
+          },
+        },
+        icon(group.expanded ? 'up' : 'down'),
+        el('span', { className: 'library-group-title' }, group.title),
+        el('span', { className: 'badge badge-ghost badge-sm' }, String(group.count))),
+        group.expanded ? el('div', { className: 'library-group-body', id: bodyId }, ...content) : undefined);
+    };
     // Built-ins ship with the product: they are read-only and are inserted as
     // real steps, so they never appear as an editable library file.
-    panel.replaceChildren(el('div', { className: 'stack-list' },
-      el('p', { className: 'eyebrow' }, '内置行为 · 随产品发布'),
-      ...[['finder', 'Finder 基础动作'], ['universal', '通用（任何 App）']].flatMap(([group, title]) => {
-        const items = builtins.filter(item => item.group === group);
-        if (!items.length) return [];
-        return [
-          el('h3', { className: 'inspector-heading library-group-heading' }, title),
-          ...items.map(item => el('article', { className: 'library-item card bg-base-300' },
-            el('div', { className: 'library-body' },
-              el('h3', { className: 'card-title' }, item.name,
-                el('span', {
-                  className: `badge badge-soft badge-sm ${item.group === 'finder' ? 'badge-info' : 'badge-ghost'}`,
-                }, item.appLabel)),
-              muted(item.summary)),
-            el('div', { className: 'actions' },
-              libraryAction('插入', () => builtinInsertDialog(item), {
-                style: 'small primary', icon: 'plus', iconOnly: true, disabled: !canInsert,
-                title: canInsert ? '插入到草稿' : '需要「全局录制」录制才能插入内置行为',
-              })))),
-        ];
-      }),
+    const builtinContent = [
+      ...[['finder', 'Finder 基础动作'], ['universal', '通用（任何 App）'], ['check', '状态检查（文件 / 进程）']]
+        .flatMap(([group, title]) => {
+          const items = builtins.filter(item => item.group === group);
+          if (!items.length) return [];
+          return [
+            el('h3', { className: 'inspector-heading library-group-heading' }, title),
+            ...items.map(item => el('article', { className: 'library-item card bg-base-300' },
+              el('div', { className: 'library-body' },
+                el('h3', { className: 'card-title' }, item.name,
+                  el('span', {
+                    className: `badge badge-soft badge-sm ${
+                      item.group === 'finder' ? 'badge-info'
+                        : item.group === 'check' ? 'badge-success' : 'badge-ghost'}`,
+                  }, item.appLabel)),
+                muted(item.summary)),
+              el('div', { className: 'actions' },
+                libraryAction('插入', () => builtinInsertDialog(item), {
+                  style: 'small primary', icon: 'plus', iconOnly: true, disabled: !canInsert,
+                  title: canInsert ? '插入到草稿' : '需要「全局录制」录制才能插入内置行为',
+                })))),
+          ];
+        }),
       !canInsert ? muted('插入内置行为需要「全局录制」录制；「单窗口」会话仍可引用「我的行为」。') : undefined,
-      el('h3', { className: 'inspector-heading library-group-heading' }, '我的行为'),
-      ...(custom.length ? custom.map(item => {
-        const compatible = state.session?.version === 1 && sameTarget(item.target, state.session.target);
-        const { behavior } = item;
-        const shell = item.shell ?? { steps: 0, privileged: 0 };
-        const blocked = !state.session ? '导入运行目录后才能' : '此行为属于另一目标窗口，无法';
-        return el('article', { className: 'library-item card bg-base-300' },
-          el('div', { className: 'library-body' },
-            el('h3', { className: 'card-title' }, behavior.name,
-              shell.privileged
-                ? el('span', { className: 'badge badge-soft badge-sm badge-warning' }, '提权')
-                : shell.steps
-                  ? el('span', { className: 'badge badge-soft badge-sm badge-ghost' }, 'Shell')
-                  : undefined),
-            muted(`${behavior.steps.length} 步 · ${appLabel(item.target.app)}`),
-            compatible || !state.session ? undefined : muted('此行为属于另一目标窗口。')),
-          el('div', { className: 'actions' },
-            libraryAction('引用', () => behaviorDialog(item, false), {
-              style: 'small', icon: 'layers', iconOnly: true, disabled: !compatible,
-              title: compatible ? '引用到草稿' : `${blocked}引用`,
-            }),
-            libraryAction('复制到草稿', () => behaviorDialog(item, true), {
-              style: 'small', icon: 'copy', iconOnly: true, disabled: !compatible,
-              title: compatible ? '复制到草稿' : `${blocked}复制`,
-            })));
-      }) : [empty('从时间线选中多个动作，合并到行为库。')])));
+    ];
+    const customContent = custom.length ? custom.map(item => {
+      const compatible = state.session?.version === 1 && sameTarget(item.target, state.session.target);
+      const { behavior } = item;
+      const shell = item.shell ?? { steps: 0, privileged: 0 };
+      const blocked = !state.session ? '导入运行目录后才能' : '此行为属于另一目标窗口，无法';
+      return el('article', { className: 'library-item card bg-base-300' },
+        el('div', { className: 'library-body' },
+          el('h3', { className: 'card-title' }, behavior.name,
+            shell.privileged
+              ? el('span', { className: 'badge badge-soft badge-sm badge-warning' }, '提权')
+              : shell.steps
+                ? el('span', { className: 'badge badge-soft badge-sm badge-ghost' }, 'Shell')
+                : undefined),
+          muted(`${behavior.steps.length} 步 · ${appLabel(item.target.app)}`),
+          compatible || !state.session ? undefined : muted('此行为属于另一目标窗口。')),
+        el('div', { className: 'actions' },
+          libraryAction('引用', () => behaviorDialog(item, false), {
+            style: 'small', icon: 'layers', iconOnly: true, disabled: !compatible,
+            title: compatible ? '引用到草稿' : `${blocked}引用`,
+          }),
+          libraryAction('复制到草稿', () => behaviorDialog(item, true), {
+            style: 'small', icon: 'copy', iconOnly: true, disabled: !compatible,
+            title: compatible ? '复制到草稿' : `${blocked}复制`,
+          })));
+    }) : [empty('从时间线选中多个动作，合并到行为库。')];
+    panel.replaceChildren(el('div', { className: 'stack-list' },
+      el('p', { className: 'eyebrow' }, '行为库 · 按需展开'),
+      ...groups.map(group =>
+        section(group, group.key === 'builtin' ? builtinContent : customContent))));
+    const focusGroup = state.libraryFocus;
+    state.libraryFocus = undefined;
+    if (focusGroup !== undefined) {
+      panel.querySelector(`.library-group-toggle[data-library-group="${focusGroup}"]`)?.focus();
+    }
     return;
   }
   const row = getRows().find(action => action.id === state.focused);
@@ -1162,7 +1201,8 @@ function renderV2() {
       el('small', { className: 'muted' },
         `${step.kind === 'gap' ? '缺口' : v2ScopeText(step.scope)}`)),
     entry ? el('span', {
-      className: statusBadge(entry.status), title: [entry.code, entry.message].filter(Boolean).join(' · '),
+      className: statusBadge(entry.status),
+      title: [entry.code, entry.message, stateCheckLabel(entry.stateCheck)].filter(Boolean).join(' · '),
     }, resultStatus[entry.status] ?? entry.status) : undefined,
     rowActions(step));
   });
@@ -1288,8 +1328,10 @@ function showV2Result(report) {
       el('td', {}, step ? v2StepLabel(step, appLabel) : KIND_LABELS[entry.kind] ?? entry.kind),
       el('td', {}, el('span', { className: statusBadge(entry.status) }, resultStatus[entry.status] ?? entry.status)),
       el('td', { className: 'mono' }, `${entry.durationMs} ms`),
-      el('td', { className: 'report-detail' },
-        entry.code ? `${entry.code}${entry.message ? ` · ${entry.message}` : ''}` : ''));
+      el('td', { className: 'report-detail' }, [
+        entry.code ? `${entry.code}${entry.message ? ` · ${entry.message}` : ''}` : '',
+        stateCheckLabel(entry.stateCheck),
+      ].filter(Boolean).join(' · ')));
   });
   const exportReport = () => {
     const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
@@ -1541,21 +1583,106 @@ function v2WaitDialog(step) {
   });
 }
 
-function v2AssertFields(initial) {
-  const targetKind = select([['element', '元素'], ['window', '窗口']]);
-  targetKind.value = initial?.target?.kind === 'window' ? 'window' : 'element';
+const ASSERT_MODE_LABELS = {
+  element: '元素', window: '窗口', file: '文件存在', process: '进程运行',
+};
+
+/** Which kind of assertion a saved step is, from its scope and check. */
+function assertModeOf(check, scope) {
+  if (scope?.kind === 'file' && scope.path !== undefined) return 'file';
+  if (scope?.kind === 'process') return 'process';
+  return check?.target?.kind === 'window' ? 'window' : 'element';
+}
+
+/**
+ * Show or hide one control group. A hidden `required` control still takes part
+ * in native form validation and silently blocks the dialog, so hiding a group
+ * disables its controls too.
+ */
+function showControlGroup(box, visible) {
+  box.hidden = !visible;
+  for (const node of box.querySelectorAll('input, select, textarea')) node.disabled = !visible;
+}
+
+/**
+ * One field set for both the add and the edit entry: a desktop assertion
+ * (element/window) or a system state check (file/process). The caller receives
+ * the check, plus the scope when the check is system-level.
+ */
+function v2AssertFields(initial, options = {}) {
+  const scope = options.scope;
+  const initialMode = assertModeOf(initial, scope);
+  const modes = options.modes ?? ['element', 'window', 'file', 'process'];
+  const targetKind = select(modes.map(mode => [mode, ASSERT_MODE_LABELS[mode]]));
+  targetKind.value = modes.includes(initialMode) ? initialMode : modes[0];
   const picker = locatorFields(initial?.target?.kind === 'window' ? undefined : initial?.target);
   const property = select([['exists', '存在'], ['visible', '可见'], ['text', '文本'], ['value', '值'], ['title', '标题']]);
   if (initial?.expect?.property) property.value = initial.expect.property;
   const equals = input({ maxLength: 4000, value: initial?.expect?.equals !== undefined && typeof initial.expect.equals === 'string' ? initial.expect.equals : '' });
-  const toggle = select([['true', '成立'], ['false', '不成立']]);
-  toggle.value = initial?.expect?.equals === false ? 'false' : 'true';
+  const toggle = select([['true', '成立'], ['false', '反向（不成立）']]);
+  // A desktop expectation keeps `equals` under `expect`; a system check keeps
+  // it on the check itself, so both shapes open on their saved value.
+  const initialExpected = initial?.expect?.equals ?? initial?.equals;
+  toggle.value = initialExpected === false ? 'false' : 'true';
+  const filePath = input({
+    maxLength: 4096, value: scope?.kind === 'file' && scope.path !== undefined ? scope.path : '',
+    placeholder: '/Users/me/Downloads/report.pdf',
+  });
+  const processMatch = select([['name', '可执行文件名'], ['path', '完整路径']]);
+  if (scope?.kind === 'process') processMatch.value = scope.name !== undefined ? 'name' : 'path';
+  const processName = input({
+    maxLength: 255, value: scope?.kind === 'process' && scope.name !== undefined ? scope.name : '',
+    placeholder: '例如 Safari',
+  });
+  const processPath = input({
+    maxLength: 4096, value: scope?.kind === 'process' && scope.path !== undefined ? scope.path : '',
+    placeholder: '/Applications/Safari.app/Contents/MacOS/Safari',
+  });
+  // Arguments refine a name match only. Each row is one argv element, kept
+  // literally: spaces and quotes are part of the value, and a blank row is not
+  // an argument at all.
+  const argsRows = el('div', { className: 'stack-list' });
+  const addArgRow = (value = '') => {
+    const arg = input({ maxLength: 4096, value, placeholder: '一个参数，空格与引号原样保留' });
+    const row = el('div', { className: 'parameter-row' }, arg,
+      button('删除', () => {
+        row.remove();
+        sync();
+      }, { style: 'small danger', icon: 'trash', iconOnly: true }));
+    argsRows.append(row);
+  };
+  for (const value of Array.isArray(initial?.args) ? initial.args : []) addArgRow(String(value));
+  const argsBox = field('参数（可选，按顺序连续匹配）', el('div', { className: 'stack-list' }, argsRows,
+    button('添加参数', () => addArgRow(), { style: 'small', icon: 'plus' })));
   const elementBox = el('div', { className: 'stack-list' }, ...picker.controls);
   const valueBox = field('预期内容', equals);
   const boolBox = field('预期结果', toggle);
+  const propertyBox = field('属性', property);
+  const fileBox = field('文件绝对路径', filePath);
+  const processNameBox = field('可执行文件名', processName);
+  const processPathBox = field('可执行完整路径', processPath);
+  const processMatchBox = field('匹配方式', processMatch);
+  // The whole group can be hidden too (a non-assert insert dialog).
+  let groupVisible = true;
+  const show = (box, visible) => showControlGroup(box, visible && groupVisible);
   const sync = () => {
-    const window = targetKind.value === 'window';
-    elementBox.hidden = window;
+    const mode = targetKind.value;
+    const window = mode === 'window';
+    const system = mode === 'file' || mode === 'process';
+    targetKind.disabled = !groupVisible;
+    toggle.disabled = !groupVisible;
+    show(elementBox, mode === 'element');
+    show(propertyBox, !system);
+    show(fileBox, mode === 'file');
+    show(processMatchBox, mode === 'process');
+    show(processNameBox, mode === 'process' && processMatch.value === 'name');
+    show(processPathBox, mode === 'process' && processMatch.value === 'path');
+    show(argsBox, mode === 'process' && processMatch.value === 'name');
+    if (system) {
+      show(boolBox, true);
+      show(valueBox, false);
+      return;
+    }
     const wanted = property.value || initial?.expect?.property;
     property.replaceChildren(...(window
       ? [el('option', { value: 'exists' }, '存在'), el('option', { value: 'title' }, '标题')]
@@ -1563,29 +1690,81 @@ function v2AssertFields(initial) {
         el('option', { value: 'text' }, '文本'), el('option', { value: 'value' }, '值')]));
     if (wanted && [...property.options].some(option => option.value === wanted)) property.value = wanted;
     const bool = property.value === 'exists' || property.value === 'visible';
-    boolBox.hidden = !bool;
-    valueBox.hidden = bool;
+    show(boolBox, bool);
+    show(valueBox, !bool);
   };
   targetKind.onchange = sync;
   property.onchange = sync;
+  processMatch.onchange = sync;
   sync();
   return {
-    controls: [field('断言目标', targetKind), elementBox, field('属性', property), boolBox, valueBox],
+    /** Show or hide the whole group; hidden controls are disabled too. */
+    setVisible(visible) {
+      groupVisible = visible;
+      sync();
+    },
+    controls: [
+      field('断言目标', targetKind), elementBox, propertyBox, boolBox, valueBox,
+      fileBox, processMatchBox, processNameBox, processPathBox, argsBox,
+    ],
     value() {
+      const expected = toggle.value === 'true';
+      const processArgs = () => {
+        const values = [...argsRows.querySelectorAll('input')]
+          .map(arg => arg.value)
+          .filter(value => value !== '');
+        for (const value of values) {
+          if (/[\u0000-\u001f\u007f]/.test(value)) throw new Error('参数不能包含控制字符。');
+        }
+        return values;
+      };
+      if (targetKind.value === 'file') {
+        const path = filePath.value.trim();
+        if (!path.startsWith('/')) throw new Error('填写要检查的文件绝对路径（以 / 开头）。');
+        return { scope: { kind: 'file', path }, check: { kind: 'file_exists', equals: expected } };
+      }
+      if (targetKind.value === 'process') {
+        if (processMatch.value === 'path') {
+          const path = processPath.value.trim();
+          if (!path.startsWith('/')) throw new Error('填写可执行的绝对路径（以 / 开头）。');
+          return { scope: { kind: 'process', path }, check: { kind: 'process_running', equals: expected } };
+        }
+        const name = processName.value.trim();
+        if (!name) throw new Error('填写可执行文件名（不含路径）。');
+        const args = processArgs();
+        return {
+          scope: { kind: 'process', name },
+          check: { kind: 'process_running', equals: expected, ...(args.length ? { args } : {}) },
+        };
+      }
       const bool = property.value === 'exists' || property.value === 'visible';
-      return assertCheck({
-        target: targetKind.value === 'window' ? { kind: 'window' } : picker.value(),
-        property: property.value,
-        equals: bool ? toggle.value === 'true' : equals.value,
-      });
+      return {
+        check: assertCheck({
+          target: targetKind.value === 'window' ? { kind: 'window' } : picker.value(),
+          property: property.value,
+          equals: bool ? expected : equals.value,
+        }),
+      };
     },
   };
 }
 
 function v2AssertDialog(step) {
-  const fields = v2AssertFields(step.check);
-  openDialog(withStepId('编辑断言', step), fields.controls, '应用', () =>
-    v2Edit({ kind: 'update', id: step.id, patch: { check: fields.value() } }));
+  const system = step.scope?.kind === 'file' || step.scope?.kind === 'process';
+  const fields = v2AssertFields(step.check, {
+    scope: step.scope,
+    modes: system ? ['file', 'process'] : ['element', 'window'],
+  });
+  openDialog(withStepId('编辑断言', step), [
+    ...fields.controls,
+    system ? muted('系统检查只看文件元数据与进程列表，不会启动、聚焦或操作任何 App。') : undefined,
+  ], '应用', () => {
+    const value = fields.value();
+    return v2Edit({
+      kind: 'update', id: step.id,
+      patch: value.scope ? { scope: value.scope, check: value.check } : { check: value.check },
+    });
+  });
 }
 
 function v2CheckpointDialog(step) {
@@ -1652,13 +1831,21 @@ function v2InsertDialog() {
   const targetBox = el('div', { className: 'stack-list' }, ...picker.controls);
   const assertFields = v2AssertFields(undefined);
   const assertBox = el('div', { className: 'stack-list' }, ...assertFields.controls);
+  // A check is useful at the end of a flow; the desktop assertion still has to
+  // follow a step with a scope, so the position only matters for system checks.
+  const position = select([['after', anchor ? `插到 ${anchor.id} 之后` : '流程末尾'], ['end', '流程末尾']]);
+  position.value = anchor ? 'after' : 'end';
+  const positionBox = field('插入位置', position);
   const sync = () => {
     const appScope = kind.value === 'launch_app' || kind.value === 'activate_app';
-    titleBox.hidden = appScope;
-    keyBox.hidden = appScope;
-    targetBox.hidden = !['click', 'type'].includes(kind.value);
-    assertBox.hidden = kind.value !== 'assert';
-    timeoutBox.hidden = kind.value !== 'wait';
+    // Every group is disabled while hidden: the element locator's `role` is
+    // required, and a hidden one would block a system check from submitting.
+    showControlGroup(titleBox, !appScope);
+    showControlGroup(keyBox, !appScope);
+    showControlGroup(targetBox, ['click', 'type'].includes(kind.value));
+    assertFields.setVisible(kind.value === 'assert');
+    showControlGroup(positionBox, kind.value === 'assert');
+    showControlGroup(timeoutBox, kind.value === 'wait');
   };
   kind.onchange = sync;
   sync();
@@ -1672,13 +1859,31 @@ function v2InsertDialog() {
   };
   openDialog('插入步骤', [
     field('类型', kind), field('App 标识', app), titleBox, keyBox,
-    targetBox, assertBox, timeoutBox,
-    muted(anchor ? `插入到 ${anchor.id} 之后。` : '插入到流程末尾。'),
+    targetBox, assertBox, positionBox, timeoutBox,
+    muted(anchor ? `插入到 ${anchor.id} 之后，或改为流程末尾。` : '插入到流程末尾。'),
   ], '插入', async () => {
     const index = anchor ? v2Steps().findIndex(entry => entry.id === anchor.id) + 1 : v2Steps().length;
     if (kind.value === 'assert') {
-      if (!anchor || anchor.kind === 'gap') throw new Error('断言要接在一个有作用域的步骤之后。');
-      return v2Edit({ kind: 'assert', afterStepId: anchor.id, check: assertFields.value() });
+      const value = assertFields.value();
+      const atEnd = position.value === 'end' || !anchor;
+      // A system check carries its own scope and can be appended to any flow.
+      if (value.scope) {
+        const step = {
+          id: id('assert'), kind: 'assert', scope: value.scope, check: value.check,
+          ...(anchor?.atMs === undefined ? {} : { atMs: anchor.atMs }),
+        };
+        return v2Edit({ kind: 'insert', index: atEnd ? v2Steps().length : index, step });
+      }
+      if (!atEnd) {
+        if (anchor.kind === 'gap') throw new Error('桌面断言要接在一个有目标窗口的步骤之后。');
+        return v2Edit({ kind: 'assert', afterStepId: anchor.id, check: value.check });
+      }
+      // Appending a desktop assertion needs the window it observes.
+      const step = {
+        id: id('assert'), kind: 'assert', scope: scopeValue(), check: value.check,
+        ...(anchor?.atMs === undefined ? {} : { atMs: anchor.atMs }),
+      };
+      return v2Edit({ kind: 'insert', index: v2Steps().length, step });
     }
     const timeoutMs = Number(timeout.value);
     if (kind.value === 'wait' && (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 1800000)) {
@@ -1986,6 +2191,7 @@ function builtinInsertDialog(item) {
     status('内置行为只能插入「全局录制」录制。', 'error');
     return;
   }
+  if (item.check) return systemCheckInsertDialog(item);
   const anchor = v2SelectedStep() ?? v2Steps().at(-1);
   const prefill = builtinScopeDefault(item);
   const app = input({ required: true, maxLength: 256, value: prefill.app ?? '', placeholder: 'com.apple.finder' });
@@ -2040,6 +2246,65 @@ function builtinInsertDialog(item) {
       renderTimeline();
     }
     status(`已插入内置行为「${item.name}」：${item.steps.length} 步`, 'success');
+  });
+}
+
+/**
+ * Insert one system check card. The path or executable and the expectation are
+ * the only inputs: the step is a real `assert` scoped to the machine, so no
+ * window, app identity or desktop permission is involved.
+ */
+function systemCheckInsertDialog(item) {
+  const anchor = v2SelectedStep() ?? v2Steps().at(-1);
+  const expected = select([['true', '成立'], ['false', '反向（不成立）']]);
+  const file = item.check === 'file_exists';
+  const filePath = input({ maxLength: 4096, placeholder: '/Users/me/Downloads/report.pdf' });
+  const match = select([['name', '可执行文件名'], ['path', '完整路径']]);
+  const processName = input({ maxLength: 255, placeholder: '例如 Safari' });
+  const processPath = input({ maxLength: 4096, placeholder: '/Applications/Safari.app/Contents/MacOS/Safari' });
+  const processNameBox = field('可执行文件名', processName);
+  const processPathBox = field('可执行完整路径', processPath);
+  const sync = () => {
+    processNameBox.hidden = file || match.value !== 'name';
+    processPathBox.hidden = file || match.value !== 'path';
+  };
+  match.onchange = sync;
+  sync();
+  openDialog(`插入检查 · ${item.name}`, [
+    muted(`${item.appLabel} · ${item.summary}`),
+    file ? field('文件绝对路径', filePath) : field('匹配方式', match),
+    file ? undefined : processNameBox,
+    file ? undefined : processPathBox,
+    field('预期结果', expected),
+    muted('检查只读文件元数据与进程列表，不启动、不聚焦也不操作任何 App。'),
+    muted(anchor ? `插入到 ${anchor.id} 之后。` : '插入到流程末尾。'),
+  ], '插入', async () => {
+    const equals = expected.value === 'true';
+    const payload = { behavior: item.id, equals, ...(anchor ? { afterStepId: anchor.id } : {}) };
+    if (file) {
+      const path = filePath.value.trim();
+      if (!path.startsWith('/')) throw new Error('填写要检查的文件绝对路径（以 / 开头）。');
+      payload.path = path;
+    } else if (match.value === 'path') {
+      const path = processPath.value.trim();
+      if (!path.startsWith('/')) throw new Error('填写可执行的绝对路径（以 / 开头）。');
+      payload.match = 'path';
+      payload.path = path;
+    } else {
+      const name = processName.value.trim();
+      if (!name) throw new Error('填写可执行文件名（不含路径）。');
+      payload.match = 'name';
+      payload.name = name;
+    }
+    const known = new Set(v2Steps().map(step => step.id));
+    const inserted = await v2Call('v2/behavior', payload);
+    const first = inserted?.flow?.steps.find(step => !known.has(step.id));
+    if (first) {
+      state.v2Selected = first.id;
+      renderV2();
+      renderTimeline();
+    }
+    status(`已插入检查「${item.name}」`, 'success');
   });
 }
 

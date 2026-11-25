@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { flowV2Check, reportV2Check } from '../dist/contracts-v2.js';
 import { hashFlow } from '../dist/flow.js';
 import {
-  dryRunFlowV2, hashFlowV2, parseFlowV2, planFlowV2, pointTargetSteps, scopeLabel,
+  dryRunFlowV2, hashFlowV2, parseFlowV2, planFlowV2, pointTargetSteps, scopeKey, scopeLabel,
 } from '../dist/flow-v2.js';
 import { loadSession } from '../dist/workbench-session.js';
 import { startWorkbench } from '../dist/workbench.js';
@@ -552,4 +552,117 @@ test('the workbench loads a v2 timeline by scope and exposes the v2 editor contr
   assert.equal(saved.status, 201, JSON.stringify(saved.body));
   assert.match(saved.body.output, /flow\.edited-.+\.json$/);
   assert.equal(saved.body.v2.saved.length, 1);
+});
+
+test('system file and process checks are closed, app-free v2 contracts', () => {
+  const steps = [
+    {
+      id: 'check-file', kind: 'assert',
+      scope: { kind: 'file', path: '/tmp/报告 (final).pdf' },
+      check: { kind: 'file_exists', equals: false },
+    },
+    {
+      id: 'check-process', kind: 'assert',
+      scope: { kind: 'process', name: 'Google Chrome' },
+      check: { kind: 'process_running', equals: true },
+    },
+    {
+      id: 'check-process-path', kind: 'assert',
+      scope: { kind: 'process', path: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' },
+      check: { kind: 'process_running', equals: false },
+    },
+    {
+      id: 'check-process-args', kind: 'assert',
+      scope: { kind: 'process', name: 'controlled sleeper' },
+      check: {
+        kind: 'process_running', equals: true,
+        // 1400 CJK characters are 4200 UTF-8 bytes: the save limit is in code
+        // units, the probe must carry the whole value.
+        args: ['--profile', 'a b', '"quoted"', '汉'.repeat(1400)],
+      },
+    },
+  ];
+  const flow = parseFlowV2({ version: 2, id: 'system-checks', name: 'System checks', steps });
+  assert.deepEqual(flow.steps, steps);
+
+  // Scope identity and labels never pretend a system check belongs to an app.
+  assert.equal(scopeKey(steps[0].scope), 'file:/tmp/报告 (final).pdf');
+  assert.equal(scopeLabel(steps[0].scope), '文件 · /tmp/报告 (final).pdf');
+  assert.equal(scopeKey(steps[1].scope), 'process:name:Google Chrome');
+  assert.equal(scopeLabel(steps[1].scope), '进程 · Google Chrome');
+  // Arguments refine the name check without entering its scope or label.
+  assert.equal(scopeKey(steps[3].scope), 'process:name:controlled sleeper');
+  assert.equal(scopeLabel(steps[3].scope), '进程 · controlled sleeper');
+  assert.deepEqual(steps[3].check.args, ['--profile', 'a b', '"quoted"', '汉'.repeat(1400)]);
+  assert.equal(Buffer.byteLength(steps[3].check.args[3], 'utf8'), 4200);
+  assert.equal(scopeKey(steps[2].scope),
+    'process:path:/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
+
+  // A dry run resolves the steps without any desktop plan and never invents
+  // a value for a check it did not run.
+  const dry = dryRunFlowV2(flow);
+  assert.equal(dry.status, 'passed');
+  assert.deepEqual(dry.entries.map(entry => [entry.id, entry.status, entry.stateCheck]),
+    [['check-file', 'resolved', undefined], ['check-process', 'resolved', undefined],
+      ['check-process-path', 'resolved', undefined], ['check-process-args', 'resolved', undefined]]);
+  assert.deepEqual(planFlowV2(flow).map(step => step.scope), flow.steps.map(step => step.scope));
+
+  // The published schemas carry both check kinds and the structured result.
+  assert.match(JSON.stringify(schema('flow-v2')), /"process_running"/);
+  assert.match(JSON.stringify(schema('report-v2')), /"stateCheck"/);
+  const report = {
+    version: 2, flowId: 'system-checks', flowSha256: 'a'.repeat(64),
+    startedAt: '2026-11-25T00:00:00.000Z', mode: 'replay', status: 'failed',
+    entries: [{
+      id: 'check-process', kind: 'assert', scope: steps[1].scope, status: 'failed',
+      atMs: 0, durationMs: 3, code: 'SYSTEM_CHECK_FAILED',
+      stateCheck: { kind: 'process_running', expected: true, actual: null },
+    }],
+  };
+  assert.equal(reportV2Check.Check(report), true);
+  assert.equal(reportV2Check.Check({
+    ...report,
+    entries: [{ ...report.entries[0], stateCheck: { kind: 'process_running', expected: true, actual: 'yes' } }],
+  }), false);
+});
+
+test('a system check refuses a path, a process name or a check/scope pairing it cannot honour', () => {
+  const withStep = step => () => parseFlowV2({
+    version: 2, id: 'system-check-bad', name: 'Bad system check', steps: [step],
+  });
+  const fileCheck = {
+    id: 'bad', kind: 'assert', scope: { kind: 'file', path: '/tmp/a.txt' },
+    check: { kind: 'file_exists', equals: true },
+  };
+  const processCheck = {
+    id: 'bad', kind: 'assert', scope: { kind: 'process', name: 'Safari' },
+    check: { kind: 'process_running', equals: true },
+  };
+  const invalid = [
+    { ...fileCheck, scope: { kind: 'file', path: 'relative/a.txt' } },
+    { ...fileCheck, scope: { kind: 'file', path: '/tmp/../etc/passwd' } },
+    { ...fileCheck, scope: { kind: 'file', path: '/tmp/a\nb.txt' } },
+    { ...fileCheck, scope: { kind: 'file', path: '/tmp/a.txt', name: 'a.txt' } },
+    { ...processCheck, scope: { kind: 'process', name: 'Safari/Contents/MacOS/Safari' } },
+    { ...processCheck, scope: { kind: 'process', name: 'Safari', path: '/Applications/Safari.app' } },
+    { ...processCheck, scope: { kind: 'process', path: 'relative/Safari' } },
+    // Arguments belong to a name check only, and stay non-empty and bounded.
+    { ...processCheck, scope: { kind: 'process', path: '/usr/bin/Safari' },
+      check: { kind: 'process_running', equals: true, args: ['--profile'] } },
+    { ...processCheck, check: { kind: 'process_running', equals: true, args: [] } },
+    { ...processCheck, check: { kind: 'process_running', equals: true, args: [''] } },
+    { ...processCheck, check: { kind: 'process_running', equals: true, args: ['a\nb'] } },
+    { ...processCheck, check: { kind: 'process_running', equals: true,
+      args: Array.from({ length: 33 }, () => 'x') } },
+    // Legal scope shapes, illegal pairings.
+    { ...fileCheck, check: { kind: 'process_running', equals: true } },
+    { ...processCheck, check: { kind: 'file_exists', equals: true } },
+    { kind: 'wait', id: 'bad', scope: { kind: 'file', path: '/tmp/a.txt' },
+      check: { kind: 'file_exists', equals: true }, timeoutMs: 1000 },
+    { kind: 'wait', id: 'bad', scope: { kind: 'process', name: 'Safari' },
+      check: { kind: 'app_running', equals: true }, timeoutMs: 1000 },
+    { kind: 'assert', id: 'bad', scope: { kind: 'window', app: 'com.apple.Safari',
+      windowKey: 'browser', windowTitle: 'Browser' }, check: { kind: 'file_exists', equals: true } },
+  ];
+  for (const step of invalid) assert.throws(withStep(step), /Invalid flow version 2/, JSON.stringify(step));
 });

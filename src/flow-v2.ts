@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { flowV2Check } from './contracts-v2.js';
+import { flowV2Check, maxProcessArgs } from './contracts-v2.js';
 import type {
   FlowV2, ReportV2, ReportV2Entry, Scope, StepV2,
 } from './contracts-v2.js';
@@ -46,7 +46,12 @@ export function scopeKey(scope: Scope): string {
   if (scope.kind === 'window') return `window:${scope.app}:${scope.windowKey}`;
   if (scope.kind === 'app') return `app:${scope.app}`;
   if (scope.kind === 'file') {
-    return `file:${scope.directory}/${'name' in scope ? scope.name : `*${scope.suffix}`}`;
+    return 'path' in scope
+      ? `file:${scope.path}`
+      : `file:${scope.directory}/${'name' in scope ? scope.name : `*${scope.suffix}`}`;
+  }
+  if (scope.kind === 'process') {
+    return 'name' in scope ? `process:name:${scope.name}` : `process:path:${scope.path}`;
   }
   if (scope.surface === 'app_menu_bar') return `surface:app_menu_bar:${scope.app}`;
   if (scope.surface === 'app_context_menu') {
@@ -60,7 +65,11 @@ export function scopeLabel(scope: Scope): string {
   if (scope.kind === 'window') return `${scope.app} · ${scope.windowTitle} (${scope.windowKey})`;
   if (scope.kind === 'app') return scope.app;
   if (scope.kind === 'file') {
+    if ('path' in scope) return `文件 · ${scope.path}`;
     return `文件 · ${'name' in scope ? scope.name : `*${scope.suffix}`}（${scope.directory}）`;
+  }
+  if (scope.kind === 'process') {
+    return `进程 · ${'name' in scope ? scope.name : scope.path}`;
   }
   if (scope.surface === 'app_menu_bar') return `${scope.app} · menu bar`;
   if (scope.surface === 'app_context_menu') {
@@ -105,10 +114,25 @@ function validateScope(scope: Scope, where: string, state: ScopeState) {
     return;
   }
   if (scope.kind === 'file') {
+    if ('path' in scope) {
+      // A state check reads one absolute path; it never names an app.
+      if (!scope.path.startsWith('/') || scope.path.split('/').includes('..')) {
+        fail(`${where}: expected an absolute POSIX path`);
+      }
+      return;
+    }
     // A file wait names no app; only an absolute, non-climbing directory is a
     // location the run may read.
     if (!scope.directory.startsWith('/') || scope.directory.split('/').includes('..')) {
       fail(`${where}: expected an absolute download directory`);
+    }
+    return;
+  }
+  if (scope.kind === 'process') {
+    // A process check names one executable and names no app. The scope shape
+    // already rejects a slash in `name`; the path keeps the same rule as files.
+    if ('path' in scope && (!scope.path.startsWith('/') || scope.path.split('/').includes('..'))) {
+      fail(`${where}: expected an absolute executable path`);
     }
     return;
   }
@@ -209,9 +233,35 @@ function validateSteps(flow: FlowV2, state: ScopeState, allowGaps = false) {
         fail(`${where}: ${step.selector.kind} cannot press a ${step.scope.surface} surface`);
       }
     }
-    if (step.kind === 'assert' && step.scope.kind === 'app' &&
-        (step.check.target.kind !== 'window' || step.check.expect.property !== 'exists')) {
-      fail(`${where}: an app-scoped assertion can only check window existence`);
+    if (step.kind === 'assert' && step.scope.kind === 'app') {
+      // An app-scoped assertion reads a window inventory; a system check has
+      // no `target`/`expect` and can never be app-scoped.
+      const check = step.check;
+      if (!('target' in check) || check.target.kind !== 'window' || check.expect.property !== 'exists') {
+        fail(`${where}: an app-scoped assertion can only check window existence`);
+      }
+    }
+    if (step.kind === 'assert' && 'args' in step.check) {
+      // Arguments only refine a name check; a full-path check matches the
+      // executable itself. Values stay literal and bounded, and never reach a
+      // report or a label.
+      const args = step.check.args;
+      if (step.scope.kind !== 'process' || !('name' in step.scope)) {
+        fail(`${where}: process arguments need a process name scope`);
+      }
+      if (args === undefined) {
+        fail(`${where}: process arguments must be a non-empty list`);
+      }
+      if (args.length > maxProcessArgs) {
+        fail(`${where}: a process check takes at most ${maxProcessArgs} arguments`);
+      }
+      for (const arg of args) {
+        if (!arg.length) fail(`${where}: a process argument cannot be empty`);
+        if (arg.length > 4096) fail(`${where}: a process argument is longer than 4096 characters`);
+        if (/[\u0000-\u001f\u007f]/.test(arg)) {
+          fail(`${where}: a process argument cannot contain control characters`);
+        }
+      }
     }
   }
   if (gaps.length && !allowGaps) {

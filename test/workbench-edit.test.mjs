@@ -400,6 +400,52 @@ test('apply covers update, move, insert and assert in one contract', async t => 
   });
 });
 
+test('process argument values survive editing and a save/reopen', async t => {
+  const { root, editor } = await fixture(t);
+  editor.insertStep(editor.flow.steps.length, {
+    id: 'check-args', kind: 'assert',
+    scope: { kind: 'process', name: 'controlled sleeper' },
+    check: { kind: 'process_running', equals: true, args: ['--profile', 'a b'] },
+  });
+  // One item is one literal argv element: the space stays inside it, quotes
+  // stay part of the value, and the array order is preserved.
+  assert.deepEqual(step(editor, 'check-args').check.args, ['--profile', 'a b']);
+  assert.equal(editor.validate().ok, true);
+
+  editor.updateStep('check-args', {
+    check: { kind: 'process_running', equals: true, args: ['--profile', 'a b', '"quoted arg"'] },
+  });
+  assert.deepEqual(step(editor, 'check-args').check.args, ['--profile', 'a b', '"quoted arg"']);
+
+  // Arguments refine a name check; a full-path check and malformed values are
+  // refused without touching the document.
+  for (const [patch, code] of [
+    [{ scope: { kind: 'process', path: '/usr/bin/sleeper' },
+      check: { kind: 'process_running', equals: true, args: ['--profile'] } }, 'INVALID_STEP_SCHEMA'],
+    [{ check: { kind: 'process_running', equals: true, args: ['a\nb'] } }, 'INVALID_STEP_SCHEMA'],
+    [{ check: { kind: 'process_running', equals: true,
+      args: Array.from({ length: 33 }, () => 'x') } }, 'INVALID_STEP_SCHEMA'],
+  ]) {
+    assert.throws(() => editor.updateStep('check-args', patch), error => {
+      assert.equal(error.code, code, JSON.stringify(error));
+      return true;
+    });
+  }
+  editor.updateStep('check-args', {
+    check: { kind: 'process_running', equals: true, args: ['--profile', 'a b', '--flag=值'] },
+  });
+  assert.deepEqual(step(editor, 'check-args').check.args, ['--profile', 'a b', '--flag=值']);
+
+  const saved = await editor.saveRevision(join(root, 'process-args.json'));
+  const reopened = await loadEditableFlow(saved.path);
+  assert.deepEqual(step(reopened, 'check-args'), {
+    id: 'check-args', kind: 'assert',
+    scope: { kind: 'process', name: 'controlled sleeper' },
+    check: { kind: 'process_running', equals: true, args: ['--profile', 'a b', '--flag=值'] },
+  });
+  assert.equal(reopened.validate().ok, true);
+});
+
 test('a recorded point click loads as a step and can be edited into an element', async t => {
   const root = await mkdtemp(join(tmpdir(), 'cuekeeper-workbench-edit-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -428,4 +474,71 @@ test('a recorded point click loads as a step and can be edited into an element',
   assert.equal(step(editor, 'open-pkg').count, 2);
   assert.equal(flowV2Check.Check(editor.flow), true);
   validateFlowV2(editor.flow);
+});
+
+test('a system check is inserted, edited and saved through the same edit contract', async t => {
+  const { root, editor } = await fixture(t);
+  const index = editor.flow.steps.length;
+  editor.insertStep(index, {
+    id: 'check-file', kind: 'assert',
+    scope: { kind: 'file', path: '/Users/qa/Downloads/report.pdf' },
+    check: { kind: 'file_exists', equals: true },
+  });
+  assert.deepEqual(step(editor, 'check-file'), {
+    id: 'check-file', kind: 'assert',
+    scope: { kind: 'file', path: '/Users/qa/Downloads/report.pdf' },
+    check: { kind: 'file_exists', equals: true },
+  });
+  assert.equal(editor.validate().ok, true);
+
+  // The expectation, the path and the process match are all editable.
+  editor.updateStep('check-file', { check: { kind: 'file_exists', equals: false } });
+  assert.equal(step(editor, 'check-file').check.equals, false);
+  editor.updateStep('check-file', { scope: { kind: 'file', path: '/Users/qa/final report.pdf' } });
+  assert.deepEqual(step(editor, 'check-file').scope, { kind: 'file', path: '/Users/qa/final report.pdf' });
+  editor.updateStep('check-file', {
+    scope: { kind: 'process', name: 'Safari' },
+    check: { kind: 'process_running', equals: true },
+  });
+  assert.deepEqual(step(editor, 'check-file'), {
+    id: 'check-file', kind: 'assert',
+    scope: { kind: 'process', name: 'Safari' },
+    check: { kind: 'process_running', equals: true },
+  });
+  assert.equal(editor.validate().ok, true);
+  editor.updateStep('check-file', {
+    scope: { kind: 'process', path: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' },
+  });
+  assert.deepEqual(step(editor, 'check-file').scope,
+    { kind: 'process', path: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' });
+
+  // A path that is not absolute and climbing, a name with a slash, and two
+  // process matchers at once are refused with their own code.
+  for (const [patch, code] of [
+    [{ scope: { kind: 'file', path: 'relative/x' } }, 'INVALID_PATH'],
+    [{ scope: { kind: 'file', path: '/tmp/../etc/passwd' } }, 'INVALID_PATH'],
+    [{ scope: { kind: 'process', name: 'Safari/Contents' } }, 'INVALID_PROCESS_NAME'],
+    [{ scope: { kind: 'process', name: 'Safari', path: '/Applications/Safari.app' } }, 'SCOPE_PROCESS_AMBIGUOUS'],
+    [{ scope: { kind: 'file' } }, 'SCOPE_PATH_REQUIRED'],
+    [{ check: { kind: 'file_exists', equals: true } }, 'INVALID_STEP_SCHEMA'],
+  ]) {
+    assert.throws(() => editor.updateStep('check-file', patch), error => {
+      assert.equal(error.code, code, JSON.stringify(error));
+      return true;
+    });
+  }
+  // Every refusal left the document on the last good value.
+  assert.deepEqual(step(editor, 'check-file').scope,
+    { kind: 'process', path: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' });
+  assert.equal(step(editor, 'check-file').check.kind, 'process_running');
+
+  // A saved revision reopens with the same check; nothing was inferred.
+  const saved = await editor.saveRevision(join(root, 'system-check.json'));
+  const reopened = await loadEditableFlow(saved.path);
+  assert.deepEqual(step(reopened, 'check-file'), {
+    id: 'check-file', kind: 'assert',
+    scope: { kind: 'process', path: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' },
+    check: { kind: 'process_running', equals: true },
+  });
+  assert.equal(reopened.validate().ok, true);
 });

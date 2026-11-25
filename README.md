@@ -372,6 +372,7 @@ node dist/cli.js report pack out/demo/batch.json.rows/row-000001/report.json \
 - [输入操作支持矩阵](docs/support-matrix.md) — 每种操作的录制/回放/错误码
 - [离线报告包](docs/report.md) — 报告 ZIP 的目录结构与查看器
 - [输入法守卫](docs/ime.md) — 录制与回放的输入源规则
+- [v2 系统状态检查](docs/state-checks.md) — 文件存在与进程运行（含参数匹配）
 - [参数化批量执行](docs/batch-run.md) — `--data` 与批量报告
 - [打包与分发](docs/packaging.md) — 发布产物、校验和、签名边界
 - [报告上传客户端](docs/upload-client.md) — 上传队列与配置
