@@ -1595,6 +1595,16 @@ function assertModeOf(check, scope) {
 }
 
 /**
+ * Show or hide one control group. A hidden `required` control still takes part
+ * in native form validation and silently blocks the dialog, so hiding a group
+ * disables its controls too.
+ */
+function showControlGroup(box, visible) {
+  box.hidden = !visible;
+  for (const node of box.querySelectorAll('input, select, textarea')) node.disabled = !visible;
+}
+
+/**
  * One field set for both the add and the edit entry: a desktop assertion
  * (element/window) or a system state check (file/process). The caller receives
  * the check, plus the scope when the check is system-level.
@@ -1652,19 +1662,9 @@ function v2AssertFields(initial, options = {}) {
   const processNameBox = field('可执行文件名', processName);
   const processPathBox = field('可执行完整路径', processPath);
   const processMatchBox = field('匹配方式', processMatch);
-  // A hidden field is not part of this dialog's answer, and a hidden `required`
-  // input (the element locator's role) silently blocks the whole form: disable
-  // what is hidden so only the fields this mode uses take part in validation.
-  const setEnabled = (box, enabled) => {
-    for (const node of box.querySelectorAll('input, select, textarea')) node.disabled = !enabled;
-  };
   // The whole group can be hidden too (a non-assert insert dialog).
   let groupVisible = true;
-  const show = (box, visible) => {
-    const shown = visible && groupVisible;
-    box.hidden = !shown;
-    setEnabled(box, shown);
-  };
+  const show = (box, visible) => showControlGroup(box, visible && groupVisible);
   const sync = () => {
     const mode = targetKind.value;
     const window = mode === 'window';
@@ -1838,12 +1838,14 @@ function v2InsertDialog() {
   const positionBox = field('插入位置', position);
   const sync = () => {
     const appScope = kind.value === 'launch_app' || kind.value === 'activate_app';
-    titleBox.hidden = appScope;
-    keyBox.hidden = appScope;
-    targetBox.hidden = !['click', 'type'].includes(kind.value);
+    // Every group is disabled while hidden: the element locator's `role` is
+    // required, and a hidden one would block a system check from submitting.
+    showControlGroup(titleBox, !appScope);
+    showControlGroup(keyBox, !appScope);
+    showControlGroup(targetBox, ['click', 'type'].includes(kind.value));
     assertFields.setVisible(kind.value === 'assert');
-    positionBox.hidden = kind.value !== 'assert';
-    timeoutBox.hidden = kind.value !== 'wait';
+    showControlGroup(positionBox, kind.value === 'assert');
+    showControlGroup(timeoutBox, kind.value === 'wait');
   };
   kind.onchange = sync;
   sync();
