@@ -383,6 +383,70 @@
                     ]
                   }
                 ]
+              },
+              {
+                "additionalProperties": false,
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "file",
+                    "type": "string"
+                  },
+                  "path": {
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^(?![\\s\\S]*[\\u0000-\\u001f\\u007f])(?!.*(?:^|/)\\.\\.(?:/|$))/(?!/)[\\s\\S]*$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "path"
+                ]
+              },
+              {
+                "anyOf": [
+                  {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "const": "process",
+                        "type": "string"
+                      },
+                      "name": {
+                        "minLength": 1,
+                        "maxLength": 255,
+                        "pattern": "^(?![\\s\\S]*[/\\\\\\u0000-\\u001f\\u007f])[\\s\\S]+$",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "name"
+                    ]
+                  },
+                  {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "const": "process",
+                        "type": "string"
+                      },
+                      "path": {
+                        "minLength": 1,
+                        "maxLength": 4096,
+                        "pattern": "^(?![\\s\\S]*[\\u0000-\\u001f\\u007f])(?!.*(?:^|/)\\.\\.(?:/|$))/(?!/)[\\s\\S]*$",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "path"
+                    ]
+                  }
+                ]
               }
             ]
           },
@@ -572,6 +636,42 @@
             "required": [
               "reason",
               "triggerStepId"
+            ]
+          },
+          "stateCheck": {
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "kind": {
+                "anyOf": [
+                  {
+                    "const": "file_exists",
+                    "type": "string"
+                  },
+                  {
+                    "const": "process_running",
+                    "type": "string"
+                  }
+                ]
+              },
+              "expected": {
+                "type": "boolean"
+              },
+              "actual": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "expected",
+              "actual"
             ]
           },
           "intent": {

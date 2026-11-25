@@ -21,6 +21,8 @@ export interface StepResult {
   focusAfter?: NonNullable<ReportV2Entry['focusAfter']>;
   /** Safe checkpoint metadata: trigger, reason and resolution, never a value. */
   checkpoint?: NonNullable<ReportV2Entry['checkpoint']>;
+  /** What a system state check compared; `actual` is null when unknown. */
+  stateCheck?: NonNullable<ReportV2Entry['stateCheck']>;
 }
 
 export class ReportV2Session {
@@ -60,6 +62,7 @@ export class ReportV2Session {
       ...(result.delivery === undefined ? {} : { delivery: result.delivery }),
       ...(result.focusAfter === undefined ? {} : { focusAfter: result.focusAfter }),
       ...(result.checkpoint === undefined ? {} : { checkpoint: result.checkpoint }),
+      ...(result.stateCheck === undefined ? {} : { stateCheck: result.stateCheck }),
       ...(result.textMode === undefined ? {} : { textMode: result.textMode }),
       ...(result.input === undefined ? {} : { input: result.input }),
     };

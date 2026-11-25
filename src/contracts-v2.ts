@@ -75,11 +75,28 @@ const fileDirectory = T.String({
   minLength: 1, maxLength: 4096, pattern: appPathPattern,
 });
 const fileName = T.String({ minLength: 1, maxLength: 255, pattern: '^[^/\\\\]+$' });
-const fileScope = T.Union([
+const fileDirectoryScope = T.Union([
   object({ kind: T.Literal('file'), directory: fileDirectory, name: fileName }),
   object({ kind: T.Literal('file'), directory: fileDirectory, suffix: fileName }),
 ]);
-export const scopeSchema = T.Union([windowScope, appScope, surfaceScope, fileScope]);
+// A state check names one absolute POSIX path or one executable. It reads
+// metadata only: nothing is launched, focused, typed into or written. The
+// path rejects control characters and `..` segments at the schema level; the
+// semantic validators report the same rule with words.
+export const systemPathPattern =
+  '^(?![\\s\\S]*[\\u0000-\\u001f\\u007f])(?!.*(?:^|/)\\.\\.(?:/|$))/(?!/)[\\s\\S]*$';
+export const processNamePattern =
+  '^(?![\\s\\S]*[/\\\\\\u0000-\\u001f\\u007f])[\\s\\S]+$';
+const systemPath = T.String({ minLength: 1, maxLength: 4096, pattern: systemPathPattern });
+const processName = T.String({ minLength: 1, maxLength: 255, pattern: processNamePattern });
+const filePathScope = object({ kind: T.Literal('file'), path: systemPath });
+const processScope = T.Union([
+  object({ kind: T.Literal('process'), name: processName }),
+  object({ kind: T.Literal('process'), path: systemPath }),
+]);
+export const scopeSchema = T.Union([
+  windowScope, appScope, surfaceScope, fileDirectoryScope, filePathScope, processScope,
+]);
 const focusAfter = T.Optional(T.Union([windowScope, appScope]));
 
 const comparator = T.Union([T.Literal('equals'), T.Literal('contains'), T.Literal('matches')]);
@@ -144,8 +161,10 @@ const appWaitCheck = T.Union([
 ]);
 // A file wait reads the download directory: a matching file exists, or it has
 // finished writing (its size and mtime have been quiet for `quietMs`).
+const fileExistsCheck = object({ kind: T.Literal('file_exists'), equals: T.Boolean() });
+const processRunningCheck = object({ kind: T.Literal('process_running'), equals: T.Boolean() });
 const fileWaitCheck = T.Union([
-  object({ kind: T.Literal('file_exists'), equals: T.Boolean() }),
+  fileExistsCheck,
   object({
     kind: T.Literal('file_stable'),
     quietMs: T.Optional(T.Integer({
@@ -238,13 +257,19 @@ const waitStep = T.Union([
     check: appWaitCheck, timeoutMs: waitTimeout,
   }),
   object({
-    ...stepBase, kind: T.Literal('wait'), scope: fileScope,
+    ...stepBase, kind: T.Literal('wait'), scope: fileDirectoryScope,
     check: fileWaitCheck, timeoutMs: waitTimeout,
   }),
 ]);
+// A state check is a plain assertion step scoped to the system, not to an app
+// or window: the file scope names one absolute path, the process scope names
+// one executable by name or by path. The pairing is closed per variant, so a
+// file path can only be checked for existence and a process only for running.
 const assertStep = T.Union([
   object({ ...stepBase, kind: T.Literal('assert'), scope: windowScope, check: assertCheck }),
   object({ ...stepBase, kind: T.Literal('assert'), scope: appScope, check: appAssertCheck }),
+  object({ ...stepBase, kind: T.Literal('assert'), scope: filePathScope, check: fileExistsCheck }),
+  object({ ...stepBase, kind: T.Literal('assert'), scope: processScope, check: processRunningCheck }),
 ]);
 const launchApp = object({
   ...stepBase, kind: T.Literal('launch_app'), scope: appScope, focusAfter,
@@ -360,6 +385,13 @@ const fallbackResult = object({
 // safe metadata that explains whether a text step used a literal or a runtime
 // parameter, and how a manual checkpoint was resolved.
 const textMode = T.Union([T.Literal('literal'), T.Literal('input')]);
+// A system state check reports the value it compared, not just whether it
+// matched; `actual` is null when the probe itself could not answer.
+const stateCheckResult = object({
+  kind: T.Union([T.Literal('file_exists'), T.Literal('process_running')]),
+  expected: T.Boolean(),
+  actual: T.Union([T.Boolean(), T.Null()]),
+});
 const checkpointResult = object({
   reason: checkpointReason,
   triggerStepId: id,
@@ -382,6 +414,7 @@ const entry = object({
   textMode: T.Optional(textMode),
   input: T.Optional(parameterName),
   checkpoint: T.Optional(checkpointResult),
+  stateCheck: T.Optional(stateCheckResult),
   intent: T.Optional(intentResult),
   fallback: T.Optional(fallbackResult),
 });
@@ -426,7 +459,12 @@ export type ReportV2Entry = Static<typeof entry>;
 export type WindowWaitCheck = Static<typeof windowWaitCheck>;
 export type AppWaitCheck = Static<typeof appWaitCheck>;
 export type FileWaitCheck = Static<typeof fileWaitCheck>;
-export type FileScope = Static<typeof fileScope>;
+export type FileScope = Static<typeof fileDirectoryScope>;
+export type FilePathScope = Static<typeof filePathScope>;
+export type ProcessScope = Static<typeof processScope>;
+export type FileExistsCheck = Static<typeof fileExistsCheck>;
+export type ProcessRunningCheck = Static<typeof processRunningCheck>;
+export type StateCheckV2 = Static<typeof stateCheckResult>;
 export type AssertCheckV2 = Static<typeof assertCheck>;
 export type ElementV2 = Static<typeof element>;
 export type DeliveryV2 = Static<typeof deliveryState>;
