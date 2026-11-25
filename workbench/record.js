@@ -67,6 +67,8 @@ const state = {
   stopFailed: false,
   // The last `GET /api/record/health`: undefined until the first probe answers.
   health: undefined,
+  // Epoch ms the recorder started, so the timer survives a throttled tab.
+  startedAt: undefined,
 };
 let healthShown = false;
 let pollId;
@@ -175,6 +177,8 @@ function adopt(status) {
   state.recording = status.recording === true;
   state.elapsedMs = Number.isFinite(status.elapsedMs) ? status.elapsedMs : 0;
   state.countdownMs = Number.isFinite(status.countdownMs) ? status.countdownMs : 0;
+  const startedAt = Date.parse(status.startedAt ?? '');
+  state.startedAt = Number.isFinite(startedAt) ? startedAt : undefined;
   if (typeof status.flowPath === 'string') state.path = status.flowPath;
   if (Number.isInteger(status.steps)) state.steps = status.steps;
   if (status.recording) {
@@ -200,7 +204,11 @@ function stopLoops() {
 
 function tick() {
   if (!state.recording) return;
-  state.elapsedMs += TICK_MS;
+  // Browsers throttle timers in a background tab, so a recording the operator
+  // watches elsewhere would freeze at "3 秒后开始录制". Derive the elapsed time
+  // from the recorder's start instead of counting ticks.
+  state.elapsedMs = state.startedAt === undefined ?
+    state.elapsedMs + TICK_MS : Math.max(0, Date.now() - state.startedAt);
   renderTimer();
 }
 
@@ -290,6 +298,14 @@ async function finish() {
 startButton.addEventListener('click', () => { void begin(); });
 stopButton.addEventListener('click', () => { void finish(); });
 recheckButton.addEventListener('click', () => { void loadHealth(); });
+// The tab was throttled while the operator worked in another app; catch up the
+// timer the moment it comes back.
+document.addEventListener?.('visibilitychange', () => {
+  if (!document.hidden) {
+    void poll();
+    renderTimer();
+  }
+});
 
 render();
 // A page loaded while a recording runs shows its timer instead of hiding it.
