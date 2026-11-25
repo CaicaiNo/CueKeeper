@@ -17,8 +17,14 @@ struct PointerSample {
 
 struct GlobalCaptureLag {
     private var lastGapAt: UInt64 = 0
+    private var firstEventAt: UInt64 = 0
 
     mutating func shouldReport(isKeyDown: Bool, timestamp: UInt64, now: UInt64) -> Bool {
+        if firstEventAt == 0 { firstEventAt = now }
+        // Installing the tap replays whatever the system queued meanwhile. Those
+        // events carry old timestamps but nothing was lost, so the first second
+        // of the session is exempt from the late-key rule.
+        guard now > firstEventAt + 1_000_000_000 else { return false }
         // A late key depends on live focus. Pointer actions carry their own
         // location and scope evidence, and interruptions are reported separately.
         guard isKeyDown, timestamp > 0, now > timestamp, now - timestamp > 500_000_000,
