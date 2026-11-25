@@ -741,13 +741,55 @@ final class Capture {
             return owner
         }
         guard let folder = folderWindow() else { return interrupted }
-        let document = axAttribute(folder, kAXDocumentAttribute as String)
-        let url = (document as? URL) ?? (document as? String).flatMap { URL(string: $0) }
-        guard let url, url.isFileURL, request.directory == nil || url.path == request.directory else {
+        let point = CGPoint(x: request.point[0], y: request.point[1])
+        // AXDocument names a folder window's folder, but Finder does not always
+        // expose it. Fall back to the target row's own file URL and take its
+        // parent. The name check is only needed while the folder is still being
+        // derived: once the caller pins request.directory, the commit editor
+        // already shows the new name and its row still carries the old file URL.
+        func documentPath() -> String? {
+            let document = axAttribute(folder, kAXDocumentAttribute as String)
+            let url = (document as? URL) ?? (document as? String).flatMap { URL(string: $0) }
+            guard let url, url.isFileURL else { return nil }
+            return url.path
+        }
+        func rowDirectory() -> (path: String, selectedCount: Int?)? {
+            var hit: AXUIElement?
+            AXUIElementCopyElementAtPosition(axApp, Float(point.x), Float(point.y), &hit)
+            guard let hit else { return nil }
+            if request.directory == nil, fileItemIdentity(hit)?.name != request.expected { return nil }
+            var node: AXUIElement? = hit
+            var row: AXUIElement?
+            var selectedCount: Int?
+            var depth = 0
+            while let current = node, depth < 12 {
+                let role = axString(current, kAXRoleAttribute as String)
+                if row == nil, role == "AXRow" || role == "AXOutlineRow" { row = current }
+                if role == "AXOutline" || role == "AXTable" || role == "AXList" {
+                    if let selected = axAttribute(current, kAXSelectedRowsAttribute as String) as? [AXUIElement] {
+                        selectedCount = selected.count
+                    }
+                    break
+                }
+                if role == "AXWindow" || role == "AXApplication" { break }
+                node = axElement(current, kAXParentAttribute as String)
+                depth += 1
+            }
+            guard let row, let raw = axAttribute(row, kAXURLAttribute as String) else { return nil }
+            let file = (raw as? URL) ?? (raw as? String).flatMap { URL(string: $0) }
+            guard let file, file.isFileURL else { return nil }
+            return (file.path, selectedCount)
+        }
+        let document = documentPath()
+        let rowSource = document == nil ? rowDirectory() : nil
+        guard let directory = RenameDirectory.resolve(
+                document: document, rowURL: rowSource?.path, selectedCount: rowSource?.selectedCount),
+              request.directory == nil || directory == request.directory else {
             return ["code": "RENAME_DIRECTORY_UNPROVEN"]
         }
-        let point = CGPoint(x: request.point[0], y: request.point[1])
-        var result: [String: Any] = ["directory": url.path, "editor": false]
+        let expectedFilePath = URL(fileURLWithPath: directory)
+            .appendingPathComponent(request.expected).standardizedFileURL.path
+        var result: [String: Any] = ["directory": directory, "editor": false]
         func provedEditor() -> AXUIElement? {
             var writable = DarwinBoolean(false)
             guard !IsSecureEventInputEnabled(), let current = folderWindow(), CFEqual(current, folder),
@@ -807,7 +849,7 @@ final class Capture {
                 let fileURL = axAttribute(element, kAXURLAttribute as String)
                 let file = (fileURL as? URL) ?? (fileURL as? String).flatMap { URL(string: $0) }
                 let pathMatches = file?.isFileURL == true &&
-                    file?.standardizedFileURL.path == url.appendingPathComponent(request.expected).standardizedFileURL.path
+                    file?.standardizedFileURL.path == expectedFilePath
                 let topLevel = (axAttribute(element, "AXDisclosureLevel") as? Int) == 0
                 guard row == nil, file == nil ? topLevel : pathMatches else { break }
                 row = element
@@ -1704,6 +1746,18 @@ struct RecorderCommand {
                                   bundlePath: nil, showIndicator: false, sound: false, traceClicks: false)
             capture.emit(capture.finderRename(request))
             return
+        }
+        // Read-only frontmost application probe. A Finder context menu is its
+        // own surface, so the folder window stops being the focused window even
+        // though Finder still owns the foreground; this answers who is in front
+        // without requiring a focused window. Needs no TCC grant and moves
+        // nothing.
+        if args.count == 2, args[1] == "--frontmost" {
+            let app = NSWorkspace.shared.frontmostApplication
+            let pid = app?.processIdentifier ?? 0
+            let bundle = (app?.bundleIdentifier ?? "").replacingOccurrences(of: "\"", with: "")
+            print("{\"pid\":\(pid),\"bundleId\":\"\(bundle)\"}")
+            exit(0)
         }
         // Read-only secure input probe for replay hand-off verification. It
         // starts no tap, reads no accessibility tree and needs no TCC grant.

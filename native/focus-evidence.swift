@@ -1,6 +1,38 @@
 import Foundation
 
 /**
+ * The folder a Finder rename applies to.
+ *
+ * A Finder folder window does not always expose `AXDocument`. The selected (or
+ * hit-tested target) row's `AXURL` names the file itself, so its parent folder
+ * is the same folder the rename would happen in. A multiple selection has no
+ * single folder, and a path that is not absolute proves nothing: both are
+ * rejected so the caller can report `RENAME_DIRECTORY_UNPROVEN`.
+ */
+enum RenameDirectory {
+    /**
+     * Resolve one folder from the two read-only sources, in order:
+     * the window document first, then the target row's file URL.
+     */
+    static func resolve(document: String?, rowURL: String?, selectedCount: Int?) -> String? {
+        if let path = absolutePath(document) { return path }
+        if let count = selectedCount, count > 1 { return nil }
+        guard let file = absolutePath(rowURL) else { return nil }
+        let parent = (file as NSString).deletingLastPathComponent
+        return parent.isEmpty || parent == "/" ? nil : parent
+    }
+
+    /** A path we can hand to `readdir`: absolute, NUL-free, not the root. */
+    private static func absolutePath(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("/"), !trimmed.contains("\0") else { return nil }
+        let standard = (trimmed as NSString).standardizingPath
+        return standard.isEmpty || standard == "/" ? nil : standard
+    }
+}
+
+/**
  * The window evidence one focus probe can prove.
  *
  * A probe reads the frontmost app and the window that app reports as focused.

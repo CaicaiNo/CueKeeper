@@ -27,6 +27,12 @@ export interface RunningApp {
   name?: string;
 }
 
+/** The application that owns the foreground, read without moving focus. */
+export interface FrontmostApp {
+  pid: number;
+  bundleId?: string;
+}
+
 export interface ClickOptions {
   /** Physical click count. 2 and 3 need headed mode. */
   count?: 1 | 2 | 3;
@@ -109,6 +115,12 @@ export interface Desktop {
    * focus. Absent when the driver does not report `is_focused` at all.
    */
   focusedWindow?(timeoutMs?: number): Promise<WindowInfo | undefined>;
+  /**
+   * The application the system reports as frontmost, read natively without
+   * moving focus. Unlike `focusedWindow`, it survives a transient surface (a
+   * context menu) that is not a window of its own.
+   */
+  frontmostApp?(timeoutMs?: number): Promise<FrontmostApp | undefined>;
   /** Read-only application inventory, for mapping a window's owner PID to a bundle ID. */
   listApps(timeoutMs?: number): Promise<RunningApp[]>;
   /** Window-only calls; no bundle ID is resolved by the driver. */
@@ -437,6 +449,23 @@ export async function withDesktop<T>(
         const data = await call('list-windows', ['--timeout-ms', String(timeoutMs)],
           undefined, timeoutMs + 3000);
         return windowList(data).find(window => window.isFocused === true);
+      },
+      async frontmostApp(timeoutMs = 2000) {
+        if (process.env.CUEKEEPER_TRACE_DESKTOP) process.stderr.write('[desktop] frontmost\n');
+        const raw = await new Promise<string>((resolve, reject) => {
+          const child = execFile(captureHelperPath(), ['--frontmost'], {
+            signal: options.signal, encoding: 'utf8', timeout: timeoutMs,
+          }, (error, stdout) => error ? reject(new Fault('FRONTMOST_UNAVAILABLE',
+            'The frontmost-application probe is unavailable; rebuild the recorder helper')) : resolve(stdout));
+          child.stdin?.on('error', () => {});
+          child.stdin?.end();
+        });
+        const data = object(JSON.parse(raw));
+        if (typeof data.pid !== 'number' || !Number.isInteger(data.pid) || data.pid <= 0) return undefined;
+        return {
+          pid: data.pid,
+          ...(typeof data.bundleId === 'string' && data.bundleId ? { bundleId: data.bundleId } : {}),
+        };
       },
       async listApps(timeoutMs = 3000) {
         const data = await call('list-apps', ['--timeout-ms', String(timeoutMs)],

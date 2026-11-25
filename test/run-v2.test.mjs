@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { AppIdentitySession } from '../dist/app-identity.js';
 import { reportV2Check } from '../dist/contracts-v2.js';
@@ -120,7 +120,7 @@ function fakeWorld(options = {}) {
     },
     async focusedWindow() {
       const window = byId(state.focused);
-      return window ? { id: window.id, title: window.title } : undefined;
+      return window ? { id: window.id, title: window.title, pid: window.pid } : undefined;
     },
     async listAllWindows() {
       return state.windows.map(window => ({
@@ -1256,7 +1256,7 @@ function renameCase(t, options = {}) {
     apps: { [finder]: [{ pid: 601, startedAt: '601.1', bundleId: finder, bundlePath }] },
     identityOptions: { appPath: () => bundlePath, pathToBundle: { [bundlePath]: finder } },
   });
-  let editing = false, opened = false, text = 'manifest.json', tries = 0;
+  let editing = false, opened = false, text = 'manifest.json', tries = 0, menuOpen = false;
   let selected = !options.unselected;
   const calls = [];
   const probes = [];
@@ -1267,10 +1267,27 @@ function renameCase(t, options = {}) {
     opened = opts?.button === 'right';
     if (!opened) selected = true;
   };
+  // While its context menu is open Finder keeps the foreground, but the folder
+  // window is no longer the app's focused window. Both shapes the real driver
+  // reports are exercised: no focused window at all, and a focused menu surface
+  // that is not the bound window.
+  const baseFocusedWindow = driver.focusedWindow;
+  driver.focusedWindow = async () => {
+    if (menuOpen && options.menuFocus === 'menu') {
+      return { id: 'w-menu', title: 'menu', pid: options.menuPid ?? 601 };
+    }
+    if (menuOpen && options.menuFocus === 'none') return undefined;
+    return baseFocusedWindow();
+  };
   driver.waitMenu = async (app, open) => {
     calls.push(['waitMenu', app, open]);
     if (options.waitFail) throw new Fault('TIMEOUT', 'menu wait expired');
     assert.equal(opened, open);
+    menuOpen = open;
+    // The folder window does not always take focus back when the menu closes.
+    if (!open && options.menuFocus) {
+      world.state.focused = options.focusLostAfterMenu ? 'w-99' : 'w-1';
+    }
   };
   driver.snapshotSurface = async (surface, timeout, app) => {
     calls.push(['snapshotSurface', surface, app]);
@@ -1286,6 +1303,11 @@ function renameCase(t, options = {}) {
     if (options.focusTree) return parseSurface({ complete: true, tree: options.focusTree(field) });
     return parseSurface({ complete: true, tree: options.cellOnly || options.nativeOnly ? { role: 'cell', states: ['focused'] } : field });
   };
+  driver.frontmostApp = async () => {
+    if (options.frontmost === 'unavailable') return undefined;
+    if (options.frontmost) return options.frontmost;
+    return { pid: 601, bundleId: finder };
+  };
   driver.clickSemantic = async ref => {
     calls.push(['clickSemantic', ref]);
     tries++;
@@ -1300,7 +1322,14 @@ function renameCase(t, options = {}) {
     assert.equal(req.pid, 601);
     assert.equal(req.windowNumber, 1);
     if (world.state.focused !== 'w-1') throw new Fault('FOCUS_INTERRUPTED', 'Finder lost focus');
-    return { directory: options.missingDir ? join(directory, 'missing') : directory,
+    // When AXDocument is missing the native probe derives the folder from the
+    // target row's AXURL. It still reports a plain folder path; the tests below
+    // only care that replay pins and uses exactly that answer.
+    if (options.nativeDirectoryUnproven) {
+      throw new Fault('RENAME_DIRECTORY_UNPROVEN', 'The Finder folder could not be proven');
+    }
+    return { directory: options.missingDir ? join(directory, 'missing')
+      : options.documentMissing ? dirname(join(directory, 'manifest.json')) : directory,
       selectedCount: options.multi ? 2 : Number(selected), targetSelected: selected, listFocused: true,
       editor: editing && !options.cellOnly && req.expected === text, ...states.shift() };
   };
@@ -1449,6 +1478,76 @@ test('loss of list focus before context chooses a menu, and before entry stops k
       assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
     }
   }
+});
+
+// A context menu is a surface of its own: the folder window stops being the
+// focused window while the menu is open, even though Finder keeps the
+// foreground. Replay must still reach the menu item, and must still refuse when
+// the foreground or the menu belongs to someone else.
+for (const menuFocus of ['none', 'menu']) {
+  test('Finder menu rename keeps replaying while the open menu (' + menuFocus + ') owns the foreground', async t => {
+    const c = renameCase(t, { menu: true, menuFocus, nativeOnly: true });
+    const report = await c.run();
+    assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+    assert.equal(c.calls.filter(call => call[0] === 'clickSemantic').length, 1);
+    assert.equal(c.calls.filter(call => call[0] === 'typeFocused').length, 1);
+    assert.deepEqual(callsOf(c.world, 'clickPoint'), []);
+    assert.deepEqual(readdirSync(c.directory), ['manifest-e2e.json']);
+  });
+}
+
+test('Finder stops before input when the folder window has not regained focus after the menu closes', async t => {
+  const c = renameCase(t, { menu: true, menuFocus: 'menu', focusLostAfterMenu: true, nativeOnly: true });
+  const report = await c.run();
+  assert.equal(entry(report, 'type-name').code, 'FOCUS_INTERRUPTED');
+  assert.equal(c.calls.filter(call => call[0] === 'typeFocused' || call[0] === 'press').length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+for (const [name, opts] of [
+  ['Finder is not the frontmost app', { frontmost: { pid: 999, bundleId: 'com.example.other' } }],
+  ['the native frontmost answer is missing', { frontmost: 'unavailable' }],
+  ['the open menu belongs to another application', { menuFocus: 'menu', menuPid: 999 }],
+]) {
+  test('Finder opens no menu input when ' + name, async t => {
+    const c = renameCase(t, { ...opts, menu: true, nativeOnly: true });
+    const report = await c.run();
+    assert.equal(entry(report, 'rename').code, 'FOCUS_INTERRUPTED');
+    assert.equal(c.calls.filter(call => call[0] === 'clickSemantic').length, 0);
+    assert.equal(c.calls.filter(call => call[0] === 'typeFocused' || call[0] === 'press').length, 0);
+    assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+  });
+}
+
+test('Finder replays with the folder the native probe derived from the target row AXURL', async t => {
+  const c = renameCase(t, { menu: true, documentMissing: true, nativeOnly: true });
+  const report = await c.run();
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  // The first probe had no folder yet (no AXDocument); the fallback answer is
+  // pinned and every later probe must agree with it.
+  assert.equal(c.probes[0].directory, undefined);
+  assert.ok(c.probes.slice(1).every(probe => probe.directory === c.directory));
+  assert.deepEqual(readdirSync(c.directory), ['manifest-e2e.json']);
+});
+
+test('Finder stops before input when neither AXDocument nor the row URL proves a folder', async t => {
+  const c = renameCase(t, { menu: true, nativeDirectoryUnproven: true, nativeOnly: true });
+  const report = await c.run();
+  assert.ok(report.entries.some(e => e.code === 'RENAME_DIRECTORY_UNPROVEN'), JSON.stringify(report.entries));
+  assert.equal(c.calls.filter(call => call[0] === 'typeFocused' || call[0] === 'press').length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+test('keyboard rename keeps the strict folder-window foreground check', async t => {
+  const c = renameCase(t);
+  let frontmost = 0;
+  c.world.desktop.frontmostApp = async () => { frontmost++; return { pid: 601, bundleId: finder }; };
+  c.world.state.focused = 'w-99';
+  const report = await c.run();
+  assert.ok(report.entries.some(e => e.code === 'FOCUS_INTERRUPTED'), JSON.stringify(report.entries));
+  assert.equal(frontmost, 0);
+  assert.equal(c.calls.filter(call => call[0] === 'press' || call[0] === 'typeFocused').length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
 });
 
 const menuItem = { role: 'menuitem', name: 'Rename', ref_id: '@menu:e1', available_actions: ['Click'] };

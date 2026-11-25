@@ -9,7 +9,7 @@ import { DesktopFault } from './desktop.js';
 import type { Desktop, FinderRenameRequest } from './desktop.js';
 import { Fault, contains, flatten, resolve } from './locator.js';
 import type { Point } from './locator.js';
-import type { ScopeResolver } from './scope.js';
+import type { ScopeResolver, WindowBinding } from './scope.js';
 import type { StepResult } from './report-v2.js';
 
 type Click = Extract<StepV2, { kind: 'click' }>;
@@ -93,6 +93,8 @@ class FinderRename {
   private request?: FinderRenameRequest;
   private original?: Awaited<ReturnType<typeof fileIdentity>>;
   private newName = '';
+  /** True from a successful menu wait until the menu is confirmed closed. */
+  private menuOpen = false;
 
   constructor(private desktop: Desktop, private resolver: ScopeResolver, private menu: Click,
     private target: ElementLocator, private type: Type, private inputs: Readonly<Record<string, string>>,
@@ -103,11 +105,36 @@ class FinderRename {
     const binding = await this.resolver.resolveWindow(this.menu.scope, true);
     if (binding.app !== finder || binding.observedTitle !== this.menu.scope.windowTitle ||
         (this.menu.recordedWindowNumber && binding.windowNumber !== this.menu.recordedWindowNumber) ||
-        (this.request && (binding.pid !== this.request.pid || binding.windowNumber !== this.request.windowNumber)) ||
-        (await this.desktop.focusedWindow?.())?.id !== binding.windowId) {
+        (this.request && (binding.pid !== this.request.pid || binding.windowNumber !== this.request.windowNumber))) {
+      throw new Fault('FOCUS_INTERRUPTED', 'The recorded Finder window must be in front');
+    }
+    if (this.menuOpen) {
+      await this.menuForeground(binding);
+      return binding;
+    }
+    if ((await this.desktop.focusedWindow?.())?.id !== binding.windowId) {
       throw new Fault('FOCUS_INTERRUPTED', 'The recorded Finder window must be in front');
     }
     return binding;
+  }
+
+  /**
+   * A context menu is a surface of its own, so its folder window is no longer
+   * the system's focused window. Prove the foreground from the app that owns
+   * the menu instead: the frontmost process read natively, plus the front
+   * window's owner when the driver names one. An app switch, a menu that
+   * belongs to another application, or a missing native answer all stop the
+   * run before any input.
+   */
+  private async menuForeground(binding: WindowBinding) {
+    const front = await this.desktop.frontmostApp?.();
+    if (!front || front.pid !== binding.pid || front.bundleId !== finder) {
+      throw new Fault('FOCUS_INTERRUPTED', 'Finder is not the frontmost application behind the open menu');
+    }
+    const focused = await this.desktop.focusedWindow?.();
+    if (focused && focused.id !== binding.windowId && focused.pid !== undefined && focused.pid !== binding.pid) {
+      throw new Fault('FOCUS_INTERRUPTED', 'The open menu belongs to another application');
+    }
   }
 
   private async diskReady() {
@@ -176,6 +203,7 @@ class FinderRename {
 
   private async renameRef() {
     await this.desktop.waitMenu(finder, true);
+    this.menuOpen = true;
     const menu = await this.desktop.snapshotSurface('menu', 2000, finder);
     const matches = flatten(menu.tree).filter(({ node }) => node.role === 'menuitem' &&
       !node.states.includes('disabled') && labels.has(node.name ?? node.value ?? ''));
@@ -203,6 +231,7 @@ class FinderRename {
         await this.desktop.clickSemantic(freshRef);
       }
       await this.desktop.waitMenu(finder, false);
+      this.menuOpen = false;
     }
     return { message: this.keyboard ? 'Entered rename with Return' : 'Invoked Rename by menu reference' };
   }
