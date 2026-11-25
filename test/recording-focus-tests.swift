@@ -15,7 +15,11 @@ struct RecordingFocusTests {
         aMultipleSelectionHasNoSingleFolder()
         anUnreadableRowURLCannotProveAFolder()
         aNonAbsoluteDocumentFallsBackToTheRow()
-        print("Recording focus: 12/12 passed")
+        aMissingSelectionProvesNoFolder()
+        aRowOutsideTheBoundWindowProvesNoFolder()
+        aPinnedFolderMustMatchTheFallback()
+        aZeroSelectionOnlyProvesTheFolderBeforeSelecting()
+        print("Recording focus: 17/17 passed")
     }
 
     /// Finder's inline rename field makes the window probe fail. The app and its
@@ -87,22 +91,35 @@ struct RecordingFocusTests {
         precondition(!titled, "a titled window was reported as a surface")
     }
 
+    /// The row evidence a Finder list around the target row normally proves.
+    static func selectedRow(count: Int? = 1, selected: Bool = true, name: String? = "manifest.json",
+                            url: String? = "/Users/qa/Downloads/manifest.json",
+                            bound: Bool = true) -> RenameDirectory.RowEvidence {
+        RenameDirectory.RowEvidence(
+            url: url, name: name, selectedCount: count, targetSelected: selected, inBoundWindow: bound)
+    }
+
     /// A folder window that exposes AXDocument names the folder directly; the
     /// row's file URL is irrelevant.
     static func theWindowDocumentNamesItsFolder() {
         let folder = RenameDirectory.resolve(
-            document: "/Users/qa/Downloads", rowURL: "/Users/qa/Downloads/manifest.json", selectedCount: 1)
+            document: "/Users/qa/Downloads", row: nil, expected: nil, pinned: nil)
         precondition(folder == "/Users/qa/Downloads", "document folder became \(String(describing: folder))")
+        // The document wins even when the row would name another folder.
+        let wins = RenameDirectory.resolve(
+            document: "/Users/qa/Downloads",
+            row: selectedRow(url: "/Users/qa/Desktop/manifest.json"), expected: nil, pinned: nil)
+        precondition(wins == "/Users/qa/Downloads", "row replaced the document with \(String(describing: wins))")
     }
 
     /// Finder folder windows do not always expose AXDocument. The target row's
     /// own file URL still names the file, so its parent is the rename folder.
     static func aMissingDocumentFallsBackToTheRowParent() {
         let folder = RenameDirectory.resolve(
-            document: nil, rowURL: "/Users/qa/Downloads/manifest.json", selectedCount: 0)
+            document: nil, row: selectedRow(count: 0, selected: false), expected: "manifest.json", pinned: nil)
         precondition(folder == "/Users/qa/Downloads", "row folder became \(String(describing: folder))")
         let selected = RenameDirectory.resolve(
-            document: nil, rowURL: "/Users/qa/Downloads/manifest.json", selectedCount: 1)
+            document: nil, row: selectedRow(), expected: "manifest.json", pinned: nil)
         precondition(selected == "/Users/qa/Downloads", "single selection became \(String(describing: selected))")
     }
 
@@ -110,16 +127,18 @@ struct RecordingFocusTests {
     /// expanded subfolders). No single folder is provable.
     static func aMultipleSelectionHasNoSingleFolder() {
         let folder = RenameDirectory.resolve(
-            document: nil, rowURL: "/Users/qa/Downloads/manifest.json", selectedCount: 2)
+            document: nil, row: selectedRow(count: 2), expected: "manifest.json", pinned: nil)
         precondition(folder == nil, "a multiple selection produced \(String(describing: folder))")
     }
 
     /// A row without a file URL, or one that names a relative path, proves no
     /// folder at all — the caller must report the directory as unproven.
     static func anUnreadableRowURLCannotProveAFolder() {
-        let missing = RenameDirectory.resolve(document: nil, rowURL: nil, selectedCount: 1)
+        let missing = RenameDirectory.resolve(
+            document: nil, row: selectedRow(url: nil), expected: "manifest.json", pinned: nil)
         precondition(missing == nil, "a missing row URL produced \(String(describing: missing))")
-        let relative = RenameDirectory.resolve(document: nil, rowURL: "Downloads/manifest.json", selectedCount: 1)
+        let relative = RenameDirectory.resolve(
+            document: nil, row: selectedRow(url: "Downloads/manifest.json"), expected: "manifest.json", pinned: nil)
         precondition(relative == nil, "a relative row URL produced \(String(describing: relative))")
     }
 
@@ -127,10 +146,57 @@ struct RecordingFocusTests {
     /// is, so the fallback is used. With neither source there is no answer.
     static func aNonAbsoluteDocumentFallsBackToTheRow() {
         let fallback = RenameDirectory.resolve(
-            document: "Downloads", rowURL: "/Users/qa/Downloads/manifest.json", selectedCount: 1)
+            document: "Downloads", row: selectedRow(), expected: "manifest.json", pinned: nil)
         precondition(fallback == "/Users/qa/Downloads", "relative document became \(String(describing: fallback))")
-        let nothing = RenameDirectory.resolve(document: "Downloads", rowURL: nil, selectedCount: 1)
+        let nothing = RenameDirectory.resolve(
+            document: "Downloads", row: selectedRow(url: nil), expected: "manifest.json", pinned: nil)
         precondition(nothing == nil, "relative document alone produced \(String(describing: nothing))")
+    }
+
+    /// A list that does not report its selection cannot authorize a row URL:
+    /// the URL could belong to any row the point happens to fall on.
+    static func aMissingSelectionProvesNoFolder() {
+        let noSelection = RenameDirectory.resolve(
+            document: nil, row: selectedRow(count: nil), expected: "manifest.json", pinned: nil)
+        precondition(noSelection == nil, "missing selection evidence produced \(String(describing: noSelection))")
+        let unselected = RenameDirectory.resolve(
+            document: nil, row: selectedRow(selected: false), expected: "manifest.json", pinned: nil)
+        precondition(unselected == nil, "an unselected row produced \(String(describing: unselected))")
+    }
+
+    /// The row and its list have to belong to the bound folder window. The same
+    /// point can fall on an overlapping window of the same Finder.
+    static func aRowOutsideTheBoundWindowProvesNoFolder() {
+        let outside = RenameDirectory.resolve(
+            document: nil, row: selectedRow(bound: false), expected: "manifest.json", pinned: nil)
+        precondition(outside == nil, "a row in another window produced \(String(describing: outside))")
+    }
+
+    /// Once the caller pinned a folder, the fallback must name that same folder.
+    static func aPinnedFolderMustMatchTheFallback() {
+        let agreed = RenameDirectory.resolve(
+            document: nil, row: selectedRow(name: nil), expected: nil, pinned: "/Users/qa/Downloads")
+        precondition(agreed == "/Users/qa/Downloads", "a matching pin became \(String(describing: agreed))")
+        let changed = RenameDirectory.resolve(
+            document: nil, row: selectedRow(name: nil, url: "/Users/qa/Desktop/manifest.json"),
+            expected: nil, pinned: "/Users/qa/Downloads")
+        precondition(changed == nil, "a different pinned folder produced \(String(describing: changed))")
+        let documentChanged = RenameDirectory.resolve(
+            document: "/Users/qa/Desktop", row: nil, expected: nil, pinned: "/Users/qa/Downloads")
+        precondition(documentChanged == nil, "a changed document produced \(String(describing: documentChanged))")
+    }
+
+    /// Zero selection proves the folder only before the target row is selected,
+    /// and only while the row under the point is the recorded file.
+    static func aZeroSelectionOnlyProvesTheFolderBeforeSelecting() {
+        let afterPinning = RenameDirectory.resolve(
+            document: nil, row: selectedRow(count: 0, selected: false, name: nil), expected: nil,
+            pinned: "/Users/qa/Downloads")
+        precondition(afterPinning == nil, "a zero selection after pinning produced \(String(describing: afterPinning))")
+        let otherRow = RenameDirectory.resolve(
+            document: nil, row: selectedRow(count: 0, selected: false, name: "other.json"),
+            expected: "manifest.json", pinned: nil)
+        precondition(otherRow == nil, "zero selection on another row produced \(String(describing: otherRow))")
     }
 
     /// An app whose only window has no title yet keeps it: nothing else can own

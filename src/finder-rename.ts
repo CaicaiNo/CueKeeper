@@ -6,9 +6,9 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import type { ElementLocator } from './contracts.js';
 import type { StepV2 } from './contracts-v2.js';
 import { DesktopFault } from './desktop.js';
-import type { Desktop, FinderRenameRequest } from './desktop.js';
+import type { Desktop, FinderRenameRequest, RunningApp } from './desktop.js';
 import { Fault, contains, flatten, resolve } from './locator.js';
-import type { Point } from './locator.js';
+import type { Point, Snapshot } from './locator.js';
 import type { ScopeResolver, WindowBinding } from './scope.js';
 import type { StepResult } from './report-v2.js';
 
@@ -100,7 +100,12 @@ class FinderRename {
     private target: ElementLocator, private type: Type, private inputs: Readonly<Record<string, string>>,
     private signal: AbortSignal, private keyboard: boolean, private commitTimeoutMs: number) {}
 
-  private async foreground() {
+  /**
+   * Resolve the bound Finder window and check that it still is the window the
+   * recording named. This is proof about the window only; whether that window
+   * is in front depends on the phase (a menu may hold the foreground).
+   */
+  private async binding() {
     this.signal.throwIfAborted();
     const binding = await this.resolver.resolveWindow(this.menu.scope, true);
     if (binding.app !== finder || binding.observedTitle !== this.menu.scope.windowTitle ||
@@ -108,6 +113,11 @@ class FinderRename {
         (this.request && (binding.pid !== this.request.pid || binding.windowNumber !== this.request.windowNumber))) {
       throw new Fault('FOCUS_INTERRUPTED', 'The recorded Finder window must be in front');
     }
+    return binding;
+  }
+
+  private async foreground() {
+    const binding = await this.binding();
     if (this.menuOpen) {
       await this.menuForeground(binding);
       return binding;
@@ -120,20 +130,49 @@ class FinderRename {
 
   /**
    * A context menu is a surface of its own, so its folder window is no longer
-   * the system's focused window. Prove the foreground from the app that owns
-   * the menu instead: the frontmost process read natively, plus the front
-   * window's owner when the driver names one. An app switch, a menu that
-   * belongs to another application, or a missing native answer all stop the
-   * run before any input.
+   * the system's focused window. Prove the foreground from the application that
+   * owns the menu instead: the frontmost process read natively must be the
+   * bound Finder instance. Whether a specific ref belongs to that instance is
+   * proved separately, from the surface answer that produced the ref.
    */
   private async menuForeground(binding: WindowBinding) {
     const front = await this.desktop.frontmostApp?.();
     if (!front || front.pid !== binding.pid || front.bundleId !== finder) {
       throw new Fault('FOCUS_INTERRUPTED', 'Finder is not the frontmost application behind the open menu');
     }
-    const focused = await this.desktop.focusedWindow?.();
-    if (focused && focused.id !== binding.windowId && focused.pid !== undefined && focused.pid !== binding.pid) {
+  }
+
+  /**
+   * Prove that the menu surface a ref came from belongs to the bound Finder
+   * process and to the bound window.
+   *
+   * The driver's surface answer names the application it read, but not its PID,
+   * so the name is joined to the running inventory: exactly one process may
+   * carry it, and it must be the bound instance. A surface that names another
+   * window of the same app is the menu of a different folder window, and a
+   * surface that names no application cannot be attributed at all. Both stop
+   * before the semantic press.
+   */
+  private async proveMenuOwner(menu: Snapshot, binding: WindowBinding) {
+    if (!menu.ownerApp) {
+      throw new Fault('RENAME_MENU_UNPROVEN', 'The open menu does not name the application that owns it');
+    }
+    if (menu.ownerWindowId !== undefined && menu.ownerWindowId !== binding.windowId) {
+      throw new Fault('FOCUS_INTERRUPTED', 'The open menu belongs to another Finder window');
+    }
+    let named: RunningApp[];
+    try {
+      named = (await this.desktop.listApps()).filter(app => app.name === menu.ownerApp);
+    } catch (error) {
+      if (error instanceof Fault) throw error;
+      throw new Fault('RENAME_MENU_UNPROVEN', 'The running applications could not be listed for the open menu');
+    }
+    if (named.some(app => app.pid !== binding.pid ||
+        (app.bundleId !== undefined && app.bundleId !== finder))) {
       throw new Fault('FOCUS_INTERRUPTED', 'The open menu belongs to another application');
+    }
+    if (named.length !== 1) {
+      throw new Fault('RENAME_MENU_UNPROVEN', 'The open menu cannot be attributed to one Finder instance');
     }
   }
 
@@ -201,10 +240,19 @@ class FinderRename {
     return { message: this.keyboard ? 'Single selection verified for keyboard rename' : 'Opened the target row menu' };
   }
 
+  /**
+   * Read the open menu and return the Rename reference, after proving that the
+   * surface it came from belongs to the bound Finder process and window. The
+   * menu was opened by a right click on the target row of that window, so an
+   * attributed surface ties the ref to both the bound window and the row.
+   */
   private async renameRef() {
+    const binding = await this.binding();
     await this.desktop.waitMenu(finder, true);
     this.menuOpen = true;
+    await this.menuForeground(binding);
     const menu = await this.desktop.snapshotSurface('menu', 2000, finder);
+    await this.proveMenuOwner(menu, binding);
     const matches = flatten(menu.tree).filter(({ node }) => node.role === 'menuitem' &&
       !node.states.includes('disabled') && labels.has(node.name ?? node.value ?? ''));
     if (matches.length !== 1 || !matches[0].node.ref) {
@@ -240,6 +288,11 @@ class FinderRename {
     await this.foreground();
     const request = { ...this.request!, expected };
     const focused = await this.desktop.snapshotSurface('focused', 2000, finder);
+    // The editor opens inside the bound window. A focused surface the driver
+    // attributes to another window of the same Finder is not this rename.
+    if (focused.ownerWindowId !== undefined && focused.ownerWindowId !== `w-${request.windowNumber}`) {
+      throw new Fault('FOCUS_INTERRUPTED', 'The focused surface belongs to another Finder window');
+    }
     const fields = flatten(focused.tree).filter(({ node }) => node.states.includes('focused') &&
       /^(textfield|textbox|textarea|searchfield|combobox)$/.test(node.role));
     if (fields.length && (fields.length !== 1 || fields[0].node.secure ||

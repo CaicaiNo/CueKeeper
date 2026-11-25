@@ -3,23 +3,65 @@ import Foundation
 /**
  * The folder a Finder rename applies to.
  *
- * A Finder folder window does not always expose `AXDocument`. The selected (or
- * hit-tested target) row's `AXURL` names the file itself, so its parent folder
- * is the same folder the rename would happen in. A multiple selection has no
- * single folder, and a path that is not absolute proves nothing: both are
- * rejected so the caller can report `RENAME_DIRECTORY_UNPROVEN`.
+ * A Finder folder window does not always expose `AXDocument`. The target row's
+ * `AXURL` names the file itself, so its parent folder is the same folder the
+ * rename would happen in. A row URL alone is not enough, though: the row and
+ * its list have to sit in the bound folder window, and the list has to prove
+ * which rows are selected. Without that evidence the URL could describe a row
+ * of another window or folder. A multiple selection has no single folder, and
+ * a path that is not absolute proves nothing: all of them are rejected so the
+ * caller can report `RENAME_DIRECTORY_UNPROVEN`.
  */
 enum RenameDirectory {
     /**
-     * Resolve one folder from the two read-only sources, in order:
-     * the window document first, then the target row's file URL.
+     * One read of the file list around the recorded point, as the native probe
+     * found it. Every field is required except the two optional raw values: a
+     * missing URL or a missing selection is a failed proof, not an empty one.
      */
-    static func resolve(document: String?, rowURL: String?, selectedCount: Int?) -> String? {
-        if let path = absolutePath(document) { return path }
-        if let count = selectedCount, count > 1 { return nil }
-        guard let file = absolutePath(rowURL) else { return nil }
+    struct RowEvidence {
+        /** The row's own file URL, when Finder exposes one. */
+        var url: String?
+        /** The filename the row currently shows, when Finder names it. */
+        var name: String?
+        /** Number of selected rows the list reports; nil when it exposes none. */
+        var selectedCount: Int?
+        /** Whether the row under the recorded point is one of the selected rows. */
+        var targetSelected: Bool
+        /** Whether the row and its containing list belong to the bound window. */
+        var inBoundWindow: Bool
+    }
+
+    /**
+     * Resolve one folder from the two read-only sources, in order: the window
+     * document first, then the target row's file URL.
+     *
+     * `expected` is the recorded filename while the caller is still deriving
+     * the folder. It becomes nil once the caller has pinned one: the editor
+     * then shows the new name while the row still carries the file's URL.
+     * `pinned` is a folder the caller already proved; an answer naming another
+     * folder is refused instead of replacing it.
+     */
+    static func resolve(document: String?, row: RowEvidence?, expected: String?, pinned: String?) -> String? {
+        if let path = absolutePath(document) {
+            return pinned == nil || pinned == path ? path : nil
+        }
+        guard let row, row.inBoundWindow, let count = row.selectedCount else { return nil }
+        if let expected, row.name != expected { return nil }
+        switch count {
+        case 0:
+            // Before the row is selected, zero selection is provable evidence.
+            // Once the folder is pinned the target row must still be selected.
+            guard expected != nil, !row.targetSelected else { return nil }
+        case 1:
+            guard row.targetSelected else { return nil }
+        default:
+            return nil
+        }
+        guard let file = absolutePath(row.url) else { return nil }
         let parent = (file as NSString).deletingLastPathComponent
-        return parent.isEmpty || parent == "/" ? nil : parent
+        guard !parent.isEmpty, parent != "/" else { return nil }
+        guard let pinned else { return parent }
+        return parent == pinned ? parent : nil
     }
 
     /** A path we can hand to `readdir`: absolute, NUL-free, not the root. */

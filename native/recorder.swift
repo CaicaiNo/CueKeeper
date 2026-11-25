@@ -742,49 +742,67 @@ final class Capture {
         }
         guard let folder = folderWindow() else { return interrupted }
         let point = CGPoint(x: request.point[0], y: request.point[1])
+        /** The AX window an element belongs to, titled or not. */
+        func enclosingWindow(_ element: AXUIElement) -> AXUIElement? {
+            if let window = axElement(element, kAXWindowAttribute as String) { return window }
+            var node = axElement(element, kAXParentAttribute as String)
+            var depth = 0
+            while let current = node, depth < 12 {
+                if axString(current, kAXRoleAttribute as String) == "AXWindow" { return current }
+                node = axElement(current, kAXParentAttribute as String)
+                depth += 1
+            }
+            return nil
+        }
         // AXDocument names a folder window's folder, but Finder does not always
         // expose it. Fall back to the target row's own file URL and take its
-        // parent. The name check is only needed while the folder is still being
-        // derived: once the caller pins request.directory, the commit editor
-        // already shows the new name and its row still carries the old file URL.
+        // parent. The URL is only evidence together with the list that shows
+        // which row is selected: without selection evidence, or with the row or
+        // its list in another Finder window, the URL proves nothing.
         func documentPath() -> String? {
             let document = axAttribute(folder, kAXDocumentAttribute as String)
             let url = (document as? URL) ?? (document as? String).flatMap { URL(string: $0) }
             guard let url, url.isFileURL else { return nil }
             return url.path
         }
-        func rowDirectory() -> (path: String, selectedCount: Int?)? {
+        func rowEvidence() -> RenameDirectory.RowEvidence? {
             var hit: AXUIElement?
             AXUIElementCopyElementAtPosition(axApp, Float(point.x), Float(point.y), &hit)
             guard let hit else { return nil }
-            if request.directory == nil, fileItemIdentity(hit)?.name != request.expected { return nil }
             var node: AXUIElement? = hit
             var row: AXUIElement?
-            var selectedCount: Int?
+            var list: AXUIElement?
             var depth = 0
             while let current = node, depth < 12 {
                 let role = axString(current, kAXRoleAttribute as String)
                 if row == nil, role == "AXRow" || role == "AXOutlineRow" { row = current }
-                if role == "AXOutline" || role == "AXTable" || role == "AXList" {
-                    if let selected = axAttribute(current, kAXSelectedRowsAttribute as String) as? [AXUIElement] {
-                        selectedCount = selected.count
-                    }
-                    break
-                }
+                if role == "AXOutline" || role == "AXTable" || role == "AXList" { list = current; break }
                 if role == "AXWindow" || role == "AXApplication" { break }
                 node = axElement(current, kAXParentAttribute as String)
                 depth += 1
             }
-            guard let row, let raw = axAttribute(row, kAXURLAttribute as String) else { return nil }
+            guard let row, let list else { return nil }
+            // The same point can fall on an overlapping window of the same
+            // Finder. Both the row and the list that reports the selection have
+            // to sit in the bound folder window.
+            let bound = enclosingWindow(row).map { CFEqual($0, folder) } == true &&
+                enclosingWindow(list).map { CFEqual($0, folder) } == true
+            let selected = axAttribute(list, kAXSelectedRowsAttribute as String) as? [AXUIElement]
+            let raw = axAttribute(row, kAXURLAttribute as String)
             let file = (raw as? URL) ?? (raw as? String).flatMap { URL(string: $0) }
-            guard let file, file.isFileURL else { return nil }
-            return (file.path, selectedCount)
+            return RenameDirectory.RowEvidence(
+                url: file?.isFileURL == true ? file?.path : nil,
+                name: fileItemIdentity(hit)?.name,
+                selectedCount: selected?.count,
+                targetSelected: selected?.contains { CFEqual($0, row) } == true,
+                inBoundWindow: bound)
         }
         let document = documentPath()
-        let rowSource = document == nil ? rowDirectory() : nil
+        let rowSource = document == nil ? rowEvidence() : nil
         guard let directory = RenameDirectory.resolve(
-                document: document, rowURL: rowSource?.path, selectedCount: rowSource?.selectedCount),
-              request.directory == nil || directory == request.directory else {
+                document: document, row: rowSource,
+                expected: request.directory == nil ? request.expected : nil,
+                pinned: request.directory) else {
             return ["code": "RENAME_DIRECTORY_UNPROVEN"]
         }
         let expectedFilePath = URL(fileURLWithPath: directory)

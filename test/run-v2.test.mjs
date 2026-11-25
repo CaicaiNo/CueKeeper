@@ -1289,13 +1289,21 @@ function renameCase(t, options = {}) {
       world.state.focused = options.focusLostAfterMenu ? 'w-99' : 'w-1';
     }
   };
+  // The driver names the application it read a surface from, but not its PID.
+  // Replay joins that name to the running inventory, so the fake offers both.
+  driver.listApps = async () => options.menuApps ?? [{ pid: 601, bundleId: finder, name: 'Finder' }];
   driver.snapshotSurface = async (surface, timeout, app) => {
     calls.push(['snapshotSurface', surface, app]);
     if (surface === 'menu') {
       assert.equal(opened, true);
-      return parseSurface({ complete: true, tree: { role: 'menu', children: options.items ?? [{
-        role: 'menuitem', name: 'Rename', ref_id: '@menu:e' + (tries + 1), available_actions: ['Click'],
-      }] } });
+      return parseSurface({
+        complete: true,
+        ...(options.menuSurfaceApp === null ? {} : { app: options.menuSurfaceApp ?? 'Finder' }),
+        ...(options.menuSurfaceWindow ? { window: options.menuSurfaceWindow } : {}),
+        tree: { role: 'menu', children: options.items ?? [{
+          role: 'menuitem', name: 'Rename', ref_id: '@menu:e' + (tries + 1), available_actions: ['Click'],
+        }] },
+      });
     }
     if (options.steal) world.state.focused = 'w-99';
     const field = { role: 'textfield', states: ['focused'], value: text,
@@ -1507,7 +1515,10 @@ test('Finder stops before input when the folder window has not regained focus af
 for (const [name, opts] of [
   ['Finder is not the frontmost app', { frontmost: { pid: 999, bundleId: 'com.example.other' } }],
   ['the native frontmost answer is missing', { frontmost: 'unavailable' }],
-  ['the open menu belongs to another application', { menuFocus: 'menu', menuPid: 999 }],
+  ['the open menu belongs to another application', {
+    menuSurfaceApp: 'Other App',
+    menuApps: [{ pid: 999, bundleId: 'com.example.other', name: 'Other App' }],
+  }],
 ]) {
   test('Finder opens no menu input when ' + name, async t => {
     const c = renameCase(t, { ...opts, menu: true, nativeOnly: true });
@@ -1518,6 +1529,49 @@ for (const [name, opts] of [
     assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
   });
 }
+
+test('Finder presses no menu ref when the open menu does not name its owner', async t => {
+  const c = renameCase(t, { menu: true, nativeOnly: true, menuSurfaceApp: null });
+  const report = await c.run();
+  assert.equal(entry(report, 'rename').code, 'RENAME_MENU_UNPROVEN');
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+test('Finder presses no menu ref when the menu surface belongs to another Finder window', async t => {
+  // Same Finder process, but the surface is attributed to a window other than
+  // the bound one: the ref cannot be tied to the recorded target row.
+  const c = renameCase(t, {
+    menu: true, nativeOnly: true,
+    menuSurfaceWindow: { id: 'w-99', title: 'Another Finder Window' },
+  });
+  const report = await c.run();
+  assert.equal(entry(report, 'rename').code, 'FOCUS_INTERRUPTED');
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+test('Finder presses no menu ref when two Finder instances share the menu owner name', async t => {
+  const c = renameCase(t, {
+    menu: true, nativeOnly: true,
+    menuApps: [
+      { pid: 601, bundleId: finder, name: 'Finder' },
+      { pid: 602, bundleId: finder, name: 'Finder' },
+    ],
+  });
+  const report = await c.run();
+  assert.equal(entry(report, 'rename').code, 'FOCUS_INTERRUPTED');
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+test('Finder presses no menu ref when the menu owner is not a running application', async t => {
+  const c = renameCase(t, { menu: true, nativeOnly: true, menuApps: [] });
+  const report = await c.run();
+  assert.equal(entry(report, 'rename').code, 'RENAME_MENU_UNPROVEN');
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
 
 test('Finder replays with the folder the native probe derived from the target row AXURL', async t => {
   const c = renameCase(t, { menu: true, documentMissing: true, nativeOnly: true });

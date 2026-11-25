@@ -20,6 +20,14 @@ export interface Node {
 export interface Snapshot {
   windowId: string;
   tree: Node;
+  /** The application the driver says it read the surface from, when it names one. */
+  ownerApp?: string;
+  /**
+   * The window the driver attributes a surface to, when it names one. A menu is
+   * an application surface and names no window; a focused surface does.
+   */
+  ownerWindowId?: string;
+  ownerWindowTitle?: string;
 }
 
 export interface Located {
@@ -98,14 +106,35 @@ export function parseSnapshot(data: unknown, target: Target): Snapshot {  const 
   return { windowId: window.id, tree: parseNode(input.tree, 0) };
 }
 
-/** A menu or menubar surface has no window title; parse it without one. */
+/**
+ * A menu or menubar surface has no window title; parse it without one. The
+ * driver's ownership answer is kept: a caller that is about to press a ref from
+ * this surface needs to know which application (and, when reported, which
+ * window) the tree belongs to.
+ */
 export function parseSurface(data: unknown): Snapshot {
   const input = object(data);
   if (input.complete !== true || input.truncated === true || Boolean(input.identity_unproven)) {
     throw new Fault('INCOMPLETE_TREE', 'Surface snapshot is incomplete');
   }
   if (input.tree === undefined) throw new Fault('BAD_RESPONSE', 'Surface snapshot has no tree');
-  return { windowId: '', tree: parseNode(input.tree, 0) };
+  const ownerApp = typeof input.app === 'string' && input.app.trim() !== '' ? input.app : undefined;
+  let ownerWindowId: string | undefined;
+  let ownerWindowTitle: string | undefined;
+  if (input.window !== undefined) {
+    const window = object(input.window);
+    if (typeof window.id !== 'string' || !/^w-[a-zA-Z0-9_.:-]+$/.test(window.id)) {
+      throw new Fault('BAD_RESPONSE', 'Surface snapshot names an invalid owner window');
+    }
+    ownerWindowId = window.id;
+    ownerWindowTitle = typeof window.title === 'string' ? window.title : '';
+  }
+  return {
+    windowId: ownerWindowId ?? '',
+    tree: parseNode(input.tree, 0),
+    ...(ownerApp === undefined ? {} : { ownerApp }),
+    ...(ownerWindowId === undefined ? {} : { ownerWindowId, ownerWindowTitle }),
+  };
 }
 
 export function flatten(tree: Node): Located[] {
