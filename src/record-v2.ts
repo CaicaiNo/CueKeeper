@@ -228,6 +228,9 @@ function captureCode(code: unknown) {
  * snapshot reader is supplied by the caller, so the same engine is exercised by
  * fixtures and by a live session.
  */
+/** How long a Dock click may wait for the focus that names the app it started. */
+const DOCK_FOCUS_WAIT_MS = 1500;
+
 export class GlobalRecording {
   private steps: StepV2[] = [];
   private inputs = new Set<string>();
@@ -270,6 +273,13 @@ export class GlobalRecording {
    */
   private pendingText?: { key: string; scope: WindowScope; scopeId: string; at: number };
   private pendingSettle?: Promise<void>;
+  /**
+   * A Dock click names no window of its own, so the app it activates only
+   * becomes provable when the focus notification arrives. Until then the click
+   * is held, and hover noise from the pointer travelling to the new window is
+   * held with it, so the flow does not gain a gap for an ordinary app switch.
+   */
+  private pendingDockGap?: { at: number };
   private startupOpen = true;
   private startupDropped = 0;
   private notes = new Map<string, string>();
@@ -389,6 +399,23 @@ export class GlobalRecording {
     }
     if (this.systemDialogVisible) return;
 
+    if (this.pendingDockGap) {
+      const focusNamesTheApp = event.kind === 'focus' &&
+        event.focusGeneration >= this.lastGeneration && this.bindingFor(event) !== undefined;
+      const movingToTheApp = event.kind === 'hover' &&
+        event.t - this.pendingDockGap.at <= DOCK_FOCUS_WAIT_MS;
+      if (focusNamesTheApp) {
+        // onFocus below turns the held click into the navigation step.
+        this.pendingDockGap = undefined;
+      } else if (movingToTheApp) {
+        return;
+      } else {
+        this.pendingDockGap = undefined;
+        this.endBursts();
+        this.pushGap('CAPTURE_SCOPE_UNVERIFIED');
+      }
+    }
+
     if (this.startupOpen && event.t > startupGraceMs) this.startupOpen = false;
     // Before the front window is provable, an event with no window at all is
     // startup noise (a click that dismissed a dialog, a queued gap); it must not
@@ -464,6 +491,9 @@ export class GlobalRecording {
       return;
     }
     if (!this.claim(event, binding)) return;
+    // The focus a Dock click was waiting for has arrived; the scope step below
+    // (or the first-window branch) replaces the held gap.
+    this.pendingDockGap = undefined;
     if (!this.current) {
       this.current = { app: binding.app, key: binding.key };
       return;
@@ -472,6 +502,13 @@ export class GlobalRecording {
   }
 
   private async onClick(event: Extract<CaptureEvent, { kind: 'click' }>) {
+    // A Dock click carries no window of its own: the app it activates is only
+    // provable from the focus notification that follows. Hold it instead of
+    // recording a gap or inventing a Dock window binding.
+    if (event.owner?.app === 'com.apple.dock' && event.decision === 'gap') {
+      this.pendingDockGap = { at: event.t };
+      return;
+    }
     const binding = this.bindingFor(event);
     if (!binding) {
       this.pushGap('CAPTURE_SCOPE_UNVERIFIED');
@@ -1501,6 +1538,12 @@ export class GlobalRecording {
    * still has to reach the workbench so the gap can be resolved there.
    */
   finish(): FlowV2 {
+    if (this.pendingDockGap) {
+      // No focus ever named the app the Dock click started.
+      this.pendingDockGap = undefined;
+      this.endBursts();
+      this.pushGap('CAPTURE_SCOPE_UNVERIFIED');
+    }
     if (this.pendingText) {
       // A buffered burst whose read never returned cannot be placed; dropping it
       // is better than a flow that silently loses every later step's order.
