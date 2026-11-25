@@ -3024,3 +3024,23 @@ test('a window-less event never inherits a scope from another app', async () => 
   assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'gap']);
   assert.equal(flow.steps[1].code, 'CAPTURE_SCOPE_UNVERIFIED');
 });
+
+test('HAOC-175 review: a queued follow-up read waits out a secure interval', async () => {
+  const data = fixture('two-apps-three-windows');
+  const queued = [];
+  let reads = 0;
+  const read = readerFor(data);
+  const recording = new GlobalRecording(async window => {
+    reads += 1;
+    return read(window);
+  }, { now: () => NOW, scheduleSettle: task => queued.push(task) });
+  await recording.add(parseCaptureEvent(data.events[0]));
+  const readCountBeforeSecure = reads;
+  assert.equal(queued.length, 1);
+  await recording.add(parseCaptureEvent({
+    ...data.events[1], secure: true, secureEvidence: ['system_secure_input'],
+  }));
+  await queued.shift()();
+  recording.finish();
+  assert.equal(reads, readCountBeforeSecure, 'a queued task read an AX tree inside the secure interval');
+});

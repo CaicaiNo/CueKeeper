@@ -269,6 +269,10 @@ function matches(tree: Node, locator: ElementLocator, names = elementNames(tree)
   if (locator.identifier !== undefined) {
     const identified = candidates.filter(entry => entry.node.identifier === locator.identifier);
     if (identified.length) return identified;
+    // A control that is recorded by its identifier alone has no name to fall
+    // back on: matching "any unnamed element of this role" would address a
+    // different control, so a missing identifier is NOT_FOUND instead.
+    if (!locator.name) return [];
   }
   return candidates.filter(entry =>
     (locator.name === undefined || (names.get(entry.node) ?? '') === locator.name) &&
@@ -278,12 +282,21 @@ function matches(tree: Node, locator: ElementLocator, names = elementNames(tree)
   );
 }
 
+/** True when the match set is one exact platform-identifier match. */
+function identifiedOnly(locator: ElementLocator, candidates: Located[]): boolean {
+  return locator.identifier !== undefined && candidates.length === 1 &&
+    candidates[0].node.identifier === locator.identifier;
+}
+
 export function resolve(snapshot: Snapshot, locator: ElementLocator): Located {
   const candidates = matches(snapshot.tree, locator);
   if (locator.index !== undefined) {
     // An identifier match can be a single element where the recorded name had
-    // several; the position was recorded for the name, so one match wins.
-    const candidate = candidates[locator.index] ?? (candidates.length === 1 ? candidates[0] : undefined);
+    // several; that one exact identifier overrides the position recorded for
+    // the name. A name or path fallback still answers by its index, and an
+    // out-of-range index is NOT_FOUND — never the remaining look-alike.
+    const candidate = candidates[locator.index] ??
+      (identifiedOnly(locator, candidates) ? candidates[0] : undefined);
     if (candidate) return candidate;
   } else {
     if (candidates.length === 1) return candidates[0];

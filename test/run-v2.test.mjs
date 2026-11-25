@@ -531,14 +531,14 @@ test('a state check that already matched is not skipped when element addressing 
 
   const report = await run(flow, { systemCheckDeps: { stat: async () => ({ isFile: () => true }) } });
 
-  assert.equal(report.status, 'failed', JSON.stringify(report.entries, null, 2));
+  assert.equal(report.status, 'blocked', JSON.stringify(report.entries, null, 2));
   // The state check that ran keeps its observation and is not relabelled.
   assert.equal(entry(report, 'export-exists').status, 'passed');
   assert.deepEqual(entry(report, 'export-exists').stateCheck,
     { kind: 'file_exists', expected: true, actual: true });
-  // The element step failed to address its target and sent no input.
-  assert.equal(entry(report, 'type-ghost').status, 'failed');
-  assert.equal(entry(report, 'type-ghost').code, 'NOT_FOUND');
+  // The element step could not prove its window and sent no input.
+  assert.equal(entry(report, 'type-ghost').status, 'blocked');
+  assert.equal(entry(report, 'type-ghost').code, 'AMBIGUOUS_TARGET');
   assert.deepEqual(callsOf(world, 'type'), []);
   assert.deepEqual(callsOf(world, 'press'), []);
   // The step after the failure is skipped without inventing a machine fact.
@@ -1598,4 +1598,64 @@ test('a recorded rename replays through the menu and focuses the inline editor',
   assert.deepEqual(callsOf(world.world, 'press'), [['press', 'return', 'w-1']]);
   // Return ended rename mode: a named field afterwards types normally.
   assert.deepEqual(callsOf(world.world, 'type'), [['type', '@w1:e9', 'plain']]);
+});
+
+function reviewTypeFlow(target = { kind: 'element', role: 'textfield', name: 'notes' }) {
+  return parseFlowV2({
+    version: 2, id: 'review-type', name: 'Review type',
+    appPaths: { [textedit]: appPaths[textedit] },
+    steps: [{ id: 'type-note', kind: 'type', scope: notesScope, target, text: 'review' }],
+  });
+}
+
+for (const unreadable of [false, true]) {
+  test(`HAOC-175 review: same-title window ${unreadable ? 'unreadable' : 'no unique focus'} sends zero input`, async t => {
+    const twin = windowRecord({ id: 'w-23', app: textedit, pid: 601, title: 'QA Notes', fields: [['notes', '@w23:e1']] });
+    if (unreadable) twin.data.complete = false;
+    const { world, run } = harness(t, { windows: [...initialWindows(), twin], focused: 'w-22' });
+    const report = await run(reviewTypeFlow());
+    assert.deepEqual({ sent: callsOf(world, 'type'), code: entry(report, 'type-note').code },
+      { sent: [], code: 'AMBIGUOUS_TARGET' });
+  });
+}
+
+test('HAOC-175 review: an absent identifier alone sends zero click input', async t => {
+  const { world, run } = finderItemsWorld(t, [{
+    role: 'image', ref_id: '@w99:e1',
+    bounds: { x: 200, y: 200, width: 120, height: 120 }, states: [],
+  }]);
+  const report = await run(identifierClickFlow({ kind: 'element', role: 'image', name: '', identifier: 'missing-id' }));
+  assert.deepEqual({ sent: callsOf(world, 'click'), code: entry(report, 'click-control').code },
+    { sent: [], code: 'NOT_FOUND' });
+});
+
+test('HAOC-175 review: an existing indexed paste refuses the wrong remaining duplicate', async t => {
+  const { world, run } = harness(t);
+  const flow = parseFlowV2({
+    version: 2, id: 'review-paste', name: 'Review paste',
+    appPaths: { [textedit]: appPaths[textedit] },
+    inputs: ['note'],
+    steps: [{
+      id: 'paste-note', kind: 'paste', scope: notesScope,
+      target: { kind: 'element', role: 'textfield', name: 'notes', index: 1 },
+      source: { kind: 'input', input: 'note' },
+    }],
+  });
+  const report = await run(flow);
+  assert.deepEqual({ sent: callsOf(world, 'press'), code: entry(report, 'paste-note').code },
+    { sent: [], code: 'NOT_FOUND' });
+});
+
+test('HAOC-175 review: identifier-only type goes to the identified field', async t => {
+  const windows = initialWindows();
+  const fields = windows[0].data.tree.children[0].children;
+  fields[0].name = '';
+  fields.push({
+    ...fields[0], ref_id: '@w21:e2', states: [],
+    native_id: { kind: 'ax_dom_identifier', value: 'recorded-field' },
+  });
+  const { world, run } = harness(t, { windows });
+  const report = await run(reviewTypeFlow({ kind: 'element', role: 'textfield', name: '', identifier: 'recorded-field' }));
+  assert.deepEqual({ sent: callsOf(world, 'type'), status: entry(report, 'type-note').status },
+    { sent: [['type', '@w21:e2', 'review']], status: 'passed' });
 });

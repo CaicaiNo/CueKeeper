@@ -315,6 +315,8 @@ export class GlobalRecording {
   private lastGeneration = 0;
   private generationWindow = new Map<number, string>();
   private secureOpen = false;
+  /** Bumped whenever a secure interval opens: reads queued before it are void. */
+  private secureEpoch = 0;
   private systemDialogVisible = false;
   private securityAgentWarned = false;
   private textBurst?: {
@@ -979,8 +981,10 @@ export class GlobalRecording {
   private startSettledTree(binding: WindowBinding) {
     if (this.ended) return;
     // Clicks are scheduled independently: a read that hangs on one click must
-    // not stop the next click from getting a tree of its own.
-    this.scheduleSettle(() => this.settleWindow(binding, 0));
+    // not stop the next click from getting a tree of its own. The interval
+    // epoch travels with the task so a secure prompt invalidates it.
+    const epoch = this.secureEpoch;
+    this.scheduleSettle(() => this.settleWindow(binding, 0, epoch));
   }
 
   /**
@@ -1003,7 +1007,10 @@ export class GlobalRecording {
     if (timer) clearTimeout(timer);
   }
 
-  private async settleWindow(binding: WindowBinding, attempt: number) {
+  private async settleWindow(binding: WindowBinding, attempt: number, epoch = this.secureEpoch) {
+    // A read queued before a secure interval must not run inside it: the screen
+    // now belongs to the prompt, and the interval reads no window at all.
+    if (this.ended || epoch !== this.secureEpoch) return;
     this.snapshotReads += 1;
     let timer: NodeJS.Timeout | undefined;
     const abandoned = new Promise<undefined>(resolve => {
@@ -1023,7 +1030,9 @@ export class GlobalRecording {
       this.settling.set(binding.key, settledRead);
       const snapshot = await Promise.race([reading, abandoned]);
       if (this.settling.get(binding.key) === settledRead) this.settling.delete(binding.key);
-      if (!snapshot || this.ended) return;
+      // A read that completed across a secure boundary describes the screen of
+      // the prompt, not of the window: it is discarded, not cached.
+      if (!snapshot || this.ended || epoch !== this.secureEpoch) return;
       const changed = !binding.settled || signature(snapshot.tree) !== signature(binding.settled.snapshot.tree);
       // A slower read can finish after a later one; the newer read wins.
       if (!binding.settled || binding.settled.at <= at) binding.settled = { snapshot, at };
@@ -1032,7 +1041,7 @@ export class GlobalRecording {
       // reads agree: the next click is then named from the finished screen
       // instead of a page that was still being built.
       if (changed && attempt + 1 < settledTreeReads && !this.ended) {
-        this.scheduleSettle(() => this.settleWindow(binding, attempt + 1));
+        this.scheduleSettle(() => this.settleWindow(binding, attempt + 1, epoch));
       }
     } catch {
       // A settle read is opportunistic; the click it serves keeps its own evidence.
@@ -1605,7 +1614,11 @@ export class GlobalRecording {
     this.secureOpen = true;
     this.endBursts();
     // A secure boundary invalidates whatever control was proven before it, and
-    // the prompt can replace what a window showed.
+    // the prompt can replace what a window showed. Every read queued before the
+    // interval is void, and a tree that finished across it is not evidence.
+    this.secureEpoch += 1;
+    this.settling.clear();
+    for (const binding of this.bindings.values()) binding.settled = undefined;
     this.textAnchor = undefined;
     this.dropTrees();
   }

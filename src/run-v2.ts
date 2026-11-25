@@ -710,30 +710,44 @@ class StepRunner {
   }
 
   /**
-   * Settles which of several same-titled windows a step belongs to. The app's
-   * focused window comes first, because that is the window an operator is
-   * looking at; then the window whose tree can perform the step; then the first
-   * one the app lists, so one duplicate window cannot stop a whole flow.
+   * Settles which of several same-titled windows a step belongs to. A step is
+   * placed in the one window its own tree evidence proves: exactly one window
+   * holds the recorded target, or several hold it and the operator's focused
+   * window is the only one of them. Anything less is insufficient evidence and
+   * stays ambiguous — a guess here would type into the wrong document.
    */
   private async pickSameTitled(
     candidates: WindowInfo[],
     step: StepV2,
   ): Promise<{ window: WindowInfo; reason: 'target' | 'focused' } | undefined> {
     const test = windowTest(step);
-    const holders: WindowInfo[] = [];
-    if (test) {
-      for (const candidate of candidates) {
-        const snapshot = await this.desktop.snapshotWindow(candidate.id).catch(() => undefined);
-        if (snapshot && test(snapshot)) holders.push(candidate);
-      }
+    if (!test) {
+      // The step names nothing the tree can be asked about, so the operator's
+      // own front window is the only evidence there is.
+      const focused = candidates.filter(window => window.isFocused === true);
+      return focused.length === 1 ? { window: focused[0], reason: 'focused' } : undefined;
     }
+    const holders: WindowInfo[] = [];
+    let unknown = 0;
+    for (const candidate of candidates) {
+      const snapshot = await this.desktop.snapshotWindow(candidate.id).catch(() => undefined);
+      // A tree that could not be read might be the recorded window, so it can
+      // neither prove nor deny a match; its silence leaves the title ambiguous.
+      if (!snapshot) {
+        unknown += 1;
+        continue;
+      }
+      if (test(snapshot)) holders.push(candidate);
+    }
+    if (unknown) return undefined;
     if (holders.length === 1) return { window: holders[0], reason: 'target' };
-    // Several windows hold the target — the same folder open twice looks the
-    // same in both — so the operator's own window decides between them.
-    const among = holders.length ? holders : candidates;
-    const focused = among.filter(window => window.isFocused === true);
-    if (focused.length === 1) return { window: focused[0], reason: 'focused' };
-    return holders.length ? { window: holders[0], reason: 'target' } : undefined;
+    if (holders.length > 1) {
+      // Several windows hold the target — the same folder open twice looks the
+      // same in both — so the operator's own window decides between them.
+      const focused = holders.filter(window => window.isFocused === true);
+      if (focused.length === 1) return { window: focused[0], reason: 'focused' };
+    }
+    return undefined;
   }
 
   /**
@@ -819,6 +833,19 @@ class StepRunner {
     }
     return this.windowStep(step.scope, async (_binding, snapshot) => {
       const locator = step.target as ElementLocator;
+      // An identifier is an explicit identity: address that control directly.
+      // The heuristics below find an unnamed inline rename editor that the tree
+      // cannot address; they must never redirect a recorded identifier's text
+      // into whichever editable control happens to be focused.
+      if (locator.identifier !== undefined) {
+        const node = actionable(snapshot!, addressable(locator)).node;
+        const delivery = await this.desktop.type(node.ref!, text);
+        return {
+          ...(delivery === undefined ? {} : { delivery }),
+          textMode: literal ? 'literal' : 'input',
+          ...(input === undefined ? {} : { input }),
+        };
+      }
       // Finder's inline rename editor is not in the accessibility tree. The
       // Rename menu item opened it, but a semantic menu press leaves keyboard
       // focus on the list. Clicking the name column makes the field editor the
