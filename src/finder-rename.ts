@@ -243,6 +243,14 @@ class FinderRename {
         throw new Fault('RENAME_MENU_UNPROVEN', 'A driver window reports two different owning processes');
       }
       const owned = driver.filter(window => window.pid === binding.pid);
+      // Both full native markers and macOS driver tokens come from libproc.
+      // The native launch-date fallback has only seconds and cannot be compared.
+      const nativeStart = /^(\d+)\.(\d+)$/.exec(binding.processInstance);
+      const expectedToken = nativeStart ? `macos-proc-v1:${nativeStart[1]}:${nativeStart[2]}` : undefined;
+      if (owned.some(({ processInstanceToken }) => processInstanceToken !== undefined &&
+          (expectedToken ? processInstanceToken !== expectedToken : !/^macos-proc-v1:\d+:\d+$/.test(processInstanceToken)))) {
+        throw new Fault('RENAME_MENU_UNPROVEN', 'The driver window process generation cannot be reconciled');
+      }
       const numbers = new Set(native.numbers);
       const driverNumbers = owned.map(window => Number(window.id.startsWith('w-') ? window.id.slice(2) : NaN));
       if (driverNumbers.some(number => !Number.isInteger(number) || !numbers.has(number))) {

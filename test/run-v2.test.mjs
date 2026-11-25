@@ -1876,6 +1876,17 @@ test('the driver window reader keeps a process generation token instead of readi
   assert.equal(window.processInstance, undefined);
 });
 
+test('the shared window reader keeps opaque process generation tokens from other platforms', () => {
+  const [linux, windows] = parseWindowInventory([
+    { id: 'w-1.11-calculator', pid: 8255, process_instance: '6d91df60:28340' },
+    { id: 'w-2', pid: 8256, process_instance: 'windows-proc-v1:1700000000:123456' },
+  ]);
+  assert.equal(linux.pid, 8255);
+  assert.equal(linux.processInstanceToken, '6d91df60:28340');
+  assert.equal(windows.pid, 8256);
+  assert.equal(windows.processInstanceToken, 'windows-proc-v1:1700000000:123456');
+});
+
 test('Finder reads real process generation tokens and attributes windows by pid', async t => {
   // The pinned driver reports `pid` plus an opaque `process_instance` token
   // (`macos-proc-v1:<seconds>:<micros>`), not a second pid. The bound Finder
@@ -1885,7 +1896,7 @@ test('Finder reads real process generation tokens and attributes windows by pid'
     menu: true, nativeOnly: true,
     driverWindowResponse: [
       { id: 'w-1', title: 'cuekeeper-demo', pid: 601,
-        process_instance: 'macos-proc-v1:1700000000:250000', is_focused: true },
+        process_instance: 'macos-proc-v1:601:1', is_focused: true },
       { id: 'w-2', title: 'Finder 另一窗口', pid: 999, process_instance: 'macos-proc-v1:1700000001:1' },
     ],
     cgWindows: [{ number: 1, ownerPid: 601, title: 'cuekeeper-demo' }],
@@ -1895,6 +1906,19 @@ test('Finder reads real process generation tokens and attributes windows by pid'
   assert.equal(report.status, 'passed', JSON.stringify(report.entries));
   assert.equal(c.calls.filter(call => call[0] === 'clickSemantic').length, 1);
   assert.deepEqual(readdirSync(c.directory), ['manifest-e2e.json']);
+});
+
+test('Finder presses no menu ref when the bound pid has a different process generation', async t => {
+  const c = renameCase(t, {
+    menu: true, nativeOnly: true,
+    driverWindowResponse: [
+      { id: 'w-1', title: 'cuekeeper-demo', pid: 601, process_instance: 'macos-proc-v1:601:2' },
+    ],
+  });
+  const report = await c.run();
+  assert.equal(entry(report, 'rename').code, 'RENAME_MENU_UNPROVEN');
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
 });
 
 test('Finder presses no menu ref when a real driver window names no owning pid', async t => {
@@ -1914,21 +1938,18 @@ test('Finder presses no menu ref when a real driver window names no owning pid',
   assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
 });
 
-test('Finder stops before selecting when the driver window inventory reports a malformed process token', async t => {
-  // `process_instance: 601` is the old fixture shape, not the pinned driver's
-  // contract. Reading it as an integer would hide that the inventory cannot be
-  // attributed, so the parse refuses it and no input is sent.
+test('Finder stops before selecting when the driver window inventory reports a malformed process field', async t => {
   const c = renameCase(t, {
     menu: true, nativeOnly: true,
     driverWindowResponse: [
-      { id: 'w-1', title: 'cuekeeper-demo', pid: 601, process_instance: 'Finder generation 1' },
+      { id: 'w-1', title: 'cuekeeper-demo', pid: 601, process_instance: { generation: 1 } },
     ],
     cgWindows: [{ number: 1, ownerPid: 601, title: 'cuekeeper-demo' }],
     appWindows: { complete: true, count: 1, numbers: [1], titles: ['cuekeeper-demo'] },
   });
   const report = await c.run();
   assert.equal(entry(report, 'select').code, 'BAD_RESPONSE');
-  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.equal(c.calls.length, 0);
   assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
 });
 

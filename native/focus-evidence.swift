@@ -120,8 +120,7 @@ enum RenameSelection {
                              expectedPath: String) -> MenuEvidence {
         guard let row, row.inBoundWindow, row.name == expectedName,
               row.selectedCount == 1, row.targetSelected,
-              let url = row.url, url.hasPrefix("/"),
-              URL(fileURLWithPath: url).standardizedFileURL.path == expectedPath else {
+              row.url == expectedPath else {
             return MenuEvidence(selectedCount: nil, targetSelected: false)
         }
         return MenuEvidence(selectedCount: 1, targetSelected: true)

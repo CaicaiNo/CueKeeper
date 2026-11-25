@@ -11,17 +11,9 @@ import { createDesktopWorkdir } from './workdir.js';
 export interface WindowInfo {
   id: string;
   title: string;
-  /**
-   * A numeric owner pid some fixtures wrote in `process_instance`. The pinned
-   * driver reports an opaque generation token there instead, so this field is
-   * only ever filled from a plain integer answer; it is not an instance token.
-   */
+  /** Legacy numeric owner PID from `process_instance`. */
   processInstance?: number;
-  /**
-   * The driver's process generation token (`macos-proc-v1:<seconds>:<micros>`).
-   * It names one launch of a process, not a pid, so it is compared only against
-   * another token for the same pid — never against a pid.
-   */
+  /** Opaque driver token for one launch of the window's owning process. */
   processInstanceToken?: string;
   /** Owner PID the driver reports for the window, when it exposes one. */
   pid?: number;
@@ -193,21 +185,13 @@ function isCommandTimeout(error: unknown) {
 }
 
 function positiveInteger(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value :
-    typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : undefined;
+  const number = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
+  return typeof number === 'number' && Number.isSafeInteger(number) && number > 0 ? number : undefined;
 }
 
-/** The process generation token the pinned macOS driver reports for a window. */
-const processToken = /^macos-proc-v1:(\d+):(\d+)$/;
-
 /**
- * The driver's window inventory, read exactly as the pinned driver answers it.
- *
- * `pid` is the window owner; `process_instance` is that process's generation
- * token, not another pid. A token cannot be compared with a pid, so it is kept
- * verbatim for a caller that has a token of the same process to compare it
- * with. An answer whose instance field is neither a token nor a plain integer
- * cannot be attributed at all, and is refused instead of reading as absent.
+ * Decode the driver's window inventory. The meaning of the opaque generation
+ * token is platform-specific. Keep legacy numeric owner IDs for older callers.
  */
 export function parseWindowInventory(data: unknown): WindowInfo[] {
   if (!Array.isArray(data)) throw new Fault('BAD_RESPONSE', 'Expected a window inventory');
@@ -216,15 +200,10 @@ export function parseWindowInventory(data: unknown): WindowInfo[] {
       throw new Fault('BAD_RESPONSE', 'Missing or invalid window ID');
     }
     const raw = window.process_instance ?? window.processInstance;
-    let processInstance: number | undefined;
-    let processInstanceToken: string | undefined;
-    if (typeof raw === 'string' && processToken.test(raw)) {
-      processInstanceToken = raw;
-    } else if (raw !== undefined && raw !== null) {
-      processInstance = positiveInteger(raw);
-      if (processInstance === undefined) {
-        throw new Fault('BAD_RESPONSE', 'Invalid process instance');
-      }
+    const processInstance = positiveInteger(raw);
+    const processInstanceToken = typeof raw === 'string' && raw.trim() && !/^\d+$/.test(raw) ? raw : undefined;
+    if (raw != null && processInstance === undefined && processInstanceToken === undefined) {
+      throw new Fault('BAD_RESPONSE', 'Invalid process instance');
     }
     const pid = positiveInteger(window.pid);
     return {

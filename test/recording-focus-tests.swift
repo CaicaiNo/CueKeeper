@@ -280,7 +280,8 @@ struct RecordingFocusTests {
     /// top level row without a URL read as the selected target.
     static func aMenuSelectionNeedsTheRecordedRow() {
         let name = "manifest.json"
-        let path = "/Users/qa/Downloads/manifest.json"
+        let document = "/Users/qa/Downloads"
+        let path = "\(document)/\(name)"
         let validated = RenameDirectory.RowEvidence(
             url: path, name: name, selectedCount: 1, targetSelected: true, inBoundWindow: true)
         precondition(RenameSelection.menuEvidence(validated, expectedName: name, expectedPath: path) ==
@@ -296,9 +297,21 @@ struct RecordingFocusTests {
         let namesake = RenameDirectory.RowEvidence(
             url: "/Users/qa/Downloads/sub/manifest.json", name: name,
             selectedCount: 1, targetSelected: true, inBoundWindow: true)
+        guard let directory = RenameDirectory.resolve(
+            document: document, row: namesake, expected: nil, pinned: document) else {
+            preconditionFailure("the valid window document did not prove the pinned folder")
+        }
+        let expectedPath = URL(fileURLWithPath: directory)
+            .appendingPathComponent(name).standardizedFileURL.path
         precondition(!RenameSelection.menuEvidence(
-            namesake, expectedName: name, expectedPath: path).targetSelected,
+            namesake, expectedName: name, expectedPath: expectedPath).targetSelected,
                      "a namesake row of another folder read as the target")
+        let relativeURL = RenameDirectory.RowEvidence(
+            url: "\(document)/linked/../\(name)", name: name,
+            selectedCount: 1, targetSelected: true, inBoundWindow: true)
+        precondition(!RenameSelection.menuEvidence(
+            relativeURL, expectedName: name, expectedPath: expectedPath).targetSelected,
+                     "a row with relative path components read as the target")
         // A row or list outside the bound window is no evidence about this
         // rename, even when its own URL names the recorded file.
         let otherWindow = RenameDirectory.RowEvidence(
