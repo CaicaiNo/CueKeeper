@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import test from 'node:test';
 import { reportV2Check } from '../dist/contracts-v2.js';
 import { parseFlowV2 } from '../dist/flow-v2.js';
 import { Fault } from '../dist/locator.js';
 import { runFlowV2 } from '../dist/run-v2.js';
+import { nativeProcessProbe } from '../dist/system-check.js';
 
 // A v2 flow made only of system checks: no window, no app identity, no
 // desktop driver call. Each run is proven against the fake seams below, so
@@ -189,6 +190,63 @@ test('an unreadable candidate is unknown, so even a reverse argument check fails
     { kind: 'process_running', expected: false, actual: null });
   assert.equal(JSON.stringify(report).includes('a b'), false);
   assert.equal(JSON.stringify(report).includes('--profile'), false);
+  assert.equal(entryOf(report, 'later').status, 'skipped');
+});
+
+test('a live process without a readable executable turns forward and reverse into unknown', async t => {
+  const probe = processProbe([{ pid: 604, uid: 501, live: true }]);
+  for (const [id, step] of [
+    ['forward', processStep('forward', { kind: 'process', name: 'controlled sleeper' }, true)],
+    ['reverse', processStep('reverse', { kind: 'process', name: 'controlled sleeper' }, false)],
+  ]) {
+    const { report } = await run(t, [step, fileStep('later', '/tmp/x', true)], {
+      systemCheckDeps: { probe },
+    });
+    assert.equal(report.status, 'failed', id);
+    const failed = entryOf(report, id);
+    assert.equal(failed.code, 'SYSTEM_CHECK_FAILED');
+    assert.deepEqual(failed.stateCheck,
+      { kind: 'process_running', expected: id === 'forward', actual: null });
+    assert.equal(entryOf(report, 'later').status, 'skipped');
+  }
+});
+
+test('a probe that exits before reading its request ends the replay cleanly', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'cuekeeper-system-epipe-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const stub = join(directory, 'identity');
+  // The table answers normally; the argument request is never read, so the
+  // parent's write hits EPIPE.
+  writeFileSync(stub, `#!/usr/bin/env node
+const command = process.argv[2];
+if (command === 'process-identities') {
+  console.log(JSON.stringify({ ok: true, data: { processes: [{
+    pid: ${process.pid}, executable: ${JSON.stringify(process.execPath)}, startedAt: '1.1' }] } }));
+  process.exit(0);
+}
+process.exit(0);
+`, { mode: 0o755 });
+  const previous = process.env.CUEKEEPER_APP_IDENTITY;
+  process.env.CUEKEEPER_APP_IDENTITY = stub;
+  t.after(() => {
+    if (previous === undefined) delete process.env.CUEKEEPER_APP_IDENTITY;
+    else process.env.CUEKEEPER_APP_IDENTITY = previous;
+  });
+  const step = {
+    id: 'epipe', kind: 'assert',
+    scope: { kind: 'process', name: basename(process.execPath) },
+    check: {
+      kind: 'process_running', equals: true,
+      args: Array.from({ length: 32 }, (_, index) => `${index}`.padEnd(4096, 'x')),
+    },
+  };
+  const { report } = await run(t, [step, fileStep('later', '/tmp/x', true)], {
+    systemCheckDeps: { probe: nativeProcessProbe() },
+  });
+  assert.equal(report.status, 'failed');
+  const failed = entryOf(report, 'epipe');
+  assert.equal(failed.code, 'SYSTEM_CHECK_FAILED');
+  assert.deepEqual(failed.stateCheck, { kind: 'process_running', expected: true, actual: null });
   assert.equal(entryOf(report, 'later').status, 'skipped');
 });
 

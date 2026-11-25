@@ -95,8 +95,18 @@ export const processArgPattern =
 export const maxProcessArgs = 32;
 const systemPath = T.String({ minLength: 1, maxLength: 4096, pattern: systemPathPattern });
 const processName = T.String({ minLength: 1, maxLength: 255, pattern: processNamePattern });
-const processArg = T.String({ minLength: 1, maxLength: 4096, pattern: processArgPattern });
-const processArgs = T.Array(processArg, { minItems: 1, maxItems: maxProcessArgs });
+const processArg = T.String({
+  minLength: 1, maxLength: 4096, pattern: processArgPattern,
+  description: '一个字面参数：空格与引号原样保留，按 UTF-8 字节比较，不能含 NUL 或控制字符',
+});
+// One argv element is compared literally: the same characters in another
+// Unicode normalization form are a different argument. Matching is a
+// contiguous, same-order run of argv[1...]; argv[0] and `path` scopes never
+// carry arguments.
+const processArgs = T.Array(processArg, {
+  minItems: 1, maxItems: maxProcessArgs,
+  description: '与 argv[1...] 中一段连续、同序、逐项字节相等的参数比较；仅 name 模式可用',
+});
 const filePathScope = object({ kind: T.Literal('file'), path: systemPath });
 const processNameScope = object({ kind: T.Literal('process'), name: processName });
 const processPathScope = object({ kind: T.Literal('process'), path: systemPath });

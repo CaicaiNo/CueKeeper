@@ -110,27 +110,34 @@ struct IdentityRequest: Codable {
     let pids: [Int32]
 }
 
-/// Executable path from the system, plus the generation marker when the bsdinfo
-/// of this UID is readable. The caller already has pid, UID and state from the
-/// fixed `ps` call, so a process of another UID still resolves its executable.
+/// What this helper could prove about one enumerated PID. Either field may be
+/// missing: a live process whose image was deleted or is protected keeps its
+/// PID entry so the caller can call it unknown instead of absent, while a PID
+/// that vanished between `ps` and this read is omitted.
 struct ProcessRow {
     let pid: pid_t
-    let executable: String
-    let startedAt: String
+    let executable: String?
+    let startedAt: String?
 }
 
 func processRow(_ pid: pid_t) -> ProcessRow? {
-    var pathBuffer = [UInt8](repeating: 0, count: maxExecutableBytes)
-    let length = proc_pidpath(pid, &pathBuffer, UInt32(maxExecutableBytes))
-    guard length > 0, Int(length) < maxExecutableBytes,
-          let executable = String(bytes: pathBuffer[0..<Int(length)], encoding: .utf8) else { return nil }
     var info = proc_bsdinfo()
     let infoSize = Int32(MemoryLayout<proc_bsdinfo>.size)
-    let readable = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, infoSize) == infoSize
+    let infoResult = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, infoSize)
+    let infoError = errno
+    var pathBuffer = [UInt8](repeating: 0, count: maxExecutableBytes)
+    let length = proc_pidpath(pid, &pathBuffer, UInt32(maxExecutableBytes))
+    let pathError = errno
+    let readableInfo = infoResult == infoSize
+    let executable: String? = length > 0 && Int(length) < maxExecutableBytes
+        ? String(bytes: pathBuffer[0..<Int(length)], encoding: .utf8) : nil
+    // Neither probe naming anything and one of them reporting ESRCH means the
+    // PID is gone. Every other combination is a live process kept as unknown.
+    if !readableInfo && executable == nil && (infoError == ESRCH || pathError == ESRCH) { return nil }
     return ProcessRow(
         pid: pid,
         executable: executable,
-        startedAt: readable ? "\(info.pbi_start_tvsec).\(info.pbi_start_tvusec)" : ""
+        startedAt: readableInfo ? "\(info.pbi_start_tvsec).\(info.pbi_start_tvusec)" : nil
     )
 }
 
@@ -139,12 +146,10 @@ func processRows(_ pids: [Int32]) -> [[String: Any]] {
     for raw in pids.prefix(maxProcessRows) {
         let pid = pid_t(raw)
         guard pid > 0, let row = processRow(pid) else { continue }
-        var record: [String: Any] = [
-            "pid": Int(row.pid),
-            "executable": row.executable,
-        ]
+        var record: [String: Any] = ["pid": Int(row.pid)]
+        if let executable = row.executable { record["executable"] = executable }
         // Only a readable generation marker can prove a PID was not reused.
-        if !row.startedAt.isEmpty { record["startedAt"] = row.startedAt }
+        if let startedAt = row.startedAt { record["startedAt"] = startedAt }
         rows.append(record)
     }
     return rows
@@ -186,13 +191,17 @@ func readArguments(_ pid: pid_t) -> [String]? {
 }
 
 /// True when `expected` equals one contiguous, same-order run of argv[1...].
-/// argv[0] is the process-chosen name, so it is never compared.
+/// argv[0] is the process-chosen name, so it is never compared. Swift `String`
+/// equality uses canonical equivalence, which would treat `e` + U+0301 and
+/// U+00E9 as equal; arguments are compared as UTF-8 bytes so the literal value
+/// the process received is the only value that matches.
 func containsContiguous(_ argv: [String], _ expected: [String]) -> Bool {
     guard !expected.isEmpty else { return false }
-    let haystack = Array(argv.dropFirst())
-    guard haystack.count >= expected.count else { return false }
-    for start in 0...(haystack.count - expected.count)
-    where Array(haystack[start..<(start + expected.count)]) == expected {
+    let haystack = argv.dropFirst().map { Array($0.utf8) }
+    let needle = expected.map { Array($0.utf8) }
+    guard haystack.count >= needle.count else { return false }
+    for start in 0...(haystack.count - needle.count)
+    where Array(haystack[start..<(start + needle.count)]) == needle {
         return true
     }
     return false

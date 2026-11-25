@@ -254,6 +254,78 @@ test('the fixed probe has no user input and reads the real process table', async
   assert.equal(psArgs.some(column => String(column).includes('comm')), false);
 });
 
+test('a live process without a readable executable path stays unknown, never absent', async () => {
+  // A readable match still wins, but an unmatched check next to an unnameable
+  // live process cannot answer false: the flow may mean that process.
+  const mixed = new SystemChecks({
+    probe: fakeProbe([
+      process_(701, '/usr/bin/node'),
+      { pid: 702, uid: 501, live: true },
+    ]).probe,
+  });
+  assert.equal(await mixed.processRunning({ kind: 'process', name: 'node' }), true);
+
+  for (const check of [
+    { kind: 'process', name: 'no-such-process' },
+    { kind: 'process', path: '/usr/bin/no-such-process' },
+  ]) {
+    await assert.rejects(mixed.processRunning(check), error => {
+      assert.equal(error.code, 'SYSTEM_CHECK_FAILED');
+      assert.match(error.message, /no readable executable path/);
+      return true;
+    }, check.kind);
+  }
+
+  // With arguments, a same-UID unnameable process is a possible candidate, so
+  // even a reverse check cannot pass; a readable match still proves true.
+  const args = new SystemChecks({
+    probe: fakeProbe([
+      process_(703, '/usr/bin/node'),
+      { pid: 704, uid: 501, live: true },
+    ], async () => 'unmatched').probe,
+  });
+  await assert.rejects(args.processRunning({ kind: 'process', name: 'node' }, ['x']), error => {
+    assert.equal(error.code, 'SYSTEM_CHECK_FAILED');
+    return true;
+  });
+  const proving = new SystemChecks({
+    probe: fakeProbe([
+      process_(705, '/usr/bin/node'),
+      { pid: 706, uid: 501, live: true },
+    ], async () => 'matched').probe,
+  });
+  assert.equal(await proving.processRunning({ kind: 'process', name: 'node' }, ['x']), true);
+});
+
+test('a probe that exits before reading its request is an unknown, never a crash', async t => {
+  const directory = await root(t);
+  const stub = join(directory, 'early-exit-identity');
+  // The identity answer is normal; the argument request is never read.
+  await writeFile(stub, `#!/usr/bin/env node
+const command = process.argv[2];
+if (command === 'process-identities') {
+  console.log(JSON.stringify({ ok: true, data: { processes: [{
+    pid: ${process.pid}, executable: ${JSON.stringify(process.execPath)}, startedAt: '1.1' }] } }));
+  process.exit(0);
+}
+process.exit(0);
+`, { mode: 0o755 });
+  const previous = process.env.CUEKEEPER_APP_IDENTITY;
+  process.env.CUEKEEPER_APP_IDENTITY = stub;
+  t.after(() => {
+    if (previous === undefined) delete process.env.CUEKEEPER_APP_IDENTITY;
+    else process.env.CUEKEEPER_APP_IDENTITY = previous;
+  });
+  // Larger than a pipe buffer, so the write outlives the reader.
+  const args = Array.from({ length: 32 }, (_, index) => `${index}`.padEnd(4096, 'x'));
+  await assert.rejects(new SystemChecks().processRunning(
+    { kind: 'process', name: process.execPath.split('/').at(-1) }, args), error => {
+    assert.equal(error.code, 'SYSTEM_CHECK_FAILED');
+    assert.match(error.message, /request pipe|could not receive its request/);
+    return true;
+  });
+});
+
 const hasSwiftc = process.platform === 'darwin' && spawnSync('swiftc', ['--version']).status === 0;
 
 test('the real helper reads executable identity and bounded argv of a controlled child',
@@ -277,8 +349,12 @@ test('the real helper reads executable identity and bounded argv of a controlled
 
     // The child names itself something else in argv[0]. `ps comm` would report
     // that lie; the real executable path is the file the system started.
+    // The last argument is the decomposed form `e` + U+0301, which Swift string
+    // equality would consider equal to U+00E9; the bytes are not equal.
+    const decomposed = 'e\u0301';
+    const precomposed = '\u00e9';
     const child = spawn('/bin/sh', ['-c',
-      `exec -a /not-the-executable/haoc165 ${JSON.stringify(executable)} --profile "a b"`,
+      `exec -a /not-the-executable/haoc165 ${JSON.stringify(executable)} --profile "a b" ${JSON.stringify(decomposed)}`,
     ], { stdio: 'ignore' });
     await Promise.race([
       new Promise((resolve, reject) => {
@@ -321,13 +397,24 @@ test('the real helper reads executable identity and bounded argv of a controlled
       ['a b', '--profile']), false);
     assert.equal(await checks.processRunning({ kind: 'process', name: 'controlled sleeper' },
       ['/not-the-executable/haoc165']), false);
+    // Arguments compare as UTF-8 bytes: the decomposed value matches only the
+    // decomposed literal, and the precomposed value is a different argument.
+    assert.equal(await checks.processRunning({ kind: 'process', name: 'controlled sleeper' },
+      [decomposed]), true);
+    assert.equal(await checks.processRunning({ kind: 'process', name: 'controlled sleeper' },
+      [precomposed]), false);
+    assert.equal(await checks.processRunning({ kind: 'process', name: 'controlled sleeper' },
+      ['--profile', 'a b', decomposed]), true);
+    assert.equal(await checks.processRunning({ kind: 'process', name: 'controlled sleeper' },
+      ['--profile', 'a b', precomposed]), false);
 
     // The helper's own response carries a status only: neither the expected
     // arguments nor the observed argv travel back to Node.
     const { nativeProcessProbe } = await import('../dist/system-check.js');
     const probe = nativeProcessProbe();
     const childIdentity = (await probe.identities()).find(identity => identity.pid === child.pid);
-    assert.ok(childIdentity?.startedAt, 'the controlled child has a generation marker');
+    assert.ok(childIdentity?.executable, 'the controlled child has a real executable path');
+    assert.ok(childIdentity.startedAt, 'the controlled child has a generation marker');
     const reply = spawnSync(helper, ['process-argv'], {
       input: JSON.stringify({
         pid: child.pid, executable: childIdentity.executable,
@@ -346,4 +433,38 @@ test('the real helper reads executable identity and bounded argv of a controlled
     assert.equal(await probe.matchArgs({
       pid: 1, executable: launchd.executable, startedAt: launchd.startedAt ?? 'unprovable',
     }, ['x']), 'unknown');
+
+    // A running image whose file is gone: the kernel may keep the old name for
+    // a while, but the PID is alive either way, so no check may answer false.
+    await rm(executable);
+    await sleep(300);
+    assert.equal(child.exitCode, null, 'the controlled process is still alive without its file');
+    const goneImage = (await probe.identities()).find(identity => identity.pid === child.pid);
+    assert.ok(goneImage, 'the live PID is kept even without an executable path');
+
+    const verdict = call => call().then(value => ({ value }), error => ({ code: error.code }));
+    for (const [label, call] of [
+      ['forward name', () => checks.processRunning({ kind: 'process', name: 'controlled sleeper' })],
+      ['reverse name', () => checks.processRunning({ kind: 'process', name: 'controlled sleeper' }, ['--profile'])],
+      ['path', () => checks.processRunning({ kind: 'process', path: canonical })],
+    ]) {
+      const answer = await verdict(call);
+      assert.ok(answer.value === true || answer.code === 'SYSTEM_CHECK_FAILED',
+        `${label} must never read as absent while the PID is alive: ${JSON.stringify(answer)}`);
+    }
+
+    // Once the system drops the name, every answer is unknown: forward and
+    // reverse alike, by name and by the old path.
+    if (goneImage.executable === undefined) {
+      for (const [label, call] of [
+        ['forward name', () => checks.processRunning({ kind: 'process', name: 'controlled sleeper' })],
+        ['reverse name', () => checks.processRunning({ kind: 'process', name: 'controlled sleeper' }, ['--profile'])],
+        ['forward path', () => checks.processRunning({ kind: 'process', path: canonical })],
+      ]) {
+        await assert.rejects(call(), error => {
+          assert.equal(error.code, 'SYSTEM_CHECK_FAILED', label);
+          return true;
+        }, label);
+      }
+    }
   });

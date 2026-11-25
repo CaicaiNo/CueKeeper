@@ -924,6 +924,14 @@ test('a system check reads as a file or process line in the timeline', () => {
   const process = { kind: 'assert', scope: { kind: 'process', name: 'Google Chrome' }, check: { kind: 'process_running', equals: true } };
   assert.equal(v2StepLabel(file), '断言 · 文件存在 = 不成立');
   assert.equal(v2StepLabel(process), '断言 · 进程运行中 = 成立');
+  // Arguments refine the check, never the label: the timeline shows no values.
+  const withArgs = {
+    kind: 'assert', scope: { kind: 'process', name: 'controlled sleeper' },
+    check: { kind: 'process_running', equals: true, args: ['--profile', 'a b'] },
+  };
+  assert.equal(v2StepLabel(withArgs), '断言 · 进程运行中 = 成立');
+  assert.equal(v2StepLabel(withArgs).includes('a b'), false);
+  assert.equal(v2StepLabel(withArgs).includes('--profile'), false);
   assert.equal(checkLabel(file.check), '文件存在 = 不成立');
   assert.equal(scopeDescription(file.scope), '文件 · /tmp/报告.pdf');
   assert.equal(scopeDescription(process.scope), '进程 · Google Chrome');

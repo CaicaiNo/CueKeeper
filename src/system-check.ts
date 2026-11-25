@@ -34,13 +34,18 @@ export interface PidRow {
   state: string;
 }
 
-/** One process the system reports, with the executable path it really runs. */
+/** One live process the system reports. */
 export interface ProcessIdentity {
   pid: number;
   /** Effective UID of the process. */
   uid: number;
-  /** Path from `proc_pidpath`, never the process-chosen argv[0]. */
-  executable: string;
+  /**
+   * Path from `proc_pidpath`, never the process-chosen argv[0]. Absent when the
+   * system cannot name the executable (a deleted image, a protected process):
+   * the PID is still alive and may be the one the flow names, so it stays an
+   * unproven candidate instead of disappearing.
+   */
+  executable?: string;
   /** Generation marker; absent when the system will not prove identity. */
   startedAt?: string;
   /** False for a zombie: a corpse is not a running process. */
@@ -63,7 +68,7 @@ export interface ArgCandidate {
 
 /** Read-only runtime facts. The macOS helper is one implementation. */
 export interface ProcessProbe {
-  /** Every process with a provable executable path; a PID without one is omitted. */
+  /** Every live process; an unnameable executable stays as an unproven entry. */
   identities(): Promise<ProcessIdentity[]>;
   /** Compares `args` with argv[1...], entirely inside the probe. */
   matchArgs(candidate: ArgCandidate, args: string[]): Promise<ArgMatch>;
@@ -118,6 +123,15 @@ function runHelper(command: string, request?: unknown): Promise<unknown> {
           'The process probe helper is unavailable; build it with npm run build:recorder')
         : new Fault('SYSTEM_CHECK_FAILED', `The process probe failed: ${code ?? 'unknown error'}`));
     });
+    // A probe that exits before reading its request closes the pipe under the
+    // write. EPIPE must become an unknown observation, not an uncaught error
+    // that ends the CLI before any report is written.
+    child.stdin.on('error', error => {
+      const code = (error as NodeJS.ErrnoException).code;
+      child.kill('SIGKILL');
+      finish(new Fault('SYSTEM_CHECK_FAILED',
+        `The process probe closed its request pipe (${code ?? 'write error'})`));
+    });
     child.on('close', () => {
       if (settled) return;
       let envelope: unknown;
@@ -138,8 +152,15 @@ function runHelper(command: string, request?: unknown): Promise<unknown> {
         typeof fault.message === 'string' ? fault.message : 'The process probe failed',
       ));
     });
-    if (request === undefined) child.stdin.end();
-    else child.stdin.end(JSON.stringify(request));
+    try {
+      if (request === undefined) child.stdin.end();
+      else child.stdin.end(JSON.stringify(request));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      child.kill('SIGKILL');
+      finish(new Fault('SYSTEM_CHECK_FAILED',
+        `The process probe could not receive its request (${code ?? 'write error'})`));
+    }
   });
 }
 
@@ -196,22 +217,28 @@ export function nativeProcessProbe(): ProcessProbe {
       if (!Array.isArray(record?.processes)) {
         throw new Fault('SYSTEM_CHECK_FAILED', 'The process probe returned no process table');
       }
-      const observed = new Map<number, { executable: string; startedAt?: string }>();
+      const observed = new Map<number, { executable?: string; startedAt?: string }>();
       for (const entry of record.processes) {
         if (entry === null || typeof entry !== 'object') continue;
         const { pid, executable, startedAt } = entry as Record<string, unknown>;
         if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) continue;
-        if (typeof executable !== 'string' || !executable.startsWith('/')) continue;
+        const path = typeof executable === 'string' && executable.startsWith('/') ? executable : undefined;
         const marker = typeof startedAt === 'string' && startedAt ? startedAt : undefined;
-        observed.set(pid, { executable, ...(marker === undefined ? {} : { startedAt: marker }) });
+        observed.set(pid, {
+          ...(path === undefined ? {} : { executable: path }),
+          ...(marker === undefined ? {} : { startedAt: marker }),
+        });
       }
       return rows.flatMap(row => {
         const seen = observed.get(row.pid);
-        if (!seen) return [];
+        // No entry means the helper found the PID gone. An entry without a path
+        // is a live process it could not name: keep it as an unproven candidate
+        // instead of turning a possible match into a false "not running".
+        if (seen === undefined) return [];
         return [{
-          pid: row.pid, uid: row.uid, executable: seen.executable,
+          pid: row.pid, uid: row.uid, live: isLiveState(row.state),
+          ...(seen.executable === undefined ? {} : { executable: seen.executable }),
           ...(seen.startedAt === undefined ? {} : { startedAt: seen.startedAt }),
-          live: isLiveState(row.state),
         }];
       });
     },
@@ -254,26 +281,44 @@ export class SystemChecks {
   }
 
   /**
-   * A path check matches the executable path verbatim. A name check matches
-   * the executable's basename, case-sensitively; with `args`, only same-UID
+   * A path check matches the executable path verbatim. A name check matches the
+   * executable's basename, case-sensitively. With `args`, only same-UID
    * candidates are read, one proven match is enough, and an unreadable
    * candidate that leaves every other candidate unmatched is an unknown.
+   *
+   * A live process whose executable path the system cannot name is never
+   * treated as absent: it may be the process the flow means, so a negative
+   * answer needs every live candidate to be readable and unmatched.
    */
   async processRunning(scope: ProcessScope, expectedArgs?: readonly string[]): Promise<boolean> {
     const identities = (await this.probe.identities()).filter(identity => identity.live);
+    const named = identities.filter(
+      (identity): identity is ProcessIdentity & { executable: string } => identity.executable !== undefined);
+    const unnameable = identities.length - named.length;
+    const unknownPath = () => new Fault('SYSTEM_CHECK_FAILED',
+      `${unnameable} live process(es) have no readable executable path`);
     if ('path' in scope) {
-      return identities.some(identity => identity.executable === scope.path);
+      if (named.some(identity => identity.executable === scope.path)) return true;
+      if (unnameable) throw unknownPath();
+      return false;
     }
-    const sameName = identities.filter(identity => basename(identity.executable) === scope.name);
+    const sameName = named.filter(identity => basename(identity.executable) === scope.name);
     const args = expectedArgs;
-    if (args === undefined || args.length === 0) return sameName.length > 0;
+    if (args === undefined || args.length === 0) {
+      if (sameName.length) return true;
+      if (unnameable) throw unknownPath();
+      return false;
+    }
     const uid = process.geteuid?.();
     if (uid === undefined) {
       throw new Fault('SYSTEM_CHECK_FAILED', 'The effective user id is unavailable on this platform');
     }
     const candidates = sameName.filter(identity => identity.uid === uid);
-    if (!candidates.length) return false;
-    if (candidates.length > maxArgCandidates) {
+    // The same UID's unnameable processes could be the target too.
+    const unresolved = unnameable
+      ? identities.filter(identity => identity.executable === undefined && identity.uid === uid).length : 0;
+    if (!candidates.length && !unresolved) return false;
+    if (candidates.length + unresolved > maxArgCandidates) {
       throw new Fault('SYSTEM_CHECK_FAILED',
         `More than ${maxArgCandidates} same-name candidates; the argument check stays bounded`);
     }
@@ -291,7 +336,7 @@ export class SystemChecks {
       if (result === 'matched') return true;
       if (result === 'unknown') unreadable = true;
     }
-    if (unreadable) {
+    if (unreadable || unresolved) {
       throw new Fault('SYSTEM_CHECK_FAILED',
         'The arguments of a matching process could not be read');
     }
