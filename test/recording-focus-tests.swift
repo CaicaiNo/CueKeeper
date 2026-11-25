@@ -23,7 +23,8 @@ struct RecordingFocusTests {
         aFolderNameKeepsItsCharacters()
         aRelativeSegmentProvesNoFolder()
         aNestedNamesakeRowProvesNothing()
-        print("Recording focus: 21/21 passed")
+        onlyRealWindowsCountAsMenuOwners()
+        print("Recording focus: 22/22 passed")
     }
 
     /// Finder's inline rename field makes the window probe fail. The app and its
@@ -270,6 +271,29 @@ struct RecordingFocusTests {
         precondition(!RenameRow.namesRecordedFile(
             url: "Downloads/manifest.json", disclosureLevel: 0, expectedPath: expected),
             "a relative row URL was accepted")
+    }
+
+    /// `kAXWindowsAttribute` lists more than windows: Finder answers with a
+    /// `AXScrollArea` desktop view beside its folder windows. Only `AXWindow`
+    /// entries can own a context menu, and a window whose number cannot be
+    /// resolved must make the answer incomplete instead of quietly fewer.
+    static func onlyRealWindowsCountAsMenuOwners() {
+        let desktop = AppWindowInventory.answer(entries: [
+            (role: "AXWindow", number: 3606, title: "下载"),
+            (role: "AXScrollArea", number: nil, title: ""),
+        ])
+        precondition(desktop == AppWindowInventory.Answer(complete: true, numbers: [3606], titles: ["下载"]),
+                     "a desktop content view changed the window list: \(desktop)")
+        let unresolved = AppWindowInventory.answer(entries: [
+            (role: "AXWindow", number: 3606, title: "下载"),
+            (role: "AXWindow", number: nil, title: "另一个窗口"),
+        ])
+        precondition(!unresolved.complete, "a window without a number read as complete: \(unresolved)")
+        let twoWindows = AppWindowInventory.answer(entries: [
+            (role: "AXWindow", number: 1, title: "a"), (role: "AXWindow", number: 2, title: "b"),
+        ])
+        precondition(twoWindows.complete && twoWindows.numbers.count == 2,
+                     "two windows were not both counted: \(twoWindows)")
     }
 
     /// An app whose only window has no title yet keeps it: nothing else can own

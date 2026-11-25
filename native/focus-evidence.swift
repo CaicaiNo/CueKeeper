@@ -86,6 +86,40 @@ enum RenameDirectory {
     }
 }
 
+/**
+ * The windows one process owns, as its accessibility answer really contains
+ * them.
+ *
+ * `kAXWindowsAttribute` is not limited to windows: Finder also lists the
+ * desktop's content scroll area (no subrole, no window number) beside its folder
+ * windows. Only an `AXWindow` can own a context menu, so anything else is not a
+ * window the menu could belong to. An `AXWindow` whose number cannot be resolved
+ * makes the whole answer incomplete rather than silently smaller — a caller that
+ * wants to rule out other owners must not read a partial list as a complete one.
+ */
+enum AppWindowInventory {
+    struct Answer: Equatable {
+        var complete: Bool
+        var numbers: [Int]
+        var titles: [String]
+    }
+
+    static func answer(entries: [(role: String, number: Int?, title: String)]) -> Answer {
+        var numbers: [Int] = []
+        var titles: [String] = []
+        var complete = true
+        for entry in entries where entry.role == "AXWindow" {
+            titles.append(entry.title)
+            if let number = entry.number {
+                numbers.append(number)
+            } else {
+                complete = false
+            }
+        }
+        return Answer(complete: complete, numbers: numbers, titles: titles)
+    }
+}
+
 enum RenameRow {
     /**
      * Whether a row names the recorded file.

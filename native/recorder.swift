@@ -1008,14 +1008,19 @@ final class Capture {
               CFGetTypeID(raw) == CFArrayGetTypeID() else {
             return ["complete": false, "count": 0, "numbers": [Int](), "titles": [String]()]
         }
-        let windows = (raw as? [AXUIElement]) ?? []
-        var numbers: [Int] = []
-        var titles: [String] = []
-        for window in windows {
-            titles.append(axString(window, kAXTitleAttribute as String) ?? "")
-            if let number = windowNumber(for: window, pid: pid, exact: true) { numbers.append(number) }
-        }
-        return ["complete": true, "count": windows.count, "numbers": numbers, "titles": titles]
+        let elements = (raw as? [AXUIElement]) ?? []
+        // `kAXWindowsAttribute` is not limited to windows: Finder also lists the
+        // desktop's content scroll area (titled "", no subrole, no window
+        // number) beside its folder windows. Only a real `AXWindow` can own a
+        // context menu, and an `AXWindow` without a resolved number makes the
+        // answer incomplete instead of silently smaller.
+        let answer = AppWindowInventory.answer(entries: elements.map {
+            (role: axString($0, kAXRoleAttribute as String) ?? "",
+             number: windowNumber(for: $0, pid: pid, exact: true),
+             title: axString($0, kAXTitleAttribute as String) ?? "")
+        })
+        return ["complete": answer.complete, "count": answer.numbers.count,
+                "numbers": answer.numbers, "titles": answer.titles]
     }
 
     /** The bound instance, or nil when no path identity was requested. */
