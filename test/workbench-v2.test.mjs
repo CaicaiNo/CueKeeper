@@ -11,9 +11,10 @@ import { hashFlowV2 } from '../dist/flow-v2.js';
 import { startWorkbench } from '../dist/workbench.js';
 import { pickWindowCandidates } from '../dist/workbench-pick.js';
 import {
-  assertCheck, checkLabel, checkpointWaitFacts, diffSummary, dragSummary, filterStepsByScope, locatorDetail,
-  pickCandidateLabel, roleLabel, scopeKey, scopeOptions, statusMap, stepTemplate, stepTiming, targetLabel,
-  v2StepLabel,
+  assertCheck, checkLabel, checkpointWaitFacts, defaultLibraryExpanded, diffSummary, dragSummary,
+  filterStepsByScope, libraryGroups, locatorDetail, pickCandidateLabel, roleLabel, scopeDescription,
+  scopeKey, scopeOptions, stateCheckLabel, statusMap, stepTemplate, stepTiming, targetLabel,
+  toggleLibraryGroup, v2StepLabel,
 } from '../workbench/model.js';
 
 const examplePath = name => new URL(`../examples/${name}.json`, import.meta.url);
@@ -886,4 +887,53 @@ test('stop while a checkpoint waits cancels it instead of killing the report', a
   assert.equal(report.stopped, true);
   assert.equal(report.entries[1].code, 'MANUAL_CHECKPOINT_CANCELLED');
   assert.equal(report.entries[2].status, 'skipped');
+});
+
+test('both behavior library groups open collapsed and toggle independently', () => {
+  const library = {
+    builtin: [
+      { id: 'finder-copy', group: 'finder' },
+      { id: 'check-file-exists', group: 'check' },
+    ],
+    custom: [
+      { behavior: { name: 'B 行为' } },
+      { behavior: { name: 'A 行为' } },
+    ],
+  };
+  // Every page load starts with both groups closed, showing only title + count.
+  const collapsed = libraryGroups(library, defaultLibraryExpanded());
+  assert.deepEqual(collapsed.map(group => [group.key, group.title, group.count, group.expanded]), [
+    ['builtin', '内置行为', 2, false],
+    ['custom', '我的行为', 2, false],
+  ]);
+  // Custom cards keep their name order inside the group.
+  assert.deepEqual(collapsed[1].items.map(item => item.behavior.name), ['A 行为', 'B 行为']);
+
+  // Opening one group leaves the other closed; the state is page memory only.
+  const builtinOpen = toggleLibraryGroup(defaultLibraryExpanded(), 'builtin');
+  assert.deepEqual(libraryGroups(library, builtinOpen).map(group => group.expanded), [true, false]);
+  const customOpen = toggleLibraryGroup(builtinOpen, 'custom');
+  assert.deepEqual(libraryGroups(library, customOpen).map(group => group.expanded), [true, true]);
+  const builtinClosed = toggleLibraryGroup(customOpen, 'builtin');
+  assert.deepEqual(libraryGroups(library, builtinClosed).map(group => group.expanded), [false, true]);
+  assert.throws(() => toggleLibraryGroup(customOpen, 'other'), /未知的行为库分组/);
+});
+
+test('a system check reads as a file or process line in the timeline', () => {
+  const file = { kind: 'assert', scope: { kind: 'file', path: '/tmp/报告.pdf' }, check: { kind: 'file_exists', equals: false } };
+  const process = { kind: 'assert', scope: { kind: 'process', name: 'Google Chrome' }, check: { kind: 'process_running', equals: true } };
+  assert.equal(v2StepLabel(file), '断言 · 文件存在 = 不成立');
+  assert.equal(v2StepLabel(process), '断言 · 进程运行中 = 成立');
+  assert.equal(checkLabel(file.check), '文件存在 = 不成立');
+  assert.equal(scopeDescription(file.scope), '文件 · /tmp/报告.pdf');
+  assert.equal(scopeDescription(process.scope), '进程 · Google Chrome');
+  assert.equal(scopeKey(process.scope), 'process:name:Google Chrome');
+  assert.equal(scopeKey({ kind: 'process', path: '/usr/bin/sleep' }), 'process:path:/usr/bin/sleep');
+  // The report shows both values, including a passing reverse check and an
+  // unknown observation.
+  assert.equal(stateCheckLabel({ kind: 'file_exists', expected: false, actual: false }),
+    '期望 不存在 · 实际 不存在');
+  assert.equal(stateCheckLabel({ kind: 'process_running', expected: true, actual: null }),
+    '期望 运行 · 实际 未知');
+  assert.equal(stateCheckLabel(undefined), '');
 });

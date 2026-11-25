@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
 import { lstat, readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
-import { flowV2Check } from './contracts-v2.js';
+import { flowV2Check, processNamePattern, systemPathPattern } from './contracts-v2.js';
 import type {
-  AppScope, AppWaitCheck, AssertCheckV2, ElementV2, FlowV2, Scope, StepV2, SurfaceKind,
-  WindowScope, WindowWaitCheck,
+  AppScope, AppWaitCheck, AssertCheckV2, ElementV2, FileExistsCheck, FlowV2, ProcessRunningCheck,
+  Scope, StepV2, SurfaceKind, WindowScope, WindowWaitCheck,
 } from './contracts-v2.js';
 import { writeNew } from './files.js';
 import { planBuiltinInsertion } from './builtin-behaviors.js';
@@ -67,7 +67,11 @@ export type ScopePatch =
   | {
     kind: 'surface'; surface: SurfaceKind;
     app?: string; windowKey?: string; windowTitle?: string;
-  };
+  }
+  /** One absolute path a system file check reads. */
+  | { kind: 'file'; path?: string }
+  /** One executable a process check matches, by basename or by absolute path. */
+  | { kind: 'process'; name?: string; path?: string };
 
 export type StepPatch = Partial<{
   scope: ScopePatch;
@@ -79,7 +83,7 @@ export type StepPatch = Partial<{
   input: string;
   key: string;
   modifiers: string[];
-  check: WindowWaitCheck | AppWaitCheck | AssertCheckV2;
+  check: WindowWaitCheck | AppWaitCheck | AssertCheckV2 | FileExistsCheck | ProcessRunningCheck;
   timeoutMs: number;
   count: number;
   button: 'left' | 'right';
@@ -97,7 +101,10 @@ export type EditOp =
   | { kind: 'delete'; id: string }
   | { kind: 'move'; id: string; toIndex: number }
   | { kind: 'insert'; index: number; step: StepV2 }
-  | { kind: 'assert'; afterStepId: string; check: AssertCheckV2 };
+  | {
+    kind: 'assert'; afterStepId: string;
+    check: AssertCheckV2 | FileExistsCheck | ProcessRunningCheck;
+  };
 
 export type EditResult =
   | { ok: true; flow: FlowV2 }
@@ -243,6 +250,29 @@ function assertWindowTitle(title: string, stepId: string, field: string) {
   }
 }
 
+const systemPath = new RegExp(systemPathPattern);
+const processName = new RegExp(processNamePattern);
+
+function assertSystemPath(path: unknown, stepId: string, field: string) {
+  if (typeof path !== 'string' || path.length > 4096 || !systemPath.test(path)) {
+    throw new EditError(
+      'INVALID_PATH',
+      'a system path must be an absolute POSIX path without control characters or .. segments',
+      { stepId, field },
+    );
+  }
+}
+
+function assertProcessName(name: unknown, stepId: string, field: string) {
+  if (typeof name !== 'string' || name.length > 255 || !processName.test(name)) {
+    throw new EditError(
+      'INVALID_PROCESS_NAME',
+      'a process name must not contain a path separator or control character',
+      { stepId, field },
+    );
+  }
+}
+
 /**
  * A new window key derived from the app, avoiding every key already used in
  * this document. Keys are the flow-wide identity of one window, so a changed
@@ -275,6 +305,38 @@ function assertWindowKeyFree(flow: FlowV2, key: string, app: string, stepId: str
 
 /** Merge a scope patch; a changed app never keeps the old window key. */
 function mergeScope(current: Scope, patch: ScopePatch, flow: FlowV2, stepId: string): Scope {
+  // A system check has no app or window: the scope is the path or executable
+  // the step reads, and switching either one replaces the whole scope.
+  if (patch.kind === 'file') {
+    const path = patch.path ?? (current.kind === 'file' && 'path' in current ? current.path : undefined);
+    if (path === undefined) {
+      throw new EditError('SCOPE_PATH_REQUIRED', 'a file check needs an absolute path', {
+        stepId, field: 'scope.path',
+      });
+    }
+    assertSystemPath(path, stepId, 'scope.path');
+    return { kind: 'file', path };
+  }
+  if (patch.kind === 'process') {
+    if (patch.name !== undefined && patch.path !== undefined) {
+      throw new EditError('SCOPE_PROCESS_AMBIGUOUS', 'a process check matches by name or by path, not both', {
+        stepId, field: 'scope',
+      });
+    }
+    if (patch.name !== undefined) {
+      assertProcessName(patch.name, stepId, 'scope.name');
+      return { kind: 'process', name: patch.name };
+    }
+    if (patch.path !== undefined) {
+      assertSystemPath(patch.path, stepId, 'scope.path');
+      return { kind: 'process', path: patch.path };
+    }
+    if (current.kind === 'process') return clone(current);
+    throw new EditError('SCOPE_PROCESS_REQUIRED', 'a process check needs a name or an absolute path', {
+      stepId, field: 'scope',
+    });
+  }
+
   if (patch.kind === 'app') {
     const app = patch.app ?? scopeApp(current);
     if (app === undefined) {
@@ -867,7 +929,10 @@ export class EditableFlowV2 {
   }
 
   /** Insert an assertion directly after an existing step, inheriting its scope. */
-  addAssert(afterStepId: string, check: AssertCheckV2): FlowV2 {
+  addAssert(
+    afterStepId: string,
+    check: AssertCheckV2 | FileExistsCheck | ProcessRunningCheck,
+  ): FlowV2 {
     return this.commit(draft => {
       const index = stepIndex(draft, afterStepId);
       const anchor = draft.steps[index];
@@ -878,9 +943,11 @@ export class EditableFlowV2 {
         });
       }
       if (scope.kind === 'surface') {
-        throw new EditError('ASSERT_SCOPE_UNSUPPORTED', 'an assertion needs a window or app scope', {
-          stepId: afterStepId, field: 'scope',
-        });
+        throw new EditError(
+          'ASSERT_SCOPE_UNSUPPORTED',
+          'an assertion needs a window, app, file or process scope',
+          { stepId: afterStepId, field: 'scope' },
+        );
       }
       const step = {
         id: nextStepId(draft, 'assert'),

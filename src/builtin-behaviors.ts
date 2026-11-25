@@ -1,3 +1,4 @@
+import { processNamePattern, systemPathPattern } from './contracts-v2.js';
 import type { ElementV2, FlowV2, Scope, StepV2, WindowScope } from './contracts-v2.js';
 
 // Built-in behaviors ship with the product. They are not files under
@@ -6,8 +7,10 @@ import type { ElementV2, FlowV2, Scope, StepV2, WindowScope } from './contracts-
 // This module owns the definitions, the product-facing summary the workbench
 // shows, and the one shot expansion into schema-valid steps.
 
-export type BuiltinGroup = 'finder' | 'universal';
+export type BuiltinGroup = 'finder' | 'universal' | 'check';
 export type BuiltinModifier = 'meta' | 'ctrl' | 'alt' | 'shift';
+/** The two system state checks a built-in can expand into. */
+export type BuiltinCheckKind = 'file_exists' | 'process_running';
 
 export interface BuiltinParameter {
   /** Parameter name written into the type step. */
@@ -20,7 +23,9 @@ export interface BuiltinParameter {
 
 export type BuiltinStepTemplate =
   | { kind: 'key'; key: string; modifiers?: readonly BuiltinModifier[] }
-  | { kind: 'type'; input: string; role: string };
+  | { kind: 'type'; input: string; role: string }
+  /** A system state check; the operator fills the path or process and the expectation. */
+  | { kind: 'assert'; check: BuiltinCheckKind };
 
 export interface BuiltinBehavior {
   id: string;
@@ -156,6 +161,18 @@ export const builtinBehaviors: readonly BuiltinBehavior[] = [
     parameters: [],
     steps: [{ kind: 'key', key: 'a', modifiers: ['meta'] }],
   },
+  {
+    id: 'check-file-exists', name: '检查文件是否存在', group: 'check', appLabel: '系统',
+    summary: '检查一个绝对路径的文件是否存在。只读元数据，不启动或聚焦任何 App。',
+    parameters: [],
+    steps: [{ kind: 'assert', check: 'file_exists' }],
+  },
+  {
+    id: 'check-process-running', name: '检查进程是否运行', group: 'check', appLabel: '系统',
+    summary: '按可执行文件名或完整路径检查进程是否在运行。僵尸进程不算运行。',
+    parameters: [],
+    steps: [{ kind: 'assert', check: 'process_running' }],
+  },
 ];
 
 export function getBuiltinBehavior(id: string): BuiltinBehavior | undefined {
@@ -181,10 +198,15 @@ export function builtinKeyLabel(key: string, modifiers: readonly BuiltinModifier
   return symbols + (namedKeyLabels[key] ?? key.toUpperCase());
 }
 
+const builtinCheckLabels: Record<BuiltinCheckKind, string> = {
+  file_exists: '检查文件存在',
+  process_running: '检查进程运行',
+};
+
 export function builtinStepLabel(step: BuiltinStepTemplate): string {
-  return step.kind === 'key'
-    ? builtinKeyLabel(step.key, step.modifiers)
-    : `输入 {${step.input}}`;
+  if (step.kind === 'key') return builtinKeyLabel(step.key, step.modifiers);
+  if (step.kind === 'type') return `输入 {${step.input}}`;
+  return builtinCheckLabels[step.check];
 }
 
 /** The read-only card the workbench library panel shows for one built-in. */
@@ -198,13 +220,16 @@ export interface BuiltinBehaviorView {
   appLabel: string;
   summary: string;
   parameters: BuiltinParameter[];
-  steps: Array<{ kind: 'key' | 'type'; label: string }>;
+  steps: Array<{ kind: 'key' | 'type' | 'assert'; label: string }>;
   /** The role of the text step, so the insert dialog can prefill a locator. */
   targetRole?: string;
+  /** Present on a state-check card; the page collects its path/process fields. */
+  check?: BuiltinCheckKind;
 }
 
 export function builtinBehaviorView(behavior: BuiltinBehavior): BuiltinBehaviorView {
   const textStep = behavior.steps.find(step => step.kind === 'type');
+  const checkStep = behavior.steps.find(step => step.kind === 'assert');
   return {
     source: 'builtin',
     editable: false,
@@ -217,6 +242,7 @@ export function builtinBehaviorView(behavior: BuiltinBehavior): BuiltinBehaviorV
     parameters: behavior.parameters.map(parameter => ({ ...parameter })),
     steps: behavior.steps.map(step => ({ kind: step.kind, label: builtinStepLabel(step) })),
     ...(textStep === undefined ? {} : { targetRole: textStep.role }),
+    ...(checkStep === undefined ? {} : { check: checkStep.check }),
   };
 }
 
@@ -366,6 +392,41 @@ function freeStepIds(flow: FlowV2, base: string, count: number): string[] {
   throw new BuiltinBehaviorError('STEP_ID_EXHAUSTED', `没有可用的步骤 id 前缀：${base}`);
 }
 
+const systemPath = new RegExp(systemPathPattern);
+const processExecutableName = new RegExp(processNamePattern);
+
+function builtinSystemPath(value: unknown, code: string, message: string): string {
+  const path = textField(value, code, message);
+  if (path.length > 4096 || !systemPath.test(path)) {
+    throw new BuiltinBehaviorError(
+      code, '路径必须是绝对 POSIX 路径，且不能包含控制字符或 .. 分段');
+  }
+  return path;
+}
+
+/** The file a `file_exists` check reads: one absolute path, nothing else. */
+function systemFileScope(input: Record<string, unknown>): Scope {
+  return { kind: 'file', path: builtinSystemPath(input.path, 'INVALID_PATH', '文件检查需要一个绝对路径') };
+}
+
+/** The executable a `process_running` check matches, by basename or by path. */
+function systemProcessScope(input: Record<string, unknown>): Scope {
+  if (input.match !== undefined && input.match !== 'name' && input.match !== 'path') {
+    throw new BuiltinBehaviorError('INVALID_PROCESS_MATCH', '进程匹配方式只能是名称或完整路径');
+  }
+  if (input.match === 'path') {
+    return {
+      kind: 'process',
+      path: builtinSystemPath(input.path, 'INVALID_PATH', '按路径检查时需要一个绝对可执行路径'),
+    };
+  }
+  const name = textField(input.name, 'INVALID_PROCESS_NAME', '进程检查需要一个可执行文件名');
+  if (name.length > 255 || !processExecutableName.test(name)) {
+    throw new BuiltinBehaviorError('INVALID_PROCESS_NAME', '可执行文件名不能包含路径分隔符或控制字符');
+  }
+  return { kind: 'process', name };
+}
+
 /**
  * Expand one built-in behavior into real v2 steps at a chosen position. The
  * caller (the edit engine) commits this as one undoable insertion and declares
@@ -376,10 +437,6 @@ export function planBuiltinInsertion(flow: FlowV2, input: unknown): BuiltinInser
   const behaviorId = textField(input.behavior, 'UNKNOWN_BEHAVIOR', '没有指定内置行为');
   const behavior = getBuiltinBehavior(behaviorId);
   if (!behavior) throw new BuiltinBehaviorError('UNKNOWN_BEHAVIOR', `没有内置行为 ${behaviorId}`);
-  const scope = windowScope(flow, input.scope);
-  const role = behavior.steps.find(step => step.kind === 'type')?.role;
-  const target = elementTarget(input.target, role ?? 'textfield');
-  const params = isRecord(input.params) ? input.params : {};
 
   let index = flow.steps.length;
   let anchor: StepV2 | undefined;
@@ -393,6 +450,30 @@ export function planBuiltinInsertion(flow: FlowV2, input: unknown): BuiltinInser
 
   const ids = freeStepIds(flow, behavior.id, behavior.steps.length);
   const atMs = anchor && anchor.atMs !== undefined ? { atMs: anchor.atMs } : {};
+  // A state-check card expands to exactly one system assert: the operator
+  // supplies the path or executable and the expected value, and no app or
+  // window scope is involved.
+  const checkTemplate = behavior.steps.find(step => step.kind === 'assert');
+  if (checkTemplate?.kind === 'assert') {
+    const equals = input.equals ?? true;
+    if (typeof equals !== 'boolean') {
+      throw new BuiltinBehaviorError('INVALID_EXPECTED', '检查需要正向（成立）或反向（不成立）期望');
+    }
+    const scope = checkTemplate.check === 'file_exists'
+      ? systemFileScope(input)
+      : systemProcessScope(input);
+    const step = {
+      id: ids[0], kind: 'assert', scope,
+      check: { kind: checkTemplate.check, equals },
+      ...atMs,
+    } as StepV2;
+    return { index, steps: [step], inputs: [] };
+  }
+
+  const scope = windowScope(flow, input.scope);
+  const role = behavior.steps.find(step => step.kind === 'type')?.role;
+  const target = elementTarget(input.target, role ?? 'textfield');
+  const params = isRecord(input.params) ? input.params : {};
   const inputs: string[] = [];
   const steps = behavior.steps.map((template, offset): StepV2 => {
     const stepScope: WindowScope = { ...scope };
@@ -403,6 +484,9 @@ export function planBuiltinInsertion(flow: FlowV2, input: unknown): BuiltinInser
         ...(template.modifiers === undefined ? {} : { modifiers: [...template.modifiers] }),
         ...atMs,
       } as StepV2;
+    }
+    if (template.kind !== 'type') {
+      throw new BuiltinBehaviorError('UNSUPPORTED_TEMPLATE', `内置行为步骤 ${template.kind} 不能展开`);
     }
     const name = parameterName(params[template.input], template.input);
     if (!inputs.includes(name)) inputs.push(name);
