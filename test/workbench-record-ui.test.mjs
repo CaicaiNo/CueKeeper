@@ -86,12 +86,21 @@ test('the record controls start the recorder, surface errors, and reload after t
   const reloads = [];
   let mode = 'busy';
   let stopMode = 'imported';
+  let healthMode = 'ok';
   globalThis.document = document;
   globalThis.window = { location: { reload: () => reloads.push(true) } };
   globalThis.fetch = async (url, init = {}) => {
     calls.push({ url, init });
     if (url === '/api/record/status') {
       return json(200, { recording: false, elapsedMs: 0, warnings: [] });
+    }
+    if (url === '/api/record/health') {
+      if (healthMode === 'ok') return json(200, { ok: true, blocking: [], nextSteps: [] });
+      return json(200, {
+        ok: false,
+        blocking: [{ id: 'recorder', label: 'recorder', status: 'fail', detail: 'missing: /Users/test/dist/cuekeeper-capture' }],
+        nextSteps: ['Rebuild the recorder with `pnpm build:recorder`, or reinstall the release archive.'],
+      });
     }
     if (url === '/api/record/start') {
       if (mode === 'busy') return json(400, { error: 'A recording is already in progress' });
@@ -150,6 +159,23 @@ test('the record controls start the recorder, surface errors, and reload after t
   assert.equal(calls[0].url, '/api/record/status');
   assert.equal(calls[0].init.method, 'GET');
   assert.equal(calls[0].init.headers['x-cuekeeper-workbench'], '1');
+
+  // A missing recorder turns the start button off, names the fix on the page,
+  // and offers a recheck that restores the button without a reload.
+  const recheckButton = document.getElementById('record-recheck');
+  assert.equal(startButton.disabled, false);
+  healthMode = 'blocked';
+  recheckButton.click();
+  await tick();
+  assert.equal(startButton.disabled, true);
+  assert.equal(recheckButton.hidden, false);
+  assert.match(message.textContent, /录制不可用（recorder：missing/);
+  assert.match(message.textContent, /build:recorder/);
+  healthMode = 'ok';
+  recheckButton.click();
+  await tick();
+  assert.equal(startButton.disabled, false);
+  assert.equal(recheckButton.hidden, true);
 
   // A refused start is shown in the page, never as a dialog.
   await startButton.click();
