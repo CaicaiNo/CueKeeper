@@ -99,7 +99,7 @@ test('the record controls start the recorder, surface errors, and reload after t
       return json(200, {
         ok: false,
         blocking: [{ id: 'recorder', label: 'recorder', status: 'fail', detail: 'missing: /Users/test/dist/cuekeeper-capture' }],
-        nextSteps: ['Rebuild the recorder with `pnpm build:recorder`, or reinstall the release archive.'],
+        nextSteps: ['Rebuild the recorder with `npm run build:recorder`, or reinstall the release archive.'],
       });
     }
     if (url === '/api/record/start') {

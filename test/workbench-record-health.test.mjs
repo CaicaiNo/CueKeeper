@@ -17,7 +17,7 @@ test('the workbench reports a blocked recorder before the record button is press
   const blocked = {
     ok: false,
     blocking: [{ id: 'recorder', label: 'recorder', status: 'fail', detail: 'missing: /tmp/dist/cuekeeper-capture' }],
-    nextSteps: ['Rebuild the recorder with `pnpm build:recorder`, or reinstall the release archive.'],
+    nextSteps: ['Rebuild the recorder with `npm run build:recorder`, or reinstall the release archive.'],
   };
   const url = await start(t, { recordHealth: async () => blocked });
 
