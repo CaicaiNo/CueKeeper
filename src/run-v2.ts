@@ -7,8 +7,8 @@ import type { AssertionObservation } from './assertion.js';
 import type { AssertCheck, ElementLocator } from './contracts.js';
 import { defaultCheckpointTimeoutMs, defaultFileQuietMs, defaultWaitTimeoutMs } from './contracts-v2.js';
 import type {
-  AppWaitCheck, DeliveryV2, FileScope, FileWaitCheck, FlowV2, ReportV2, ReportV2Entry, Scope, StepV2,
-  WindowScope, WindowWaitCheck,
+  AppWaitCheck, DeliveryV2, FileExistsCheck, FileScope, FileWaitCheck, FlowV2, ProcessRunningCheck,
+  ProcessScope, ReportV2, ReportV2Entry, Scope, StepV2, WindowScope, WindowWaitCheck,
 } from './contracts-v2.js';
 import { DesktopFault } from './desktop.js';
 import type { Desktop, DragEndpoint } from './desktop.js';
@@ -23,6 +23,8 @@ import { ReportV2Session } from './report-v2.js';
 import type { AppIdentityRecord, StepResult } from './report-v2.js';
 import { RunLease, ScopeResolver } from './scope.js';
 import type { WindowBinding } from './scope.js';
+import { SystemChecks } from './system-check.js';
+import type { SystemCheckDeps } from './system-check.js';
 import { assertWaitCheckSupported, waitFor } from './wait.js';
 import type { WaitObservation } from './wait.js';
 
@@ -51,6 +53,9 @@ export interface FlowV2RunOptions {
   /** Install/download/process evidence seam; production reads the local disk. */
   installState?: InstallState;
   installDeps?: InstallStateDeps;
+  /** File/process state probes; production reads stat(2) and /bin/ps. */
+  systemChecks?: SystemChecks;
+  systemCheckDeps?: SystemCheckDeps;
   /** Streaming progress: one call per completed step. */
   onEntry?: (entry: import('./contracts-v2.js').ReportV2Entry) => void;
   /** Operator hand-off channel; a checkpoint without one blocks the run. */
@@ -264,7 +269,7 @@ function flowApps(flow: FlowV2): string[] {
     if (scope.kind === 'window' || scope.kind === 'app') apps.add(scope.app);
     else if (scope.kind === 'surface' &&
         (scope.surface === 'app_menu_bar' || scope.surface === 'app_context_menu')) apps.add(scope.app);
-    // A file scope names no app: its wait observes the filesystem only.
+    // A file or process scope names no app: it observes the machine only.
   };
   for (const step of flow.steps) {
     if (step.kind === 'gap') continue;
@@ -295,6 +300,7 @@ class StepRunner {
     signal: AbortSignal;
     inputs: Readonly<Record<string, string>>;
     install: InstallState;
+    system: SystemChecks;
     appPaths: Readonly<Record<string, string>>;
     baselineDir?: string;
     checkpoints?: CheckpointChannel;
@@ -967,6 +973,31 @@ class StepRunner {
   }
 
   private async assertStep(step: Extract<StepV2, { kind: 'assert' }>): Promise<StepOutcome> {
+    // A system state check reads the machine only. It never resolves a window,
+    // probes an app identity, takes focus or raises a permission.
+    if (step.scope.kind === 'file' && 'path' in step.scope) {
+      const path = step.scope.path;
+      return this.systemAssert(
+        step.check as FileExistsCheck,
+        () => this.ctx.system.fileExists(path),
+        actual => `File ${path} ${actual ? 'exists' : 'does not exist'}`,
+      );
+    }
+    if (step.scope.kind === 'process') {
+      const scope = step.scope as ProcessScope;
+      const check = step.check as ProcessRunningCheck;
+      const label = 'name' in scope ? `Process ${scope.name}` : `Process at ${scope.path}`;
+      // An argument check compares a run of argv, so an unmatched process is
+      // still running; say which fact failed without repeating the arguments.
+      const describesArgs = 'args' in check && (check.args?.length ?? 0) > 0;
+      return this.systemAssert(
+        check,
+        () => this.ctx.system.processRunning(scope, 'args' in check ? check.args : undefined),
+        actual => describesArgs
+          ? `${label} ${actual ? 'runs' : 'does not run'} with the expected arguments`
+          : `${label} is ${actual ? 'running' : 'not running'}`,
+      );
+    }
     if (step.scope.kind === 'app') {
       // A missing app is an empty window inventory, so `exists: false` can still
       // pass; `evaluateAssertion` reads the inventory through `windowsFor`.
@@ -990,6 +1021,34 @@ class StepRunner {
       ...(this.ctx.baselineDir === undefined ? {} : { baselineDir: this.ctx.baselineDir }),
     });
     return assertionOutcome(observation);
+  }
+
+  /**
+   * Compares one observed system value with the declared expectation. A probe
+   * error is an unknown value: the step fails with `actual: null` whatever the
+   * expectation was, so a reverse check can never pass by accident.
+   */
+  private async systemAssert(
+    check: FileExistsCheck | ProcessRunningCheck,
+    observe: () => Promise<boolean>,
+    describe: (actual: boolean) => string,
+  ): Promise<StepOutcome> {
+    const stateCheck = { kind: check.kind, expected: check.equals, actual: null as boolean | null };
+    let actual: boolean;
+    try {
+      actual = await observe();
+    } catch (error) {
+      const fault = toFault(error);
+      return { status: 'failed', code: fault.code, message: fault.message, stateCheck };
+    }
+    stateCheck.actual = actual;
+    if (actual === check.equals) return { stateCheck };
+    return {
+      status: 'failed',
+      code: 'ASSERTION_FALSE',
+      message: `${describe(actual)}; expected ${check.kind}=${check.equals}`,
+      stateCheck,
+    };
   }
 }
 
@@ -1107,6 +1166,7 @@ export async function runFlowV2(input: FlowV2, options: FlowV2RunOptions): Promi
     signal: options.signal,
     inputs: options.inputs ?? {},
     install: options.installState ?? new InstallState(options.installDeps),
+    system: options.systemChecks ?? new SystemChecks(options.systemCheckDeps),
     appPaths: flow.appPaths ?? {},
     ...(options.baselineDir === undefined ? {} : { baselineDir: options.baselineDir }),
     ...(options.checkpoints === undefined ? {} : { checkpoints: options.checkpoints }),

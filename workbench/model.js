@@ -30,8 +30,10 @@ export function scopeDescription(scope, appName = id => id) {
   if (scope.kind === 'window') return `${appName(scope.app)} · ${scope.windowTitle}`;
   if (scope.kind === 'app') return `${appName(scope.app)} · 应用`;
   if (scope.kind === 'file') {
+    if (scope.path !== undefined) return `文件 · ${scope.path}`;
     return `文件 · ${scope.name ?? `*${scope.suffix}`}（${scope.directory}）`;
   }
+  if (scope.kind === 'process') return `进程 · ${scope.name ?? scope.path}`;
   return [SURFACE_LABELS[scope.surface] ?? scope.surface,
     scope.app ? appName(scope.app) : '', scope.windowTitle ?? ''].filter(Boolean).join(' · ');
 }
@@ -411,13 +413,23 @@ export function shellSummary(action) {
 const waitKindLabels = {
   window_exists: '窗口存在', element_enabled: '元素可用', element: '元素状态',
   window: '窗口属性', app_running: '应用运行中', app_installed: '应用已安装',
+  file_exists: '文件存在', file_stable: '文件已写完',
+  process_running: '进程运行中',
 };
 
-/** One window/app/surface scope as the editor groups and filters it. */
+/** One window/app/surface/file/process scope as the editor groups and filters it. */
 export function scopeKey(scope) {
   if (!scope) return 'gap';
   if (scope.kind === 'window') return `window:${scope.app}:${scope.windowKey}`;
   if (scope.kind === 'app') return `app:${scope.app}`;
+  if (scope.kind === 'file') {
+    return scope.path !== undefined
+      ? `file:${scope.path}`
+      : `file:${scope.directory}/${scope.name ?? `*${scope.suffix}`}`;
+  }
+  if (scope.kind === 'process') {
+    return scope.name !== undefined ? `process:name:${scope.name}` : `process:path:${scope.path}`;
+  }
   return `surface:${scope.surface}:${scope.app ?? ''}:${scope.windowKey ?? ''}`;
 }
 
@@ -430,6 +442,20 @@ export function expectLabel(expect) {
   if (expect.contains !== undefined) return `${expect.property} 包含 ${expect.contains}`;
   if (expect.matches !== undefined) return `${expect.property} 匹配 ${expect.matches}`;
   return expect.property ?? '';
+}
+
+/**
+ * What a system state check compared, as the report shows it. A passing check
+ * still prints both values; an unknown observation prints `实际 未知`.
+ */
+export function stateCheckLabel(stateCheck) {
+  if (!stateCheck) return '';
+  const words = stateCheck.kind === 'file_exists'
+    ? { yes: '存在', no: '不存在' }
+    : { yes: '运行', no: '未运行' };
+  const value = observed => observed === null || observed === undefined
+    ? '未知' : observed ? words.yes : words.no;
+  return `期望 ${value(stateCheck.expected)} · 实际 ${value(stateCheck.actual)}`;
 }
 
 /** A wait or assertion condition in one readable line. */
@@ -491,6 +517,43 @@ export const V2_INSERT_KINDS = new Map([
 export const V2_COPYABLE_KINDS = new Set([
   'click', 'type', 'key', 'wait', 'assert', 'launch_app', 'activate_app', 'focus_window',
 ]);
+
+// --- Behavior library -----------------------------------------------------------
+// The library has two top-level groups. Both open collapsed on every page load;
+// the expansion lives in page memory only, so a re-render keeps it and a reload
+// forgets it.
+
+export const LIBRARY_GROUPS = [
+  { key: 'builtin', title: '内置行为' },
+  { key: 'custom', title: '我的行为' },
+];
+
+export function defaultLibraryExpanded() {
+  return { builtin: false, custom: false };
+}
+
+/** Flip one group's expansion without touching the other. */
+export function toggleLibraryGroup(expanded, key) {
+  if (!Object.hasOwn(defaultLibraryExpanded(), key)) throw new Error(`未知的行为库分组：${key}`);
+  return { ...defaultLibraryExpanded(), ...expanded, [key]: !expanded?.[key] };
+}
+
+/**
+ * The two collapsible groups in display order, each with its own count and
+ * expansion flag. Custom behaviors are sorted by name; built-ins keep the
+ * product order so Finder, universal and system cards stay together.
+ */
+export function libraryGroups(library, expanded = {}) {
+  const builtin = library?.builtin ?? [];
+  const custom = [...(library?.custom ?? [])].sort((a, b) => a.behavior.name.localeCompare(b.behavior.name));
+  return LIBRARY_GROUPS.map(group => ({
+    key: group.key,
+    title: group.title,
+    count: group.key === 'builtin' ? builtin.length : custom.length,
+    expanded: expanded?.[group.key] === true,
+    items: group.key === 'builtin' ? builtin : custom,
+  }));
+}
 
 const isWindowScope = scope => Boolean(scope) && scope.kind === 'window';
 

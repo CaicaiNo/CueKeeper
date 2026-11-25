@@ -68,12 +68,12 @@ test('the shipped library has Finder actions and universal shortcuts, all as v2 
     ['name']);
 
   // A built-in is read-only and only produces the step kinds the v2 schema
-  // already has: shortcuts and parameterized text.
+  // already has: shortcuts, parameterized text and the two system checks.
   assert.ok(views.every(view => view.source === 'builtin' && view.editable === false));
   assert.equal(new Set(views.map(view => view.id)).size, views.length);
   for (const behavior of builtinBehaviors) {
     for (const step of behavior.steps) {
-      assert.ok(step.kind === 'key' || step.kind === 'type', `${behavior.id} uses ${step.kind}`);
+      assert.ok(['key', 'type', 'assert'].includes(step.kind), `${behavior.id} uses ${step.kind}`);
       if (step.kind === 'type') {
         assert.ok(behavior.parameters.some(parameter => parameter.name === step.input),
           `${behavior.id} declares ${step.input}`);
@@ -245,4 +245,93 @@ test('a built-in insert derives a window key and refuses bad requests without ch
   assert.equal(state.session.v2.validation.ok, true);
   // The flow still has the original step count plus the one inserted behavior.
   assert.equal(state.session.v2.flow.steps.length, flow.steps.length + 3);
+});
+
+test('the library ships two system checks that expand into real assert steps', async t => {
+  const views = builtinBehaviorViews().filter(view => view.group === 'check');
+  assert.deepEqual(views.map(view => [view.name, view.check, view.appLabel]), [
+    ['检查文件是否存在', 'file_exists', '系统'],
+    ['检查进程是否运行', 'process_running', '系统'],
+  ]);
+  // A system card belongs to no app and expands to exactly one assert step.
+  assert.equal(views[0].app, undefined);
+  assert.deepEqual(views[0].steps.map(step => step.kind), ['assert']);
+  assert.equal(builtinStepLabel({ kind: 'assert', check: 'process_running' }), '检查进程运行');
+
+  const { root, directory, flow } = await fixture(t);
+  const { post } = await server(t, root);
+  const session = await post('import', { directory });
+  const anchor = 'type-address';
+  const anchorIndex = flow.steps.findIndex(step => step.id === anchor);
+
+  // A file check inserted after a step keeps the declared expectation and its
+  // absolute path; it carries no window or app scope.
+  const inserted = await post('v2/behavior', {
+    session: session.id, behavior: 'check-file-exists',
+    path: '/Users/qa/Downloads/report.pdf', equals: false, afterStepId: anchor,
+  });
+  assert.deepEqual(inserted.flow.steps[anchorIndex + 1], {
+    id: 'check-file-exists-1', kind: 'assert',
+    scope: { kind: 'file', path: '/Users/qa/Downloads/report.pdf' },
+    check: { kind: 'file_exists', equals: false },
+  });
+  assert.equal(inserted.validation.ok, true);
+  assert.equal([...flowV2Check.Errors(inserted.flow)].length, 0);
+
+  // A process check appended at the end matches by executable name; a second
+  // one matches a full path that contains spaces.
+  const byName = await post('v2/behavior', {
+    session: session.id, behavior: 'check-process-running', match: 'name', name: 'Google Chrome', equals: true,
+  });
+  assert.deepEqual(byName.flow.steps.at(-1), {
+    id: 'check-process-running-1', kind: 'assert',
+    scope: { kind: 'process', name: 'Google Chrome' },
+    check: { kind: 'process_running', equals: true },
+  });
+  const byPath = await post('v2/behavior', {
+    session: session.id, behavior: 'check-process-running', match: 'path',
+    path: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', equals: false,
+  });
+  assert.deepEqual(byPath.flow.steps.at(-1), {
+    id: 'check-process-running-2-1', kind: 'assert',
+    scope: { kind: 'process', path: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' },
+    check: { kind: 'process_running', equals: false },
+  });
+  assert.equal(byPath.validation.ok, true);
+
+  // Saving writes a revision that reopens with the same values, and a dry run
+  // resolves the checks structurally without starting a desktop.
+  const saved = await post('save', { session: session.id }, 201);
+  const written = JSON.parse(await readFile(saved.output, 'utf8'));
+  assert.doesNotThrow(() => parseFlowV2(written));
+  assert.deepEqual(written.steps.find(step => step.id === 'check-file-exists-1'), {
+    id: 'check-file-exists-1', kind: 'assert',
+    scope: { kind: 'file', path: '/Users/qa/Downloads/report.pdf' },
+    check: { kind: 'file_exists', equals: false },
+  });
+  assert.deepEqual(written.steps.find(step => step.id === 'check-process-running-2-1').scope,
+    { kind: 'process', path: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' });
+  const dry = await post('run', { session: session.id, mode: 'dry-run' });
+  assert.equal(dry.status, 'passed');
+  assert.deepEqual(dry.entries.slice(-2).map(entry => [entry.id, entry.status]),
+    [['check-process-running-1', 'resolved'], ['check-process-running-2-1', 'resolved']]);
+
+  // Bad inputs are refused without changing the flow.
+  const settled = byPath.flow.steps.map(step => step.id);
+  for (const [payload, code] of [
+    [{ behavior: 'check-file-exists', path: 'relative/report.pdf' }, 'INVALID_PATH'],
+    [{ behavior: 'check-file-exists', path: '/tmp/../etc/passwd' }, 'INVALID_PATH'],
+    [{ behavior: 'check-file-exists', path: '/tmp/report.pdf', equals: 'yes' }, 'INVALID_EXPECTED'],
+    [{ behavior: 'check-file-exists' }, 'INVALID_PATH'],
+    [{ behavior: 'check-process-running', match: 'path', path: 'relative/Safari' }, 'INVALID_PATH'],
+    [{ behavior: 'check-process-running', match: 'name', name: 'Safari/Contents/MacOS/Safari' }, 'INVALID_PROCESS_NAME'],
+    [{ behavior: 'check-process-running', match: 'pid', name: 'Safari' }, 'INVALID_PROCESS_MATCH'],
+    [{ behavior: 'check-process-running', match: 'name' }, 'INVALID_PROCESS_NAME'],
+    [{ behavior: 'check-file-exists', path: '/tmp/report.pdf', afterStepId: 'missing-step' }, 'UNKNOWN_STEP'],
+  ]) {
+    const refused = await post('v2/behavior', { session: session.id, ...payload }, 400);
+    assert.equal(refused.code, code, JSON.stringify(refused));
+  }
+  const state = await post('state', {});
+  assert.deepEqual(state.session.v2.flow.steps.map(step => step.id), settled);
 });

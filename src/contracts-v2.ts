@@ -75,11 +75,45 @@ const fileDirectory = T.String({
   minLength: 1, maxLength: 4096, pattern: appPathPattern,
 });
 const fileName = T.String({ minLength: 1, maxLength: 255, pattern: '^[^/\\\\]+$' });
-const fileScope = T.Union([
+const fileDirectoryScope = T.Union([
   object({ kind: T.Literal('file'), directory: fileDirectory, name: fileName }),
   object({ kind: T.Literal('file'), directory: fileDirectory, suffix: fileName }),
 ]);
-export const scopeSchema = T.Union([windowScope, appScope, surfaceScope, fileScope]);
+// A state check names one absolute POSIX path or one executable. It reads
+// metadata only: nothing is launched, focused, typed into or written. The
+// path rejects control characters and `..` segments at the schema level; the
+// semantic validators report the same rule with words.
+export const systemPathPattern =
+  '^(?![\\s\\S]*[\\u0000-\\u001f\\u007f])(?!.*(?:^|/)\\.\\.(?:/|$))/(?!/)[\\s\\S]*$';
+export const processNamePattern =
+  '^(?![\\s\\S]*[/\\\\\\u0000-\\u001f\\u007f])[\\s\\S]+$';
+// One argv element: literal text, spaces and quotes preserved, bounded, with no
+// NUL or other control character. A flow only ever matches a contiguous run of
+// these against `argv[1...]`.
+export const processArgPattern =
+  '^(?![\\s\\S]*[\\u0000-\\u001f\\u007f])[\\s\\S]+$';
+export const maxProcessArgs = 32;
+const systemPath = T.String({ minLength: 1, maxLength: 4096, pattern: systemPathPattern });
+const processName = T.String({ minLength: 1, maxLength: 255, pattern: processNamePattern });
+const processArg = T.String({
+  minLength: 1, maxLength: 4096, pattern: processArgPattern,
+  description: '一个字面参数（最多 4096 个字符）：空格与引号原样保留，按 UTF-8 字节比较，不能含 NUL 或控制字符',
+});
+// One argv element is compared literally: the same characters in another
+// Unicode normalization form are a different argument. Matching is a
+// contiguous, same-order run of argv[1...]; argv[0] and `path` scopes never
+// carry arguments.
+const processArgs = T.Array(processArg, {
+  minItems: 1, maxItems: maxProcessArgs,
+  description: '与 argv[1...] 中一段连续、同序、逐项字节相等的参数比较；仅 name 模式可用',
+});
+const filePathScope = object({ kind: T.Literal('file'), path: systemPath });
+const processNameScope = object({ kind: T.Literal('process'), name: processName });
+const processPathScope = object({ kind: T.Literal('process'), path: systemPath });
+const processScope = T.Union([processNameScope, processPathScope]);
+export const scopeSchema = T.Union([
+  windowScope, appScope, surfaceScope, fileDirectoryScope, filePathScope, processScope,
+]);
 const focusAfter = T.Optional(T.Union([windowScope, appScope]));
 
 const comparator = T.Union([T.Literal('equals'), T.Literal('contains'), T.Literal('matches')]);
@@ -144,8 +178,17 @@ const appWaitCheck = T.Union([
 ]);
 // A file wait reads the download directory: a matching file exists, or it has
 // finished writing (its size and mtime have been quiet for `quietMs`).
+const fileExistsCheck = object({ kind: T.Literal('file_exists'), equals: T.Boolean() });
+// Arguments are only meaningful for a name scope: the full-path form matches
+// the executable itself, never its argv. The two closed variants keep that
+// pairing structural instead of relying on a runtime warning.
+const processNameRunningCheck = object({
+  kind: T.Literal('process_running'), equals: T.Boolean(), args: T.Optional(processArgs),
+});
+const processPathRunningCheck = object({ kind: T.Literal('process_running'), equals: T.Boolean() });
+const processRunningCheck = T.Union([processNameRunningCheck, processPathRunningCheck]);
 const fileWaitCheck = T.Union([
-  object({ kind: T.Literal('file_exists'), equals: T.Boolean() }),
+  fileExistsCheck,
   object({
     kind: T.Literal('file_stable'),
     quietMs: T.Optional(T.Integer({
@@ -238,13 +281,20 @@ const waitStep = T.Union([
     check: appWaitCheck, timeoutMs: waitTimeout,
   }),
   object({
-    ...stepBase, kind: T.Literal('wait'), scope: fileScope,
+    ...stepBase, kind: T.Literal('wait'), scope: fileDirectoryScope,
     check: fileWaitCheck, timeoutMs: waitTimeout,
   }),
 ]);
+// A state check is a plain assertion step scoped to the system, not to an app
+// or window: the file scope names one absolute path, the process scope names
+// one executable by name or by path. The pairing is closed per variant, so a
+// file path can only be checked for existence and a process only for running.
 const assertStep = T.Union([
   object({ ...stepBase, kind: T.Literal('assert'), scope: windowScope, check: assertCheck }),
   object({ ...stepBase, kind: T.Literal('assert'), scope: appScope, check: appAssertCheck }),
+  object({ ...stepBase, kind: T.Literal('assert'), scope: filePathScope, check: fileExistsCheck }),
+  object({ ...stepBase, kind: T.Literal('assert'), scope: processNameScope, check: processNameRunningCheck }),
+  object({ ...stepBase, kind: T.Literal('assert'), scope: processPathScope, check: processPathRunningCheck }),
 ]);
 const launchApp = object({
   ...stepBase, kind: T.Literal('launch_app'), scope: appScope, focusAfter,
@@ -360,6 +410,13 @@ const fallbackResult = object({
 // safe metadata that explains whether a text step used a literal or a runtime
 // parameter, and how a manual checkpoint was resolved.
 const textMode = T.Union([T.Literal('literal'), T.Literal('input')]);
+// A system state check reports the value it compared, not just whether it
+// matched; `actual` is null when the probe itself could not answer.
+const stateCheckResult = object({
+  kind: T.Union([T.Literal('file_exists'), T.Literal('process_running')]),
+  expected: T.Boolean(),
+  actual: T.Union([T.Boolean(), T.Null()]),
+});
 const checkpointResult = object({
   reason: checkpointReason,
   triggerStepId: id,
@@ -382,6 +439,7 @@ const entry = object({
   textMode: T.Optional(textMode),
   input: T.Optional(parameterName),
   checkpoint: T.Optional(checkpointResult),
+  stateCheck: T.Optional(stateCheckResult),
   intent: T.Optional(intentResult),
   fallback: T.Optional(fallbackResult),
 });
@@ -426,7 +484,12 @@ export type ReportV2Entry = Static<typeof entry>;
 export type WindowWaitCheck = Static<typeof windowWaitCheck>;
 export type AppWaitCheck = Static<typeof appWaitCheck>;
 export type FileWaitCheck = Static<typeof fileWaitCheck>;
-export type FileScope = Static<typeof fileScope>;
+export type FileScope = Static<typeof fileDirectoryScope>;
+export type FilePathScope = Static<typeof filePathScope>;
+export type ProcessScope = Static<typeof processScope>;
+export type FileExistsCheck = Static<typeof fileExistsCheck>;
+export type ProcessRunningCheck = Static<typeof processRunningCheck>;
+export type StateCheckV2 = Static<typeof stateCheckResult>;
 export type AssertCheckV2 = Static<typeof assertCheck>;
 export type ElementV2 = Static<typeof element>;
 export type DeliveryV2 = Static<typeof deliveryState>;
