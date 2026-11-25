@@ -3044,3 +3044,39 @@ test('HAOC-175 review: a queued follow-up read waits out a secure interval', asy
   recording.finish();
   assert.equal(reads, readCountBeforeSecure, 'a queued task read an AX tree inside the secure interval');
 });
+
+test('HAOC-175 review: a read completed across secure input cannot name a later click', async () => {
+  const data = fixture('two-apps-three-windows');
+  const click = data.events[0];
+  const expired = structuredClone(data.snapshots[String(click.owner.windowNumber)]);
+  expired.tree.children = [{
+    role: 'button', name: 'Expired target', ref: '@w11:e42',
+    bounds: { x: 140, y: 100, width: 30, height: 30 },
+    states: [], secure: false, children: [],
+  }];
+  const queued = [];
+  let reads = 0;
+  let completeRead;
+  const delayed = new Promise(resolve => { completeRead = resolve; });
+  const recording = new GlobalRecording(async () => {
+    reads += 1;
+    if (reads === 1) return delayed;
+    throw new Error('fresh tree unavailable');
+  }, { now: () => NOW, scheduleSettle: task => queued.push(task) });
+
+  await recording.add(parseCaptureEvent(click));
+  const pending = queued.shift()();
+  assert.equal(reads, 1);
+  await recording.add(parseCaptureEvent({
+    ...data.events[1], secure: true, secureEvidence: ['system_secure_input'],
+  }));
+  completeRead(expired);
+  await pending;
+  await recording.add(parseCaptureEvent({
+    ...click, t: 300, seen: NOW + 200, owner: { ...click.owner, name: '' },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'manual_checkpoint', 'click']);
+  assert.deepEqual(flow.steps[2].target, { kind: 'point', point: click.point });
+});

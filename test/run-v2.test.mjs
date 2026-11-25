@@ -1659,3 +1659,73 @@ test('HAOC-175 review: identifier-only type goes to the identified field', async
   assert.deepEqual({ sent: callsOf(world, 'type'), status: entry(report, 'type-note').status },
     { sent: [['type', '@w21:e2', 'review']], status: 'passed' });
 });
+
+test('HAOC-175 review: an ambiguous element in a same-titled window prevents choosing its twin', async t => {
+  const twin = windowRecord({
+    id: 'w-23', app: textedit, pid: 601, title: 'QA Notes',
+    fields: [['notes', '@w23:e1'], ['notes', '@w23:e2']],
+  });
+  const { world, run } = harness(t, { windows: [...initialWindows(), twin], focused: 'w-22' });
+  const report = await run(reviewTypeFlow());
+  assert.equal(entry(report, 'type-note').code, 'AMBIGUOUS_TARGET');
+  assert.deepEqual(callsOf(world, 'type'), []);
+});
+
+test('HAOC-175 review: a same-titled window with unknown bounds prevents point input', async t => {
+  const twin = windowRecord({ id: 'w-23', app: textedit, pid: 601, title: 'QA Notes', fields: [] });
+  delete twin.data.tree.bounds;
+  const { world, run } = harness(t, { windows: [...initialWindows(), twin], headed: true });
+  const flow = parseFlowV2({
+    version: 2, id: 'review-point', name: 'Review point',
+    appPaths: { [textedit]: appPaths[textedit] },
+    steps: [{
+      id: 'point', kind: 'click', scope: notesScope, target: { kind: 'point', point: [200, 200] },
+    }],
+  });
+  const report = await run(flow);
+  assert.equal(entry(report, 'point').code, 'AMBIGUOUS_TARGET');
+  assert.deepEqual(callsOf(world, 'clickPoint'), []);
+});
+
+test('HAOC-175 review: a name index cannot pick among repeated exact identifiers', async t => {
+  const native_id = { kind: 'ax_dom_identifier', value: 'shared' };
+  const { world, run } = finderItemsWorld(t, [
+    { role: 'image', ref_id: '@w99:e1', native_id },
+    { role: 'image', ref_id: '@w99:e2', native_id },
+  ]);
+  const report = await run(identifierClickFlow({
+    kind: 'element', role: 'image', name: '', identifier: 'shared', index: 1,
+  }));
+  assert.equal(entry(report, 'click-control').code, 'AMBIGUOUS');
+  assert.deepEqual(callsOf(world, 'click'), []);
+});
+
+test('HAOC-175 review: typing with an identifier preserves the fallback name index', async t => {
+  const { world, run } = harness(t);
+  const report = await run(reviewTypeFlow({
+    kind: 'element', role: 'textfield', name: 'notes', identifier: 'absent', index: 1,
+  }));
+  assert.equal(entry(report, 'type-note').code, 'NOT_FOUND');
+  assert.deepEqual(callsOf(world, 'type'), []);
+});
+
+test('HAOC-175 review: a right click with an identifier ignores an earlier click on another element', async t => {
+  const { world, run } = finderItemsWorld(t, [
+    { role: 'button', name: 'Previous', ref_id: '@w99:e1' },
+    {
+      role: 'button', ref_id: '@w99:e2',
+      native_id: { kind: 'ax_dom_identifier', value: 'right-clicked' },
+    },
+  ]);
+  const flow = identifierClickFlow({ kind: 'element', role: 'button', name: '', identifier: 'right-clicked' });
+  const [step] = flow.steps;
+  const report = await run(parseFlowV2({
+    ...flow,
+    steps: [
+      { id: 'previous', kind: 'click', scope: step.scope, target: { kind: 'element', role: 'button', name: 'Previous' } },
+      { ...step, button: 'right' },
+    ],
+  }));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w99:e1'], ['click', '@w99:e2']]);
+});

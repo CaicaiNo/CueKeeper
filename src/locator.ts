@@ -12,8 +12,8 @@ export interface Node {
   /**
    * The accessibility identifier the platform exposes for this element:
    * Chromium's AXDOMIdentifier for web content, Cocoa's AXIdentifier for native
-   * controls. It is stable across copy changes and unique within a window, which
-   * a name is not; replay prefers it and falls back to the name.
+   * controls. It can stay stable across copy changes; replay prefers a unique
+   * identifier match and falls back to the name when the identifier is absent.
    */
   identifier?: string;
   states: string[];
@@ -263,16 +263,15 @@ function matches(tree: Node, locator: ElementLocator, names = elementNames(tree)
   // the name still has to match exactly.
   const family = (role: string) => rowRoles.has(role) ? 'row' : role;
   const candidates = flatten(tree).filter(entry => family(entry.node.role) === family(locator.role));
-  // The platform identifier is the first identity: it survives renamed labels
-  // and is unique within a window. When the page no longer carries it — rebuilt
-  // element, older app version — the recorded name and path still resolve it.
+  // A platform identifier can survive renamed labels. When the page no longer
+  // carries it, the recorded name and path can still resolve the control.
   if (locator.identifier !== undefined) {
     const identified = candidates.filter(entry => entry.node.identifier === locator.identifier);
     if (identified.length) return identified;
     // A control that is recorded by its identifier alone has no name to fall
     // back on: matching "any unnamed element of this role" would address a
     // different control, so a missing identifier is NOT_FOUND instead.
-    if (!locator.name) return [];
+    if (!locator.name?.trim()) return [];
   }
   return candidates.filter(entry =>
     (locator.name === undefined || (names.get(entry.node) ?? '') === locator.name) &&
@@ -282,21 +281,13 @@ function matches(tree: Node, locator: ElementLocator, names = elementNames(tree)
   );
 }
 
-/** True when the match set is one exact platform-identifier match. */
-function identifiedOnly(locator: ElementLocator, candidates: Located[]): boolean {
-  return locator.identifier !== undefined && candidates.length === 1 &&
-    candidates[0].node.identifier === locator.identifier;
-}
-
 export function resolve(snapshot: Snapshot, locator: ElementLocator): Located {
   const candidates = matches(snapshot.tree, locator);
-  if (locator.index !== undefined) {
-    // An identifier match can be a single element where the recorded name had
-    // several; that one exact identifier overrides the position recorded for
-    // the name. A name or path fallback still answers by its index, and an
-    // out-of-range index is NOT_FOUND — never the remaining look-alike.
-    const candidate = candidates[locator.index] ??
-      (identifiedOnly(locator, candidates) ? candidates[0] : undefined);
+  const matchedIdentifier = locator.identifier !== undefined && candidates[0]?.node.identifier === locator.identifier;
+  // The index was recorded for the name and path. Exact identifier matches
+  // use their own evidence: one resolves, and duplicates are ambiguous.
+  if (locator.index !== undefined && !matchedIdentifier) {
+    const candidate = candidates[locator.index];
     if (candidate) return candidate;
   } else {
     if (candidates.length === 1) return candidates[0];

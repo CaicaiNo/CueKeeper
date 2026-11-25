@@ -109,7 +109,8 @@ function actionable(snapshot: Snapshot, locator: ElementLocator): { node: Node }
     // Finder's list view names a file in the value of a textfield, while the
     // recording may address it as a row. A single name/value match is the same
     // element; anything ambiguous keeps the original NOT_FOUND.
-    if (!(error instanceof Fault) || error.code !== 'NOT_FOUND' || !locator.name) throw error;
+    if (!(error instanceof Fault) || error.code !== 'NOT_FOUND' ||
+        locator.identifier !== undefined || !locator.name) throw error;
     let candidates = flatten(snapshot.tree)
       .filter(({ node }) => node.name === locator.name || node.value === locator.name || node.text === locator.name);
     if (candidates.length > 1) {
@@ -217,10 +218,10 @@ function addressable(locator: ElementLocator): ElementLocator {
 /**
  * The test a window must pass to be the one a step was recorded in. A window
  * holds the step when it contains the recorded point, or when its tree
- * addresses the recorded element exactly once. A step with nothing the tree can
- * be asked about returns undefined and keeps its window ambiguity.
+ * addresses the recorded element exactly once. A test returns undefined when
+ * the tree cannot rule the window in or out.
  */
-function windowTest(step: StepV2): ((snapshot: Snapshot) => boolean) | undefined {
+function windowTest(step: StepV2): ((snapshot: Snapshot) => boolean | undefined) | undefined {
   const points: Point[] = [];
   const locators: ElementLocator[] = [];
   if (step.kind === 'click') {
@@ -233,12 +234,13 @@ function windowTest(step: StepV2): ((snapshot: Snapshot) => boolean) | undefined
   }
   if (!points.length && !locators.length) return undefined;
   return snapshot => {
+    if (points.length && !snapshot.tree.bounds) return undefined;
     if (!points.every(point => contains(snapshot.tree.bounds, point))) return false;
     try {
       for (const locator of locators) resolve(snapshot, addressable(locator));
       return true;
-    } catch {
-      return false;
+    } catch (error) {
+      return error instanceof Fault && error.code === 'NOT_FOUND' ? false : undefined;
     }
   };
 }
@@ -524,9 +526,10 @@ class StepRunner {
           // menu belongs to the selected file row. The click that selected the
           // file is stronger evidence than the AX "selected" state, which the
           // list view does not always expose.
-          const locator = step.button === 'right'
-            ? (this.lastClickTarget ?? rightClickTarget(snapshot!, step.button, step.target as ElementLocator))
-            : (step.target as ElementLocator);
+          const target = step.target as ElementLocator;
+          const locator = step.button === 'right' && target.identifier === undefined
+            ? (this.lastClickTarget ?? rightClickTarget(snapshot!, step.button, target))
+            : target;
           const { node } = actionable(snapshot!, addressable(locator));
           let delivery;
           try {
@@ -728,18 +731,13 @@ class StepRunner {
       return focused.length === 1 ? { window: focused[0], reason: 'focused' } : undefined;
     }
     const holders: WindowInfo[] = [];
-    let unknown = 0;
     for (const candidate of candidates) {
       const snapshot = await this.desktop.snapshotWindow(candidate.id).catch(() => undefined);
-      // A tree that could not be read might be the recorded window, so it can
-      // neither prove nor deny a match; its silence leaves the title ambiguous.
-      if (!snapshot) {
-        unknown += 1;
-        continue;
-      }
-      if (test(snapshot)) holders.push(candidate);
+      const result = snapshot && test(snapshot);
+      // A failed read or an ambiguous element keeps this window in contention.
+      if (result === undefined) return undefined;
+      if (result) holders.push(candidate);
     }
-    if (unknown) return undefined;
     if (holders.length === 1) return { window: holders[0], reason: 'target' };
     if (holders.length > 1) {
       // Several windows hold the target — the same folder open twice looks the
@@ -838,8 +836,9 @@ class StepRunner {
       // cannot address; they must never redirect a recorded identifier's text
       // into whichever editable control happens to be focused.
       if (locator.identifier !== undefined) {
-        const node = actionable(snapshot!, addressable(locator)).node;
-        const delivery = await this.desktop.type(node.ref!, text);
+        const { node } = resolve(snapshot!, locator);
+        if (!node.ref || node.secure) throw new Fault('UNSAFE_TARGET', 'Type target is secure or has no action reference');
+        const delivery = await this.desktop.type(node.ref, text);
         return {
           ...(delivery === undefined ? {} : { delivery }),
           textMode: literal ? 'literal' : 'input',
