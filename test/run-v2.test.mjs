@@ -450,9 +450,12 @@ test('two windows with the recorded title stop the first bind as ambiguous', asy
   const report = await run(flow);
 
   assert.equal(report.status, 'blocked');
-  assert.equal(entry(report, 'switch-notes').status, 'blocked');
-  assert.equal(entry(report, 'switch-notes').code, 'AMBIGUOUS_TARGET');
-  assert.equal(entry(report, 'type-note').status, 'skipped');
+  // The hand-off only brings TextEdit forward; the ambiguity belongs to the
+  // step that needs one window, so the fault lands on the input step.
+  assert.equal(entry(report, 'switch-notes').status, 'passed');
+  assert.deepEqual(entry(report, 'switch-notes').focusAfter, { kind: 'app', app: textedit });
+  assert.equal(entry(report, 'type-note').status, 'blocked');
+  assert.equal(entry(report, 'type-note').code, 'AMBIGUOUS_TARGET');
   // No input is ever guessed into one of the two windows.
   assert.deepEqual(callsOf(world, 'type'), []);
   assert.deepEqual(callsOf(world, 'focusWindow'), []);
@@ -684,6 +687,30 @@ test('an app-scope focusAfter activates the app and the next step consumes it', 
   // The declared hand-off is consumed: no extra window focus before typing.
   assert.deepEqual(callsOf(world, 'focusWindow'), []);
   assert.deepEqual(callsOf(world, 'type').map(call => [call[1], call[2]]), [['@w21:e1', 'typed']]);
+});
+
+test('a window-scope focusAfter with a duplicate title still activates the app', async t => {
+  // Two TextEdit windows share the recorded title, so no single window can be
+  // proved. Activating the app is still well defined, exactly like `open -a`.
+  const twin = windowRecord({
+    id: 'w-23', app: textedit, pid: 601, title: 'QA Notes', fields: [['notes2', '@w23:e1']],
+  });
+  const { world, run } = harness(t, { focused: 'w-99', windows: [...initialWindows(), twin] });
+  const flow = parseFlowV2({
+    version: 2, id: 'activate-twin', name: 'Activate twin',
+    appPaths: { [textedit]: appPaths[textedit] },
+    steps: [{
+      id: 'activate', kind: 'activate_app', scope: { kind: 'app', app: textedit },
+      focusAfter: { kind: 'window', app: textedit, windowKey: 'notes', windowTitle: 'QA Notes' },
+    }],
+  });
+
+  const report = await run(flow);
+
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries, null, 2));
+  assert.deepEqual(entry(report, 'activate').focusAfter, { kind: 'app', app: textedit });
+  assert.match(entry(report, 'activate').message, /more than one window/);
+  assert.deepEqual(callsOf(world, 'open'), [['open', appPaths[textedit], true]]);
 });
 
 test('an app-scoped window assertion can prove an app is not running', async t => {
