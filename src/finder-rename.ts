@@ -231,17 +231,18 @@ class FinderRename {
       // The driver's answer is taken as it comes: filtering it through the
       // system's on-screen list first is what would drop a window only the
       // driver reports. A window whose process is unknown cannot be compared.
-      if (driver.some(window => window.pid === undefined && window.processInstance === undefined)) {
-        throw new Fault('RENAME_MENU_UNPROVEN', 'A driver window cannot be attributed to a process');
+      // The window owner is the PID the driver reports. Its process_instance is
+      // an opaque generation token that names no pid, so it cannot stand in for
+      // one; a window that reports no pid cannot be attributed at all.
+      if (driver.some(window => window.pid === undefined)) {
+        throw new Fault('RENAME_MENU_UNPROVEN', 'A driver window reports no owning process');
       }
-      // Two owner fields that disagree mean the answer cannot be read at all:
-      // picking one of them would let a window of another process pass as the
-      // bound one, or hide it from the comparison below.
-      if (driver.some(window => window.pid !== undefined && window.processInstance !== undefined &&
-          window.pid !== window.processInstance)) {
+      // A legacy numeric instance that disagrees with the pid makes the record
+      // unreadable: picking one owner would hide the other from the comparison.
+      if (driver.some(window => window.processInstance !== undefined && window.processInstance !== window.pid)) {
         throw new Fault('RENAME_MENU_UNPROVEN', 'A driver window reports two different owning processes');
       }
-      const owned = driver.filter(window => (window.pid ?? window.processInstance) === binding.pid);
+      const owned = driver.filter(window => window.pid === binding.pid);
       const numbers = new Set(native.numbers);
       const driverNumbers = owned.map(window => Number(window.id.startsWith('w-') ? window.id.slice(2) : NaN));
       if (driverNumbers.some(number => !Number.isInteger(number) || !numbers.has(number))) {
@@ -372,7 +373,15 @@ class FinderRename {
     if (!listFocused) this.keyboard = false;
     if (!this.keyboard) {
       await this.foreground();
-      await this.desktop.click(row.ref!, { button: 'right' });
+      // The menu that is read after this click has to be the one it opened, so
+      // the click itself has to be observed as delivered. An unverified click
+      // leaves no causal link between the row and the surface, and no input is
+      // sent.
+      const delivery = await this.desktop.click(row.ref!, { button: 'right' });
+      if (delivery !== 'delivered_verified') {
+        throw new Fault('RENAME_MENU_UNPROVEN',
+          'The right click that opens the menu was not verified as delivered');
+      }
       this.menuRow = row.ref;
     }
     return { message: this.keyboard ? 'Single selection verified for keyboard rename' : 'Opened the target row menu' };

@@ -276,25 +276,58 @@ struct RecordingFocusTests {
 
     /// A menu read proves the selection only from a row that names the recorded
     /// file. A valid AXDocument decides the folder, but it must not let a
-    /// same-named file of an expanded subfolder read as the selected target.
+    /// same-named file of an expanded subfolder, a row of another window or a
+    /// top level row without a URL read as the selected target.
     static func aMenuSelectionNeedsTheRecordedRow() {
+        let name = "manifest.json"
+        let path = "/Users/qa/Downloads/manifest.json"
         let validated = RenameDirectory.RowEvidence(
-            url: "/Users/qa/Downloads/manifest.json", name: "manifest.json",
-            selectedCount: 1, targetSelected: true, inBoundWindow: true)
-        precondition(RenameSelection.menuEvidence(validated) ==
+            url: path, name: name, selectedCount: 1, targetSelected: true, inBoundWindow: true)
+        precondition(RenameSelection.menuEvidence(validated, expectedName: name, expectedPath: path) ==
                      RenameSelection.MenuEvidence(selectedCount: 1, targetSelected: true),
                      "a validated single selection was not reported")
-        precondition(RenameSelection.menuEvidence(nil) ==
+        precondition(RenameSelection.menuEvidence(
+            nil, expectedName: name, expectedPath: path) ==
                      RenameSelection.MenuEvidence(selectedCount: nil, targetSelected: false),
                      "a missing row read as a selected target")
-        // A namesake row of another folder never reaches this function: the
-        // evidence is only built for a row that names the recorded file (see
-        // `aNestedNamesakeRowProvesNothing`).
+        // A valid AXDocument names the pinned folder, but the selected row must
+        // still be that folder's own file. The namesake below belongs to an
+        // expanded subfolder, even though it is the only selected row.
+        let namesake = RenameDirectory.RowEvidence(
+            url: "/Users/qa/Downloads/sub/manifest.json", name: name,
+            selectedCount: 1, targetSelected: true, inBoundWindow: true)
+        precondition(!RenameSelection.menuEvidence(
+            namesake, expectedName: name, expectedPath: path).targetSelected,
+                     "a namesake row of another folder read as the target")
+        // A row or list outside the bound window is no evidence about this
+        // rename, even when its own URL names the recorded file.
+        let otherWindow = RenameDirectory.RowEvidence(
+            url: path, name: name, selectedCount: 1, targetSelected: true, inBoundWindow: false)
+        precondition(!RenameSelection.menuEvidence(
+            otherWindow, expectedName: name, expectedPath: path).targetSelected,
+                     "a row of another window read as the target")
+        // The closed-menu path may fall back to a top level row without a URL;
+        // a menu press may not, because it cannot prove which file it selects.
+        let noURL = RenameDirectory.RowEvidence(
+            url: nil, name: name, selectedCount: 1, targetSelected: true, inBoundWindow: true)
+        precondition(!RenameSelection.menuEvidence(
+            noURL, expectedName: name, expectedPath: path).targetSelected,
+                     "a row without a URL read as the target")
+        // The old name has to be the recorded one: after the editor opens the
+        // row may still carry the file URL while showing the new name.
+        let renamed = RenameDirectory.RowEvidence(
+            url: path, name: "manifest-e2e.json", selectedCount: 1, targetSelected: true, inBoundWindow: true)
+        precondition(!RenameSelection.menuEvidence(
+            renamed, expectedName: name, expectedPath: path).targetSelected,
+                     "a row showing another name read as the target")
         let twoRows = RenameDirectory.RowEvidence(
-            url: "/Users/qa/Downloads/manifest.json", name: "manifest.json",
-            selectedCount: 2, targetSelected: true, inBoundWindow: true)
-        precondition(!RenameSelection.menuEvidence(twoRows).targetSelected,
+            url: path, name: name, selectedCount: 2, targetSelected: true, inBoundWindow: true)
+        precondition(!RenameSelection.menuEvidence(
+            twoRows, expectedName: name, expectedPath: path).targetSelected,
                      "a multiple selection read as the target")
+        precondition(RenameSelection.menuEvidence(
+            twoRows, expectedName: name, expectedPath: path).selectedCount == nil,
+                     "a multiple selection reported a selected count")
     }
 
     /// `kAXWindowsAttribute` lists more than windows: Finder answers with a

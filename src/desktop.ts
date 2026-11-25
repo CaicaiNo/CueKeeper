@@ -11,8 +11,18 @@ import { createDesktopWorkdir } from './workdir.js';
 export interface WindowInfo {
   id: string;
   title: string;
-  /** PID the driver reports for the window owner, when it exposes one. */
+  /**
+   * A numeric owner pid some fixtures wrote in `process_instance`. The pinned
+   * driver reports an opaque generation token there instead, so this field is
+   * only ever filled from a plain integer answer; it is not an instance token.
+   */
   processInstance?: number;
+  /**
+   * The driver's process generation token (`macos-proc-v1:<seconds>:<micros>`).
+   * It names one launch of a process, not a pid, so it is compared only against
+   * another token for the same pid — never against a pid.
+   */
+  processInstanceToken?: string;
   /** Owner PID the driver reports for the window, when it exposes one. */
   pid?: number;
   /** Whether the window is its app's front window; absent means unproven. */
@@ -187,19 +197,41 @@ function positiveInteger(value: unknown): number | undefined {
     typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : undefined;
 }
 
-function windowList(data: unknown): WindowInfo[] {
+/** The process generation token the pinned macOS driver reports for a window. */
+const processToken = /^macos-proc-v1:(\d+):(\d+)$/;
+
+/**
+ * The driver's window inventory, read exactly as the pinned driver answers it.
+ *
+ * `pid` is the window owner; `process_instance` is that process's generation
+ * token, not another pid. A token cannot be compared with a pid, so it is kept
+ * verbatim for a caller that has a token of the same process to compare it
+ * with. An answer whose instance field is neither a token nor a plain integer
+ * cannot be attributed at all, and is refused instead of reading as absent.
+ */
+export function parseWindowInventory(data: unknown): WindowInfo[] {
   if (!Array.isArray(data)) throw new Fault('BAD_RESPONSE', 'Expected a window inventory');
   return data.map(object).map(window => {
     if (typeof window.id !== 'string' || !/^w-[a-zA-Z0-9_.:-]+$/.test(window.id)) {
       throw new Fault('BAD_RESPONSE', 'Missing or invalid window ID');
     }
     const raw = window.process_instance ?? window.processInstance;
-    const processInstance = positiveInteger(raw);
+    let processInstance: number | undefined;
+    let processInstanceToken: string | undefined;
+    if (typeof raw === 'string' && processToken.test(raw)) {
+      processInstanceToken = raw;
+    } else if (raw !== undefined && raw !== null) {
+      processInstance = positiveInteger(raw);
+      if (processInstance === undefined) {
+        throw new Fault('BAD_RESPONSE', 'Invalid process instance');
+      }
+    }
     const pid = positiveInteger(window.pid);
     return {
       id: window.id,
       title: typeof window.title === 'string' ? window.title : '',
       ...(processInstance === undefined ? {} : { processInstance }),
+      ...(processInstanceToken === undefined ? {} : { processInstanceToken }),
       ...(pid === undefined ? {} : { pid }),
       ...(typeof window.is_focused === 'boolean' ? { isFocused: window.is_focused } : {}),
     };
@@ -475,17 +507,17 @@ export async function withDesktop<T>(
       async listWindows(app, timeoutMs = 3000) {
         const data = await call('list-windows', ['--app', app, '--timeout-ms', String(timeoutMs)],
           undefined, timeoutMs + 3000);
-        return windowList(data);
+        return parseWindowInventory(data);
       },
       async listAllWindows(timeoutMs = 3000) {
         const data = await call('list-windows', ['--timeout-ms', String(timeoutMs)],
           undefined, timeoutMs + 3000);
-        return windowList(data);
+        return parseWindowInventory(data);
       },
       async focusedWindow(timeoutMs = 3000) {
         const data = await call('list-windows', ['--timeout-ms', String(timeoutMs)],
           undefined, timeoutMs + 3000);
-        return windowList(data).find(window => window.isFocused === true);
+        return parseWindowInventory(data).find(window => window.isFocused === true);
       },
       async frontmostApp(timeoutMs = 2000) {
         if (process.env.CUEKEEPER_TRACE_DESKTOP) process.stderr.write('[desktop] frontmost\n');

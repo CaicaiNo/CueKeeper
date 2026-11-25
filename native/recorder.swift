@@ -953,7 +953,8 @@ final class Capture {
             // AXDocument decides the folder, but it never makes up for a row that
             // failed that check — a same-named file of an expanded subfolder must
             // not read as the selected target.
-            let evidence = RenameSelection.menuEvidence(rowSource)
+            let evidence = RenameSelection.menuEvidence(
+                rowSource, expectedName: request.expected, expectedPath: expectedFilePath)
             if let count = evidence.selectedCount { result["selectedCount"] = count }
             result["targetSelected"] = evidence.targetSelected
             return result

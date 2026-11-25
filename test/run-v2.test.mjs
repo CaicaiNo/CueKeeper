@@ -6,7 +6,7 @@ import { dirname, join, normalize } from 'node:path';
 import test from 'node:test';
 import { AppIdentitySession } from '../dist/app-identity.js';
 import { reportV2Check } from '../dist/contracts-v2.js';
-import { DesktopFault } from '../dist/desktop.js';
+import { DesktopFault, parseWindowInventory } from '../dist/desktop.js';
 import { parseFlowV2 } from '../dist/flow-v2.js';
 import { Fault, parseSnapshot, parseSurface } from '../dist/locator.js';
 import { runFlowV2 } from '../dist/run-v2.js';
@@ -124,7 +124,7 @@ function fakeWorld(options = {}) {
     },
     async listAllWindows() {
       return state.windows.map(window => ({
-        id: window.id, title: window.title, processInstance: window.pid,
+        id: window.id, title: window.title, pid: window.pid, processInstance: window.pid,
         isFocused: window.id === state.focused,
       }));
     },
@@ -1293,6 +1293,7 @@ function renameCase(t, options = {}) {
     calls.push([opts?.button === 'right' ? 'right-click' : 'click', ref]);
     opened = opts?.button === 'right';
     if (!opened) selected = true;
+    return opts?.button === 'right' ? options.rightClickDelivery ?? 'delivered_verified' : 'delivered_verified';
   };
   // While its context menu is open Finder keeps the foreground, but the folder
   // window is no longer the app's focused window. Both shapes the real driver
@@ -1326,6 +1327,9 @@ function renameCase(t, options = {}) {
   // separate answers. A test can make them disagree on purpose; the replay has
   // to notice rather than pick one.
   if (options.driverWindows) driver.listAllWindows = async () => options.driverWindows;
+  // A raw inventory is parsed by the production window reader at replay time,
+  // exactly as the driver's `list-windows` answer is.
+  if (options.driverWindowResponse) driver.listAllWindows = async () => parseWindowInventory(options.driverWindowResponse);
   if (options.cgWindows) world.probe.windows = async () => options.cgWindows;
   // A menu surface reports the bounds of the box it occupies. A queue lets a
   // retry read a different answer than the first attempt.
@@ -1815,8 +1819,8 @@ test('Finder presses no menu ref when only the driver reports another Finder win
   const c = renameCase(t, {
     menu: true, nativeOnly: true,
     driverWindows: [
-      { id: 'w-1', title: 'cuekeeper-demo', processInstance: 601, isFocused: true },
-      { id: 'w-2', title: 'Finder 另一窗口', processInstance: 601 },
+      { id: 'w-1', title: 'cuekeeper-demo', pid: 601, isFocused: true },
+      { id: 'w-2', title: 'Finder 另一窗口', pid: 601 },
     ],
     cgWindows: [{ number: 1, ownerPid: 601, title: 'cuekeeper-demo' }],
     appWindows: { complete: true, count: 1, numbers: [1], titles: ['cuekeeper-demo'] },
@@ -1842,6 +1846,88 @@ test('Finder presses no menu ref when a driver window reports two owning process
   });
   const report = await c.run();
   assert.equal(entry(report, 'rename').code, 'RENAME_MENU_UNPROVEN');
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+test('Finder stops before input when the right click that should open the menu was not verified', async t => {
+  // The click is the only thing that can tie the row to the menu that appears
+  // afterwards. An unverified delivery leaves that link unproven, so the menu
+  // is never pressed and nothing is typed.
+  const c = renameCase(t, { menu: true, nativeOnly: true, rightClickDelivery: 'delivered_unverified' });
+  const report = await c.run();
+  assert.ok(report.entries.some(e => e.code === 'RENAME_MENU_UNPROVEN'), JSON.stringify(report.entries));
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.equal(c.calls.filter(call => call[0] === 'right-click').length, 1);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+test('the driver window reader keeps a process generation token instead of reading it as a pid', () => {
+  // The pinned driver reports `pid` plus `process_instance`, an opaque launch
+  // token. Reading the token as an integer would drop it, so the inventory
+  // would lose the only evidence that distinguishes a reused pid from the
+  // process it belonged to.
+  const [window] = parseWindowInventory([
+    { id: 'w-1', title: 'cuekeeper-demo', pid: 601,
+      process_instance: 'macos-proc-v1:1700000000:250000', is_focused: true },
+  ]);
+  assert.equal(window.pid, 601);
+  assert.equal(window.processInstanceToken, 'macos-proc-v1:1700000000:250000');
+  assert.equal(window.processInstance, undefined);
+});
+
+test('Finder reads real process generation tokens and attributes windows by pid', async t => {
+  // The pinned driver reports `pid` plus an opaque `process_instance` token
+  // (`macos-proc-v1:<seconds>:<micros>`), not a second pid. The bound Finder
+  // owns w-1; w-2 belongs to another process and must not be counted as a
+  // second window of the bound Finder.
+  const c = renameCase(t, {
+    menu: true, nativeOnly: true,
+    driverWindowResponse: [
+      { id: 'w-1', title: 'cuekeeper-demo', pid: 601,
+        process_instance: 'macos-proc-v1:1700000000:250000', is_focused: true },
+      { id: 'w-2', title: 'Finder 另一窗口', pid: 999, process_instance: 'macos-proc-v1:1700000001:1' },
+    ],
+    cgWindows: [{ number: 1, ownerPid: 601, title: 'cuekeeper-demo' }],
+    appWindows: { complete: true, count: 1, numbers: [1], titles: ['cuekeeper-demo'] },
+  });
+  const report = await c.run();
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.equal(c.calls.filter(call => call[0] === 'clickSemantic').length, 1);
+  assert.deepEqual(readdirSync(c.directory), ['manifest-e2e.json']);
+});
+
+test('Finder presses no menu ref when a real driver window names no owning pid', async t => {
+  // A generation token names a launch, not a pid, so it cannot attribute the
+  // window. The inventory is unreadable and the menu is never pressed.
+  const c = renameCase(t, {
+    menu: true, nativeOnly: true,
+    driverWindowResponse: [
+      { id: 'w-1', title: 'cuekeeper-demo', process_instance: 'macos-proc-v1:1700000000:250000', is_focused: true },
+    ],
+    cgWindows: [{ number: 1, ownerPid: 601, title: 'cuekeeper-demo' }],
+    appWindows: { complete: true, count: 1, numbers: [1], titles: ['cuekeeper-demo'] },
+  });
+  const report = await c.run();
+  assert.equal(entry(report, 'rename').code, 'RENAME_MENU_UNPROVEN');
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+test('Finder stops before selecting when the driver window inventory reports a malformed process token', async t => {
+  // `process_instance: 601` is the old fixture shape, not the pinned driver's
+  // contract. Reading it as an integer would hide that the inventory cannot be
+  // attributed, so the parse refuses it and no input is sent.
+  const c = renameCase(t, {
+    menu: true, nativeOnly: true,
+    driverWindowResponse: [
+      { id: 'w-1', title: 'cuekeeper-demo', pid: 601, process_instance: 'Finder generation 1' },
+    ],
+    cgWindows: [{ number: 1, ownerPid: 601, title: 'cuekeeper-demo' }],
+    appWindows: { complete: true, count: 1, numbers: [1], titles: ['cuekeeper-demo'] },
+  });
+  const report = await c.run();
+  assert.equal(entry(report, 'select').code, 'BAD_RESPONSE');
   assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
   assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
 });

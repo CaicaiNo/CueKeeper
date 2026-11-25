@@ -100,10 +100,15 @@ enum RenameDirectory {
 /**
  * What a menu read may say about the selection.
  *
- * The row evidence is the only source: it has already proved that the row names
- * the recorded file of the pinned folder. A missing row (a namesake of another
- * folder, a row outside the bound window, no selection evidence) proves nothing,
- * and the caller must stop before pressing the menu item.
+ * The row evidence is the only source, and a menu read proves everything the
+ * closed-menu path would: the row and its list sit in the bound window, the row
+ * shows the recorded old name, the row's own URL names that exact file of the
+ * pinned folder, and the list reports that row as its only selection. A
+ * document that decided the folder cannot make up for a failed row: a
+ * same-named file of an expanded subfolder, a row of another window, or a top
+ * level row that exposes no URL all prove nothing, and the caller must stop
+ * before pressing the menu item. The selection is reported only when every one
+ * of those checks holds at once.
  */
 enum RenameSelection {
     struct MenuEvidence: Equatable {
@@ -111,8 +116,12 @@ enum RenameSelection {
         var targetSelected: Bool
     }
 
-    static func menuEvidence(_ row: RenameDirectory.RowEvidence?) -> MenuEvidence {
-        guard let row, row.selectedCount == 1, row.targetSelected else {
+    static func menuEvidence(_ row: RenameDirectory.RowEvidence?, expectedName: String,
+                             expectedPath: String) -> MenuEvidence {
+        guard let row, row.inBoundWindow, row.name == expectedName,
+              row.selectedCount == 1, row.targetSelected,
+              let url = row.url, url.hasPrefix("/"),
+              URL(fileURLWithPath: url).standardizedFileURL.path == expectedPath else {
             return MenuEvidence(selectedCount: nil, targetSelected: false)
         }
         return MenuEvidence(selectedCount: 1, targetSelected: true)
