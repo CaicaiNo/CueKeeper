@@ -44,11 +44,29 @@ function provenFolder(path: string | undefined) {
 }
 
 /**
+ * Whether a menu box was placed at the recorded pointer.
+ *
+ * macOS places a context menu with the pointer on one of its corners: the top
+ * left one normally, the bottom right one when the menu has to open up and to
+ * the left near a screen edge. AppKit tracks one menu at a time, so the click
+ * we delivered to the row is what opened the menu standing at that corner. The
+ * corner is the only link macOS exposes between an open menu and that click,
+ * and a menu that merely covers the point — one opened from another control in
+ * the same window — does not have it.
+ */
+function anchoredAt(box: { x: number; y: number; width: number; height: number }, point: Point,
+  tolerance = 12) {
+  return [
+    [box.x, box.y],
+    [box.x + box.width, box.y],
+    [box.x, box.y + box.height],
+    [box.x + box.width, box.y + box.height],
+  ].some(([x, y]) => Math.abs(x - point[0]) <= tolerance && Math.abs(y - point[1]) <= tolerance);
+}
+
+/**
  * The box an open menu occupies: the union of the bounds its surface reported.
- * A context menu is anchored at the pointer that opened it, so anchoring the
- * recorded right-click point in that box is what ties this menu to the row the
- * click was delivered to. A menu near a screen edge flips, so the anchor may be
- * any corner of the box; the tolerance only covers that corner.
+ * Its corners are where macOS may have placed the pointer that opened it.
  */
 function menuAnchor(tree: Node) {
   let box: { x: number; y: number; width: number; height: number } | undefined;
@@ -243,20 +261,29 @@ class FinderRename {
       if (!native || !native.complete || native.numbers.length !== native.count) {
         throw new Fault('RENAME_MENU_UNPROVEN', 'The menu owner window inventory is incomplete');
       }
-      let owned: WindowInfo[];
+      let driver: WindowInfo[];
       try {
-        owned = await this.resolver.ownedWindows(binding);
+        driver = await this.desktop.listAllWindows();
       } catch (error) {
         if (error instanceof Fault && error.dependency) throw error;
         throw new Fault('RENAME_MENU_UNPROVEN', 'The menu owner window inventory could not be cross-checked');
       }
+      // The driver's answer is taken as it comes: filtering it through the
+      // system's on-screen list first is what would drop a window only the
+      // driver reports. A window whose process is unknown cannot be compared.
+      if (driver.some(window => window.pid === undefined && window.processInstance === undefined)) {
+        throw new Fault('RENAME_MENU_UNPROVEN', 'A driver window cannot be attributed to a process');
+      }
+      const owned = driver.filter(window => (window.pid ?? window.processInstance) === binding.pid);
       const numbers = new Set(native.numbers);
-      if (owned.some(window => {
-        const number = Number(window.id.startsWith('w-') ? window.id.slice(2) : NaN);
-        return !Number.isInteger(number) || !numbers.has(number);
-      })) {
+      const driverNumbers = owned.map(window => Number(window.id.startsWith('w-') ? window.id.slice(2) : NaN));
+      if (driverNumbers.some(number => !Number.isInteger(number) || !numbers.has(number))) {
         throw new Fault('RENAME_MENU_UNPROVEN',
           'The native window list omits a window the driver reports; the menu owner is unclear');
+      }
+      if (driverNumbers.length !== native.count) {
+        throw new Fault('RENAME_MENU_UNPROVEN',
+          'The driver and the native window lists disagree; the menu owner is unclear');
       }
       if (native.count !== 1 || native.numbers[0] !== binding.windowNumber) {
         throw new Fault('RENAME_MENU_UNPROVEN',
@@ -283,10 +310,8 @@ class FinderRename {
       throw new Fault('RENAME_MENU_UNPROVEN', 'The open menu cannot be tied to the recorded target row');
     }
     const anchor = menuAnchor(menu.tree);
-    const tolerance = 8;
-    if (!anchor || point[0] < anchor.x - tolerance || point[0] > anchor.x + anchor.width + tolerance ||
-        point[1] < anchor.y - tolerance || point[1] > anchor.y + anchor.height + tolerance) {
-      throw new Fault('RENAME_MENU_UNPROVEN', 'The open menu is not anchored at the recorded target row');
+    if (!anchor || !anchoredAt(anchor, point)) {
+      throw new Fault('RENAME_MENU_UNPROVEN', 'The open menu was not placed at the recorded target row');
     }
     const state = await this.desktop.finderRenameState({ ...request, menu: true });
     if (state.editor) {

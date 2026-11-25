@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, normalize } from 'node:path';
 import test from 'node:test';
 import { AppIdentitySession } from '../dist/app-identity.js';
 import { reportV2Check } from '../dist/contracts-v2.js';
@@ -1322,6 +1322,14 @@ function renameCase(t, options = {}) {
     if (options.menuInventoryError) throw options.menuInventoryError;
     return options.menuApps ?? [{ pid: 601, bundleId: finder, name: 'Finder' }];
   };
+  // The driver, the system's CG inventory and the app's AX list are three
+  // separate answers. A test can make them disagree on purpose; the replay has
+  // to notice rather than pick one.
+  if (options.driverWindows) driver.listAllWindows = async () => options.driverWindows;
+  if (options.cgWindows) world.probe.windows = async () => options.cgWindows;
+  // A menu surface reports the bounds of the box it occupies. A queue lets a
+  // retry read a different answer than the first attempt.
+  const menuBounds = Array.isArray(options.menuBounds) ? [...options.menuBounds] : null;
   driver.snapshotSurface = async (surface, timeout, app) => {
     calls.push(['snapshotSurface', surface, app]);
     if (surface === 'menu') {
@@ -1335,7 +1343,8 @@ function renameCase(t, options = {}) {
         complete: true,
         ...(options.menuSurfaceApp === null ? {} : { app: options.menuSurfaceApp ?? 'Finder' }),
         ...(options.menuSurfaceWindow ? { window: options.menuSurfaceWindow } : {}),
-        tree: { role: 'menu', bounds: options.menuBounds ?? { x: 162, y: 170, width: 200, height: 140 },
+        tree: { role: 'menu', bounds: menuBounds ? menuBounds.shift() ?? { x: 162, y: 170, width: 200, height: 140 }
+          : options.menuBounds ?? { x: 162, y: 170, width: 200, height: 140 },
           children: options.items ?? [{
             role: 'menuitem', name: 'Rename', ref_id: '@menu:e' + (tries + 1), available_actions: ['Click'],
           }] },
@@ -1379,6 +1388,9 @@ function renameCase(t, options = {}) {
     // window; the native probe is asked for the window by number then.
     if (req.menu === true) assert.equal(menuOpen, true);
     else if (world.state.focused !== 'w-1') throw new Fault('FOCUS_INTERRUPTED', 'Finder lost focus');
+    // A native probe can refuse the row under the open menu (a same-named file
+    // in an expanded subfolder sits at the same point). The replay must stop.
+    if (req.menu === true && options.menuCode) throw new Fault(options.menuCode, 'The row under the open menu is not the recorded file');
     // When AXDocument is missing the native probe derives the folder from the
     // target row's AXURL. It still reports a plain folder path; the tests below
     // only care that replay pins and uses exactly that answer.
@@ -1750,34 +1762,96 @@ test('Finder presses no menu ref when the native window list names a window the 
   assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
 });
 
-test('Finder stops when a relative segment would make the folder and its child name different folders', async t => {
-  // `link` points at `real`, so `<dir>/link/../child` reads two different
-  // folders depending on whether `..` is folded textually before or after the
-  // symlink. Both folders exist: only refusing the proof keeps the rename out of
-  // the wrong one.
-  const c = renameCase(t, { menu: true, nativeOnly: true, reportedDirectory: dir => {
-    if (!existsSync(join(dir, 'link'))) {
-      mkdirSync(join(dir, 'real', 'child'), { recursive: true });
-      symlinkSync('real', join(dir, 'link'));
-    }
-    // The textually folded folder exists and even holds a file of that name, so
-    // nothing but the segment rule stops replay from typing into it.
-    if (!existsSync(join(dir, 'child'))) {
-      mkdirSync(join(dir, 'child'), { recursive: true });
-      writeFileSync(join(dir, 'child', 'manifest.json'), 'wrong contents\n');
-    }
-    return `${dir}/link/../child`;
-  } });
+test('Finder presses no menu ref when the open menu merely covers the recorded point', async t => {
+  // A 200x140 menu opened at (120,100) covers (162,170), but macOS places a
+  // context menu with the pointer on one of its corners, so this one was opened
+  // from another control in the same window.
+  const c = renameCase(t, { menu: true, nativeOnly: true, menuBounds: { x: 120, y: 100, width: 200, height: 140 } });
+  const report = await c.run();
+  assert.equal(entry(report, 'rename').code, 'RENAME_MENU_UNPROVEN');
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+test('Finder presses no menu ref when a retried menu is opened elsewhere but covers the point', async t => {
+  // The first menu is placed correctly; its ref press is not delivered, so the
+  // replay reopens the menu and reads a box that only covers the point. The
+  // retry presses nothing and types nothing.
+  const c = renameCase(t, {
+    menu: true, nativeOnly: true, refFailures: 1,
+    menuBounds: [{ x: 162, y: 170, width: 200, height: 140 }, { x: 120, y: 100, width: 200, height: 140 }],
+  });
+  const report = await c.run();
+  assert.equal(entry(report, 'rename').code, 'RENAME_MENU_UNPROVEN');
+  assert.equal(c.calls.filter(call => call[0] === 'clickSemantic').length, 1);
+  assert.equal(c.calls.filter(call => ['typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+test('Finder presses no menu ref when only the driver reports another Finder window', async t => {
+  // The driver answers with two windows of the bound process while the system
+  // inventory and the app's AX list both see one. Cross-checking the driver's
+  // raw answer is what catches it; a CG-filtered view would drop w-2 first.
+  const c = renameCase(t, {
+    menu: true, nativeOnly: true,
+    driverWindows: [
+      { id: 'w-1', title: 'cuekeeper-demo', processInstance: 601, isFocused: true },
+      { id: 'w-2', title: 'Finder 另一窗口', processInstance: 601 },
+    ],
+    cgWindows: [{ number: 1, ownerPid: 601, title: 'cuekeeper-demo' }],
+    appWindows: { complete: true, count: 1, numbers: [1], titles: ['cuekeeper-demo'] },
+  });
+  const report = await c.run();
+  assert.equal(entry(report, 'rename').code, 'RENAME_MENU_UNPROVEN');
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+test('Finder stops before input when the row under the open menu is not the recorded file', async t => {
+  // A same-named file in an expanded subfolder can be drawn at the recorded
+  // point while the pinned folder still holds the recorded file. The native
+  // probe refuses that row, and replay sends nothing.
+  const c = renameCase(t, { menu: true, nativeOnly: true, menuCode: 'RENAME_DIRECTORY_UNPROVEN' });
+  const report = await c.run();
+  assert.equal(entry(report, 'rename').code, 'RENAME_DIRECTORY_UNPROVEN');
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+test('Finder stops when a symlink makes the literal folder and the file system name different folders', async t => {
+  // `link` points at `real/nested`, so `<dir>/link/../child` reaches
+  // `<dir>/real/child` on disk while folding the text names `<dir>/child`.
+  // Both hold a `manifest.json` with different content; the fixture asserts the
+  // two readings really diverge before replay is asked about it.
+  const opts = { menu: true, nativeOnly: true };
+  const c = renameCase(t, opts);
+  mkdirSync(join(c.directory, 'real', 'nested'), { recursive: true });
+  mkdirSync(join(c.directory, 'real', 'child'), { recursive: true });
+  mkdirSync(join(c.directory, 'child'), { recursive: true });
+  symlinkSync(join('real', 'nested'), join(c.directory, 'link'));
+  writeFileSync(join(c.directory, 'real', 'child', 'manifest.json'), 'through the symlink\n');
+  writeFileSync(join(c.directory, 'child', 'manifest.json'), 'folded by text\n');
+  const literal = `${c.directory}/link/../child`;
+  // The kernel resolves the literal path through the symlink, while folding the
+  // text names another folder: prove the two readings really diverge.
+  assert.equal(statSync(literal).ino, statSync(join(c.directory, 'real', 'child')).ino);
+  assert.notEqual(statSync(literal).ino, statSync(join(c.directory, 'child')).ino);
+  assert.equal(normalize(literal), join(c.directory, 'child'));
+  assert.notEqual(readFileSync(join(c.directory, 'real', 'child', 'manifest.json'), 'utf8'),
+    readFileSync(join(c.directory, 'child', 'manifest.json'), 'utf8'));
+  opts.reportedDirectory = literal;
   const report = await c.run();
   assert.equal(entry(report, 'select').code, 'RENAME_DIRECTORY_UNPROVEN', JSON.stringify(report.entries));
   assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
   assert.equal(c.calls.filter(call => call[0] === 'right-click').length, 0);
   assert.equal(readFileSync(c.oldPath, 'utf8'), 'fixed contents\n');
-  assert.equal(readFileSync(join(c.directory, 'child', 'manifest.json'), 'utf8'), 'wrong contents\n');
+  assert.equal(readFileSync(join(c.directory, 'real', 'child', 'manifest.json'), 'utf8'), 'through the symlink\n');
+  assert.equal(readFileSync(join(c.directory, 'child', 'manifest.json'), 'utf8'), 'folded by text\n');
   assert.equal(existsSync(c.newPath), false);
 });
 
-test('Finder replays with the folder the native probe derived from the target row AXURL', async t => {  const c = renameCase(t, { menu: true, documentMissing: true, nativeOnly: true });
+test('Finder replays with the folder the native probe derived from the target row AXURL', async t => {
+  const c = renameCase(t, { menu: true, documentMissing: true, nativeOnly: true });
   const report = await c.run();
   assert.equal(report.status, 'passed', JSON.stringify(report.entries));
   // The first probe had no folder yet (no AXDocument); the fallback answer is

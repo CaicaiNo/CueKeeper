@@ -732,6 +732,11 @@ final class Capture {
     func finderRename(_ request: RenameRequest) -> [String: Any] {
         let interrupted = ["code": "FOCUS_INTERRUPTED"]
         let unproven = ["code": "RENAME_EDITOR_UNPROVEN"]
+        // A menu read only describes the window: the folder window is not
+        // focused while the menu is open, so Cmd+A and the replacement must not
+        // travel through it. A request that asks for both is refused before any
+        // window is read.
+        if request.menu == true, request.replacement != nil { return unproven }
         guard AXIsProcessTrusted(), !IsSecureEventInputEnabled(), request.point.count == 2,
               let app = NSWorkspace.shared.frontmostApplication,
               app.bundleIdentifier == "com.apple.finder", app.processIdentifier == request.pid else {
@@ -809,6 +814,20 @@ final class Capture {
             walk(folder, nil, 0)
             return found.count == 1 ? found[0] : nil
         }
+        /**
+         * Whether a row carries the recorded file, by the rule the closed-menu
+         * path already used: its own URL must name the expected file in the
+         * pinned folder. A row without a URL only qualifies when it is a top
+         * level row of that folder, never a nested file of an expanded
+         * subfolder that happens to be drawn at the same point.
+         */
+        func rowNamesRecordedFile(_ row: AXUIElement, expectedPath: String) -> Bool {
+            let raw = axAttribute(row, kAXURLAttribute as String)
+            let url = (raw as? URL)?.absoluteString ?? (raw as? String)
+            return RenameRow.namesRecordedFile(
+                url: url, disclosureLevel: axAttribute(row, "AXDisclosureLevel") as? Int,
+                expectedPath: expectedPath)
+        }
         func rowEvidence() -> RenameDirectory.RowEvidence? {
             var row: AXUIElement?
             var list: AXUIElement?
@@ -816,11 +835,19 @@ final class Capture {
             if request.menu == true {
                 // The open menu covers the recorded point, so hit-testing answers
                 // a menu item. The row is found in the bound window's own tree
-                // instead: exactly one row may contain the point.
-                guard let found = treeRowAndList() else { return nil }
+                // instead: exactly one row may contain the point, and it has to
+                // be the recorded file of the pinned folder — a same-named file
+                // in an expanded subfolder can occupy the same point.
+                guard let pinned = request.directory, let found = treeRowAndList() else { return nil }
+                let expectedFile = URL(fileURLWithPath: pinned)
+                    .appendingPathComponent(request.expected).standardizedFileURL.path
+                guard rowNamesRecordedFile(found.row, expectedPath: expectedFile),
+                      let rowName = fileItemIdentity(found.row)?.name, rowName == request.expected else {
+                    return nil
+                }
                 row = found.row
                 list = found.list
-                name = fileItemIdentity(found.row)?.name
+                name = rowName
             } else {
                 var hit: AXUIElement?
                 AXUIElementCopyElementAtPosition(axApp, Float(point.x), Float(point.y), &hit)

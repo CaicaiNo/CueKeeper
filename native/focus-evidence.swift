@@ -86,6 +86,25 @@ enum RenameDirectory {
     }
 }
 
+enum RenameRow {
+    /**
+     * Whether a row names the recorded file.
+     *
+     * The row's own URL must name that exact file in the pinned folder. A row
+     * that exposes no URL only qualifies when it is a top level row of that
+     * folder — never a same-named file of an expanded subfolder, which can be
+     * drawn at the very point the recorded row occupies. A URL that is not a
+     * readable file URL proves nothing.
+     */
+    static func namesRecordedFile(url: String?, disclosureLevel: Int?, expectedPath: String) -> Bool {
+        if let url {
+            guard let file = URL(string: url), file.isFileURL else { return false }
+            return file.standardizedFileURL.path == expectedPath
+        }
+        return disclosureLevel == 0
+    }
+}
+
 /**
  * The window evidence one focus probe can prove.
  *

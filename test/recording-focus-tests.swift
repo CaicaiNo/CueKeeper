@@ -22,7 +22,8 @@ struct RecordingFocusTests {
         onlyAnAbsolutePathIsAUsableFolder()
         aFolderNameKeepsItsCharacters()
         aRelativeSegmentProvesNoFolder()
-        print("Recording focus: 20/20 passed")
+        aNestedNamesakeRowProvesNothing()
+        print("Recording focus: 21/21 passed")
     }
 
     /// Finder's inline rename field makes the window probe fail. The app and its
@@ -248,6 +249,27 @@ struct RecordingFocusTests {
         let dotted = "/Users/qa/Downloads/v1..2"
         precondition(RenameDirectory.absolutePath(dotted) == dotted,
                      "a dotted folder name was refused")
+    }
+
+    /// The row under an open menu has to be the recorded file itself. Its own
+    /// URL must name that file; a row without one only counts as the recorded
+    /// file when it is a top level row of the pinned folder, not a same-named
+    /// file of an expanded subfolder drawn at the same point.
+    static func aNestedNamesakeRowProvesNothing() {
+        let expected = "/Users/qa/Downloads/manifest.json"
+        precondition(RenameRow.namesRecordedFile(
+            url: "file:///Users/qa/Downloads/manifest.json", disclosureLevel: 0, expectedPath: expected),
+            "the recorded file's own row was refused")
+        precondition(!RenameRow.namesRecordedFile(
+            url: "file:///Users/qa/Downloads/sub/manifest.json", disclosureLevel: 1, expectedPath: expected),
+            "a nested namesake row was accepted")
+        precondition(RenameRow.namesRecordedFile(url: nil, disclosureLevel: 0, expectedPath: expected),
+                     "a top level row without a URL was refused")
+        precondition(!RenameRow.namesRecordedFile(url: nil, disclosureLevel: 2, expectedPath: expected),
+                     "a nested row without a URL was accepted")
+        precondition(!RenameRow.namesRecordedFile(
+            url: "Downloads/manifest.json", disclosureLevel: 0, expectedPath: expected),
+            "a relative row URL was accepted")
     }
 
     /// An app whose only window has no title yet keeps it: nothing else can own
