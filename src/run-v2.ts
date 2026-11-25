@@ -12,6 +12,7 @@ import type {
 } from './contracts-v2.js';
 import { DesktopFault } from './desktop.js';
 import type { Desktop, DragEndpoint } from './desktop.js';
+import { finderRenameSteps } from './finder-rename.js';
 import { parseFlowV2 } from './flow-v2.js';
 import { InstallState } from './install-state.js';
 import type { InstallStateDeps } from './install-state.js';
@@ -51,6 +52,9 @@ export interface FlowV2RunOptions {
   /** Install/download/process evidence seam; production reads the local disk. */
   installState?: InstallState;
   installDeps?: InstallStateDeps;
+  /** Replay Finder's recorded context menu literally instead of using Return. */
+  finderRenameMenu?: boolean;
+  renameCommitTimeoutMs?: number;
   /** Streaming progress: one call per completed step. */
   onEntry?: (entry: import('./contracts-v2.js').ReportV2Entry) => void;
   /** Operator hand-off channel; a checkpoint without one blocks the run. */
@@ -166,24 +170,6 @@ function rightClickTarget(snapshot: Snapshot, button: string | undefined, locato
   return toLocator(snapshot, item[0]);
 }
 
-/**
- * A point inside the file-name column of a row. Finder's inline rename editor
- * replaces the name textfield without exposing a new AX node, so replay keeps
- * this point to click into the editor and give it keyboard focus.
- */
-function rowNamePoint(node: Node): Point | undefined {
-  if (!/^(treeitem|row|listitem|outlinerow|outlineitem)$/.test(node.role)) return undefined;
-  const cell = node.children.find(child => child.role === 'cell');
-  const label = cell?.children.find(child => /^(textfield|statictext)$/.test(child.role))
-    ?? cell?.children.find(child => child.role === 'image');
-  const bounds = label?.bounds ?? cell?.bounds;
-  if (!bounds || bounds.width < 2 || bounds.height < 2) return undefined;
-  return [
-    bounds.x + Math.min(bounds.width / 2, 24),
-    bounds.y + bounds.height / 2,
-  ];
-}
-
 /** Root-to-node chain in the window tree, or undefined when the node is absent. */
 function chainTo(tree: Node, target: Node): Node[] | undefined {
   if (tree === target) return [tree];
@@ -290,6 +276,7 @@ function recordedTitles(flow: FlowV2): Map<string, string> {
 
 class StepRunner {
   constructor(private readonly ctx: {
+    renameActions: ReturnType<typeof finderRenameSteps>;
     desktop: Desktop;
     resolver: ScopeResolver;
     signal: AbortSignal;
@@ -310,13 +297,6 @@ class StepRunner {
 
   /** The element the last left click landed on, for a container's context menu. */
   private lastClickTarget?: ElementLocator;
-  /** Where that click landed, so a rename field can be found in place. */
-  private lastClickPoint?: Point;
-  /** True after a Rename menu item opened Finder's inline editor. */
-  private inlineRename = false;
-  /** A point in the clicked row's name column, for focusing the inline editor. */
-  private lastRowNamePoint?: Point;
-
   /** Per-step file stability memory: size, mtime and when they last changed. */
   private readonly fileStability = new Map<string, { size: number; mtimeMs: number; since: number }>();
 
@@ -334,6 +314,8 @@ class StepRunner {
         throw new Fault('SYSTEM_DIALOG_VISIBLE', 'A macOS system dialog is already visible before automatic input');
       }
     }
+    const rename = this.ctx.renameActions.get(step.id);
+    if (rename) return rename();
     const outcome = await this.dispatch(step);
     return { ...outcome, ...await this.handOff(step) };
   }
@@ -374,68 +356,14 @@ class StepRunner {
    */
   private async menuStep(step: Extract<StepV2, { kind: 'click' }>): Promise<StepOutcome> {
     const target = step.target as ElementLocator;
-    const readMenu = async () => {
-      for (let attempt = 0; attempt < 20; attempt += 1) {
-        try {
-          return await this.desktop.snapshotSurface('menu');
-        } catch {
-          await sleep(100);
-        }
-      }
-      return undefined;
-    };
-    const findItem = (menu: Snapshot) => flatten(menu.tree).filter(({ node }) =>
+    await this.desktop.waitMenu(step.scope.app, true);
+    const menu = await this.desktop.snapshotSurface('menu', 2000, step.scope.app);
+    const items = flatten(menu.tree).filter(({ node }) =>
       node.role === 'menuitem' && !node.states.includes('disabled') &&
       (node.name === target.name || node.value === target.name));
-
-    let menu = await readMenu();
-    if (!menu) throw new Fault('ELEMENT_NOT_FOUND', 'The context menu did not open');
-    let items = findItem(menu);
-    if (items.length !== 1) {
-      throw new Fault('NOT_FOUND',
-        `Menu item "${target.name ?? ''}" matched ${items.length}; the context menu may not be open`);
-    }
-
-    let delivery;
-    try {
-      delivery = await this.desktop.clickSemantic(items[0].node.ref!);
-    } catch {
-      // The menu can close between the snapshot and the press. Reopen it at the
-      // recorded click point and try once more before falling back to a
-      // physical click on the item's centre.
-      if (this.lastClickPoint) {
-        await this.desktop.clickScreen(this.lastClickPoint, { button: 'right' }).catch(() => undefined);
-        await sleep(500);
-        const reopened = await readMenu();
-        if (reopened) {
-          menu = reopened;
-          items = findItem(reopened);
-          if (items.length === 1) {
-            try {
-              delivery = await this.desktop.clickSemantic(items[0].node.ref!);
-            } catch {
-              // fall through to the physical click below
-            }
-          }
-        }
-      }
-    }
-    if (delivery === undefined) {
-      const bounds = items[0]?.node.bounds;
-      if (!bounds) throw new Fault('UNSAFE_TARGET', 'Menu item has no bounds to click');
-      delivery = await this.desktop.clickScreen(
-        [bounds.x + bounds.width / 2, bounds.y + bounds.height / 2],
-        { button: step.button === 'right' ? 'right' : 'left' },
-      );
-    }
-    // A rename item turns the file name into an inline editor that the window
-    // tree does not expose. The next type step must use the keyboard focus the
-    // menu just set, not click a neighbouring file name.
-    if (/重新命名|重命名|rename/i.test(target.name ?? '')) this.inlineRename = true;
-    // The rename editor appears after the menu closes; give Finder a moment
-    // before the next step reads the window.
-    await sleep(300);
-    return delivery === undefined ? {} : { delivery };
+    if (items.length !== 1 || !items[0].node.ref) throw new Fault('NOT_FOUND', 'Expected one enabled menu item');
+    const delivery = await this.desktop.clickSemantic(items[0].node.ref);
+    return { delivery };
   }
 
   private async dispatch(step: StepV2): Promise<StepOutcome> {
@@ -464,9 +392,6 @@ class StepRunner {
         if (step.target.kind === 'element' && step.target.role === 'menuitem') {
           return this.menuStep(step);
         }
-        // Any other click ends an inline rename editor: it either commits the
-        // name or moves focus, so later typing must not use the stale focus.
-        this.inlineRename = false;
         return this.windowStep(step.scope, async (binding, snapshot) => {
           // A recorded point is the fallback for a click whose window tree could
           // not name the element. It stays replayable as physical input; an
@@ -509,14 +434,7 @@ class StepRunner {
             ];
             delivery = await this.desktop.clickPoint(snapshot!, this.targetOf(binding), point, { button: 'right' });
           }
-          if (step.button !== 'right') {
-            this.lastClickTarget = locator;
-            if (node.bounds) {
-              this.lastClickPoint = [node.bounds.x + node.bounds.width / 2, node.bounds.y + node.bounds.height / 2];
-            }
-            const namePoint = rowNamePoint(node);
-            if (namePoint) this.lastRowNamePoint = namePoint;
-          }
+          if (step.button !== 'right') this.lastClickTarget = locator;
           return delivery === undefined ? {} : { delivery };
         });
       case 'type':
@@ -524,12 +442,8 @@ class StepRunner {
       case 'key':
         return this.windowStep(step.scope, async (_binding, snapshot) => {
           const combo = [...(step.modifiers ?? []), step.key].join('+');
-          try {
-            const delivery = await this.desktop.press(combo, snapshot!);
-            return delivery === undefined ? {} : { delivery };
-          } finally {
-            if (step.key === 'return' || step.key === 'escape') this.inlineRename = false;
-          }
+          const delivery = await this.desktop.press(combo, snapshot!);
+          return delivery === undefined ? {} : { delivery };
         });
       case 'scroll':
         return this.windowStep(step.scope, async (_binding, snapshot) => {
@@ -720,85 +634,14 @@ class StepRunner {
     if (text === undefined) {
       throw new Fault('INPUT_MISSING', `Input parameter ${String(input)} has no value for this run`);
     }
+    const locator = step.target as ElementLocator;
+    if (step.scope.app === 'com.apple.finder' && !locator.name && /^(textfield|textbox)$/.test(locator.role)) {
+      throw new Fault('RENAME_EDITOR_UNPROVEN', 'An unnamed Finder editor requires a verified rename sequence');
+    }
     return this.windowStep(step.scope, async (_binding, snapshot) => {
-      const locator = step.target as ElementLocator;
-      // Finder's inline rename editor is not in the accessibility tree. The
-      // Rename menu item opened it, but a semantic menu press leaves keyboard
-      // focus on the list. Clicking the name column makes the field editor the
-      // first responder; Cmd+A then replaces the whole name, so a recorded
-      // full file name is not appended to the old base name.
-      if (this.inlineRename && !locator.name) {
-        if (this.lastRowNamePoint) {
-          await this.desktop.clickScreen(this.lastRowNamePoint).catch(() => undefined);
-          await sleep(150);
-        }
-        await this.desktop.typeFocused(text, step.scope.app, { selectAll: true });
-        this.inlineRename = false;
-        await sleep(250);
-        return { textMode: literal ? 'literal' : 'input', ...(input === undefined ? {} : { input }) };
-      }
-      // A recorded rename field has no name of its own: the editor appears in
-      // place and several textfields may exist. The focused editable control is
-      // the one that received the characters.
-      const focused = locator.name ? undefined : flatten(snapshot!.tree).find(({ node }) =>
-        node.ref && node.states.includes('focused') &&
-        /^(textfield|textbox|textarea|searchfield|combobox)$/.test(node.role));
-      // A rename editor opens exactly where the file was clicked. When AX does
-      // not flag the focused field, the editable control nearest that point is
-      // the one the recorded characters landed in.
-      // The rename editor is the text field of the file that was clicked: its
-      // value still holds the old file name. That is stronger evidence than a
-      // distance guess.
-      const clickName = this.lastClickTarget?.name;
-      const byName = focused || locator.name || !clickName ? undefined : flatten(snapshot!.tree).find(({ node }) =>
-        /^(textfield|textbox|textarea|searchfield|combobox)$/.test(node.role) &&
-        (node.value === clickName || node.name === clickName));
-      const near = focused || byName || locator.name || !this.lastClickPoint ? undefined : (() => {
-        const candidates = flatten(snapshot!.tree).filter(({ node }) =>
-          node.ref && /^(textfield|textbox|textarea|searchfield|combobox)$/.test(node.role) && node.bounds)
-          .map(entry => {
-            const b = entry.node.bounds!;
-            const dx = b.x + b.width / 2 - this.lastClickPoint![0];
-            const dy = b.y + b.height / 2 - this.lastClickPoint![1];
-            return { entry, distance: Math.hypot(dx, dy) };
-          })
-          .sort((a, b) => a.distance - b.distance);
-        return candidates[0] && candidates[0].distance <= 120 ? candidates[0].entry : undefined;
-      })();
-      // Finder's rename editor is not exposed as an editable element: AX shows
-      // only the focused cell. A focused editable control elsewhere in the
-      // window means the recorded characters belong there instead.
-      const host = focused || locator.name ? undefined : flatten(snapshot!.tree).find(({ node }) =>
-        node.ref && node.states.includes('focused') && /^(cell|row|treeitem)$/.test(node.role));
-      // The editor is usually a nameless textfield where the file name was.
-      // Click it first: it has no AX focus of its own.
-      const renameField = !this.lastClickPoint || locator.name ? undefined : flatten(snapshot!.tree)
-        .filter(({ node }) => node.role === 'textfield' && node.ref && node.bounds)
-        .map(entry => {
-          const b = entry.node.bounds!;
-          const dx = b.x + b.width / 2 - this.lastClickPoint![0];
-          const dy = b.y + b.height / 2 - this.lastClickPoint![1];
-          return { entry, distance: Math.hypot(dx, dy) };
-        })
-        .filter(candidate => candidate.distance <= 120)
-        .sort((a, b) => a.distance - b.distance)[0]?.entry;
-      if (renameField) {
-        await this.desktop.click(renameField.node.ref!).catch(() => undefined);
-        await sleep(150);
-        await this.desktop.typeFocused(text, step.scope.app);
-        await sleep(250);
-        return { textMode: literal ? 'literal' : 'input', ...(input === undefined ? {} : { input }) };
-      }
-      if (host) {
-        await this.desktop.typeFocused(text, step.scope.app);
-        await sleep(250);
-        return { textMode: literal ? 'literal' : 'input', ...(input === undefined ? {} : { input }) };
-      }
-      const direct = focused ?? byName ?? near;
-      const node = direct?.node ?? actionable(snapshot!, addressable(locator)).node;
-      // A rename field that AX does not flag as focused still needs a click to
-      // take keyboard focus before the characters are typed into it.
-      if (byName || near) await this.desktop.click(node.ref!).catch(() => undefined);
+      const focused = locator.name ? undefined : flatten(snapshot!.tree).filter(({ node }) =>
+        node.ref && !node.secure && node.states.includes('focused') && pasteEditable.has(node.role));
+      const node = focused?.length === 1 ? focused[0].node : actionable(snapshot!, addressable(locator)).node;
       const delivery = await this.desktop.type(node.ref!, text);
       return {
         ...(delivery === undefined ? {} : { delivery }),
@@ -1090,6 +933,8 @@ export async function runFlowV2(input: FlowV2, options: FlowV2RunOptions): Promi
     ...(options.launchTimeoutMs === undefined ? {} : { launchTimeoutMs: options.launchTimeoutMs }),
   });
   const runner = new StepRunner({
+    renameActions: finderRenameSteps(flow.steps, options.desktop, resolver, options.inputs ?? {}, options.signal,
+      options.finderRenameMenu ?? process.env.CUEKEEPER_FINDER_RENAME_MENU === '1', options.renameCommitTimeoutMs),
     desktop: options.desktop,
     resolver,
     signal: options.signal,

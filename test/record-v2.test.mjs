@@ -1823,6 +1823,7 @@ test('a context-menu choice and the rename editor stay on the window that opened
   // The menu press names the item, not the menu window it was drawn in.
   assert.deepEqual(flow.steps[1].target, { kind: 'element', role: 'menuitem', name: '重命名' });
   assert.equal(flow.steps[1].button, undefined);
+  assert.equal(flow.steps[1].recordedWindowNumber, FINDER_FOLDER.windowNumber);
   assert.deepEqual(flow.steps[2].target, { kind: 'element', role: 'textfield' });
   assert.equal(flowV2Check.Check(flow), true);
   assert.ok(recording.captureWarnings.some(warning => warning.code === 'WINDOW_SCOPE_FROM_LAST_WINDOW'));

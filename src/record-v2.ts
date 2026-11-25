@@ -650,6 +650,8 @@ export class GlobalRecording {
     }
     this.push({
       kind: 'click', scope, target,
+      ...(scope.app === 'com.apple.finder' && target.kind === 'element' && target.role === 'menuitem'
+        ? { recordedWindowNumber: binding.windowNumber } : {}),
       ...(count > 1 ? { count } : {}),
       ...(button === 'right' ? { button } : {}),
     });
@@ -923,7 +925,7 @@ export class GlobalRecording {
     const renaming = (last?.kind === 'key' && last.key === 'r' &&
         (last.modifiers ?? []).includes('meta')) ||
       (last?.kind === 'click' && last.target?.kind === 'element' &&
-        last.target.role === 'menuitem' && /重命名|rename/i.test(last.target.name ?? ''));
+        last.target.role === 'menuitem' && /^(?:重新命名|重命名|rename)$/i.test(last.target.name ?? ''));
     const base = renaming ? 'filename' : 'text';
     let name = renaming ? base : `${base}_1`;
     let suffix = 2;

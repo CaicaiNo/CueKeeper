@@ -10,7 +10,12 @@ struct RecordingFocusTests {
         aSheetIsASurfaceOfTheWindowThatOwnsIt()
         anUntitledSurfaceIsNotANewWindow()
         anOnlyUntitledWindowKeepsItsOwnScope()
-        print("Recording focus: 7/7 passed")
+        theWindowDocumentNamesItsFolder()
+        aMissingDocumentFallsBackToTheRowParent()
+        aMultipleSelectionHasNoSingleFolder()
+        anUnreadableRowURLCannotProveAFolder()
+        aNonAbsoluteDocumentFallsBackToTheRow()
+        print("Recording focus: 12/12 passed")
     }
 
     /// Finder's inline rename field makes the window probe fail. The app and its
@@ -80,6 +85,52 @@ struct RecordingFocusTests {
             role: "AXWindow", subrole: "AXStandardWindow", title: "cuekeeper-demo",
             mainTitle: "cuekeeper-demo", isMainWindow: true)
         precondition(!titled, "a titled window was reported as a surface")
+    }
+
+    /// A folder window that exposes AXDocument names the folder directly; the
+    /// row's file URL is irrelevant.
+    static func theWindowDocumentNamesItsFolder() {
+        let folder = RenameDirectory.resolve(
+            document: "/Users/qa/Downloads", rowURL: "/Users/qa/Downloads/manifest.json", selectedCount: 1)
+        precondition(folder == "/Users/qa/Downloads", "document folder became \(String(describing: folder))")
+    }
+
+    /// Finder folder windows do not always expose AXDocument. The target row's
+    /// own file URL still names the file, so its parent is the rename folder.
+    static func aMissingDocumentFallsBackToTheRowParent() {
+        let folder = RenameDirectory.resolve(
+            document: nil, rowURL: "/Users/qa/Downloads/manifest.json", selectedCount: 0)
+        precondition(folder == "/Users/qa/Downloads", "row folder became \(String(describing: folder))")
+        let selected = RenameDirectory.resolve(
+            document: nil, rowURL: "/Users/qa/Downloads/manifest.json", selectedCount: 1)
+        precondition(selected == "/Users/qa/Downloads", "single selection became \(String(describing: selected))")
+    }
+
+    /// Multiple selected rows can belong to different folders (search results,
+    /// expanded subfolders). No single folder is provable.
+    static func aMultipleSelectionHasNoSingleFolder() {
+        let folder = RenameDirectory.resolve(
+            document: nil, rowURL: "/Users/qa/Downloads/manifest.json", selectedCount: 2)
+        precondition(folder == nil, "a multiple selection produced \(String(describing: folder))")
+    }
+
+    /// A row without a file URL, or one that names a relative path, proves no
+    /// folder at all — the caller must report the directory as unproven.
+    static func anUnreadableRowURLCannotProveAFolder() {
+        let missing = RenameDirectory.resolve(document: nil, rowURL: nil, selectedCount: 1)
+        precondition(missing == nil, "a missing row URL produced \(String(describing: missing))")
+        let relative = RenameDirectory.resolve(document: nil, rowURL: "Downloads/manifest.json", selectedCount: 1)
+        precondition(relative == nil, "a relative row URL produced \(String(describing: relative))")
+    }
+
+    /// A document that is not an absolute path is not a folder; the row still
+    /// is, so the fallback is used. With neither source there is no answer.
+    static func aNonAbsoluteDocumentFallsBackToTheRow() {
+        let fallback = RenameDirectory.resolve(
+            document: "Downloads", rowURL: "/Users/qa/Downloads/manifest.json", selectedCount: 1)
+        precondition(fallback == "/Users/qa/Downloads", "relative document became \(String(describing: fallback))")
+        let nothing = RenameDirectory.resolve(document: "Downloads", rowURL: nil, selectedCount: 1)
+        precondition(nothing == nil, "relative document alone produced \(String(describing: nothing))")
     }
 
     /// An app whose only window has no title yet keeps it: nothing else can own

@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { promisify } from 'node:util';
+import { captureHelperPath } from './manual-checkpoint.js';
 import { Fault, contains, object, parseSnapshot, parseSurface } from './locator.js';
 import type { Node, Point, Snapshot } from './locator.js';
 import type { Delivery, Ensure, Target } from './contracts.js';
@@ -25,6 +25,12 @@ export interface RunningApp {
   pid: number;
   bundleId?: string;
   name?: string;
+}
+
+/** The application that owns the foreground, read without moving focus. */
+export interface FrontmostApp {
+  pid: number;
+  bundleId?: string;
 }
 
 export interface ClickOptions {
@@ -62,6 +68,22 @@ export type ClipboardRead =
   | { type: 'text'; text: string }
   | { type: 'image' | 'file_urls' | 'empty' };
 
+export interface FinderRenameRequest {
+  pid: number;
+  windowNumber: number;
+  point: Point;
+  expected: string;
+  directory?: string;
+}
+
+export interface FinderRenameState {
+  directory: string;
+  editor: boolean;
+  selectedCount?: number;
+  targetSelected?: boolean;
+  listFocused?: boolean;
+}
+
 export interface Desktop {
   snapshot(target: Target, timeoutMs?: number, windowId?: string, exactWindow?: boolean): Promise<Snapshot>;
   property(node: Node, property: 'text' | 'value' | 'visible', timeoutMs?: number): Promise<string | boolean | undefined>;
@@ -77,7 +99,7 @@ export interface Desktop {
   /** Physical press, move and release between two endpoints; requires headed mode. */
   drag(snapshot: Snapshot, target: Target, from: DragEndpoint, to: DragEndpoint, options: DragOptions): Promise<Delivery | undefined>;
   type(ref: string, text: string): Promise<Delivery | undefined>;
-  press(combo: string, snapshot: Snapshot): Promise<Delivery | undefined>;
+  press(combo: string, snapshot: Pick<Snapshot, 'windowId'>, options?: { headed: false }): Promise<Delivery | undefined>;
   /** Put keyboard focus on one element before a clipboard paste. */
   focus(ref: string): Promise<void>;
   /** Read the plain-text clipboard without writing anything. */
@@ -93,16 +115,20 @@ export interface Desktop {
    * focus. Absent when the driver does not report `is_focused` at all.
    */
   focusedWindow?(timeoutMs?: number): Promise<WindowInfo | undefined>;
+  /**
+   * The application the system reports as frontmost, read natively without
+   * moving focus. Unlike `focusedWindow`, it survives a transient surface (a
+   * context menu) that is not a window of its own.
+   */
+  frontmostApp?(timeoutMs?: number): Promise<FrontmostApp | undefined>;
   /** Read-only application inventory, for mapping a window's owner PID to a bundle ID. */
   listApps(timeoutMs?: number): Promise<RunningApp[]>;
   /** Window-only calls; no bundle ID is resolved by the driver. */
   snapshotWindow(windowId: string, title?: string, timeoutMs?: number): Promise<Snapshot>;
-  /** Menu/menubar surfaces, which have no window of their own. */
-  snapshotSurface(surface: 'menu' | 'menubar', timeoutMs?: number): Promise<Snapshot>;
-  /** A physical click at a screen point, with no window binding of its own. */
-  clickScreen(point: Point, options?: { button?: 'left' | 'right' }): Promise<Delivery | undefined>;
-  /** Type into the keyboard focus, for controls that AX does not expose. */
-  typeFocused(text: string, app?: string, options?: { selectAll?: boolean }): Promise<void>;
+  snapshotSurface(surface: 'focused' | 'menu' | 'menubar', timeoutMs?: number, app?: string): Promise<Snapshot>;
+  waitMenu(app: string, open: boolean): Promise<void>;
+  finderRenameState(request: FinderRenameRequest): Promise<FinderRenameState>;
+  typeFocused(text: string, request: FinderRenameRequest): Promise<void>;
   /** Semantic AX press with no physical delivery, for transient menus. */
   clickSemantic(ref: string): Promise<Delivery | undefined>;
   focusWindow(windowId: string, timeoutMs?: number): Promise<void>;
@@ -305,6 +331,30 @@ export async function withDesktop<T>(
       return result;
     };
 
+    async function finderRename(request: FinderRenameRequest, replacement?: string): Promise<FinderRenameState> {
+      if (process.env.CUEKEEPER_TRACE_DESKTOP) {
+        process.stderr.write(replacement === undefined ? '[desktop] finderRenameState\n' : '[desktop] typeFocused Cmd+A\n');
+      }
+      const raw = await new Promise<string>((resolve, reject) => {
+        const child = execFile(captureHelperPath(), ['--finder-rename'], {
+          signal: options.signal, encoding: 'utf8', timeout: 2500,
+        }, (error, stdout) => error ? reject(new Fault('RENAME_PROBE_UNAVAILABLE',
+          'The Finder focus probe is unavailable; rebuild the recorder helper')) : resolve(stdout));
+        child.stdin?.on('error', () => {});
+        child.stdin?.end(JSON.stringify({ ...request, replacement }));
+      });
+      const data = object(JSON.parse(raw));
+      if (typeof data.code === 'string') throw new Fault(data.code, 'Finder could not verify the rename target');
+      if (typeof data.editor !== 'boolean' || typeof data.directory !== 'string') {
+        throw new Fault('RENAME_PROBE_UNAVAILABLE', 'Missing Finder focus evidence');
+      }
+      return {
+        editor: data.editor, directory: data.directory,
+        selectedCount: typeof data.selectedCount === 'number' ? data.selectedCount : undefined,
+        targetSelected: data.targetSelected === true, listFocused: data.listFocused === true,
+      };
+    }
+
     // Coordinate input is global, so it re-focuses the bound window and
     // re-reads it before delivery. Scrolling at a point needs the same guard.
     const requirePoint = async (current: Snapshot, target: Target, point: Point) => {
@@ -400,6 +450,23 @@ export async function withDesktop<T>(
           undefined, timeoutMs + 3000);
         return windowList(data).find(window => window.isFocused === true);
       },
+      async frontmostApp(timeoutMs = 2000) {
+        if (process.env.CUEKEEPER_TRACE_DESKTOP) process.stderr.write('[desktop] frontmost\n');
+        const raw = await new Promise<string>((resolve, reject) => {
+          const child = execFile(captureHelperPath(), ['--frontmost'], {
+            signal: options.signal, encoding: 'utf8', timeout: timeoutMs,
+          }, (error, stdout) => error ? reject(new Fault('FRONTMOST_UNAVAILABLE',
+            'The frontmost-application probe is unavailable; rebuild the recorder helper')) : resolve(stdout));
+          child.stdin?.on('error', () => {});
+          child.stdin?.end();
+        });
+        const data = object(JSON.parse(raw));
+        if (typeof data.pid !== 'number' || !Number.isInteger(data.pid) || data.pid <= 0) return undefined;
+        return {
+          pid: data.pid,
+          ...(typeof data.bundleId === 'string' && data.bundleId ? { bundleId: data.bundleId } : {}),
+        };
+      },
       async listApps(timeoutMs = 3000) {
         const data = await call('list-apps', ['--timeout-ms', String(timeoutMs)],
           undefined, timeoutMs + 3000);
@@ -435,39 +502,18 @@ export async function withDesktop<T>(
         // the semantic AX press lands inside it.
         return act('click', [ref], undefined, false);
       },
-      async typeFocused(text, app, { selectAll = false } = {}) {
-        // Finder's rename editor is not in the accessibility tree, so the
-        // driver cannot address it. System Events types into whatever holds
-        // keyboard focus, which is the editor the menu item just opened — but
-        // only when the app is frontmost: a replay runs from a terminal that
-        // would otherwise receive the keystrokes.
-        if (app) {
-          await promisify(execFile)('/usr/bin/osascript', [
-            '-e', `tell application id "${app}" to activate`,
-            '-e', 'delay 0.2',
-          ]).catch(() => undefined);
-        }
-        // Cmd+A must be a real key event. The driver's `press meta+a` resolves
-        // the app's Select All menu item and would select files, not the text.
-        if (selectAll) {
-          await promisify(execFile)('/usr/bin/osascript', [
-            '-e', 'tell application "System Events" to keystroke "a" using command down',
-            '-e', 'delay 0.1',
-          ]);
-        }
-        const escaped = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-        await promisify(execFile)('/usr/bin/osascript', [
-          '-e', `tell application "System Events" to keystroke "${escaped}"`,
-        ]);
+      finderRenameState: finderRename,
+      async typeFocused(text, request) { await finderRename(request, text); },
+      async waitMenu(app, open) {
+        const args = [open ? '--menu' : '--menu-closed', '--app', app, '--timeout', '2000'];
+        if (process.env.CUEKEEPER_TRACE_DESKTOP) process.stderr.write(`[desktop] wait ${args.join(' ')}\n`);
+        await call('wait', args, undefined, 3000);
       },
-      clickScreen(point, { button = 'left' } = {}) {
-        return act('mouse-click', [
-          '--xy', point.join(','), ...(button === 'right' ? ['--button', 'right'] : []),
-        ]);
-      },
-      async snapshotSurface(surface, timeoutMs = 3000) {
+      async snapshotSurface(surface, timeoutMs = 3000, app) {
+        if (process.env.CUEKEEPER_TRACE_DESKTOP) process.stderr.write(`[desktop] snapshot --surface ${surface}\n`);
         const data = await call('snapshot', [
-          '--surface', surface, '--include-bounds', '--max-depth', '20', '--timeout-ms', String(timeoutMs),
+          '--surface', surface, ...(app ? ['--app', app] : []),
+          '--include-bounds', '--max-depth', '20', '--timeout-ms', String(timeoutMs),
         ], undefined, timeoutMs + 3000);
         return parseSurface(data);
       },
@@ -575,7 +621,7 @@ export async function withDesktop<T>(
       // (ACTION_FAILED) while native controls accept both. Headless replay
       // keeps the original path.
       type: (ref, input) => act('type', [ref, '--stdin'], input, options.headed),
-      press: (combo, current) => act('press', [combo, '--window-id', current.windowId]),
+      press: (combo, current, mode) => act('press', [combo, '--window-id', current.windowId], undefined, mode?.headed),
     });
   } finally {
     await rm(state, { recursive: true, force: true });
@@ -641,7 +687,7 @@ export function offlineDesktop(data: unknown, expected: Target): Desktop {
       throw new Fault('WINDOW_MISMATCH', 'Offline fixtures do not include an application inventory');
     },
     async snapshotSurface() { throw new Fault('WINDOW_MISMATCH', 'Offline fixtures do not include menus'); },
-    async clickScreen() { throw new Fault('WINDOW_MISMATCH', 'Offline fixtures cannot click screen points'); },
+    waitMenu: mutate, finderRenameState: mutate,
     async typeFocused() { throw new Fault('WINDOW_MISMATCH', 'Offline fixtures cannot type into the desktop'); },
     async clickSemantic() { throw new Fault('WINDOW_MISMATCH', 'Offline fixtures cannot click menus'); },
     async snapshotWindow(windowId, title) {

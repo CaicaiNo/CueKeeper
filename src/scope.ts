@@ -120,10 +120,10 @@ export class ScopeResolver {
    * so a retitled or moved window keeps its key and a same-titled new window
    * cannot capture it.
    */
-  async resolveWindow(scope: WindowScope): Promise<WindowBinding> {
+  async resolveWindow(scope: WindowScope, exact = false): Promise<WindowBinding> {
     this.signal.throwIfAborted();
     const existing = this.windows.get(scope.windowKey);
-    if (existing) return this.refresh(existing);
+    if (existing) return this.refresh(existing, exact);
     const app = await this.requireRunning(scope.app);
     const identity = this.identityFor(scope.app);
     const owned = await identity.ownedWindows(this.desktop);
@@ -133,6 +133,7 @@ export class ScopeResolver {
     }
     let chosen = matches[0];
     let rebound = false;
+    if (!chosen && exact) throw new Fault('WINDOW_CHANGED', 'The recorded window is missing');
     if (!chosen && scope.app === 'com.apple.finder') {
       // Finder's sidebar view ("最近使用") is a window title the replay can
       // reopen: the recorded click on that view only exists because the view
@@ -195,7 +196,7 @@ export class ScopeResolver {
     }
   }
 
-  private async refresh(binding: WindowBinding): Promise<WindowBinding> {
+  private async refresh(binding: WindowBinding, exact = false): Promise<WindowBinding> {
     const identity = this.identityFor(binding.app);
     // The inventory already proves the instance and every window's owner, so a
     // single read decides whether the bound window is still open.
@@ -211,6 +212,7 @@ export class ScopeResolver {
     // the folder is reopened). Rebind the same app's window when the recorded
     // title matches, or when that app has exactly one window, and mark the
     // binding so the report can say a rebind happened.
+    if (exact) throw new Fault('WINDOW_CHANGED', 'The bound window disappeared during rename');
     const byTitle = owned.filter(window => titleOf(window) === binding.title);
     const chosen = byTitle.length === 1 ? byTitle[0] : owned.length === 1 ? owned[0] : undefined;
     if (!chosen) {

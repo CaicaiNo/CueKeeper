@@ -184,7 +184,7 @@ final class Capture {
     }
 
     /** The layer-0 CGWindow of one AX window, matched by its frame. */
-    private func windowNumber(for axWindow: AXUIElement, pid: Int32) -> Int? {
+    private func windowNumber(for axWindow: AXUIElement, pid: Int32, exact: Bool = false) -> Int? {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
                                                    kCGNullWindowID) as? [[String: Any]] else { return nil }
         let owned = list.filter {
@@ -193,16 +193,18 @@ final class Capture {
         }
         if let position = axPoint(axWindow, kAXPositionAttribute as String),
            let size = axSize(axWindow, kAXSizeAttribute as String) {
+            var matches: [Int] = []
             for entry in owned {
                 guard let bounds = entry[kCGWindowBounds as String] as? NSDictionary,
                       let rect = CGRect(dictionaryRepresentation: bounds),
                       abs(rect.minX - position.x) <= 4, abs(rect.minY - position.y) <= 4,
                       abs(rect.width - size.width) <= 8, abs(rect.height - size.height) <= 8,
                       let number = (entry[kCGWindowNumber as String] as? NSNumber)?.intValue else { continue }
-                return number
+                matches.append(number)
             }
+            if matches.count == 1 || (!exact && !matches.isEmpty) { return matches.first }
         }
-        if owned.count == 1, let number = (owned[0][kCGWindowNumber as String] as? NSNumber)?.intValue {
+        if !exact && owned.count == 1, let number = (owned[0][kCGWindowNumber as String] as? NSNumber)?.intValue {
             return number
         }
         return nil
@@ -683,10 +685,10 @@ final class Capture {
      * are read — never kAXValueAttribute — so a secure field's content never
      * enters the stream, and no window tree is walked.
      */
-    private func focusElementEvidence(_ application: NSRunningApplication? = nil) -> [String: Any]? {
+    private func focusElementEvidence(_ application: NSRunningApplication? = nil, element supplied: AXUIElement? = nil) -> [String: Any]? {
         guard let targetPid = focusPid ?? application?.processIdentifier else { return nil }
         let axApp = AXUIElementCreateApplication(targetPid)
-        guard let element = axElement(axApp, kAXFocusedUIElementAttribute as String) else { return nil }
+        guard let element = supplied ?? axElement(axApp, kAXFocusedUIElementAttribute as String) else { return nil }
         let role = axString(element, kAXRoleAttribute as String)
         let subrole = axString(element, kAXSubroleAttribute as String)
         var evidence: [String: Any] = [:]
@@ -708,6 +710,167 @@ final class Capture {
                                   Int(size.width.rounded()), Int(size.height.rounded())]
         }
         return evidence.isEmpty ? nil : evidence
+    }
+
+    // Replay reads only the bound Finder folder and the element at its name column.
+    // The replacement is delivered to that AX object, even if focus moves meanwhile.
+    struct RenameRequest: Decodable {
+        let pid: Int32
+        let windowNumber: Int
+        let point: [Double]
+        let expected: String
+        let replacement: String?
+        let directory: String?
+    }
+
+    func finderRename(_ request: RenameRequest) -> [String: Any] {
+        let interrupted = ["code": "FOCUS_INTERRUPTED"]
+        let unproven = ["code": "RENAME_EDITOR_UNPROVEN"]
+        guard AXIsProcessTrusted(), !IsSecureEventInputEnabled(), request.point.count == 2,
+              let app = NSWorkspace.shared.frontmostApplication,
+              app.bundleIdentifier == "com.apple.finder", app.processIdentifier == request.pid else {
+            return interrupted
+        }
+        let axApp = AXUIElementCreateApplication(request.pid)
+        func folderWindow() -> AXUIElement? {
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == request.pid,
+                  let focused = axElement(axApp, kAXFocusedWindowAttribute as String) else { return nil }
+            let owner = isTransientSurface(focused, axApp: axApp) ? owningWindow(focused) : focused
+            guard let owner, windowNumber(for: owner, pid: request.pid, exact: true) == request.windowNumber
+                else { return nil }
+            return owner
+        }
+        guard let folder = folderWindow() else { return interrupted }
+        let point = CGPoint(x: request.point[0], y: request.point[1])
+        // AXDocument names a folder window's folder, but Finder does not always
+        // expose it. Fall back to the target row's own file URL and take its
+        // parent. The name check is only needed while the folder is still being
+        // derived: once the caller pins request.directory, the commit editor
+        // already shows the new name and its row still carries the old file URL.
+        func documentPath() -> String? {
+            let document = axAttribute(folder, kAXDocumentAttribute as String)
+            let url = (document as? URL) ?? (document as? String).flatMap { URL(string: $0) }
+            guard let url, url.isFileURL else { return nil }
+            return url.path
+        }
+        func rowDirectory() -> (path: String, selectedCount: Int?)? {
+            var hit: AXUIElement?
+            AXUIElementCopyElementAtPosition(axApp, Float(point.x), Float(point.y), &hit)
+            guard let hit else { return nil }
+            if request.directory == nil, fileItemIdentity(hit)?.name != request.expected { return nil }
+            var node: AXUIElement? = hit
+            var row: AXUIElement?
+            var selectedCount: Int?
+            var depth = 0
+            while let current = node, depth < 12 {
+                let role = axString(current, kAXRoleAttribute as String)
+                if row == nil, role == "AXRow" || role == "AXOutlineRow" { row = current }
+                if role == "AXOutline" || role == "AXTable" || role == "AXList" {
+                    if let selected = axAttribute(current, kAXSelectedRowsAttribute as String) as? [AXUIElement] {
+                        selectedCount = selected.count
+                    }
+                    break
+                }
+                if role == "AXWindow" || role == "AXApplication" { break }
+                node = axElement(current, kAXParentAttribute as String)
+                depth += 1
+            }
+            guard let row, let raw = axAttribute(row, kAXURLAttribute as String) else { return nil }
+            let file = (raw as? URL) ?? (raw as? String).flatMap { URL(string: $0) }
+            guard let file, file.isFileURL else { return nil }
+            return (file.path, selectedCount)
+        }
+        let document = documentPath()
+        let rowSource = document == nil ? rowDirectory() : nil
+        guard let directory = RenameDirectory.resolve(
+                document: document, rowURL: rowSource?.path, selectedCount: rowSource?.selectedCount),
+              request.directory == nil || directory == request.directory else {
+            return ["code": "RENAME_DIRECTORY_UNPROVEN"]
+        }
+        let expectedFilePath = URL(fileURLWithPath: directory)
+            .appendingPathComponent(request.expected).standardizedFileURL.path
+        var result: [String: Any] = ["directory": directory, "editor": false]
+        func provedEditor() -> AXUIElement? {
+            var writable = DarwinBoolean(false)
+            guard !IsSecureEventInputEnabled(), let current = folderWindow(), CFEqual(current, folder),
+                  let field = axElement(axApp, kAXFocusedUIElementAttribute as String),
+                  let fieldWindow = axElement(field, kAXWindowAttribute as String),
+                  CFEqual(fieldWindow, folder) || owningWindow(fieldWindow).map({ CFEqual($0, folder) }) == true,
+                  let evidence = focusElementEvidence(app, element: field),
+                  evidence["secure"] as? Bool != true, evidence["role"] as? String == "AXTextField",
+                  AXUIElementIsAttributeSettable(field, kAXSelectedTextAttribute as CFString, &writable) == .success,
+                  writable.boolValue, axAttribute(field, kAXSelectedTextRangeAttribute as String) != nil,
+                  let pos = axPoint(field, kAXPositionAttribute as String),
+                  let size = axSize(field, kAXSizeAttribute as String),
+                  CGRect(origin: pos, size: size).contains(point),
+                  axString(field, kAXValueAttribute as String) == request.expected else { return nil }
+            return field
+        }
+        if let field = provedEditor() {
+            result["editor"] = true
+            if let replacement = request.replacement {
+                guard !replacement.isEmpty, replacement.utf8.count <= 255,
+                      replacement.rangeOfCharacter(from: .controlCharacters) == nil,
+                      !replacement.contains("/"), !replacement.contains(":"),
+                      let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
+                      let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false),
+                      provedEditor().map({ CFEqual(field, $0) }) == true else { return unproven }
+                down.flags = .maskCommand
+                up.flags = .maskCommand
+                down.postToPid(request.pid)
+                up.postToPid(request.pid)
+                // The select-all event is asynchronous. Only a full, observed
+                // text selection qualifies for replacement (including extension).
+                for _ in 0..<20 {
+                    guard provedEditor().map({ CFEqual(field, $0) }) == true else { return unproven }
+                    if axString(field, kAXSelectedTextAttribute as String) == request.expected {
+                        guard AXUIElementSetAttributeValue(field, kAXSelectedTextAttribute as CFString,
+                                                          replacement as CFString) == .success else { return unproven }
+                        return result
+                    }
+                    Thread.sleep(forTimeInterval: 0.01)
+                }
+                return unproven
+            }
+            return result
+        }
+        if request.replacement != nil { return unproven }
+
+        var hit: AXUIElement?
+        AXUIElementCopyElementAtPosition(axApp, Float(point.x), Float(point.y), &hit)
+        var row: AXUIElement?
+        let hitName = hit.flatMap(fileItemIdentity)?.name == request.expected
+        // Query the file list containing the target, never Finder's sidebar.
+        for _ in 0..<12 {
+            guard let element = hit else { break }
+            let role = axString(element, kAXRoleAttribute as String)
+            if role == "AXRow" || role == "AXOutlineRow" {
+                // Nested files in expanded subfolders do not belong to AXDocument.
+                let fileURL = axAttribute(element, kAXURLAttribute as String)
+                let file = (fileURL as? URL) ?? (fileURL as? String).flatMap { URL(string: $0) }
+                let pathMatches = file?.isFileURL == true &&
+                    file?.standardizedFileURL.path == expectedFilePath
+                let topLevel = (axAttribute(element, "AXDisclosureLevel") as? Int) == 0
+                guard row == nil, file == nil ? topLevel : pathMatches else { break }
+                row = element
+            }
+            if let row, hitName, role == "AXOutline" || role == "AXTable" || role == "AXList",
+               let selected = axAttribute(element, kAXSelectedRowsAttribute as String) as? [AXUIElement],
+               let listWindow = axElement(element, kAXWindowAttribute as String), CFEqual(listWindow, folder) {
+                var focus = axElement(axApp, kAXFocusedUIElementAttribute as String)
+                for _ in 0..<8 {
+                    guard let node = focus else { break }
+                    if CFEqual(node, element) { result["listFocused"] = true; break }
+                    if axString(node, kAXRoleAttribute as String) == "AXTextField" { break }
+                    focus = axElement(node, kAXParentAttribute as String)
+                }
+                result["selectedCount"] = selected.count
+                result["targetSelected"] = selected.contains { CFEqual($0, row) }
+                break
+            }
+            hit = axElement(element, kAXParentAttribute as String)
+        }
+        return result
     }
 
     /** The bound instance, or nil when no path identity was requested. */
@@ -1574,6 +1737,26 @@ struct RecorderCommand {
             let accessibility = AXIsProcessTrusted()
             let inputMonitoring = CGPreflightListenEventAccess()
             print("{\"accessibility\":\(accessibility),\"inputMonitoring\":\(inputMonitoring)}")
+            exit(0)
+        }
+        if args.count == 2, args[1] == "--finder-rename" {
+            guard let request = try? JSONDecoder().decode(Capture.RenameRequest.self,
+                    from: FileHandle.standardInput.readDataToEndOfFile()) else { exit(2) }
+            let capture = Capture(app: "com.apple.finder", window: request.windowNumber, pid: request.pid,
+                                  bundlePath: nil, showIndicator: false, sound: false, traceClicks: false)
+            capture.emit(capture.finderRename(request))
+            return
+        }
+        // Read-only frontmost application probe. A Finder context menu is its
+        // own surface, so the folder window stops being the focused window even
+        // though Finder still owns the foreground; this answers who is in front
+        // without requiring a focused window. Needs no TCC grant and moves
+        // nothing.
+        if args.count == 2, args[1] == "--frontmost" {
+            let app = NSWorkspace.shared.frontmostApplication
+            let pid = app?.processIdentifier ?? 0
+            let bundle = (app?.bundleIdentifier ?? "").replacingOccurrences(of: "\"", with: "")
+            print("{\"pid\":\(pid),\"bundleId\":\"\(bundle)\"}")
             exit(0)
         }
         // Read-only secure input probe for replay hand-off verification. It

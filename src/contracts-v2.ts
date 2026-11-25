@@ -179,6 +179,7 @@ const stepBase = { id, atMs: stepAtMs };
 
 const clickStep = object({
   ...stepBase, kind: T.Literal('click'), scope: windowScope, focusAfter,
+  recordedWindowNumber: T.Optional(T.Integer({ minimum: 1 })),
   target: clickTarget, count: clickCount, button: clickButton,
 });
 // `text` is an explicit literal; `input` names a runtime parameter. A step has
