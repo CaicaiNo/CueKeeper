@@ -1723,6 +1723,13 @@ export async function recordGlobal(
         recording.endBursts();
         continue;
       }
+      // The helper announces a pickup so v1 can read the tree the gesture starts
+      // from. v2 reads that tree when the drop arrives, so the announcement only
+      // closes the current burst and is never an event of its own.
+      if (data.kind === 'drag_start') {
+        recording.endBursts();
+        continue;
+      }
       const event = parseCaptureEvent(data);
       await checkAccessibility(event);
       await recording.add(event);

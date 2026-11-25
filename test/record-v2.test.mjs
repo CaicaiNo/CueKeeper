@@ -1539,6 +1539,24 @@ test('record --global writes a v2 flow with scopes and no typed content', { skip
   assert.equal(run.response.data.snapshotReads, 1);
 });
 
+test('record --global consumes a drag pickup and saves the drag step', { skip: process.platform !== 'darwin' }, t => {
+  const data = fixture('cross-window-drag');
+  // The helper announces every pickup before the drop. A same-window drag from
+  // the note body back to itself must yield one drag step, not a protocol error
+  // for the announcement the helper sends first.
+  const drag = { ...data.events[0], to: [1300, 112], path: [], toWindowNumber: 21 };
+  const run = globalCliFixture(t, {
+    events: [{ kind: 'drag_start' }, drag],
+    snapshots: { 21: data.snapshots['21'] },
+  });
+  assert.equal(run.code, 0, (run.stderr || '') + JSON.stringify(run.response));
+  assert.ok(run.written, 'the CLI must write the flow');
+  const flow = JSON.parse(run.written);
+  assert.deepEqual(flow.steps.map(step => step.kind), ['drag']);
+  assert.equal(run.response.data.partial, undefined);
+  assert.equal(run.response.error, undefined);
+});
+
 test('record --global names a click after its window retitled', { skip: process.platform !== 'darwin' }, t => {
   const data = fixture('finder-list-view-file-click');
   // The click carries no element evidence, so it is named by reading the tree.
