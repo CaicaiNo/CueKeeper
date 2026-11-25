@@ -12,6 +12,8 @@ import { appIconPng } from './apps.js';
 import { loadBaseline } from './assertion.js';
 import { BuiltinBehaviorError, builtinBehaviorViews } from './builtin-behaviors.js';
 import { fixtureAppPath, offlineDesktop, withDesktop } from './desktop.js';
+import { captureHealth } from './doctor.js';
+import type { RecordHealth } from './doctor.js';
 import { readJson, writeNew } from './files.js';
 import { hashFlow, plan } from './flow.js';
 import { dryRunFlowV2, hashFlowV2, isFlowV2, pointTargetSteps } from './flow-v2.js';
@@ -228,6 +230,8 @@ export async function startWorkbench(options: {
    */
   pickWindow?: (scope: WindowScope, signal: AbortSignal) => Promise<WindowPickResult>;
   record?: { cli?: string; recordings?: string; stopTimeoutMs?: number };
+  /** Tests replace the read-only probe that gates the record button. */
+  recordHealth?: () => Promise<RecordHealth>;
   /** The login-keychain store the page writes an administrator password to. */
   sudoStore?: SudoKeychainStore;
   /** Tests replace the batch's blue overlay; the release spawns the helper. */
@@ -525,6 +529,13 @@ export async function startWorkbench(options: {
         return send(response, 403, { error: 'Use the local CueKeeper workbench' });
       }
       return send(response, 200, recorder.status());
+    }
+    // Read-only like the status poll: no desktop access, no permission prompt.
+    if (request.method === 'GET' && path === '/api/record/health') {
+      if (request.headers['x-cuekeeper-workbench'] !== '1') {
+        return send(response, 403, { error: 'Use the local CueKeeper workbench' });
+      }
+      return send(response, 200, await (options.recordHealth ?? (() => captureHealth()))());
     }
     if (request.method !== 'POST' || request.headers.origin !== origin ||
         request.headers['x-cuekeeper-workbench'] !== '1' || request.headers['content-type'] !== 'application/json') {

@@ -38,6 +38,14 @@ stopButton.className = 'btn btn-error btn-sm';
 stopButton.textContent = '停止录制';
 stopButton.hidden = true;
 
+const recheckButton = document.createElement('button');
+recheckButton.type = 'button';
+recheckButton.id = 'record-recheck';
+recheckButton.className = 'btn btn-sm';
+recheckButton.textContent = '重新检查';
+recheckButton.title = '重新检查录制器、权限与 agent-desktop';
+recheckButton.hidden = true;
+
 const timer = document.createElement('span');
 timer.id = 'record-timer';
 timer.className = 'record-timer';
@@ -49,7 +57,7 @@ message.className = 'record-message';
 message.setAttribute('role', 'status');
 message.setAttribute('aria-live', 'polite');
 
-bar.append(countdown, startButton, stopButton, timer, message);
+bar.append(countdown, startButton, stopButton, recheckButton, timer, message);
 const anchor = document.getElementById('session-name');
 if (anchor) anchor.after(bar);
 else document.querySelector('.topbar')?.append(bar);
@@ -57,7 +65,10 @@ else document.querySelector('.topbar')?.append(bar);
 const state = {
   recording: false, busy: false, elapsedMs: 0, countdownMs: 0, path: '', steps: undefined,
   stopFailed: false,
+  // The last `GET /api/record/health`: undefined until the first probe answers.
+  health: undefined,
 };
+let healthShown = false;
 let pollId;
 let tickId;
 
@@ -82,12 +93,15 @@ function renderTimer() {
 }
 
 function render() {
-  startButton.disabled = state.recording || state.busy;
+  const blocked = state.health !== undefined && state.health.ok === false;
+  startButton.disabled = state.recording || state.busy || blocked;
   startButton.textContent = state.busy && !state.recording ? '正在开始…' : '开始录制';
   stopButton.hidden = !state.recording;
   stopButton.disabled = state.busy;
   stopButton.textContent = state.busy && state.recording ? '正在保存…' : '停止录制';
   countdown.disabled = state.recording || state.busy;
+  recheckButton.hidden = !blocked;
+  recheckButton.disabled = state.busy || state.recording;
   renderTimer();
 }
 
@@ -102,6 +116,40 @@ function errorText(result) {
   const partialPath = result.partial === true ? (result.flowPath || state.path) : '';
   return `${result.error.code}：${result.error.message}` +
     (partialPath ? `（部分录制：${partialPath}）` : '');
+}
+
+/** Why the record button is off, plus the first doctor next step. */
+function healthText(health) {
+  const first = Array.isArray(health.blocking) ? health.blocking[0] : undefined;
+  const steps = Array.isArray(health.nextSteps) ? health.nextSteps : [];
+  const detail = first ? `${first.label}：${first.detail}` : '录制环境未就绪';
+  return `录制不可用（${detail}）${steps.length ? `。${steps[0]}` : ''}`;
+}
+
+/** Read-only probe: the recorder binary, its permissions, and agent-desktop. */
+async function loadHealth() {
+  try {
+    state.health = await request('api/record/health', 'GET');
+  } catch {
+    // A server without the health route leaves the record button usable.
+    state.health = undefined;
+    render();
+    return;
+  }
+  if (state.health.ok === false) {
+    const checks = Array.isArray(state.health.blocking) ? state.health.blocking : [];
+    const steps = Array.isArray(state.health.nextSteps) ? state.health.nextSteps : [];
+    startButton.title = checks.map(check => `${check.label}：${check.detail}`).concat(steps).join('\n');
+    setMessage(healthText(state.health), true);
+    healthShown = true;
+  } else {
+    startButton.title = '';
+    if (healthShown) {
+      setMessage('');
+      healthShown = false;
+    }
+  }
+  render();
 }
 
 async function request(route, method = 'POST', body) {
@@ -241,13 +289,13 @@ async function finish() {
 
 startButton.addEventListener('click', () => { void begin(); });
 stopButton.addEventListener('click', () => { void finish(); });
+recheckButton.addEventListener('click', () => { void loadHealth(); });
 
 render();
 // A page loaded while a recording runs shows its timer instead of hiding it.
 void (async () => {
-  try {
-    await poll();
-  } catch (error) {
-    setMessage(`无法读取录制状态：${error.message}`, true);
-  }
+  await poll();
+  // After the status: a blocked recorder explains itself, but a stale outcome
+  // from the last recording still owns the message while the probe is healthy.
+  await loadHealth();
 })();

@@ -80,6 +80,16 @@ export interface CapturePreflight {
   issues: PreflightIssue[];
 }
 
+export interface RecordHealth {
+  ok: boolean;
+  /** Failed doctor checks that keep `record --global` from starting. */
+  blocking: DoctorCheck[];
+  nextSteps: string[];
+}
+
+/** The checks a `record --global` run needs; anything else does not gate it. */
+const recordingGate = new Set(['recorder', 'accessibility', 'input-monitoring', 'agent-desktop']);
+
 function defaultRoot() {
   return resolve(fileURLToPath(new URL('../', import.meta.url)));
 }
@@ -399,4 +409,16 @@ export function preflightFault({ issues }: CapturePreflight) {
   if (!issues.length) return undefined;
   const lines = issues.flatMap(issue => [issue.message, ...(issue.hint ? [issue.hint] : [])]);
   return new Fault(issues[0].code, lines.join('\n'), true);
+}
+
+/**
+ * The doctor subset that gates a web-driven recording: the recorder binary, its
+ * macOS permissions, and the pinned agent-desktop build. The workbench asks
+ * before it offers the record button, so a missing binary shows up on page load
+ * instead of as a fault on the first press.
+ */
+export async function captureHealth(options: DoctorOptions = {}): Promise<RecordHealth> {
+  const report = await diagnose(options);
+  const blocking = report.checks.filter(check => check.status === 'fail' && recordingGate.has(check.id));
+  return { ok: blocking.length === 0, blocking, nextSteps: report.nextSteps };
 }
