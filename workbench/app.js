@@ -94,6 +94,15 @@ const appIconSrc = id => {
   return info.icon ?? `/app-icon/${encodeURIComponent(id)}`;
 };
 const appLabel = id => appInfo(id)?.label ?? state.appNames[id] ?? id;
+// Icon-only buttons keep their label in aria-label/title; a disabled control
+// does not receive hover events in every engine, so the explanation lives on
+// a wrapper that still does.
+const libraryAction = (label, onclick, options) => {
+  const node = button(label, onclick, options);
+  return options.disabled
+    ? el('span', { className: 'library-action-disabled', title: options.title ?? label }, node)
+    : node;
+};
 const appMissing = id => Boolean(id && state.catalog) && !state.catalog.some(app => app.bundleId === id) && !state.session?.apps?.[id];
 const appTitle = id => {
   const info = appInfo(id);
@@ -546,15 +555,17 @@ function renderInspector() {
         if (!items.length) return [];
         return [
           el('h3', { className: 'inspector-heading library-group-heading' }, title),
-          ...items.map(item => el('article', { className: 'library-item stack-list card bg-base-300' },
-            el('h3', { className: 'card-title' }, item.name,
-              el('span', {
-                className: `badge badge-soft badge-sm ${item.group === 'finder' ? 'badge-info' : 'badge-ghost'}`,
-              }, item.appLabel)),
-            muted(item.summary),
+          ...items.map(item => el('article', { className: 'library-item card bg-base-300' },
+            el('div', { className: 'library-body' },
+              el('h3', { className: 'card-title' }, item.name,
+                el('span', {
+                  className: `badge badge-soft badge-sm ${item.group === 'finder' ? 'badge-info' : 'badge-ghost'}`,
+                }, item.appLabel)),
+              muted(item.summary)),
             el('div', { className: 'actions' },
-              button('插入', () => builtinInsertDialog(item), {
-                style: 'small primary', icon: 'plus', disabled: !canInsert,
+              libraryAction('插入', () => builtinInsertDialog(item), {
+                style: 'small primary', icon: 'plus', iconOnly: true, disabled: !canInsert,
+                title: canInsert ? '插入到草稿' : '需要 v2 录制文件才能插入内置行为',
               })))),
         ];
       }),
@@ -564,18 +575,26 @@ function renderInspector() {
         const compatible = state.session?.version === 1 && sameTarget(item.target, state.session.target);
         const { behavior } = item;
         const shell = item.shell ?? { steps: 0, privileged: 0 };
-        return el('article', { className: 'library-item stack-list card bg-base-300' },
-          el('h3', { className: 'card-title' }, behavior.name,
-            shell.privileged
-              ? el('span', { className: 'badge badge-soft badge-sm badge-warning' }, '提权')
-              : shell.steps
-                ? el('span', { className: 'badge badge-soft badge-sm badge-ghost' }, 'Shell')
-                : undefined),
-          muted(`${behavior.steps.length} 步 · ${appLabel(item.target.app)}`),
+        const blocked = !state.session ? '导入运行目录后才能' : '此行为属于另一目标窗口，无法';
+        return el('article', { className: 'library-item card bg-base-300' },
+          el('div', { className: 'library-body' },
+            el('h3', { className: 'card-title' }, behavior.name,
+              shell.privileged
+                ? el('span', { className: 'badge badge-soft badge-sm badge-warning' }, '提权')
+                : shell.steps
+                  ? el('span', { className: 'badge badge-soft badge-sm badge-ghost' }, 'Shell')
+                  : undefined),
+            muted(`${behavior.steps.length} 步 · ${appLabel(item.target.app)}`),
+            compatible || !state.session ? undefined : muted('此行为属于另一目标窗口。')),
           el('div', { className: 'actions' },
-            button('引用', () => behaviorDialog(item, false), { style: 'small', icon: 'plus', disabled: !compatible }),
-            button('复制到草稿', () => behaviorDialog(item, true), { style: 'small', icon: 'copy', disabled: !compatible })),
-          compatible || !state.session ? undefined : muted('此行为属于另一目标窗口。'));
+            libraryAction('引用', () => behaviorDialog(item, false), {
+              style: 'small', icon: 'layers', iconOnly: true, disabled: !compatible,
+              title: compatible ? '引用到草稿' : `${blocked}引用`,
+            }),
+            libraryAction('复制到草稿', () => behaviorDialog(item, true), {
+              style: 'small', icon: 'copy', iconOnly: true, disabled: !compatible,
+              title: compatible ? '复制到草稿' : `${blocked}复制`,
+            })));
       }) : [empty('从时间线选中多个动作，合并到行为库。')])));
     return;
   }

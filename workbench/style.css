@@ -314,7 +314,10 @@ button:disabled { cursor: default; }
 .meta-grid dt { color: var(--muted); }
 .meta-grid dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 .actions { display: flex; flex-wrap: wrap; gap: 7px; }
-.library-item { padding: 14px; overflow-wrap: anywhere; }
+.library-item.card { display: flex; flex-direction: row; align-items: center; gap: 10px; padding: 14px; overflow-wrap: anywhere; }
+.library-body { display: flex; flex: 1 1 auto; flex-direction: column; gap: 3px; min-width: 0; }
+.library-item .actions { flex: none; flex-wrap: nowrap; align-self: center; }
+.library-action-disabled { display: inline-flex; }
 .library-item .card-title { font-size: 13px; }
 .library-item .card-title .badge { margin-left: auto; }
 .library-group-heading { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
