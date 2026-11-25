@@ -97,6 +97,28 @@ enum RenameDirectory {
  * makes the whole answer incomplete rather than silently smaller — a caller that
  * wants to rule out other owners must not read a partial list as a complete one.
  */
+/**
+ * What a menu read may say about the selection.
+ *
+ * The row evidence is the only source: it has already proved that the row names
+ * the recorded file of the pinned folder. A missing row (a namesake of another
+ * folder, a row outside the bound window, no selection evidence) proves nothing,
+ * and the caller must stop before pressing the menu item.
+ */
+enum RenameSelection {
+    struct MenuEvidence: Equatable {
+        var selectedCount: Int?
+        var targetSelected: Bool
+    }
+
+    static func menuEvidence(_ row: RenameDirectory.RowEvidence?) -> MenuEvidence {
+        guard let row, row.selectedCount == 1, row.targetSelected else {
+            return MenuEvidence(selectedCount: nil, targetSelected: false)
+        }
+        return MenuEvidence(selectedCount: 1, targetSelected: true)
+    }
+}
+
 enum AppWindowInventory {
     struct Answer: Equatable {
         var complete: Bool

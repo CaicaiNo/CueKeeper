@@ -887,7 +887,11 @@ final class Capture {
         // validated one a missing document uses; a valid document still wins and
         // a valid one that disagrees with the pinned folder is still refused by
         // resolve without consulting the row.
-        let rowSource = RenameDirectory.absolutePath(document) == nil ? rowEvidence() : nil
+        // A menu read also needs the row evidence even when the document names
+        // the folder: the selection proof below comes from that validated row,
+        // never from the document.
+        let rowSource = request.menu == true || RenameDirectory.absolutePath(document) == nil
+            ? rowEvidence() : nil
         guard let directory = RenameDirectory.resolve(
                 document: document, row: rowSource,
                 expected: request.directory == nil ? request.expected : nil,
@@ -943,15 +947,15 @@ final class Capture {
         }
         if request.replacement != nil { return unproven }
         if request.menu == true {
-            // The menu covers the point and holds focus, so the selection is
-            // read from the bound window's tree: the same single row and list
-            // the folder fallback would use. Missing evidence leaves both keys
-            // out, which the caller reads as unproven.
-            if let found = treeRowAndList() {
-                let selected = axAttribute(found.list, kAXSelectedRowsAttribute as String) as? [AXUIElement]
-                result["selectedCount"] = selected?.count
-                result["targetSelected"] = selected?.contains { CFEqual($0, found.row) } == true
-            }
+            // The menu covers the point and holds focus, so the selection comes
+            // from the same validated row evidence the folder fallback uses: the
+            // row has to name the recorded file of the pinned folder. A valid
+            // AXDocument decides the folder, but it never makes up for a row that
+            // failed that check — a same-named file of an expanded subfolder must
+            // not read as the selected target.
+            let evidence = RenameSelection.menuEvidence(rowSource)
+            if let count = evidence.selectedCount { result["selectedCount"] = count }
+            result["targetSelected"] = evidence.targetSelected
             return result
         }
 

@@ -43,48 +43,6 @@ function provenFolder(path: string | undefined) {
   return path;
 }
 
-/**
- * Whether a menu box was placed at the recorded pointer.
- *
- * macOS places a context menu with the pointer on one of its corners: the top
- * left one normally, the bottom right one when the menu has to open up and to
- * the left near a screen edge. AppKit tracks one menu at a time, so the click
- * we delivered to the row is what opened the menu standing at that corner. The
- * corner is the only link macOS exposes between an open menu and that click,
- * and a menu that merely covers the point — one opened from another control in
- * the same window — does not have it.
- */
-function anchoredAt(box: { x: number; y: number; width: number; height: number }, point: Point,
-  tolerance = 12) {
-  return [
-    [box.x, box.y],
-    [box.x + box.width, box.y],
-    [box.x, box.y + box.height],
-    [box.x + box.width, box.y + box.height],
-  ].some(([x, y]) => Math.abs(x - point[0]) <= tolerance && Math.abs(y - point[1]) <= tolerance);
-}
-
-/**
- * The box an open menu occupies: the union of the bounds its surface reported.
- * Its corners are where macOS may have placed the pointer that opened it.
- */
-function menuAnchor(tree: Node) {
-  let box: { x: number; y: number; width: number; height: number } | undefined;
-  const visit = (node: Node) => {
-    const b = node.bounds;
-    if (b) {
-      const x = box ? Math.min(box.x, b.x) : b.x;
-      const y = box ? Math.min(box.y, b.y) : b.y;
-      const right = box ? Math.max(box.x + box.width, b.x + b.width) : b.x + b.width;
-      const bottom = box ? Math.max(box.y + box.height, b.y + b.height) : b.y + b.height;
-      box = { x, y, width: right - x, height: bottom - y };
-    }
-    for (const child of node.children) visit(child);
-  };
-  visit(tree);
-  return box;
-}
-
 async function absent(path: string) {
   try { await lstat(path); } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
@@ -152,6 +110,8 @@ class FinderRename {
   private newName = '';
   /** True from a successful menu wait until the menu is confirmed closed. */
   private menuOpen = false;
+  /** The row ref the menu-opening right click was delivered to. */
+  private menuRow?: string;
 
   constructor(private desktop: Desktop, private resolver: ScopeResolver, private menu: Click,
     private target: ElementLocator, private type: Type, private inputs: Readonly<Record<string, string>>,
@@ -274,6 +234,13 @@ class FinderRename {
       if (driver.some(window => window.pid === undefined && window.processInstance === undefined)) {
         throw new Fault('RENAME_MENU_UNPROVEN', 'A driver window cannot be attributed to a process');
       }
+      // Two owner fields that disagree mean the answer cannot be read at all:
+      // picking one of them would let a window of another process pass as the
+      // bound one, or hide it from the comparison below.
+      if (driver.some(window => window.pid !== undefined && window.processInstance !== undefined &&
+          window.pid !== window.processInstance)) {
+        throw new Fault('RENAME_MENU_UNPROVEN', 'A driver window reports two different owning processes');
+      }
       const owned = driver.filter(window => (window.pid ?? window.processInstance) === binding.pid);
       const numbers = new Set(native.numbers);
       const driverNumbers = owned.map(window => Number(window.id.startsWith('w-') ? window.id.slice(2) : NaN));
@@ -304,14 +271,20 @@ class FinderRename {
   private async proveMenuTarget(menu: Snapshot, binding: WindowBinding) {
     const request = this.request;
     if (!request?.directory) throw new Fault('RENAME_DIRECTORY_UNPROVEN', 'The recorded folder was never proven');
+    // Where a menu is drawn is not what opened it: a menu from another control
+    // can sit at the same point. Only the surface naming the element it was
+    // opened from ties it to the right click this replay delivered, so a surface
+    // that names no origin (or names another element) stops here.
+    if (!menu.originRef) {
+      throw new Fault('RENAME_MENU_UNPROVEN', 'The open menu does not name the element it was opened from');
+    }
+    if (!this.menuRow || menu.originRef !== this.menuRow) {
+      throw new Fault('RENAME_MENU_UNPROVEN', 'The open menu was opened from another element');
+    }
     const snapshot = await this.resolver.snapshot(binding);
     const { point } = this.targetRow(snapshot);
     if (point[0] !== request.point[0] || point[1] !== request.point[1]) {
       throw new Fault('RENAME_MENU_UNPROVEN', 'The open menu cannot be tied to the recorded target row');
-    }
-    const anchor = menuAnchor(menu.tree);
-    if (!anchor || !anchoredAt(anchor, point)) {
-      throw new Fault('RENAME_MENU_UNPROVEN', 'The open menu was not placed at the recorded target row');
     }
     const state = await this.desktop.finderRenameState({ ...request, menu: true });
     if (state.editor) {
@@ -400,6 +373,7 @@ class FinderRename {
     if (!this.keyboard) {
       await this.foreground();
       await this.desktop.click(row.ref!, { button: 'right' });
+      this.menuRow = row.ref;
     }
     return { message: this.keyboard ? 'Single selection verified for keyboard rename' : 'Opened the target row menu' };
   }

@@ -28,6 +28,12 @@ export interface Snapshot {
    */
   ownerWindowId?: string;
   ownerWindowTitle?: string;
+  /**
+   * The element the driver says the surface was opened from, when it names one.
+   * A context menu that names the element under the pointer is what ties it to
+   * the click that opened it; a surface that names nothing proves no origin.
+   */
+  originRef?: string;
 }
 
 export interface Located {
@@ -129,11 +135,20 @@ export function parseSurface(data: unknown): Snapshot {
     ownerWindowId = window.id;
     ownerWindowTitle = typeof window.title === 'string' ? window.title : '';
   }
+  let originRef: string | undefined;
+  const rawOrigin = input.origin_ref ?? (input.origin === undefined ? undefined : object(input.origin).ref_id);
+  if (rawOrigin !== undefined) {
+    if (typeof rawOrigin !== 'string' || !/^@[a-z\d]+:e\d+$/i.test(rawOrigin)) {
+      throw new Fault('BAD_RESPONSE', 'Surface snapshot names an invalid origin element');
+    }
+    originRef = rawOrigin;
+  }
   return {
     windowId: ownerWindowId ?? '',
     tree: parseNode(input.tree, 0),
     ...(ownerApp === undefined ? {} : { ownerApp }),
     ...(ownerWindowId === undefined ? {} : { ownerWindowId, ownerWindowTitle }),
+    ...(originRef === undefined ? {} : { originRef }),
   };
 }
 

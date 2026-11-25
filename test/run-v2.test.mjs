@@ -1330,6 +1330,7 @@ function renameCase(t, options = {}) {
   // A menu surface reports the bounds of the box it occupies. A queue lets a
   // retry read a different answer than the first attempt.
   const menuBounds = Array.isArray(options.menuBounds) ? [...options.menuBounds] : null;
+  const menuOrigins = Array.isArray(options.menuOriginRefs) ? [...options.menuOriginRefs] : null;
   driver.snapshotSurface = async (surface, timeout, app) => {
     calls.push(['snapshotSurface', surface, app]);
     if (surface === 'menu') {
@@ -1339,10 +1340,16 @@ function renameCase(t, options = {}) {
         const row = world.state.windows[0].data.tree.children[0].children[0];
         row.children[0].children[1].bounds = { x: 400, y: 160, width: 120, height: 20 };
       }
+      // The driver names the element the menu was opened from. Replay only
+      // accepts a menu that names the row its right click was delivered to; a
+      // surface that names nothing or another element proves no origin.
+      const origin = menuOrigins ? menuOrigins.shift()
+        : options.menuOriginRef === undefined ? '@w1:e3' : options.menuOriginRef;
       return parseSurface({
         complete: true,
         ...(options.menuSurfaceApp === null ? {} : { app: options.menuSurfaceApp ?? 'Finder' }),
         ...(options.menuSurfaceWindow ? { window: options.menuSurfaceWindow } : {}),
+        ...(origin === null ? {} : { origin_ref: origin }),
         tree: { role: 'menu', bounds: menuBounds ? menuBounds.shift() ?? { x: 162, y: 170, width: 200, height: 140 }
           : options.menuBounds ?? { x: 162, y: 170, width: 200, height: 140 },
           children: options.items ?? [{
@@ -1705,11 +1712,21 @@ test('Finder presses no menu ref when Finder changes folders under the open menu
   assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
 });
 
-test('Finder presses no menu ref when the open menu is anchored elsewhere in the window', async t => {
-  // Same Finder process, same window, row still at the recorded point: a menu
-  // opened by another control does not grow out of that point, so it is not the
-  // menu this replay opened and its Rename item is not pressed.
-  const c = renameCase(t, { menu: true, nativeOnly: true, menuBounds: { x: 600, y: 420, width: 200, height: 140 } });
+test('Finder presses no menu ref when the open menu names no element it was opened from', async t => {
+  // Same Finder process, same window, row still at the recorded point, and the
+  // menu even sits at that point: without the surface naming its origin there
+  // is nothing tying it to the right click this replay delivered.
+  const c = renameCase(t, { menu: true, nativeOnly: true, menuOriginRef: null });
+  const report = await c.run();
+  assert.equal(entry(report, 'rename').code, 'RENAME_MENU_UNPROVEN');
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+test('Finder presses no menu ref when the open menu was opened from another element', async t => {
+  // The surface names its origin, but that element is the list, not the row the
+  // right click was delivered to.
+  const c = renameCase(t, { menu: true, nativeOnly: true, menuOriginRef: '@w1:e2' });
   const report = await c.run();
   assert.equal(entry(report, 'rename').code, 'RENAME_MENU_UNPROVEN');
   assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
@@ -1762,24 +1779,27 @@ test('Finder presses no menu ref when the native window list names a window the 
   assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
 });
 
-test('Finder presses no menu ref when the open menu merely covers the recorded point', async t => {
-  // A 200x140 menu opened at (120,100) covers (162,170), but macOS places a
-  // context menu with the pointer on one of its corners, so this one was opened
-  // from another control in the same window.
-  const c = renameCase(t, { menu: true, nativeOnly: true, menuBounds: { x: 120, y: 100, width: 200, height: 140 } });
+test('Finder presses no menu ref when a neighbouring menu names no origin', async t => {
+  // The reviewer's shape: the menu's corner sits 8pt away from the recorded
+  // point and it would cover it. Position alone is not provenance, so the press
+  // stops before any input.
+  const c = renameCase(t, {
+    menu: true, nativeOnly: true, menuOriginRef: null,
+    menuBounds: { x: 154, y: 162, width: 200, height: 140 },
+  });
   const report = await c.run();
   assert.equal(entry(report, 'rename').code, 'RENAME_MENU_UNPROVEN');
   assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
   assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
 });
 
-test('Finder presses no menu ref when a retried menu is opened elsewhere but covers the point', async t => {
-  // The first menu is placed correctly; its ref press is not delivered, so the
-  // replay reopens the menu and reads a box that only covers the point. The
-  // retry presses nothing and types nothing.
+test('Finder presses no menu ref when a retried menu names no origin', async t => {
+  // The first menu names the row, so its ref press is attempted; the delivery
+  // fails, the replay reopens the menu, and the second surface names no origin.
+  // The retry presses nothing and types nothing.
   const c = renameCase(t, {
     menu: true, nativeOnly: true, refFailures: 1,
-    menuBounds: [{ x: 162, y: 170, width: 200, height: 140 }, { x: 120, y: 100, width: 200, height: 140 }],
+    menuOriginRefs: ['@w1:e3', null],
   });
   const report = await c.run();
   assert.equal(entry(report, 'rename').code, 'RENAME_MENU_UNPROVEN');
@@ -1797,6 +1817,25 @@ test('Finder presses no menu ref when only the driver reports another Finder win
     driverWindows: [
       { id: 'w-1', title: 'cuekeeper-demo', processInstance: 601, isFocused: true },
       { id: 'w-2', title: 'Finder 另一窗口', processInstance: 601 },
+    ],
+    cgWindows: [{ number: 1, ownerPid: 601, title: 'cuekeeper-demo' }],
+    appWindows: { complete: true, count: 1, numbers: [1], titles: ['cuekeeper-demo'] },
+  });
+  const report = await c.run();
+  assert.equal(entry(report, 'rename').code, 'RENAME_MENU_UNPROVEN');
+  assert.equal(c.calls.filter(call => ['clickSemantic', 'typeFocused', 'press'].includes(call[0])).length, 0);
+  assert.deepEqual(readdirSync(c.directory), ['manifest.json']);
+});
+
+test('Finder presses no menu ref when a driver window reports two owning processes', async t => {
+  // w-2 carries pid 999 and processInstance 601 while the bound Finder is 601.
+  // Reading one of the two fields would either let it pass as the bound window
+  // or drop it before the comparison, so the answer is refused as unreadable.
+  const c = renameCase(t, {
+    menu: true, nativeOnly: true,
+    driverWindows: [
+      { id: 'w-1', title: 'cuekeeper-demo', pid: 601, processInstance: 601, isFocused: true },
+      { id: 'w-2', title: 'Finder 另一窗口', pid: 999, processInstance: 601 },
     ],
     cgWindows: [{ number: 1, ownerPid: 601, title: 'cuekeeper-demo' }],
     appWindows: { complete: true, count: 1, numbers: [1], titles: ['cuekeeper-demo'] },

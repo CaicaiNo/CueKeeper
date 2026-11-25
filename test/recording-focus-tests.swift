@@ -24,7 +24,8 @@ struct RecordingFocusTests {
         aRelativeSegmentProvesNoFolder()
         aNestedNamesakeRowProvesNothing()
         onlyRealWindowsCountAsMenuOwners()
-        print("Recording focus: 22/22 passed")
+        aMenuSelectionNeedsTheRecordedRow()
+        print("Recording focus: 23/23 passed")
     }
 
     /// Finder's inline rename field makes the window probe fail. The app and its
@@ -271,6 +272,29 @@ struct RecordingFocusTests {
         precondition(!RenameRow.namesRecordedFile(
             url: "Downloads/manifest.json", disclosureLevel: 0, expectedPath: expected),
             "a relative row URL was accepted")
+    }
+
+    /// A menu read proves the selection only from a row that names the recorded
+    /// file. A valid AXDocument decides the folder, but it must not let a
+    /// same-named file of an expanded subfolder read as the selected target.
+    static func aMenuSelectionNeedsTheRecordedRow() {
+        let validated = RenameDirectory.RowEvidence(
+            url: "/Users/qa/Downloads/manifest.json", name: "manifest.json",
+            selectedCount: 1, targetSelected: true, inBoundWindow: true)
+        precondition(RenameSelection.menuEvidence(validated) ==
+                     RenameSelection.MenuEvidence(selectedCount: 1, targetSelected: true),
+                     "a validated single selection was not reported")
+        precondition(RenameSelection.menuEvidence(nil) ==
+                     RenameSelection.MenuEvidence(selectedCount: nil, targetSelected: false),
+                     "a missing row read as a selected target")
+        // A namesake row of another folder never reaches this function: the
+        // evidence is only built for a row that names the recorded file (see
+        // `aNestedNamesakeRowProvesNothing`).
+        let twoRows = RenameDirectory.RowEvidence(
+            url: "/Users/qa/Downloads/manifest.json", name: "manifest.json",
+            selectedCount: 2, targetSelected: true, inBoundWindow: true)
+        precondition(!RenameSelection.menuEvidence(twoRows).targetSelected,
+                     "a multiple selection read as the target")
     }
 
     /// `kAXWindowsAttribute` lists more than windows: Finder answers with a
