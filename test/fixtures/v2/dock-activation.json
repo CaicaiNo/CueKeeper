@@ -1,0 +1,66 @@
+{
+  "description": "A click on the Dock names no window of its own. The focus notification that follows proves the app the click activated, so the held click becomes navigation instead of a CAPTURE_SCOPE_UNVERIFIED gap.",
+  "snapshots": {
+    "21": {
+      "windowId": "w-21",
+      "tree": {
+        "role": "window", "name": "Notes 1", "ref": "@w21:e1",
+        "bounds": { "x": 1000, "y": 0, "width": 800, "height": 600 },
+        "states": [], "secure": false, "children": [
+          {
+            "role": "button", "name": "Save", "ref": "@w21:e2",
+            "bounds": { "x": 1100, "y": 300, "width": 80, "height": 24 },
+            "states": [], "secure": false, "children": []
+          }
+        ]
+      }
+    },
+    "31": {
+      "windowId": "w-31",
+      "tree": {
+        "role": "window", "name": "Chrome 1", "ref": "@w31:e1",
+        "bounds": { "x": 2000, "y": 0, "width": 800, "height": 600 },
+        "states": [], "secure": false, "children": [
+          {
+            "role": "button", "name": "OK", "ref": "@w31:e2",
+            "bounds": { "x": 2100, "y": 300, "width": 80, "height": 24 },
+            "states": [], "secure": false, "children": []
+          }
+        ]
+      }
+    }
+  },
+  "events": [
+    {
+      "kind": "click", "t": 1000, "seen": 1700000000000, "point": [1150, 310],
+      "focusGeneration": 1, "secure": false, "decision": "record",
+      "owner": {
+        "app": "com.apple.TextEdit", "pid": 200, "processInstance": 1700000000000,
+        "windowNumber": 21, "windowTitle": "Notes 1", "role": "AXButton", "pressable": true
+      }
+    },
+    {
+      "kind": "click", "t": 1300, "seen": 1700000000000, "point": [700, 1034],
+      "focusGeneration": 1, "secure": false, "decision": "gap", "gapCode": "CAPTURE_SCOPE_UNVERIFIED",
+      "owner": {
+        "app": "com.apple.dock", "pid": 690, "processInstance": 1700000000000,
+        "windowNumber": 40, "windowTitle": "Dock", "pressable": false
+      }
+    },
+    {
+      "kind": "focus", "t": 1600, "seen": 1700000000000, "focusGeneration": 2, "secure": false,
+      "owner": {
+        "app": "com.google.Chrome", "pid": 300, "processInstance": 1700000000000,
+        "windowNumber": 31, "windowTitle": "Chrome 1"
+      }
+    },
+    {
+      "kind": "click", "t": 1900, "seen": 1700000000000, "point": [2150, 310],
+      "focusGeneration": 2, "secure": false, "decision": "record",
+      "owner": {
+        "app": "com.google.Chrome", "pid": 300, "processInstance": 1700000000000,
+        "windowNumber": 31, "windowTitle": "Chrome 1", "role": "AXButton", "pressable": true
+      }
+    }
+  ]
+}

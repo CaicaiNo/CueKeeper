@@ -299,6 +299,19 @@ test('occluded and first-mouse clicks become gaps; activation-only clicks naviga
   assert.equal(flow.steps.filter(step => step.kind === 'click').length, 1);
 });
 
+test('a Dock click navigates once the focus names the app it started', async () => {
+  const flow = (await recordFixture('dock-activation')).finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'activate_app', 'click']);
+  assert.equal(flow.steps[1].scope.app, 'com.google.Chrome');
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+});
+
+test('a Dock click with no new focus keeps the gap', async () => {
+  const flow = (await recordFixture('dock-click-unproven')).finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'gap', 'click']);
+  assert.equal(flow.steps[1].code, 'CAPTURE_SCOPE_UNVERIFIED');
+});
+
 test('a drag that crosses a window boundary leaves CROSS_SCOPE_GESTURE', async () => {
   const flow = (await recordFixture('cross-window-drag')).finish();
   assert.deepEqual(flow.steps.map(step => step.kind), ['gap']);
