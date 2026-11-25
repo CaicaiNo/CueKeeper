@@ -255,6 +255,18 @@ function setSession(session) {
 
 function renderSummary() {
   const { session } = state;
+  const kind = $('session-kind');
+  if (session) {
+    const crossApp = session.version === 2;
+    kind.hidden = false;
+    kind.textContent = crossApp ? '跨 App' : '单窗口';
+    kind.className = `badge badge-soft badge-sm ${crossApp ? 'badge-info' : 'badge-ghost'}`;
+    kind.title = crossApp
+      ? '跨 App 全局录制：每一步自带作用域，可跨窗口执行'
+      : '单窗口录制：整条流程锁定一个窗口';
+  } else {
+    kind.hidden = true;
+  }
   $('session-name').textContent = session?.name ?? '';
   if (!session) {
     $('summary').replaceChildren(muted('尚未导入运行目录'));
@@ -565,11 +577,11 @@ function renderInspector() {
             el('div', { className: 'actions' },
               libraryAction('插入', () => builtinInsertDialog(item), {
                 style: 'small primary', icon: 'plus', iconOnly: true, disabled: !canInsert,
-                title: canInsert ? '插入到草稿' : '需要 v2 录制文件才能插入内置行为',
+                title: canInsert ? '插入到草稿' : '需要「跨 App」录制才能插入内置行为',
               })))),
         ];
       }),
-      !canInsert ? muted('插入内置行为需要 v2 录制；v1 会话仍可引用「我的行为」。') : undefined,
+      !canInsert ? muted('插入内置行为需要「跨 App」录制；「单窗口」会话仍可引用「我的行为」。') : undefined,
       el('h3', { className: 'inspector-heading library-group-heading' }, '我的行为'),
       ...(custom.length ? custom.map(item => {
         const compatible = state.session?.version === 1 && sameTarget(item.target, state.session.target);
@@ -957,7 +969,7 @@ function applyTemplateDialog(template) {
     state.v2?.dirty
       ? muted('当前工作流有未保存修改；应用模板会切换到新会话，请先保存要保留的修改。')
       : undefined,
-    muted('应用会写入一条新的 v2 工作流并切换当前会话；模板文件与原始录制都不会改变。'),
+    muted('应用会写入一条新的「跨 App」工作流并切换当前会话；模板文件与原始录制都不会改变。'),
   ], '应用', async () => {
     const map = {};
     for (const { parameter, control } of values) {
@@ -1033,7 +1045,7 @@ async function templateDialog() {
     muted(`模板存放在 ${result.directory}。应用模板会生成新的工作流，不会修改模板本身。`),
     templates.length
       ? el('div', { className: 'template-list stack-list' }, ...rows)
-      : empty('还没有模板。打开一条 v2 工作流后，在时间线里点「创建模板」。'),
+      : empty('还没有模板。打开一条「跨 App」工作流后，在时间线里点「创建模板」。'),
     el('div', { className: 'actions' },
       button('从当前工作流创建', () => {
         if (!state.v2) {
@@ -1234,7 +1246,7 @@ function v2LiveDialog() {
     placeholder: '填写本次回放使用的值',
   })]));
   const checkpoints = flow.steps.filter(step => step.kind === 'manual_checkpoint');
-  openDialog('实时回放 v2 流程', [
+  openDialog('实时回放跨 App 流程', [
     muted(!live
       ? '当前有未保存的修改，请先保存工作流。'
       : live.revision
@@ -1971,7 +1983,7 @@ function builtinScopeDefault(item) {
  */
 function builtinInsertDialog(item) {
   if (!state.session || state.session.version !== 2) {
-    status('内置行为只能插入 v2 录制。', 'error');
+    status('内置行为只能插入「跨 App」录制。', 'error');
     return;
   }
   const anchor = v2SelectedStep() ?? v2Steps().at(-1);
@@ -2490,7 +2502,7 @@ function runDialog() {
   if (session.version === 2) {
     openDialog('运行测试项', [
       muted('全局 flow 的实时回放要等跨 App 回放调度器（HAOC-113）接入。' +
-        '工作台目前只按作用域复盘 v2 时间线，不会启动、聚焦或输入。'),
+        '工作台目前只按作用域复盘「跨 App」时间线，不会启动、聚焦或输入。'),
     ]);
     return;
   }

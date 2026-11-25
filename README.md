@@ -329,6 +329,8 @@ flow 里写作 `{{url}}`。变量名以字母开头，只含字母、数字与�
 | `report upload [--queue <dir>] [--retry-paused]` | 处理本地上传队列；暂停项修复原因后用 `--retry-paused` 手动继续 |
 | `serve --config <server.json> --data <dir>` | 启动自建上传服务；列表、下载、查看器接口见[上传服务](docs/server.md) |
 
+界面里把两种流程分别叫**「单窗口」**（v1：一条流程锁定一个 App 的一个窗口）和**「跨 App」**（v2：每一步自带作用域，可跨窗口执行）；文件里的 `version` 字段仍写作 `1` / `2`，改的是叫法，不是格式。
+
 v2 flow 顶层没有 `target`，每一步用 `scope` 声明窗口、应用或系统界面；`windowKey` 在 flow 内绑定一个 App，标题变化后仍跟随同一窗口。契约、报告和哈希定义见 `schemas/flow-v2.schema.json` 与 `schemas/report-v2.schema.json`。数据表批量（`--data`）和报告打包仍只支持 v1；工作台可以按 scope 分组复盘 v2 时间线，批量队列也能直接回放 v2 修订。
 
 v2 实时回放需要显式 `--foreground`，因为它会跨 App 抢前台并注入输入。运行时一次只持有一个前台租约（`~/.cuekeeper/run.lock`，可用 `CUEKEEPER_STATE_DIR` 改目录），取消、失败和正常结束都会释放。每步先按 `windowKey` 绑定进程实例与原生窗口号，再确认前台；窗口被移动或改名不影响绑定，同名新窗口不会接管旧 `windowKey`，进程重启、路径错误副本和人工切走分别以 `APP_AMBIGUOUS`、`APP_PATH_INVALID`、`FOCUS_INTERRUPTED` 停在原步骤。
