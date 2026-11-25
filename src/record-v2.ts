@@ -1695,11 +1695,11 @@ export async function recordGlobal(
       if (data.kind === 'ready' && !ready) {
         if (data.global !== true || data.hotkeysFiltered !== true) {
           throw new Fault('CAPTURE_PROTOCOL',
-            'Capture helper did not confirm global mode. Rebuild it with pnpm build:recorder', true);
+            'Capture helper did not confirm global mode. Rebuild it with npm run build:recorder', true);
         }
         if (options.indicator && !indicatorConfirmed(data.indicator)) {
           throw new Fault('INDICATOR_UNCONFIRMED',
-            'Capture helper did not confirm the requested indicator state. Rebuild it with pnpm build:recorder', true);
+            'Capture helper did not confirm the requested indicator state. Rebuild it with npm run build:recorder', true);
         }
         ready = true;
         clearTimeout(startupTimeout);
@@ -1731,7 +1731,7 @@ export async function recordGlobal(
     const code = await completion;
     signal.throwIfAborted();
     if (startupTimedOut) throw new Fault('CAPTURE_START_TIMEOUT', 'Capture helper did not become ready within five seconds');
-    if (!ready) throw new Fault('CAPTURE_DEPENDENCY', 'Capture helper unavailable. Build it with pnpm build:recorder', true);
+    if (!ready) throw new Fault('CAPTURE_DEPENDENCY', 'Capture helper unavailable. Build it with npm run build:recorder', true);
     if (code !== 0) throw new Fault('CAPTURE_FAILED', 'Capture helper exited before recording finished');
   } catch (error) {
     failure = signal.aborted ? new Fault('INTERRUPTED', 'Recording interrupted') :

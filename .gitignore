@@ -5,5 +5,4 @@ release/
 coverage/
 *.tsbuildinfo
 *.log
-.pnpm-store/
 .DS_Store

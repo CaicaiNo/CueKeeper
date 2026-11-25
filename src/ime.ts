@@ -116,7 +116,7 @@ const copy: Record<ImeCode, { title: string; action: string }> = {
   },
   IME_UNAVAILABLE: {
     title: '输入法保护不可用',
-    action: '运行 pnpm build:recorder 重新构建输入法辅助程序，或重新安装发布包。',
+    action: '运行 npm run build:recorder 重新构建输入法辅助程序，或重新安装发布包。',
   },
   IME_SWITCH_FAILED: {
     title: '没有切换到英文输入法',
@@ -226,7 +226,7 @@ export function nativeImeBackend(executable = helperPath()): ImeBackend {
       execFile(executable, [command, ...args], { encoding: 'utf8', timeout: 5000 }, (error, stdout) => {
         if (error && (error.code === 'ENOENT' || error.code === 'EACCES')) {
           return reject(new Fault('IME_DEPENDENCY',
-            'The input source helper is unavailable. Build it with pnpm build:recorder', true));
+            'The input source helper is unavailable. Build it with npm run build:recorder', true));
         }
         let envelope: Record<string, unknown>;
         try {

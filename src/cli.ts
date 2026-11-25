@@ -250,7 +250,7 @@ async function main() {
     const action = positionals[0] ?? 'status';
     const requireHelper = async () => {
       if (!await backend.available()) {
-        throw new Fault('IME_DEPENDENCY', '输入法辅助程序不可用，请先运行 pnpm build:recorder 重新构建');
+        throw new Fault('IME_DEPENDENCY', '输入法辅助程序不可用，请先运行 npm run build:recorder 重新构建');
       }
     };
     if (action === 'status' || action === 'list') {

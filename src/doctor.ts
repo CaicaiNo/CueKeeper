@@ -192,7 +192,7 @@ function nextSteps(checks: DoctorCheck[], root: string) {
     if (check.status !== 'fail' && check.status !== 'warn') continue;
     if (check.id === 'recorder' || check.id === 'install') {
       const hint = check.id === 'recorder' ?
-        'Rebuild the recorder with `pnpm build:recorder`, or reinstall the release archive.' :
+        'Rebuild the recorder with `npm run build:recorder`, or reinstall the release archive.' :
         'Reinstall the release archive so the packaged files are complete.';
       if (!steps.includes(hint)) steps.push(hint);
     }
@@ -371,7 +371,7 @@ export async function capturePreflight(options: DoctorOptions = {}): Promise<Cap
     issues.push({
       code: 'RECORDER_MISSING',
       message: `The recorder is missing: ${recorder.path}`,
-      hint: 'Rebuild it with `pnpm build:recorder`, or reinstall the release archive.',
+      hint: 'Rebuild it with `npm run build:recorder`, or reinstall the release archive.',
     });
   } else if (!recorder.executable) {
     issues.push({

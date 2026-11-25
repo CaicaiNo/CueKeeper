@@ -1,7 +1,7 @@
 #!/bin/sh
 # One command to go from a checkout to a working workbench.
 #
-#   pnpm quickstart
+#   npm run quickstart
 #
 # It builds only what is missing, checks the environment, starts the local
 # workbench on 17899 and opens it in the browser. Ctrl+C stops the server.
@@ -10,20 +10,20 @@ cd "$(dirname "$0")/.."
 
 if [ ! -f dist/cli.js ]; then
   echo "==> building CueKeeper"
-  pnpm install --frozen-lockfile
-  pnpm build
+  npm ci
+  npm run build
 fi
 
 if [ ! -x dist/cuekeeper-capture ]; then
   echo "==> building the capture helper"
-  pnpm build:recorder
+  npm run build:recorder
 fi
 
 echo "==> checking environment (accessibility, input monitoring, agent-desktop)"
 node dist/cli.js doctor || {
   echo
   echo "doctor reported a problem. Grant the listed permissions in System Settings,"
-  echo "then run: pnpm quickstart"
+  echo "then run: npm run quickstart"
   exit 1
 }
 

@@ -6,7 +6,7 @@
 //                            [--no-archive] [--keep-staging] [--json]
 //
 // The package bundles the compiled CLI, workbench assets, the prebuilt recorder
-// and a Node runtime so a clean Mac without Node or pnpm can run it.
+// and a Node runtime so a clean Mac without Node or npm can run it.
 import { createHash } from 'node:crypto';
 import {
   chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync,
@@ -167,7 +167,7 @@ function main() {
   if (typeof version !== 'string' || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) {
     fail(`invalid version ${String(version)}`);
   }
-  if (!options.skipBuild) run('pnpm', ['build']);
+  if (!options.skipBuild) run('npm', ['run', 'build']);
   if (!options.skipRecorder) run('sh', ['scripts/build-recorder.sh']);
 
   const cli = join(repoRoot, 'dist', 'cli.js');

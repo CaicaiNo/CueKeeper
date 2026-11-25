@@ -91,7 +91,7 @@ node dist/cli.js report upload --retry-paused --json
 - 幂等创建（同一键返回同一 `runId`）、丢响应（创建后断开连接）、`CHUNK_OUT_OF_ORDER`、`CHUNK_CONFLICT`、`UPLOAD_INCOMPLETE`、`UPLOAD_EXPIRED`、`UPLOAD_FINALIZED`、`UPLOAD_VERIFYING`。
 - 可注入任意错误状态与 `Retry-After`，可切换离线以模拟断网恢复。
 
-运行：`pnpm build && pnpm test`（`test/upload.test.mjs`）。
+运行：`npm run build && npm test`（`test/upload.test.mjs`）。
 
 ## 当前限制
 

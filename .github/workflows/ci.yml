@@ -24,32 +24,26 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.28.2
-          run_install: false
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
+          cache: npm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: npm ci
 
       - name: Build TypeScript and check schemas
-        run: pnpm build
+        run: npm run build
 
       - name: Run tests
         run: |
           mkdir -p out
           set -o pipefail
-          pnpm test 2>&1 | tee out/ci-test.log
+          npm test 2>&1 | tee out/ci-test.log
 
       - name: Build macOS recorder
-        run: pnpm build:recorder
+        run: npm run build:recorder
 
       - name: Package unsigned release
         run: node scripts/package.mjs --skip-build --skip-recorder --out out/release

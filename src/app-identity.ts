@@ -118,7 +118,7 @@ export function nativeIdentityProbe(executable = helperPath()): IdentityProbe {
     return new Promise((resolve, reject) => {
       execFile(executable, [command, ...args], { encoding: 'utf8', timeout: 10_000 }, (error, stdout) => {
         if (error && (error.code === 'ENOENT' || error.code === 'EACCES')) {
-          return reject(new Fault('IDENTITY_DEPENDENCY', 'The app identity helper is unavailable. Build it with pnpm build:recorder', true));
+          return reject(new Fault('IDENTITY_DEPENDENCY', 'The app identity helper is unavailable. Build it with npm run build:recorder', true));
         }
         try {
           const envelope = object(JSON.parse(stdout));

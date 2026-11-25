@@ -364,7 +364,7 @@ class StepRunner {
 
   private missingSecureProbe() {
     return new Fault('MANUAL_CHECKPOINT_REQUIRED',
-      'A flow with manual checkpoints needs the secure input probe; rebuild the capture helper with pnpm build:recorder', true);
+      'A flow with manual checkpoints needs the secure input probe; rebuild the capture helper with npm run build:recorder', true);
   }
 
   /**
@@ -1069,7 +1069,7 @@ export async function runFlowV2(input: FlowV2, options: FlowV2RunOptions): Promi
   for (const app of apps) {
     if (!await identityFor(app).probe.available()) {
       return blockedReport(new Fault('IDENTITY_DEPENDENCY',
-        'Cross-app replay needs the app identity helper; build it with pnpm build:recorder', true));
+        'Cross-app replay needs the app identity helper; build it with npm run build:recorder', true));
     }
   }
 

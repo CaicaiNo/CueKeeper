@@ -44,14 +44,14 @@ Never terminate `multica` or `multica.exe` by executable name: a long-lived matc
 
 仓库约定：
 - 远程：git@github.com:CaicaiNo/CueKeeper.git，直接推 main，不需要等人工确认。
-- 推送前必须通过 pnpm build 与 pnpm test；失败不推。
+- 推送前必须通过 npm run build 与 npm test；失败不推。
 - 提交前检查不要带入密钥、截图或本地缓存；不 force push main。
 - 大改动可开分支，但完成并通过测试后合并回 main 并推送。
 
 并发与隔离：
 - 每个任务使用项目资源分配的独立 worktree，不直接修改主 checkout /Users/sheng/Documents/git/cuekeeper。
 - 不同任务不要并行修改同一文件；需要跨任务改动时在 issue 评论里说明。
-- 完成前 rebase 最新 main，跑 pnpm build && pnpm test，再合并/推送 main。
+- 完成前 rebase 最新 main，跑 npm run build && npm test，再合并/推送 main。
 
 分工修正：
 - 常规代码修复、实现、测试默认由你首先负责；不要等 mac-codex 动手。
@@ -195,7 +195,7 @@ ai 自动化测试方案，使用 [https://lite.ego.app/](https://lite.ego.app/)
 
 - GitHub：https://github.com/CaicaiNo/CueKeeper
 - 本地：`/Users/sheng/Documents/git/cuekeeper`，`origin` 使用 SSH
-- 约定：直接提交并推送到 `origin/main`，不需要等人工确认；推送前必须通过 `pnpm build && pnpm test`
+- 约定：直接提交并推送到 `origin/main`，不需要等人工确认；推送前必须通过 `npm run build && npm test`
 
 Project resources (also written to `.multica/project/resources.json`):
 

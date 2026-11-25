@@ -1,6 +1,6 @@
 # 打包与分发
 
-M2 的分发目标是：没装 Node、pnpm 的测试同学拿到一个目录包就能用——doctor、录制、工作台、回放、报告都在包内完成，不读仓库目录。
+M2 的分发目标是：没装 Node、npm 的测试同学拿到一个目录包就能用——doctor、录制、工作台、回放、报告都在包内完成，不读仓库目录。
 
 ## 范围与边界
 
@@ -34,18 +34,18 @@ cuekeeper-<version>-macos-<arch>/
 ## 构建
 
 ```sh
-pnpm package
+npm run package
 # 等价于 node scripts/package.mjs
 ```
 
-一条命令依次执行 `pnpm build`、`sh scripts/build-recorder.sh`、组装目录、生成 `manifest.json`、打 `tar.gz`、写 `.sha256` 与发布说明。参数：
+一条命令依次执行 `npm run build`、`sh scripts/build-recorder.sh`、组装目录、生成 `manifest.json`、打 `tar.gz`、写 `.sha256` 与发布说明。参数：
 
 | 参数 | 用途 |
 | --- | --- |
 | `--out <dir>` | 输出目录，默认 `release/` |
 | `--version <x.y.z>` | 覆盖产物版本；默认取 `package.json` |
 | `--node <path>` | 内置的 Node 运行时，默认当前 `process.execPath` |
-| `--skip-build` | 复用已有 `dist/`，不跑 `pnpm build` |
+| `--skip-build` | 复用已有 `dist/`，不跑 `npm run build` |
 | `--skip-recorder` | 复用已有 `dist/cuekeeper-capture` |
 | `--allow-missing-recorder` | 允许产物缺录制器（仅用于离线检查，不作为发布产物） |
 | `--no-archive` | 只产出目录与 `manifest.json`，不压缩 |

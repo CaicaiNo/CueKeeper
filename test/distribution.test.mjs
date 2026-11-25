@@ -88,7 +88,7 @@ test('doctor reports a missing recorder without guessing about permissions', () 
   assert.equal(statuses.recorder, 'fail');
   assert.equal(statuses.accessibility, 'skip');
   assert.equal(statuses['input-monitoring'], 'skip');
-  assert.ok(response.data.nextSteps.some(step => step.includes('pnpm build:recorder')));
+  assert.ok(response.data.nextSteps.some(step => step.includes('npm run build:recorder')));
 });
 
 test('doctor points at both System Settings panes when permissions are not granted', t => {

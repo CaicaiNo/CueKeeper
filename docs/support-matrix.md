@@ -6,7 +6,7 @@
 - **部分**：只在限定条件下可用，条件写在单元格里。
 - **不支持**：显式报错，或在「不支持的操作」一节标注明确的警告 / 拒绝方式，不会静默变成别的动作。
 
-离线测试来自 `pnpm test` 与 `sh scripts/test-recording-pointer.sh`（后者只编译纯逻辑测试二进制，不碰 AX、TCC 或真实输入）。**HAOC-95（双击/三击/右键/滚轮）、HAOC-93（拖拽）与 HAOC-94（悬停/剪贴板/中文 IME）只做离线实现与测试，真机一列全部是「未验证」，统一指向 HAOC-76 / HAOC-87。** 真机验证须按项目纪律先获批时间窗，不随离线任务执行。HAOC-97 修正 `type` 的 headed 注入方式（Chrome web 内容在无头路径下 `ACTION_FAILED`），真机复测同样归 HAOC-87。
+离线测试来自 `npm test` 与 `sh scripts/test-recording-pointer.sh`（后者只编译纯逻辑测试二进制，不碰 AX、TCC 或真实输入）。**HAOC-95（双击/三击/右键/滚轮）、HAOC-93（拖拽）与 HAOC-94（悬停/剪贴板/中文 IME）只做离线实现与测试，真机一列全部是「未验证」，统一指向 HAOC-76 / HAOC-87。** 真机验证须按项目纪律先获批时间窗，不随离线任务执行。HAOC-97 修正 `type` 的 headed 注入方式（Chrome web 内容在无头路径下 `ACTION_FAILED`），真机复测同样归 HAOC-87。
 
 `--headed` 指回放命令必须显式传入 `run --headed`。物理输入缺失该参数时以 `HEADED_REQUIRED` 失败，不会降级成单击或无头近似。
 

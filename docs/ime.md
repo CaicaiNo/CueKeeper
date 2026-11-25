@@ -129,7 +129,7 @@ CLI 在标准错误输出「标题 + 下一步」；`--json` 的报告里包含�
 
 ## 实现
 
-- `native/input-source.swift`：Carbon TIS 辅助程序（`list` / `current` / `select --id`）。只读与选择，不注入按键、不弹权限框；由 `pnpm build:recorder` 与发布包一起构建到 `dist/cuekeeper-ime`。
+- `native/input-source.swift`：Carbon TIS 辅助程序（`list` / `current` / `select --id`）。只读与选择，不注入按键、不弹权限框；由 `npm run build:recorder` 与发布包一起构建到 `dist/cuekeeper-ime`。
 - `src/ime.ts`：`ImeBackend` 接口 + `InputSourceManager`（回放守卫与录制时的 `startRecording` / `restore(true)` 共用同一把锁、同一份 `ime.json`），测试注入 fake，不碰真实 TIS。
 - `src/cli.ts`：只有 `--input-source-switch` 才构造回放的 `InputSourceManager`；`record --global` 在建流前 `startRecording()`、在 `finally` 里恢复，工作台通过 CLI 子进程走同一条路径；`src/record.ts` 做单窗口录制侧检测。
 

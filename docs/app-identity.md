@@ -2,7 +2,7 @@
 
 **已实现** · 工作台目录能显示同 bundle ID 的多个安装路径，并把用户选中的路径写进可选的 `flow.target.appPath`。见 `workbench/model.js`、`src/desktop.ts`、`src/run.ts` 和 `native/recorder.swift`。
 
-**已实现** · 本文和 [v1 schema 提案](../design/app-identity/schema-diff.json) 定义从选中副本到输入送达的契约。JSON 文件按当前仓库惯例以 schema 路径为键，值为 RFC 6902 操作数组。`src/contracts.ts` 已按补丁实现，`schemas/` 为 `pnpm schemas:write` 的生成产物。
+**已实现** · 本文和 [v1 schema 提案](../design/app-identity/schema-diff.json) 定义从选中副本到输入送达的契约。JSON 文件按当前仓库惯例以 schema 路径为键，值为 RFC 6902 操作数组。`src/contracts.ts` 已按补丁实现，`schemas/` 为 `npm run schemas:write` 的生成产物。
 
 
 **实现状态（HAOC-80）** · §1–§5 已落地：`src/contracts.ts` 与生成的 v1 schema 增加路径外形与 `appIdentity`；`src/app-identity.ts` 与 `native/app-identity.swift` 负责路径、实例与窗口归属核对；回放的 `snapshot` / `focus-window` / `screenshot` / `press` 在固定路径流程中只传 `--window-id`；录制与 `pick --app-path` 握手确认 PID、启动标识和规范 bundle 路径。离线契约与命令参数由 `test/app-identity-contract.test.mjs`、`test/app-identity-replay.test.mjs`、`test/app-identity-capture.test.mjs` 覆盖。§6 的真机行为仍需在 HAOC-76 按批准的时间窗验证。

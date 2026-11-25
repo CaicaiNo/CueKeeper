@@ -117,7 +117,7 @@ HAOC-68 定义流程、结果和工作台的契约，供 HAOC-70 实现。断言
 
 ## Schema diff 与交付顺序
 
-[Schema diff](../design/assertions/schema-diff.json) 的每个值都是一组针对指定文件的 RFC 6902 操作。应用到副本时，以原 schema 文件路径为基准解析 `$ref`，引用 [草案定义](../design/assertions/contracts.schema.json)。一共替换三处 `assert.check`，报告拆出仅 `assert` 可用的可选 `assertion` 字段。对象形态继续使用 `additionalProperties: false`。HAOC-70 把定义迁入现有 TypeBox 源并通过 `pnpm schemas:write` 生成正式 schema。
+[Schema diff](../design/assertions/schema-diff.json) 的每个值都是一组针对指定文件的 RFC 6902 操作。应用到副本时，以原 schema 文件路径为基准解析 `$ref`，引用 [草案定义](../design/assertions/contracts.schema.json)。一共替换三处 `assert.check`，报告拆出仅 `assert` 可用的可选 `assertion` 字段。对象形态继续使用 `additionalProperties: false`。HAOC-70 把定义迁入现有 TypeBox 源并通过 `npm run schemas:write` 生成正式 schema。
 
 | 阶段 | 可验收输出 |
 | --- | --- |

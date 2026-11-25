@@ -506,7 +506,7 @@ function announceIndicator(confirmation: unknown, enabled: boolean) {
       return;
     }
   }
-  throw new Fault('INDICATOR_UNCONFIRMED', 'Capture helper did not confirm the requested indicator state. Rebuild it with pnpm build:recorder', true);
+  throw new Fault('INDICATOR_UNCONFIRMED', 'Capture helper did not confirm the requested indicator state. Rebuild it with npm run build:recorder', true);
 }
 
 export async function record(
@@ -650,7 +650,7 @@ export async function record(
       if (data.kind === 'ready' && !ready) {
         if (data.hotkeysFiltered !== true) {
           throw new Fault('HOTKEY_FILTER_UNCONFIRMED',
-            'Capture helper did not confirm hotkey filtering. Rebuild it with pnpm build:recorder', true);
+            'Capture helper did not confirm hotkey filtering. Rebuild it with npm run build:recorder', true);
         }
         if (bound) {
           // The helper confirms the same PID and canonical path before the
@@ -803,7 +803,7 @@ export async function record(
     const code = await completion;
     signal.throwIfAborted();
     if (startupTimedOut) throw new Fault('CAPTURE_START_TIMEOUT', 'Capture helper did not become ready within five seconds');
-    if (!ready) throw new Fault('CAPTURE_DEPENDENCY', 'Capture helper unavailable. Build it with pnpm build:recorder', true);
+    if (!ready) throw new Fault('CAPTURE_DEPENDENCY', 'Capture helper unavailable. Build it with npm run build:recorder', true);
     if (code !== 0) throw new Fault('CAPTURE_FAILED', 'Capture helper exited before recording finished');
   } catch (error) {
     failure = signal.aborted ? new Fault('INTERRUPTED', 'Recording interrupted') :

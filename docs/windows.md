@@ -141,7 +141,7 @@ agent-desktop 在 Windows 上有跨进程**独占交互租约**（按 token 派�
 | 同上 | 新增（可选）`restore?(target)`、`status?()` | §5 的两个缺口；`restore` 只为最小化兜底，`status` 只为 preflight。不加这两个方法也能出首版，但最小化会静默假通过 |
 | `src/cli.ts` | `macOnly()` → 按命令的平台能力判断（live 命令允许 `darwin` 与 `win32`；`record` 只允许"有采集桥"的平台） | 现在 Windows 上 `pick`/`run`/`record` 一律 `UNSUPPORTED_PLATFORM` |
 | 同上 | `--app` 校验分平台：**调研建议**接受镜像名与绝对路径；**W1 只接受镜像名**（拒绝路径分隔符，`flow.target.app` 只用于 `list-*`，见[范围决策](windows-scope.md) §3.2）；macOS 保持 bundle ID | 现有正则要求"带点的两段"，会拒绝 `Notepad` 之类名字，又会接受语义错误的 `foo.bar` |
-| `src/record.ts` | 采集桥路径与扩展名：`dist/cuekeeper-capture.exe`（win32），二进制缺失时给"用 `pnpm build:recorder` 构建"的提示 | `fileURLToPath(new URL('./cuekeeper-capture', …))` 在 Windows 上找不到 `.exe` |
+| `src/record.ts` | 采集桥路径与扩展名：`dist/cuekeeper-capture.exe`（win32），二进制缺失时给"用 `npm run build:recorder` 构建"的提示 | `fileURLToPath(new URL('./cuekeeper-capture', …))` 在 Windows 上找不到 `.exe` |
 | 同上 | 窗口标识：不要用 `/^w-([1-9]\d*)$/` 提取"窗口号"再当 macOS 参数传；改为把 `windowId`（含平台语义）和 `target.app` 传给采集桥 | 现在这段只在 macOS 有意义；HWND 是句柄不是序号 |
 | 同上 | 预热快照：录制开始前先做一次长预算快照（30s），失败直接报错而不是开始计时 | Chromium 冷启动 |
 | `src/locator.ts` | 无 schema 改动。可在 `parseSnapshot` 加"bounds 明显异常（−32000 锚点）→ `INCOMPLETE_TREE`"的判定，或保持现状由 §5 的窗口状态兜底 | 最小化窗口的假 bounds |

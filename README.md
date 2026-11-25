@@ -35,13 +35,13 @@
 ```sh
 git clone git@github.com:CaicaiNo/CueKeeper.git
 cd CueKeeper
-pnpm quickstart
+npm run quickstart
 ```
 
-`pnpm quickstart` 会自动完成：
+`npm run quickstart` 会自动完成：
 
-1. 安装依赖并构建（`pnpm install` / `pnpm build`）；
-2. 编译录制器（`pnpm build:recorder`）；
+1. 安装依赖并构建（`npm install` / `npm run build`）；
+2. 编译录制器（`npm run build:recorder`）；
 3. 运行 `doctor` 检查环境；
 4. 启动工作台并打开浏览器 `http://127.0.0.1:17899`。
 
@@ -51,7 +51,7 @@ pnpm quickstart
 - 输入监控权限（全局键盘事件）；
 - `agent-desktop` 1.3.1（版本锁定）。
 
-授权后重新执行 `pnpm quickstart` 即可。
+授权后重新执行 `npm run quickstart` 即可。
 
 ### 第一次录制与回放
 
@@ -63,7 +63,7 @@ pnpm quickstart
 
 录制文件默认在 `~/.cuekeeper/recordings/`；工作流副本（编辑后保存）在同一目录，文件名 `flow.edited-<时间>.json`。
 
-### 用发布包（没有 Node/pnpm）
+### 用发布包（没有 Node/npm）
 
 ```sh
 cuekeeper workbench
@@ -73,7 +73,7 @@ cuekeeper workbench
 
 ## 安装
 
-### 从发布包安装（推荐，无需 Node 和 pnpm）
+### 从发布包安装（推荐，无需 Node 和 npm）
 
 发布产物是自包含目录包 `cuekeeper-<version>-macos-<arch>.tar.gz`，内含 CLI、工作台静态资源、预编译录制器和 Node 运行时。平台为 macOS，架构与产物名一致。
 
@@ -104,20 +104,20 @@ xattr -dr com.apple.quarantine ~/Applications/cuekeeper-<version>-macos-<arch>
 
 ### 从源码运行（开发者）
 
-需要 macOS、Node.js 22+ 和 pnpm 10.28.2。GitHub Actions 在 `macos-latest` 上执行相同的安装、构建、测试和录制器编译，工作流见 `.github/workflows/ci.yml`。
+需要 macOS、Node.js 22+ 和 npm 11。GitHub Actions 在 `macos-latest` 上执行相同的安装、构建、测试和录制器编译，工作流见 `.github/workflows/ci.yml`。
 
 ```sh
 git clone git@github.com:CaicaiNo/CueKeeper.git
 cd CueKeeper
-pnpm install --frozen-lockfile
-pnpm build
-pnpm test
+npm ci
+npm run build
+npm test
 ```
 
 录制（首次使用先运行 `node dist/cli.js doctor` 检查环境；需要 macOS 辅助功能和输入监控权限，步骤见 [TextEdit 验收](docs/textedit.md)）：
 
 ```sh
-pnpm build:recorder
+npm run build:recorder
 node dist/cli.js record
 ```
 
@@ -158,7 +158,7 @@ node dist/cli.js run out/demo/recorded.flow.json --dry-run --json
 node dist/cli.js run out/demo/recorded.flow.json --headed --report out/demo/recorded-report.json --json
 ```
 
-固定应用路径的流程还需要 `pnpm build:recorder` 生成的原生身份查询程序 `dist/cuekeeper-identity`。它只读取进程、进程启动标识和窗口归属，不安装事件监听，也不申请辅助功能或输入监控权限。
+固定应用路径的流程还需要 `npm run build:recorder` 生成的原生身份查询程序 `dist/cuekeeper-identity`。它只读取进程、进程启动标识和窗口归属，不安装事件监听，也不申请辅助功能或输入监控权限。
 
 工作台读取 `flow.json`、`recorded.flow.json`、`report.json` 等同目录文件（终端会打印本机地址，手动打开，`Ctrl+C` 关闭）：
 
@@ -166,16 +166,16 @@ node dist/cli.js run out/demo/recorded.flow.json --headed --report out/demo/reco
 node dist/cli.js workbench out/demo
 ```
 
-可选：`pnpm link --global` 后可直接用 `cuekeeper` 代替 `node dist/cli.js`，不需要其他全局依赖。发布包用 `pnpm package` 生成，详细参数见 [打包与分发](docs/packaging.md)。
+可选：`npm link` 后可直接用 `cuekeeper` 代替 `node dist/cli.js`，不需要其他全局依赖。发布包用 `npm run package` 生成，详细参数见 [打包与分发](docs/packaging.md)。
 
 ## 构建与离线验证
 
-需要 Node.js 22+ 和 pnpm 10。以下命令使用仓库自带的 TextEdit 树样本检查定位器和报告。
+需要 Node.js 22+ 和 npm 11。以下命令使用仓库自带的 TextEdit 树样本检查定位器和报告。
 
 ```sh
-pnpm install --frozen-lockfile
-pnpm build
-pnpm test
+npm ci
+npm run build
+npm test
 node dist/cli.js flow validate examples/textedit.flow.json --json
 
 mkdir -p out
@@ -193,7 +193,7 @@ unzip -t out/textedit-dry.zip
 在终端运行以下命令，然后手动打开打印的本机地址。用 `Ctrl+C` 关闭工作台。
 
 ```sh
-pnpm build
+npm run build
 node dist/cli.js workbench /path/to/run-directory
 ```
 
@@ -306,7 +306,7 @@ flow 里写作 `{{url}}`。变量名以字母开头，只含字母、数字与�
 
 ## 在 macOS 录制和回放
 
-现场步骤和权限清单见 [TextEdit 验收](docs/textedit.md)。录制器单独构建。普通 `pnpm build` 只编译 TypeScript 并核对发布的 JSON Schema。实时 `--dry-run` 读取桌面可访问性树。带 `--snapshot` 的离线运行只读样本文件。
+现场步骤和权限清单见 [TextEdit 验收](docs/textedit.md)。录制器单独构建。普通 `npm run build` 只编译 TypeScript 并核对发布的 JSON Schema。实时 `--dry-run` 读取桌面可访问性树。带 `--snapshot` 的离线运行只读样本文件。
 
 | 命令 | 用途 |
 | --- | --- |
@@ -335,7 +335,7 @@ v2 flow 顶层没有 `target`，每一步用 `scope` 声明窗口、应用或系
 
 v2 实时回放需要显式 `--foreground`，因为它会跨 App 抢前台并注入输入。运行时一次只持有一个前台租约（`~/.cuekeeper/run.lock`，可用 `CUEKEEPER_STATE_DIR` 改目录），取消、失败和正常结束都会释放。每步先按 `windowKey` 绑定进程实例与原生窗口号，再确认前台；窗口被移动或改名不影响绑定，同名新窗口不会接管旧 `windowKey`，进程重启、路径错误副本和人工切走分别以 `APP_AMBIGUOUS`、`APP_PATH_INVALID`、`FOCUS_INTERRUPTED` 停在原步骤。
 
-密码与系统授权界面不中止整条录制：连续 secure 区间折叠成一个 `manual_checkpoint`，区间内的按键、文本、截图和剪贴板一律丢弃，系统授权界面（Security Agent）不作为可回放的作用域。回放暂停后由操作者在真实界面完成授权或输入密码，再回到运行终端输入 `continue` 独立确认；CueKeeper 只验证系统 secure 状态已清除且 `resume` 的只读条件成立，默认等待 120 秒。取消、超时或无法证实恢复都会停在该检查点，后续步骤不执行，报告只记录检查点、触发步、恢复条件与结果。含检查点的 flow 需要交互式终端，`--json` 会在任何桌面操作前以 `MANUAL_CHECKPOINT_REQUIRED` 拒绝；secure 状态探测和录制一样来自 `pnpm build:recorder` 构建的 helper。密码、Keychain 内容和授权值不进入 flow、报告、日志或 argv。
+密码与系统授权界面不中止整条录制：连续 secure 区间折叠成一个 `manual_checkpoint`，区间内的按键、文本、截图和剪贴板一律丢弃，系统授权界面（Security Agent）不作为可回放的作用域。回放暂停后由操作者在真实界面完成授权或输入密码，再回到运行终端输入 `continue` 独立确认；CueKeeper 只验证系统 secure 状态已清除且 `resume` 的只读条件成立，默认等待 120 秒。取消、超时或无法证实恢复都会停在该检查点，后续步骤不执行，报告只记录检查点、触发步、恢复条件与结果。含检查点的 flow 需要交互式终端，`--json` 会在任何桌面操作前以 `MANUAL_CHECKPOINT_REQUIRED` 拒绝；secure 状态探测和录制一样来自 `npm run build:recorder` 构建的 helper。密码、Keychain 内容和授权值不进入 flow、报告、日志或 argv。
 
 macOS 全局录制也会把 `CoreServicesUIAgent` 的可见弹框（包括由该系统进程显示的 Gatekeeper 安全提示）保存为人工检查点，原因是 `system_dialog`。例如从 Finder 双击 `.pkg` 后，录制会把弹框检查点放在该双击之后。回放先等待检测到弹框，操作者处理后在运行终端输入 `continue`，CueKeeper 确认弹框关闭、secure 状态清除且恢复条件成立后才继续。只记录弹框的出现与消失，弹框的文案和操作留在桌面界面。使用此功能需要重新构建录制 helper。
 

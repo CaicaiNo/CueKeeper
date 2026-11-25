@@ -346,7 +346,7 @@ function nativeBooleanProbe(
       (error, stdout) => {
         if (error) {
           reject(new Fault(code,
-            `Could not read the ${description}; rebuild the capture helper with pnpm build:recorder`, true));
+            `Could not read the ${description}; rebuild the capture helper with npm run build:recorder`, true));
           return;
         }
         try {

@@ -177,7 +177,7 @@ agent-desktop 在 Windows 上有跨进程独占交互租约。W1 不做自己的
 
 | 任务 | 一句话目标 | 可观察验收 | 依赖 |
 | --- | --- | --- | --- |
-| **W1-T1**（HAOC-84）驱动层平台化（离线） | 让 win32 分支按"回放-only"成型，并在 macOS 用注入平台 + stub provider 测出来 | §3.1.1、§3.2、§3.3 每一行都有对应用例：预检 ID 贯穿每次 `snapshot` 与 `clickPoint`、焦点丢失零输入、退出码、参数数组、重试次数、平台门矩阵、旧 v1 flow/snapshot/report 读取、`--no-upload`；`pnpm build && pnpm test` 绿；macOS 旧用例全过 | 无实机、无 CI 改动 |
+| **W1-T1**（HAOC-84）驱动层平台化（离线） | 让 win32 分支按"回放-only"成型，并在 macOS 用注入平台 + stub provider 测出来 | §3.1.1、§3.2、§3.3 每一行都有对应用例：预检 ID 贯穿每次 `snapshot` 与 `clickPoint`、焦点丢失零输入、退出码、参数数组、重试次数、平台门矩阵、旧 v1 flow/snapshot/report 读取、`--no-upload`；`npm run build && npm test` 绿；macOS 旧用例全过 | 无实机、无 CI 改动 |
 | **W1-T2**（HAOC-83）Windows 实机验收（W1 出口） | 手写 flow 对标题稳定的编辑器完成 pick → dry-run → headed 十轮，并覆盖批量、断言、point、有限 workbench 与负例 | §7.3 十轮 10/10；§7.4 每项能力各有一个可观察结果；§7.5 负例错误码与"零输入"；§7.6 报告在 macOS 可打开且 manifest 一致；§7.7 的 W1 门禁逐项记录 | T1；Windows 实机 + 用户在场（HAOC-76） |
 | **W2-T3**（HAOC-85）Windows 录制桥（仅登记） | 复用 JSON 协议在标题稳定编辑器录出 3 步 flow | 录制→validate→dry-run→headed 回放全通过；HUD 不抢焦点、录屏不可见；热键被吞；无裸按键落盘 | T1/T2 通过后细化；实机 + .NET SDK |
 
@@ -207,7 +207,7 @@ TextEdit 的等价物必须同时满足四条，全部可观察：
 
 ### 7.2 准备
 
-- Windows 10 1809+ / 11 x64；Node 22；pnpm 10.28.2；agent-desktop 1.3.1 原生 exe。
+- Windows 10 1809+ / 11 x64；Node 22；npm 11；agent-desktop 1.3.1 原生 exe。
 - `set CUEKEEPER_AGENT_DESKTOP=C:\path\to\agent-desktop.exe`
 - 测试目录 `C:\cuekeeper-w1`，文件 `Cuekeeper-W1.rtf`（已存在），内容固定为 ASCII 字符串（例如 `Cuekeeper W1 round 01`）。每轮在编辑器里全选删除并 `Ctrl+S`，确认文件已空，再开始回放。
 - flow 三步：正文 click → type 固定字符串 → `ctrl+s`。定位器来自 `pick --select`；把结果手写进 `out\w1.flow.json` 后先 `flow validate`。
@@ -268,7 +268,7 @@ W1 出口只认下表的可观察结果；表外实机项只记录，不作为�
 
 | 项 | 来源 | 通过判据 |
 | --- | --- | --- |
-| 驱动层离线用例 | T1（macOS） | §3.1.1、§3.2、§3.3 全覆盖；`pnpm build && pnpm test` 绿 |
+| 驱动层离线用例 | T1（macOS） | §3.1.1、§3.2、§3.3 全覆盖；`npm run build && npm test` 绿 |
 | 旧 v1 兼容（离线） | T1（macOS） | 旧 flow `flow validate` 通过；旧 `snapshot.json` 在 `run --dry-run --snapshot` 与 `pick --snapshot` 下解析成功；旧 `report.json` + 对应 `flow.json` 能 `report pack --no-upload`，放进同一目录后能被 workbench 打开；含 shell 的旧 flow 在 `validate`/dry-run 可读，在 `pack` 按现有规则被拒 |
 | pick / dry-run / headed 十轮 | T2 | §7.3 全过 |
 | 批量、断言、point、workbench | T2 | §7.4 五项全过 |
