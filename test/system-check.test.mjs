@@ -8,7 +8,7 @@ import test from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Fault } from '../dist/locator.js';
 import {
-  SystemChecks, isLiveState, maxArgCandidates, parsePidTable, psArgs, psTimeoutMs, runPs,
+  SystemChecks, isLiveState, maxArgCandidates, nativeProcessProbe, parsePidTable, psArgs, psTimeoutMs, runPs,
 } from '../dist/system-check.js';
 
 // These tests observe real temporary files and real processes. They never start
@@ -416,7 +416,19 @@ test('the real helper reads executable identity and bounded argv of a controlled
       if (previous === undefined) delete process.env.CUEKEEPER_APP_IDENTITY;
       else process.env.CUEKEEPER_APP_IDENTITY = previous;
     });
-    const checks = new SystemChecks();
+    // The identity and argument assertions are about this controlled child, so
+    // the probe is narrowed to its PID: another process on the machine with an
+    // unreadable image must not decide this test's outcome. The probe itself is
+    // the real /bin/ps + native helper path.
+    const probe = nativeProcessProbe();
+    const checks = new SystemChecks({
+      probe: {
+        async identities() {
+          return (await probe.identities()).filter(identity => identity.pid === child.pid);
+        },
+        matchArgs: (candidate, args) => probe.matchArgs(candidate, args),
+      },
+    });
 
     // Identity comes from the system, so the custom argv[0] matches nothing.
     assert.equal(await checks.processRunning({ kind: 'process', name: 'controlled sleeper' }), true);
@@ -462,8 +474,6 @@ test('the real helper reads executable identity and bounded argv of a controlled
 
     // The helper's own response carries a status only: neither the expected
     // arguments nor the observed argv travel back to Node.
-    const { nativeProcessProbe } = await import('../dist/system-check.js');
-    const probe = nativeProcessProbe();
     const childIdentity = (await probe.identities()).find(identity => identity.pid === child.pid);
     assert.ok(childIdentity?.executable, 'the controlled child has a real executable path');
     assert.ok(childIdentity.startedAt, 'the controlled child has a generation marker');
