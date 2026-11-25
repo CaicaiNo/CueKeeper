@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { flowV2Check } from './contracts-v2.js';
+import { flowV2Check, maxProcessArgs } from './contracts-v2.js';
 import type {
   FlowV2, ReportV2, ReportV2Entry, Scope, StepV2,
 } from './contracts-v2.js';
@@ -239,6 +239,28 @@ function validateSteps(flow: FlowV2, state: ScopeState, allowGaps = false) {
       const check = step.check;
       if (!('target' in check) || check.target.kind !== 'window' || check.expect.property !== 'exists') {
         fail(`${where}: an app-scoped assertion can only check window existence`);
+      }
+    }
+    if (step.kind === 'assert' && 'args' in step.check) {
+      // Arguments only refine a name check; a full-path check matches the
+      // executable itself. Values stay literal and bounded, and never reach a
+      // report or a label.
+      const args = step.check.args;
+      if (step.scope.kind !== 'process' || !('name' in step.scope)) {
+        fail(`${where}: process arguments need a process name scope`);
+      }
+      if (args === undefined) {
+        fail(`${where}: process arguments must be a non-empty list`);
+      }
+      if (args.length > maxProcessArgs) {
+        fail(`${where}: a process check takes at most ${maxProcessArgs} arguments`);
+      }
+      for (const arg of args) {
+        if (!arg.length) fail(`${where}: a process argument cannot be empty`);
+        if (arg.length > 4096) fail(`${where}: a process argument is longer than 4096 characters`);
+        if (/[\u0000-\u001f\u007f]/.test(arg)) {
+          fail(`${where}: a process argument cannot contain control characters`);
+        }
       }
     }
   }

@@ -4244,47 +4244,95 @@
                     "type": "string"
                   },
                   "scope": {
-                    "anyOf": [
-                      {
-                        "additionalProperties": false,
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "const": "process",
-                            "type": "string"
-                          },
-                          "name": {
-                            "minLength": 1,
-                            "maxLength": 255,
-                            "pattern": "^(?![\\s\\S]*[/\\\\\\u0000-\\u001f\\u007f])[\\s\\S]+$",
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "name"
-                        ]
+                    "additionalProperties": false,
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "const": "process",
+                        "type": "string"
                       },
-                      {
-                        "additionalProperties": false,
-                        "type": "object",
-                        "properties": {
-                          "kind": {
-                            "const": "process",
-                            "type": "string"
-                          },
-                          "path": {
-                            "minLength": 1,
-                            "maxLength": 4096,
-                            "pattern": "^(?![\\s\\S]*[\\u0000-\\u001f\\u007f])(?!.*(?:^|/)\\.\\.(?:/|$))/(?!/)[\\s\\S]*$",
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "kind",
-                          "path"
-                        ]
+                      "name": {
+                        "minLength": 1,
+                        "maxLength": 255,
+                        "pattern": "^(?![\\s\\S]*[/\\\\\\u0000-\\u001f\\u007f])[\\s\\S]+$",
+                        "type": "string"
                       }
+                    },
+                    "required": [
+                      "kind",
+                      "name"
+                    ]
+                  },
+                  "check": {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "const": "process_running",
+                        "type": "string"
+                      },
+                      "equals": {
+                        "type": "boolean"
+                      },
+                      "args": {
+                        "minItems": 1,
+                        "maxItems": 32,
+                        "type": "array",
+                        "items": {
+                          "minLength": 1,
+                          "maxLength": 4096,
+                          "pattern": "^(?![\\s\\S]*[\\u0000-\\u001f\\u007f])[\\s\\S]+$",
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "equals"
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "kind",
+                  "scope",
+                  "check"
+                ]
+              },
+              {
+                "additionalProperties": false,
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
+                    "type": "string"
+                  },
+                  "atMs": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "kind": {
+                    "const": "assert",
+                    "type": "string"
+                  },
+                  "scope": {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "const": "process",
+                        "type": "string"
+                      },
+                      "path": {
+                        "minLength": 1,
+                        "maxLength": 4096,
+                        "pattern": "^(?![\\s\\S]*[\\u0000-\\u001f\\u007f])(?!.*(?:^|/)\\.\\.(?:/|$))/(?!/)[\\s\\S]*$",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "path"
                     ]
                   },
                   "check": {

@@ -571,6 +571,11 @@ test('system file and process checks are closed, app-free v2 contracts', () => {
       scope: { kind: 'process', path: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' },
       check: { kind: 'process_running', equals: false },
     },
+    {
+      id: 'check-process-args', kind: 'assert',
+      scope: { kind: 'process', name: 'controlled sleeper' },
+      check: { kind: 'process_running', equals: true, args: ['--profile', 'a b', '"quoted"'] },
+    },
   ];
   const flow = parseFlowV2({ version: 2, id: 'system-checks', name: 'System checks', steps });
   assert.deepEqual(flow.steps, steps);
@@ -580,6 +585,10 @@ test('system file and process checks are closed, app-free v2 contracts', () => {
   assert.equal(scopeLabel(steps[0].scope), '文件 · /tmp/报告 (final).pdf');
   assert.equal(scopeKey(steps[1].scope), 'process:name:Google Chrome');
   assert.equal(scopeLabel(steps[1].scope), '进程 · Google Chrome');
+  // Arguments refine the name check without entering its scope or label.
+  assert.equal(scopeKey(steps[3].scope), 'process:name:controlled sleeper');
+  assert.equal(scopeLabel(steps[3].scope), '进程 · controlled sleeper');
+  assert.deepEqual(steps[3].check.args, ['--profile', 'a b', '"quoted"']);
   assert.equal(scopeKey(steps[2].scope),
     'process:path:/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
 
@@ -589,7 +598,7 @@ test('system file and process checks are closed, app-free v2 contracts', () => {
   assert.equal(dry.status, 'passed');
   assert.deepEqual(dry.entries.map(entry => [entry.id, entry.status, entry.stateCheck]),
     [['check-file', 'resolved', undefined], ['check-process', 'resolved', undefined],
-      ['check-process-path', 'resolved', undefined]]);
+      ['check-process-path', 'resolved', undefined], ['check-process-args', 'resolved', undefined]]);
   assert.deepEqual(planFlowV2(flow).map(step => step.scope), flow.steps.map(step => step.scope));
 
   // The published schemas carry both check kinds and the structured result.
@@ -631,6 +640,14 @@ test('a system check refuses a path, a process name or a check/scope pairing it 
     { ...processCheck, scope: { kind: 'process', name: 'Safari/Contents/MacOS/Safari' } },
     { ...processCheck, scope: { kind: 'process', name: 'Safari', path: '/Applications/Safari.app' } },
     { ...processCheck, scope: { kind: 'process', path: 'relative/Safari' } },
+    // Arguments belong to a name check only, and stay non-empty and bounded.
+    { ...processCheck, scope: { kind: 'process', path: '/usr/bin/Safari' },
+      check: { kind: 'process_running', equals: true, args: ['--profile'] } },
+    { ...processCheck, check: { kind: 'process_running', equals: true, args: [] } },
+    { ...processCheck, check: { kind: 'process_running', equals: true, args: [''] } },
+    { ...processCheck, check: { kind: 'process_running', equals: true, args: ['a\nb'] } },
+    { ...processCheck, check: { kind: 'process_running', equals: true,
+      args: Array.from({ length: 33 }, () => 'x') } },
     // Legal scope shapes, illegal pairings.
     { ...fileCheck, check: { kind: 'process_running', equals: true } },
     { ...processCheck, check: { kind: 'file_exists', equals: true } },

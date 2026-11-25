@@ -98,13 +98,26 @@ test('a reverse check passes when the file is absent', async t => {
     { kind: 'file_exists', expected: false, actual: false });
 });
 
-test('process checks match an executable name and an exact path with spaces', async t => {
-  const table = [
-    '  501 S     /Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-    '  502 S     /usr/bin/sleep',
-  ].join('\n');
+const processIdentity = (pid, executable, options = {}) => ({
+  pid, uid: options.uid ?? 501, executable, live: options.live ?? true,
+  ...(options.startedAt === null ? {} : { startedAt: options.startedAt ?? `1.${pid}` }),
+});
+
+/** A probe whose identities and argument answer are fixed per test. */
+function processProbe(identities, match = async () => 'unmatched') {
+  return {
+    async identities() { return identities; },
+    async matchArgs(candidate, args) { return match(candidate, [...args]); },
+  };
+}
+
+test('process checks match the real executable basename and an exact path with spaces', async t => {
+  const probe = processProbe([
+    processIdentity(501, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
+    processIdentity(502, '/usr/bin/sleep'),
+  ]);
   const byName = await run(t, [processStep('chrome', { kind: 'process', name: 'Google Chrome' })], {
-    systemCheckDeps: { ps: async () => table },
+    systemCheckDeps: { probe },
   });
   assert.equal(byName.report.status, 'passed');
   assert.deepEqual(entryOf(byName.report, 'chrome').stateCheck,
@@ -112,23 +125,71 @@ test('process checks match an executable name and an exact path with spaces', as
 
   const byPath = await run(t, [processStep('sleep', {
     kind: 'process', path: '/usr/bin/sleep',
-  })], { systemCheckDeps: { ps: async () => table } });
+  })], { systemCheckDeps: { probe } });
   assert.equal(byPath.report.status, 'passed');
 
   const wrongPath = await run(t, [processStep('wrong', {
     kind: 'process', path: '/usr/local/bin/sleep',
-  }, false)], { systemCheckDeps: { ps: async () => table } });
+  }, false)], { systemCheckDeps: { probe } });
   assert.equal(wrongPath.report.status, 'passed');
 });
 
 test('a zombie is not running, so a reverse process check passes', async t => {
-  const table = '  7 Z     /usr/bin/sleep';
+  const probe = processProbe([processIdentity(7, '/usr/bin/sleep', { live: false })]);
   const { report } = await run(t, [processStep('sleep', { kind: 'process', name: 'sleep' }, false)], {
-    systemCheckDeps: { ps: async () => table },
+    systemCheckDeps: { probe },
   });
   assert.equal(report.status, 'passed');
   assert.deepEqual(entryOf(report, 'sleep').stateCheck,
     { kind: 'process_running', expected: false, actual: false });
+});
+
+const processArgsStep = (id, args, equals = true) => ({
+  id, kind: 'assert',
+  scope: { kind: 'process', name: 'controlled sleeper' },
+  check: { kind: 'process_running', equals, args },
+});
+
+test('a process argument check reports only its expected and actual value', async t => {
+  const probe = processProbe([processIdentity(601, '/tmp/controlled sleeper')],
+    async (_candidate, args) => (args.length === 2 && args[1] === 'a b' ? 'matched' : 'unmatched'));
+  const { report } = await run(t, [processArgsStep('args', ['--profile', 'a b'])], {
+    systemCheckDeps: { probe },
+  });
+  assert.equal(report.status, 'passed');
+  assert.deepEqual(entryOf(report, 'args').stateCheck,
+    { kind: 'process_running', expected: true, actual: true });
+  // The literal arguments stay out of the report entirely.
+  assert.equal(JSON.stringify(report).includes('a b'), false);
+  assert.equal(JSON.stringify(report).includes('--profile'), false);
+});
+
+test('split or reordered arguments do not match, and a reverse check passes', async t => {
+  const probe = processProbe([processIdentity(602, '/tmp/controlled sleeper')],
+    async (_candidate, args) => (args[0] === '--profile' && args.length === 3 ? 'matched' : 'unmatched'));
+  const { report } = await run(t, [processArgsStep('reverse', ['--profile', 'a b'], false)], {
+    systemCheckDeps: { probe },
+  });
+  assert.equal(report.status, 'passed');
+  assert.deepEqual(entryOf(report, 'reverse').stateCheck,
+    { kind: 'process_running', expected: false, actual: false });
+});
+
+test('an unreadable candidate is unknown, so even a reverse argument check fails', async t => {
+  const probe = processProbe([processIdentity(603, '/tmp/controlled sleeper')],
+    async () => 'unknown');
+  const { report } = await run(t, [
+    processArgsStep('unknown', ['--profile', 'a b'], false),
+    fileStep('later', '/tmp/x', true),
+  ], { systemCheckDeps: { probe } });
+  assert.equal(report.status, 'failed');
+  const failed = entryOf(report, 'unknown');
+  assert.equal(failed.code, 'SYSTEM_CHECK_FAILED');
+  assert.deepEqual(failed.stateCheck,
+    { kind: 'process_running', expected: false, actual: null });
+  assert.equal(JSON.stringify(report).includes('a b'), false);
+  assert.equal(JSON.stringify(report).includes('--profile'), false);
+  assert.equal(entryOf(report, 'later').status, 'skipped');
 });
 
 test('a failed probe is an unknown and makes even a reverse check fail', async t => {
@@ -141,7 +202,10 @@ test('a failed probe is an unknown and makes even a reverse check fail', async t
       },
     }],
     ['process', processStep('process', { kind: 'process', name: 'Safari' }, false), {
-      ps: async () => { throw new Fault('SYSTEM_CHECK_FAILED', 'The process probe failed: EACCES'); },
+      probe: {
+        async identities() { throw new Fault('SYSTEM_CHECK_FAILED', 'The process probe failed: EACCES'); },
+        async matchArgs() { return 'unknown'; },
+      },
     }],
   ]) {
     const { report } = await run(t, [step, fileStep('later', '/tmp/x', true)], {

@@ -1,17 +1,19 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { chmod, copyFile, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { spawn, spawnSync } from 'node:child_process';
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Fault } from '../dist/locator.js';
 import {
-  SystemChecks, isLiveProcess, parseProcessTable, processMatches, psArgs, psTimeoutMs, runPs,
+  SystemChecks, isLiveState, maxArgCandidates, parsePidTable, psArgs, psTimeoutMs, runPs,
 } from '../dist/system-check.js';
 
-// These tests observe real temporary files and the real /bin/ps table. They
-// never start a GUI, focus a window or need any macOS authorization.
+// These tests observe real temporary files and real processes. They never start
+// a GUI, focus a window or need any macOS authorization. The argv tests build
+// the read-only native helper and drive a controlled child process.
 
 /** A bounded wait: unref'd, so a passed test never lingers on its timer. */
 function timeoutAfter(ms, message) {
@@ -24,6 +26,28 @@ async function root(t) {
   const directory = await mkdtemp(join(tmpdir(), 'cuekeeper-system-check-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   return directory;
+}
+
+const process_ = (pid, executable, options = {}) => {
+  const startedAt = 'startedAt' in options ? options.startedAt : `1.${pid}`;
+  return {
+    pid, uid: options.uid ?? 501, executable, live: options.live ?? true,
+    ...(startedAt === undefined || startedAt === null ? {} : { startedAt }),
+  };
+};
+
+function fakeProbe(identities, onArgs = async () => 'unmatched') {
+  const calls = [];
+  return {
+    calls,
+    probe: {
+      async identities() { return identities; },
+      async matchArgs(candidate, args) {
+        calls.push({ candidate, args: [...args] });
+        return onArgs(candidate, args);
+      },
+    },
+  };
 }
 
 test('a file check keeps stat semantics: regular files exist, everything else does not', async t => {
@@ -76,125 +100,250 @@ test('a file probe error stays unknown and never answers false', async () => {
   assert.equal(await notDirectory.fileExists('/file/child'), false);
 });
 
-const table = [
-  '  101 S     /Applications/Safari.app/Contents/MacOS/Safari',
-  '  102 S+    /Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-  '  103 Z     /Applications/Safari.app/Contents/MacOS/Safari',
-  '  104 R     node',
-].join('\n');
-
-test('the process table keeps a path with spaces whole and excludes zombies', () => {
-  const entries = parseProcessTable(table);
-  assert.deepEqual(entries[1], {
-    pid: 102, state: 'S+', comm: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-  });
-  assert.equal(isLiveProcess(entries[2]), false);
-
-  // A name is the basename of the visible executable, matched case-sensitively.
-  assert.equal(processMatches(entries, { kind: 'process', name: 'Google Chrome' }), true);
-  assert.equal(processMatches(entries, { kind: 'process', name: 'Safari' }), true);
-  assert.equal(processMatches(entries, { kind: 'process', name: 'safari' }), false);
-  assert.equal(processMatches(entries, { kind: 'process', name: 'Chrome' }), false);
-  // A path is compared verbatim, with no symlink or prefix equivalence.
-  assert.equal(processMatches(entries, {
-    kind: 'process', path: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-  }), true);
-  assert.equal(processMatches(entries, { kind: 'process', path: '/usr/bin/Safari' }), false);
-  assert.equal(processMatches(entries, { kind: 'process', name: 'not-running' }), false);
-});
-
-test('a zombie never satisfies a running check', async () => {
-  const checks = new SystemChecks({ ps: async () => '  7 Z     /usr/bin/zombie' });
-  assert.equal(await checks.processRunning({ kind: 'process', name: 'zombie' }), false);
-  assert.equal(await checks.processRunning({ kind: 'process', path: '/usr/bin/zombie' }), false);
-});
-
-test('unreadable or failed process output is an unknown, not an empty table', async () => {
-  const malformed = new SystemChecks({ ps: async () => 'this line is not a ps row' });
-  await assert.rejects(malformed.processRunning({ kind: 'process', name: 'Safari' }), error => {
+test('the process table reads kernel pid, uid and state, never comm or args', () => {
+  // A state with modifiers and an extra space still parses; comm (which a
+  // process can rewrite) is not part of the row at all.
+  const rows = parsePidTable([
+    '  101   501 S',
+    '  102     0 Ss+',
+    '  103   501 Z',
+    '',
+  ].join('\n'));
+  assert.deepEqual(rows, [
+    { pid: 101, uid: 501, state: 'S' },
+    { pid: 102, uid: 0, state: 'Ss+' },
+    { pid: 103, uid: 501, state: 'Z' },
+  ]);
+  assert.equal(isLiveState('Z'), false);
+  assert.equal(isLiveState('Z+'), false);
+  assert.equal(isLiveState('Ss+'), true);
+  assert.throws(() => parsePidTable('this line is not a ps row'), error => {
     assert.ok(error instanceof Fault);
     assert.equal(error.code, 'SYSTEM_CHECK_FAILED');
     return true;
   });
+});
 
-  const failed = new SystemChecks({
-    ps: async () => {
-      throw new Fault('SYSTEM_CHECK_FAILED', 'The process probe failed: timed out after 3000 ms');
+test('a name or path matches the real executable path and never a zombie', async () => {
+  const { probe } = fakeProbe([
+    process_(101, '/Applications/Safari.app/Contents/MacOS/Safari'),
+    process_(102, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
+    process_(103, '/Applications/Safari.app/Contents/MacOS/Safari', { live: false }),
+    process_(104, '/usr/bin/node'),
+  ]);
+  const checks = new SystemChecks({ probe });
+
+  // A name is the basename of the real executable, matched case-sensitively.
+  assert.equal(await checks.processRunning({ kind: 'process', name: 'Google Chrome' }), true);
+  assert.equal(await checks.processRunning({ kind: 'process', name: 'Safari' }), true);
+  assert.equal(await checks.processRunning({ kind: 'process', name: 'safari' }), false);
+  assert.equal(await checks.processRunning({ kind: 'process', name: 'Chrome' }), false);
+  // A path is compared verbatim, with no symlink or prefix equivalence.
+  assert.equal(await checks.processRunning({
+    kind: 'process', path: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  }), true);
+  assert.equal(await checks.processRunning({ kind: 'process', path: '/usr/bin/Safari' }), false);
+  assert.equal(await checks.processRunning({ kind: 'process', name: 'not-running' }), false);
+
+  // A zombie alone never satisfies a check, reverse or forward.
+  const zombie = new SystemChecks({
+    probe: fakeProbe([process_(9, '/usr/bin/sleep', { live: false })]).probe,
+  });
+  assert.equal(await zombie.processRunning({ kind: 'process', name: 'sleep' }), false);
+  assert.equal(await zombie.processRunning({ kind: 'process', path: '/usr/bin/sleep' }), false);
+});
+
+test('arguments are only read for same-uid candidates of that name', async () => {
+  const { probe, calls } = fakeProbe([
+    process_(201, '/usr/bin/node'),
+    process_(202, '/usr/bin/node', { uid: 0 }),
+    process_(203, '/usr/bin/other'),
+  ]);
+  const checks = new SystemChecks({ probe });
+
+  assert.equal(await checks.processRunning({ kind: 'process', name: 'node' }, ['--flag']), false);
+  // The other process of another executable and the other UID are not read.
+  assert.deepEqual(calls.map(call => call.candidate.pid), [201]);
+  assert.deepEqual(calls[0].args, ['--flag']);
+
+  // No same-UID candidate means the answer is a real false, not an unknown.
+  calls.length = 0;
+  assert.equal(await checks.processRunning({ kind: 'process', name: 'root-only' }, ['x']), false);
+  assert.deepEqual(calls, []);
+});
+
+test('one proved argument match wins over an unreadable candidate', async () => {
+  const statuses = new Map([[301, 'unknown'], [302, 'matched']]);
+  const { probe, calls } = fakeProbe([
+    process_(301, '/usr/bin/node'),
+    process_(302, '/usr/bin/node'),
+  ], candidate => statuses.get(candidate.pid));
+  const checks = new SystemChecks({ probe });
+  assert.equal(await checks.processRunning({ kind: 'process', name: 'node' }, ['--profile', 'a b']), true);
+  assert.equal(calls.length, 2);
+
+  // A readable mismatch plus an unreadable candidate is still an unknown.
+  const mixed = fakeProbe([
+    process_(401, '/usr/bin/node'),
+    process_(402, '/usr/bin/node'),
+  ], candidate => (candidate.pid === 401 ? 'unmatched' : 'unknown'));
+  await assert.rejects(
+    new SystemChecks({ probe: mixed.probe }).processRunning({ kind: 'process', name: 'node' }, ['x']),
+    error => {
+      assert.equal(error.code, 'SYSTEM_CHECK_FAILED');
+      return true;
+    });
+});
+
+test('an unprovable candidate is unknown, never an absent process', async () => {
+  const noMarker = fakeProbe([process_(501, '/usr/bin/node', { startedAt: null })]);
+  await assert.rejects(
+    new SystemChecks({ probe: noMarker.probe }).processRunning({ kind: 'process', name: 'node' }, ['x']),
+    error => {
+      assert.equal(error.code, 'SYSTEM_CHECK_FAILED');
+      return true;
+    });
+
+  const allUnknown = fakeProbe([process_(502, '/usr/bin/node')], async () => 'unknown');
+  await assert.rejects(
+    new SystemChecks({ probe: allUnknown.probe }).processRunning({ kind: 'process', name: 'node' }, ['x']),
+    error => {
+      assert.equal(error.code, 'SYSTEM_CHECK_FAILED');
+      assert.match(error.message, /could not be read/);
+      return true;
+    });
+
+  // The candidate fan-out is bounded: too many same-name processes is unknown.
+  const many = Array.from({ length: maxArgCandidates + 1 }, (_, index) =>
+    process_(600 + index, '/usr/bin/node'));
+  await assert.rejects(
+    new SystemChecks({ probe: fakeProbe(many).probe }).processRunning({ kind: 'process', name: 'node' }, ['x']),
+    error => {
+      assert.equal(error.code, 'SYSTEM_CHECK_FAILED');
+      return true;
+    });
+});
+
+test('a failed probe becomes an unknown, not an empty process table', async () => {
+  const broken = new SystemChecks({
+    probe: {
+      async identities() {
+        throw new Fault('SYSTEM_CHECK_FAILED', 'The process probe failed: timeout');
+      },
+      async matchArgs() { return 'unknown'; },
     },
   });
-  await assert.rejects(failed.processRunning({ kind: 'process', name: 'Safari' }), error => {
+  await assert.rejects(broken.processRunning({ kind: 'process', name: 'Safari' }), error => {
     assert.equal(error.code, 'SYSTEM_CHECK_FAILED');
-    assert.match(error.message, /timed out/);
+    assert.match(error.message, /timeout/);
     return true;
   });
 });
 
-test('a controlled process is seen running and gone once it has exited', async t => {
-  const directory = await root(t);
-  // A unique executable name that contains a space proves the real ps output
-  // keeps the whole basename and the whole path in one comparison.
-  const executable = join(directory, 'controlled sleep');
-  await copyFile('/bin/sleep', executable);
-  await chmod(executable, 0o755);
-  const child = spawn(executable, ['30'], { stdio: 'ignore' });
-  // Await the spawn result explicitly: a binary this machine refuses to run
-  // must fail the test at once, never leave it waiting for an exit event that
-  // was never going to fire.
-  const spawned = Promise.race([
-    new Promise((resolve, reject) => {
-      child.once('spawn', resolve);
-      child.once('error', reject);
-    }),
-    timeoutAfter(10_000, 'the controlled process never started'),
-  ]);
-  const waitExit = () => Promise.race([
-    new Promise(resolve => {
-      // `exit` may already have fired, so the state check comes first.
-      if (child.exitCode !== null || child.signalCode !== null) resolve();
-      else child.once('exit', resolve);
-    }),
-    timeoutAfter(10_000, 'the controlled process did not exit after SIGKILL'),
-  ]);
-  t.after(() => {
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-  });
-  await spawned;
-  const checks = new SystemChecks();
-  const sees = async (expected, check) => {
-    for (let attempt = 0; attempt < 60; attempt += 1) {
-      if (await check() === expected) return true;
-      await sleep(50);
-    }
-    return false;
-  };
-  assert.equal(await sees(true, () => checks.processRunning({
-    kind: 'process', name: 'controlled sleep',
-  })), true);
-  assert.equal(await checks.processRunning({ kind: 'process', path: executable }), true);
-  // Case-sensitive, so a different casing is not the same process.
-  assert.equal(await checks.processRunning({ kind: 'process', name: 'Controlled sleep' }), false);
-
-  child.kill('SIGKILL');
-  await waitExit();
-  // A killed child is reaped by the exit event; the table no longer lists it.
-  assert.equal(await sees(false, () => checks.processRunning({
-    kind: 'process', name: 'controlled sleep',
-  })), true);
-  assert.equal(await checks.processRunning({ kind: 'process', path: executable }), false);
-});
-
-test('the fixed probe has no user input, a bounded time and reads the real table', async () => {
-  // Fixed argv, bounded time: a flow value is never appended to the command.
-  assert.deepEqual([...psArgs], ['-axww', '-o', 'pid=', '-o', 'state=', '-o', 'comm=']);
+test('the fixed probe has no user input and reads the real process table', async () => {
+  assert.deepEqual([...psArgs], ['-axww', '-o', 'pid=', '-o', 'uid=', '-o', 'state=']);
   assert.equal(psTimeoutMs, 3000);
 
-  const entries = parseProcessTable(await runPs());
-  const own = entries.find(entry => entry.pid === process.pid);
+  const rows = parsePidTable(await runPs());
+  const own = rows.find(row => row.pid === process.pid);
   assert.ok(own, 'the running test process appears in /bin/ps output');
-  // The real table confirms both matching forms from this machine's ps output.
-  assert.equal(processMatches(entries, { kind: 'process', name: basename(process.execPath) }), true);
-  assert.equal(processMatches(entries, { kind: 'process', path: own.comm }), true);
-  assert.equal(processMatches(entries, {
-    kind: 'process', name: `no-such-process-${process.pid}`,
-  }), false);
+  assert.equal(own.uid, process.geteuid());
+  assert.ok(rows.some(row => row.pid !== process.pid && row.uid !== process.geteuid()),
+    'the table is not limited to the current UID');
+  // `comm` is not part of the fixed columns at all.
+  assert.equal(psArgs.some(column => String(column).includes('comm')), false);
 });
+
+const hasSwiftc = process.platform === 'darwin' && spawnSync('swiftc', ['--version']).status === 0;
+
+test('the real helper reads executable identity and bounded argv of a controlled child',
+  { skip: !hasSwiftc }, async t => {
+    const directory = await root(t);
+    const helper = join(directory, 'cuekeeper-identity');
+    const identitySource = fileURLToPath(new URL('../native/app-identity.swift', import.meta.url));
+    let build = spawnSync('swiftc', ['-O', '-parse-as-library', identitySource, '-o', helper], {
+      encoding: 'utf8', timeout: 120_000,
+    });
+    assert.equal(build.status, 0, build.stderr);
+
+    // A unique executable name keeps the candidate set to this one child.
+    const sleeperSource = join(directory, 'sleeper.swift');
+    const executable = join(directory, 'controlled sleeper');
+    await writeFile(sleeperSource, 'import Foundation\nThread.sleep(forTimeInterval: 30)\n');
+    build = spawnSync('swiftc', ['-O', sleeperSource, '-o', executable], {
+      encoding: 'utf8', timeout: 120_000,
+    });
+    assert.equal(build.status, 0, build.stderr);
+
+    // The child names itself something else in argv[0]. `ps comm` would report
+    // that lie; the real executable path is the file the system started.
+    const child = spawn('/bin/sh', ['-c',
+      `exec -a /not-the-executable/haoc165 ${JSON.stringify(executable)} --profile "a b"`,
+    ], { stdio: 'ignore' });
+    await Promise.race([
+      new Promise((resolve, reject) => {
+        child.once('spawn', resolve);
+        child.once('error', reject);
+      }),
+      timeoutAfter(10_000, 'the controlled process never started'),
+    ]);
+    t.after(() => {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    });
+    await sleep(300);
+
+    const previous = process.env.CUEKEEPER_APP_IDENTITY;
+    process.env.CUEKEEPER_APP_IDENTITY = helper;
+    t.after(() => {
+      if (previous === undefined) delete process.env.CUEKEEPER_APP_IDENTITY;
+      else process.env.CUEKEEPER_APP_IDENTITY = previous;
+    });
+    const checks = new SystemChecks();
+
+    // Identity comes from the system, so the custom argv[0] matches nothing.
+    assert.equal(await checks.processRunning({ kind: 'process', name: 'controlled sleeper' }), true);
+    assert.equal(await checks.processRunning({ kind: 'process', name: 'haoc165' }), false);
+    assert.equal(await checks.processRunning({ kind: 'process', name: 'not-the-executable' }), false);
+    // proc_pidpath reports the canonical path; the verbatim compare is exact.
+    const canonical = await realpath(executable);
+    assert.equal(await checks.processRunning({ kind: 'process', path: canonical }), true);
+    assert.equal(await checks.processRunning({
+      kind: 'process', path: '/not-the-executable/haoc165',
+    }), false);
+
+    // One argument containing a space is not two arguments, order matters, and
+    // argv[0] is never part of the comparable run.
+    assert.equal(await checks.processRunning({ kind: 'process', name: 'controlled sleeper' },
+      ['--profile', 'a b']), true);
+    assert.equal(await checks.processRunning({ kind: 'process', name: 'controlled sleeper' },
+      ['--profile', 'a', 'b']), false);
+    assert.equal(await checks.processRunning({ kind: 'process', name: 'controlled sleeper' },
+      ['a b', '--profile']), false);
+    assert.equal(await checks.processRunning({ kind: 'process', name: 'controlled sleeper' },
+      ['/not-the-executable/haoc165']), false);
+
+    // The helper's own response carries a status only: neither the expected
+    // arguments nor the observed argv travel back to Node.
+    const { nativeProcessProbe } = await import('../dist/system-check.js');
+    const probe = nativeProcessProbe();
+    const childIdentity = (await probe.identities()).find(identity => identity.pid === child.pid);
+    assert.ok(childIdentity?.startedAt, 'the controlled child has a generation marker');
+    const reply = spawnSync(helper, ['process-argv'], {
+      input: JSON.stringify({
+        pid: child.pid, executable: childIdentity.executable,
+        startedAt: childIdentity.startedAt, args: ['--profile', 'a b'],
+      }),
+      encoding: 'utf8', timeout: 10_000,
+    });
+    assert.equal(JSON.parse(reply.stdout).data.status, 'matched');
+    assert.equal(reply.stdout.includes('a b'), false);
+    assert.equal(reply.stdout.includes('--profile'), false);
+
+    // A candidate whose identity is visible but whose argv the system refuses
+    // to read (PID 1 belongs to another UID) stays unknown.
+    const launchd = (await probe.identities()).find(identity => identity.pid === 1);
+    assert.ok(launchd, 'launchd is listed by the fixed process table');
+    assert.equal(await probe.matchArgs({
+      pid: 1, executable: launchd.executable, startedAt: launchd.startedAt ?? 'unprovable',
+    }, ['x']), 'unknown');
+  });

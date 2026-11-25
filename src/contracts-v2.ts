@@ -87,13 +87,20 @@ export const systemPathPattern =
   '^(?![\\s\\S]*[\\u0000-\\u001f\\u007f])(?!.*(?:^|/)\\.\\.(?:/|$))/(?!/)[\\s\\S]*$';
 export const processNamePattern =
   '^(?![\\s\\S]*[/\\\\\\u0000-\\u001f\\u007f])[\\s\\S]+$';
+// One argv element: literal text, spaces and quotes preserved, bounded, with no
+// NUL or other control character. A flow only ever matches a contiguous run of
+// these against `argv[1...]`.
+export const processArgPattern =
+  '^(?![\\s\\S]*[\\u0000-\\u001f\\u007f])[\\s\\S]+$';
+export const maxProcessArgs = 32;
 const systemPath = T.String({ minLength: 1, maxLength: 4096, pattern: systemPathPattern });
 const processName = T.String({ minLength: 1, maxLength: 255, pattern: processNamePattern });
+const processArg = T.String({ minLength: 1, maxLength: 4096, pattern: processArgPattern });
+const processArgs = T.Array(processArg, { minItems: 1, maxItems: maxProcessArgs });
 const filePathScope = object({ kind: T.Literal('file'), path: systemPath });
-const processScope = T.Union([
-  object({ kind: T.Literal('process'), name: processName }),
-  object({ kind: T.Literal('process'), path: systemPath }),
-]);
+const processNameScope = object({ kind: T.Literal('process'), name: processName });
+const processPathScope = object({ kind: T.Literal('process'), path: systemPath });
+const processScope = T.Union([processNameScope, processPathScope]);
 export const scopeSchema = T.Union([
   windowScope, appScope, surfaceScope, fileDirectoryScope, filePathScope, processScope,
 ]);
@@ -162,7 +169,14 @@ const appWaitCheck = T.Union([
 // A file wait reads the download directory: a matching file exists, or it has
 // finished writing (its size and mtime have been quiet for `quietMs`).
 const fileExistsCheck = object({ kind: T.Literal('file_exists'), equals: T.Boolean() });
-const processRunningCheck = object({ kind: T.Literal('process_running'), equals: T.Boolean() });
+// Arguments are only meaningful for a name scope: the full-path form matches
+// the executable itself, never its argv. The two closed variants keep that
+// pairing structural instead of relying on a runtime warning.
+const processNameRunningCheck = object({
+  kind: T.Literal('process_running'), equals: T.Boolean(), args: T.Optional(processArgs),
+});
+const processPathRunningCheck = object({ kind: T.Literal('process_running'), equals: T.Boolean() });
+const processRunningCheck = T.Union([processNameRunningCheck, processPathRunningCheck]);
 const fileWaitCheck = T.Union([
   fileExistsCheck,
   object({
@@ -269,7 +283,8 @@ const assertStep = T.Union([
   object({ ...stepBase, kind: T.Literal('assert'), scope: windowScope, check: assertCheck }),
   object({ ...stepBase, kind: T.Literal('assert'), scope: appScope, check: appAssertCheck }),
   object({ ...stepBase, kind: T.Literal('assert'), scope: filePathScope, check: fileExistsCheck }),
-  object({ ...stepBase, kind: T.Literal('assert'), scope: processScope, check: processRunningCheck }),
+  object({ ...stepBase, kind: T.Literal('assert'), scope: processNameScope, check: processNameRunningCheck }),
+  object({ ...stepBase, kind: T.Literal('assert'), scope: processPathScope, check: processPathRunningCheck }),
 ]);
 const launchApp = object({
   ...stepBase, kind: T.Literal('launch_app'), scope: appScope, focusAfter,

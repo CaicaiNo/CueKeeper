@@ -1,70 +1,174 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { stat } from 'node:fs/promises';
 import { basename } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { ProcessScope } from './contracts-v2.js';
 import { Fault } from './locator.js';
 
 // System state checks: is one absolute path a regular file, and is one
 // executable running. Both are observations of the machine, never of a window:
 // nothing here launches, focuses, clicks or types, and neither probe needs the
-// accessibility helper or an app identity. The process probe runs a fixed
-// `/bin/ps` argv with no shell and never passes a flow value as an argument.
+// accessibility helper or an app identity.
+//
+// Process identity never trusts `ps comm` (which is argv[0], a value the
+// process chooses) or `ps args` (which joins arguments into text). `ps` is read
+// only for kernel-provided pid/uid/state; the executable path comes from
+// `proc_pidpath` in the native helper, and the helper compares expected
+// arguments itself against a bounded KERN_PROCARGS2 read, so raw argv never
+// crosses back into Node and two arguments containing a space can never
+// collapse into one.
 
-/** The fixed argv the process probe uses. User input is never appended to it. */
-export const psArgs = ['-axww', '-o', 'pid=', '-o', 'state=', '-o', 'comm='] as const;
+export const psArgs = ['-axww', '-o', 'pid=', '-o', 'uid=', '-o', 'state='] as const;
 export const psTimeoutMs = 3000;
-export const maxPsBytes = 1024 * 1024;
+export const maxPsBytes = 4 * 1024 * 1024;
+export const processProbeTimeoutMs = 10_000;
+export const maxProcessProbeBytes = 4 * 1024 * 1024;
+/** Bounded fan-out: one helper call per same-name candidate. */
+export const maxArgCandidates = 64;
+export const maxListedProcesses = 8192;
 
-/** One row of `ps -o pid= -o state= -o comm=`. `comm` may contain spaces. */
-export interface ProcessEntry {
+/** One row of `ps -o pid= -o uid= -o state=`: kernel values only, no comm. */
+export interface PidRow {
   pid: number;
+  uid: number;
   state: string;
-  comm: string;
+}
+
+/** One process the system reports, with the executable path it really runs. */
+export interface ProcessIdentity {
+  pid: number;
+  /** Effective UID of the process. */
+  uid: number;
+  /** Path from `proc_pidpath`, never the process-chosen argv[0]. */
+  executable: string;
+  /** Generation marker; absent when the system will not prove identity. */
+  startedAt?: string;
+  /** False for a zombie: a corpse is not a running process. */
+  live: boolean;
+}
+
+/**
+ * `matched`: one live candidate proved the expected argv run. `unmatched`: the
+ * argv was read in full and does not contain it. `unknown`: the candidate could
+ * not be read (permission, init/protected process, PID reuse) — a reverse check
+ * must never treat this as absent.
+ */
+export type ArgMatch = 'matched' | 'unmatched' | 'unknown';
+
+export interface ArgCandidate {
+  pid: number;
+  executable: string;
+  startedAt: string;
+}
+
+/** Read-only runtime facts. The macOS helper is one implementation. */
+export interface ProcessProbe {
+  /** Every process with a provable executable path; a PID without one is omitted. */
+  identities(): Promise<ProcessIdentity[]>;
+  /** Compares `args` with argv[1...], entirely inside the probe. */
+  matchArgs(candidate: ArgCandidate, args: string[]): Promise<ArgMatch>;
 }
 
 export interface SystemCheckDeps {
   /** Read-only metadata; follows symlinks exactly like stat(2). */
   stat?(path: string): Promise<{ isFile(): boolean }>;
-  /** Returns `/bin/ps` stdout; tests replace it and never start a process. */
-  ps?(): Promise<string>;
+  /** Tests replace it and never start a process. */
+  probe?: ProcessProbe;
+}
+
+function helperPath() {
+  return process.env.CUEKEEPER_APP_IDENTITY ?? fileURLToPath(new URL('./cuekeeper-identity', import.meta.url));
 }
 
 /**
- * Parses the bounded `ps` output. A line that does not fit the three columns is
- * a probe failure, not an empty process table: a negative check must never pass
- * because the output was unreadable.
+ * One request to the read-only native helper: fixed argv, one bounded JSON
+ * request on stdin, bounded stdout and a hard timeout. A missing helper is a
+ * dependency failure; every other problem is an unknown observation.
  */
-export function parseProcessTable(output: string): ProcessEntry[] {
-  const entries: ProcessEntry[] = [];
-  for (const line of output.split('\n')) {
-    if (!line.trim()) continue;
-    const match = /^\s*(\d+)\s+(\S+)\s+(.+?)\s*$/.exec(line);
-    if (!match) {
-      throw new Fault('SYSTEM_CHECK_FAILED', 'The process probe returned output that could not be parsed');
-    }
-    entries.push({ pid: Number(match[1]), state: match[2], comm: match[3] });
-  }
-  return entries;
-}
-
-/** Zombies are corpses, not running processes; their state starts with `Z`. */
-export function isLiveProcess(entry: ProcessEntry): boolean {
-  return !/^Z/.test(entry.state);
-}
-
-/**
- * True when any live process matches. A name is the basename of the visible
- * executable (so a path with spaces stays one comparison); a path is compared
- * verbatim, with no symlink equivalence, because the flow named that path.
- */
-export function processMatches(entries: ProcessEntry[], scope: ProcessScope): boolean {
-  return entries.some(entry => {
-    if (!isLiveProcess(entry)) return false;
-    return 'name' in scope ? basename(entry.comm) === scope.name : entry.comm === scope.path;
+function runHelper(command: string, request?: unknown): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const executable = helperPath();
+    const child = spawn(executable, [command], { stdio: ['pipe', 'pipe', 'ignore'] });
+    let stdout = '';
+    let settled = false;
+    const finish = (error: Fault | undefined, value?: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      finish(new Fault('SYSTEM_CHECK_FAILED',
+        `The process probe timed out after ${processProbeTimeoutMs} ms`));
+    }, processProbeTimeoutMs);
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+      if (stdout.length > maxProcessProbeBytes) {
+        child.kill('SIGKILL');
+        finish(new Fault('SYSTEM_CHECK_FAILED', 'The process probe returned too much output'));
+      }
+    });
+    child.on('error', error => {
+      const code = (error as NodeJS.ErrnoException).code;
+      finish(code === 'ENOENT' || code === 'EACCES'
+        ? new Fault('SYSTEM_CHECK_FAILED',
+          'The process probe helper is unavailable; build it with npm run build:recorder')
+        : new Fault('SYSTEM_CHECK_FAILED', `The process probe failed: ${code ?? 'unknown error'}`));
+    });
+    child.on('close', () => {
+      if (settled) return;
+      let envelope: unknown;
+      try {
+        envelope = JSON.parse(stdout);
+      } catch {
+        finish(new Fault('SYSTEM_CHECK_FAILED', 'The process probe returned no JSON envelope'));
+        return;
+      }
+      const record = envelope as { ok?: unknown; data?: unknown; error?: unknown };
+      if (record?.ok === true) {
+        finish(undefined, record.data);
+        return;
+      }
+      const fault = (record?.error ?? {}) as { code?: unknown; message?: unknown };
+      finish(new Fault(
+        typeof fault.code === 'string' && /^[A-Z_]+$/.test(fault.code) ? fault.code : 'SYSTEM_CHECK_FAILED',
+        typeof fault.message === 'string' ? fault.message : 'The process probe failed',
+      ));
+    });
+    if (request === undefined) child.stdin.end();
+    else child.stdin.end(JSON.stringify(request));
   });
 }
 
-/** Runs the fixed probe. Failure, timeout or overlong output is an unknown. */
+/**
+ * The fixed `ps` call: kernel-provided pid, effective uid and state. `comm` and
+ * `args` are deliberately absent, so no process-chosen string decides identity.
+ */
+export function parsePidTable(output: string): PidRow[] {
+  const rows: PidRow[] = [];
+  for (const line of output.split('\n')) {
+    if (!line.trim()) continue;
+    const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s*$/.exec(line);
+    if (!match) {
+      throw new Fault('SYSTEM_CHECK_FAILED', 'The process probe returned output that could not be parsed');
+    }
+    rows.push({ pid: Number(match[1]), uid: Number(match[2]), state: match[3] });
+    if (rows.length > maxListedProcesses) {
+      throw new Fault('SYSTEM_CHECK_FAILED', 'The process probe returned too many processes');
+    }
+  }
+  return rows;
+}
+
+/** Zombies are corpses, not running processes; their state starts with `Z`. */
+export function isLiveState(state: string): boolean {
+  return !/^Z/.test(state);
+}
+
+/** Runs the fixed process table call. Failure, timeout or overlong output is an unknown. */
 export function runPs(): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile('/bin/ps', [...psArgs], {
@@ -82,6 +186,47 @@ export function runPs(): Promise<string> {
   });
 }
 
+/** The real macOS helper, shared with the app-identity probe. */
+export function nativeProcessProbe(): ProcessProbe {
+  return {
+    async identities() {
+      const rows = parsePidTable(await runPs());
+      const data = await runHelper('process-identities', { pids: rows.map(row => row.pid) });
+      const record = data as { processes?: unknown };
+      if (!Array.isArray(record?.processes)) {
+        throw new Fault('SYSTEM_CHECK_FAILED', 'The process probe returned no process table');
+      }
+      const observed = new Map<number, { executable: string; startedAt?: string }>();
+      for (const entry of record.processes) {
+        if (entry === null || typeof entry !== 'object') continue;
+        const { pid, executable, startedAt } = entry as Record<string, unknown>;
+        if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) continue;
+        if (typeof executable !== 'string' || !executable.startsWith('/')) continue;
+        const marker = typeof startedAt === 'string' && startedAt ? startedAt : undefined;
+        observed.set(pid, { executable, ...(marker === undefined ? {} : { startedAt: marker }) });
+      }
+      return rows.flatMap(row => {
+        const seen = observed.get(row.pid);
+        if (!seen) return [];
+        return [{
+          pid: row.pid, uid: row.uid, executable: seen.executable,
+          ...(seen.startedAt === undefined ? {} : { startedAt: seen.startedAt }),
+          live: isLiveState(row.state),
+        }];
+      });
+    },
+    async matchArgs(candidate, args) {
+      const data = await runHelper('process-argv', {
+        pid: candidate.pid, executable: candidate.executable,
+        startedAt: candidate.startedAt, args,
+      });
+      const status = (data as { status?: unknown } | null)?.status;
+      if (status === 'matched' || status === 'unmatched' || status === 'unknown') return status;
+      throw new Fault('SYSTEM_CHECK_FAILED', 'The process probe returned an unknown argument status');
+    },
+  };
+}
+
 /**
  * The two system observations. `fileExists` keeps the `stat` semantics the
  * contract promises: a regular file or a symlink to one exists, a directory or
@@ -90,11 +235,11 @@ export function runPs(): Promise<string> {
  */
 export class SystemChecks {
   private readonly statFile: (path: string) => Promise<{ isFile(): boolean }>;
-  private readonly probe: () => Promise<string>;
+  private readonly probe: ProcessProbe;
 
   constructor(deps: SystemCheckDeps = {}) {
     this.statFile = deps.stat ?? (path => stat(path));
-    this.probe = deps.ps ?? runPs;
+    this.probe = deps.probe ?? nativeProcessProbe();
   }
 
   async fileExists(path: string): Promise<boolean> {
@@ -108,8 +253,48 @@ export class SystemChecks {
     }
   }
 
-  async processRunning(scope: ProcessScope): Promise<boolean> {
-    const output = await this.probe();
-    return processMatches(parseProcessTable(output), scope);
+  /**
+   * A path check matches the executable path verbatim. A name check matches
+   * the executable's basename, case-sensitively; with `args`, only same-UID
+   * candidates are read, one proven match is enough, and an unreadable
+   * candidate that leaves every other candidate unmatched is an unknown.
+   */
+  async processRunning(scope: ProcessScope, expectedArgs?: readonly string[]): Promise<boolean> {
+    const identities = (await this.probe.identities()).filter(identity => identity.live);
+    if ('path' in scope) {
+      return identities.some(identity => identity.executable === scope.path);
+    }
+    const sameName = identities.filter(identity => basename(identity.executable) === scope.name);
+    const args = expectedArgs;
+    if (args === undefined || args.length === 0) return sameName.length > 0;
+    const uid = process.geteuid?.();
+    if (uid === undefined) {
+      throw new Fault('SYSTEM_CHECK_FAILED', 'The effective user id is unavailable on this platform');
+    }
+    const candidates = sameName.filter(identity => identity.uid === uid);
+    if (!candidates.length) return false;
+    if (candidates.length > maxArgCandidates) {
+      throw new Fault('SYSTEM_CHECK_FAILED',
+        `More than ${maxArgCandidates} same-name candidates; the argument check stays bounded`);
+    }
+    let unreadable = false;
+    for (const candidate of candidates) {
+      // Without a generation marker the system cannot prove this is still the
+      // same process, so the candidate's arguments stay unknown.
+      if (candidate.startedAt === undefined) {
+        unreadable = true;
+        continue;
+      }
+      const result = await this.probe.matchArgs({
+        pid: candidate.pid, executable: candidate.executable, startedAt: candidate.startedAt,
+      }, [...args]);
+      if (result === 'matched') return true;
+      if (result === 'unknown') unreadable = true;
+    }
+    if (unreadable) {
+      throw new Fault('SYSTEM_CHECK_FAILED',
+        'The arguments of a matching process could not be read');
+    }
+    return false;
   }
 }

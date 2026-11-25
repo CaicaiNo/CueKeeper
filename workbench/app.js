@@ -572,8 +572,12 @@ function renderInspector() {
         el('button', {
           type: 'button', className: 'library-group-toggle',
           'aria-expanded': String(group.expanded), 'aria-controls': bodyId,
+          'data-library-group': group.key,
           onclick: () => {
             state.libraryExpanded = toggleLibraryGroup(state.libraryExpanded, group.key);
+            // Remember which toggle was operated so the redrawn button gets the
+            // focus back and the operator can keep pressing Space/Enter.
+            state.libraryFocus = group.key;
             renderInspector();
           },
         },
@@ -638,6 +642,11 @@ function renderInspector() {
       el('p', { className: 'eyebrow' }, '行为库 · 按需展开'),
       ...groups.map(group =>
         section(group, group.key === 'builtin' ? builtinContent : customContent))));
+    const focusGroup = state.libraryFocus;
+    state.libraryFocus = undefined;
+    if (focusGroup !== undefined) {
+      panel.querySelector(`.library-group-toggle[data-library-group="${focusGroup}"]`)?.focus();
+    }
     return;
   }
   const row = getRows().find(action => action.id === state.focused);
@@ -1619,6 +1628,22 @@ function v2AssertFields(initial, options = {}) {
     maxLength: 4096, value: scope?.kind === 'process' && scope.path !== undefined ? scope.path : '',
     placeholder: '/Applications/Safari.app/Contents/MacOS/Safari',
   });
+  // Arguments refine a name match only. Each row is one argv element, kept
+  // literally: spaces and quotes are part of the value, and a blank row is not
+  // an argument at all.
+  const argsRows = el('div', { className: 'stack-list' });
+  const addArgRow = (value = '') => {
+    const arg = input({ maxLength: 4096, value, placeholder: '一个参数，空格与引号原样保留' });
+    const row = el('div', { className: 'parameter-row' }, arg,
+      button('删除', () => {
+        row.remove();
+        sync();
+      }, { style: 'small danger', icon: 'trash', iconOnly: true }));
+    argsRows.append(row);
+  };
+  for (const value of Array.isArray(initial?.args) ? initial.args : []) addArgRow(String(value));
+  const argsBox = field('参数（可选，按顺序连续匹配）', el('div', { className: 'stack-list' }, argsRows,
+    button('添加参数', () => addArgRow(), { style: 'small', icon: 'plus' })));
   const elementBox = el('div', { className: 'stack-list' }, ...picker.controls);
   const valueBox = field('预期内容', equals);
   const boolBox = field('预期结果', toggle);
@@ -1637,6 +1662,7 @@ function v2AssertFields(initial, options = {}) {
     processMatchBox.hidden = mode !== 'process';
     processNameBox.hidden = mode !== 'process' || processMatch.value !== 'name';
     processPathBox.hidden = mode !== 'process' || processMatch.value !== 'path';
+    argsBox.hidden = mode !== 'process' || processMatch.value !== 'name';
     if (system) {
       boolBox.hidden = false;
       valueBox.hidden = true;
@@ -1659,10 +1685,19 @@ function v2AssertFields(initial, options = {}) {
   return {
     controls: [
       field('断言目标', targetKind), elementBox, propertyBox, boolBox, valueBox,
-      fileBox, processMatchBox, processNameBox, processPathBox,
+      fileBox, processMatchBox, processNameBox, processPathBox, argsBox,
     ],
     value() {
       const expected = toggle.value === 'true';
+      const processArgs = () => {
+        const values = [...argsRows.querySelectorAll('input')]
+          .map(arg => arg.value)
+          .filter(value => value !== '');
+        for (const value of values) {
+          if (/[\u0000-\u001f\u007f]/.test(value)) throw new Error('参数不能包含控制字符。');
+        }
+        return values;
+      };
       if (targetKind.value === 'file') {
         const path = filePath.value.trim();
         if (!path.startsWith('/')) throw new Error('填写要检查的文件绝对路径（以 / 开头）。');
@@ -1676,7 +1711,11 @@ function v2AssertFields(initial, options = {}) {
         }
         const name = processName.value.trim();
         if (!name) throw new Error('填写可执行文件名（不含路径）。');
-        return { scope: { kind: 'process', name }, check: { kind: 'process_running', equals: expected } };
+        const args = processArgs();
+        return {
+          scope: { kind: 'process', name },
+          check: { kind: 'process_running', equals: expected, ...(args.length ? { args } : {}) },
+        };
       }
       const bool = property.value === 'exists' || property.value === 'visible';
       return {

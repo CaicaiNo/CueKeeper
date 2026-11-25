@@ -985,11 +985,17 @@ class StepRunner {
     }
     if (step.scope.kind === 'process') {
       const scope = step.scope as ProcessScope;
+      const check = step.check as ProcessRunningCheck;
       const label = 'name' in scope ? `Process ${scope.name}` : `Process at ${scope.path}`;
+      // An argument check compares a run of argv, so an unmatched process is
+      // still running; say which fact failed without repeating the arguments.
+      const describesArgs = 'args' in check && (check.args?.length ?? 0) > 0;
       return this.systemAssert(
-        step.check as ProcessRunningCheck,
-        () => this.ctx.system.processRunning(scope),
-        actual => `${label} is ${actual ? 'running' : 'not running'}`,
+        check,
+        () => this.ctx.system.processRunning(scope, 'args' in check ? check.args : undefined),
+        actual => describesArgs
+          ? `${label} ${actual ? 'runs' : 'does not run'} with the expected arguments`
+          : `${label} is ${actual ? 'running' : 'not running'}`,
       );
     }
     if (step.scope.kind === 'app') {
