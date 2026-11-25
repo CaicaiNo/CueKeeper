@@ -319,7 +319,7 @@ button:disabled { cursor: default; }
 .library-item .actions { flex: none; flex-wrap: nowrap; align-self: center; }
 .library-action-disabled { display: inline-flex; }
 .library-item .card-title { font-size: 13px; }
-.library-item .card-title .badge { margin-left: auto; }
+.library-item .card-title .badge { margin-left: 0; }
 .library-group-heading { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
 .empty { padding: 48px 0; max-width: 32ch; color: var(--muted); font-size: 12.5px; line-height: 1.65; }
 
