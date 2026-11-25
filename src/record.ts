@@ -242,7 +242,7 @@ export class Recording {
       if (!contains(snapshot.tree.bounds, event.point)) {
         throw new Fault('OUTSIDE_WINDOW', 'Hover fell outside the requested window');
       }
-      const hit = hitTest(snapshot, event.point);
+      const hit = hitTest(snapshot, event.point, { referencedOnly: true });
       if (hit?.node.secure) throw new Fault('SECURE_INPUT', 'Hover touched a protected control');
       // A path-fixed flow cannot replay a global coordinate against one copy.
       if (!hit && this.options.requireElementLocator) return 'UNTARGETED_HOVER';
@@ -261,8 +261,8 @@ export class Recording {
       this.textAnchor = undefined;
       if (event.modifiers.length) return 'DRAG_MODIFIERS_SKIPPED';
       if (!contains(snapshot.tree.bounds, event.from)) return 'DRAG_OUTSIDE_WINDOW';
-      const fromHit = hitTest(snapshot, event.from);
-      const toHit = hitTest(snapshot, event.to);
+      const fromHit = hitTest(snapshot, event.from, { referencedOnly: true });
+      const toHit = hitTest(snapshot, event.to, { referencedOnly: true });
       if (fromHit?.node.secure || toHit?.node.secure) {
         throw new Fault('SECURE_INPUT', 'Drag touched a protected control');
       }
@@ -287,7 +287,7 @@ export class Recording {
       if (!contains(snapshot.tree.bounds, event.point)) {
         throw new Fault('OUTSIDE_WINDOW', 'Click fell outside the requested window');
       }
-      const hit = hitTest(snapshot, event.point);
+      const hit = hitTest(snapshot, event.point, { referencedOnly: true });
       if (hit?.node.secure) throw new Fault('SECURE_INPUT', 'Click hit a protected control');
       // A path-fixed flow cannot replay a global coordinate against one copy.
       if (!hit && this.options.requireElementLocator) return 'UNTARGETED_POINT';
@@ -328,7 +328,7 @@ export class Recording {
       if (!contains(snapshot.tree.bounds, event.point)) {
         throw new Fault('OUTSIDE_WINDOW', 'Scroll fell outside the requested window');
       }
-      const hit = hitTest(snapshot, event.point);
+      const hit = hitTest(snapshot, event.point, { referencedOnly: true });
       if (!hit && this.options.requireElementLocator) return 'UNTARGETED_POINT';
       const target: Locator = hit ? toLocator(snapshot, hit) : { kind: 'point', point: event.point };
       const pending = this.scroll;

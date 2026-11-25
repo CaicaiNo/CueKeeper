@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { parseCaptureEvent } from '../dist/capture-protocol.js';
 import { flowV2Check } from '../dist/contracts-v2.js';
 import { parseFlowV2 } from '../dist/flow-v2.js';
-import { Fault, resolve } from '../dist/locator.js';
+import { Fault, parseSnapshot, resolve } from '../dist/locator.js';
 import { GlobalRecording } from '../dist/record-v2.js';
 import { loadSession } from '../dist/workbench-session.js';
 import { ABC_SOURCE, imeStub, SOGOU_SOURCE } from './support/ime-stub.mjs';
@@ -290,13 +290,13 @@ test('an already visible system dialog without a trigger leaves a gap', async ()
   assert.throws(() => parseFlowV2(flow), { code: 'CAPTURE_GAP' });
 });
 
-test('occluded and first-mouse clicks become gaps; activation-only clicks navigate', async () => {
+test('occluded and unprovable clicks keep their point; activation-only clicks navigate', async () => {
   const flow = (await recordFixture('unprovable-clicks')).finish();
-  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'gap', 'activate_app', 'gap']);
-  assert.equal(flow.steps[1].code, 'CAPTURE_SCOPE_UNVERIFIED');
-  assert.equal(flow.steps[3].code, 'CAPTURE_SCOPE_UNVERIFIED');
-  assert.equal(flow.steps[2].scope.app, 'com.apple.TextEdit');
-  assert.equal(flow.steps.filter(step => step.kind === 'click').length, 1);
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'activate_app', 'click', 'click']);
+  assert.equal(flow.steps[1].scope.app, 'com.apple.TextEdit');
+  assert.deepEqual(flow.steps[2].target, { kind: 'point', point: [1150, 310] });
+  assert.deepEqual(flow.steps[3].target, { kind: 'point', point: [1100, 300] });
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
 });
 
 test('a Dock click navigates once the focus names the app it started', async () => {
@@ -306,10 +306,12 @@ test('a Dock click navigates once the focus names the app it started', async () 
   assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
 });
 
-test('a Dock click with no new focus keeps the gap', async () => {
-  const flow = (await recordFixture('dock-click-unproven')).finish();
-  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'gap', 'click']);
-  assert.equal(flow.steps[1].code, 'CAPTURE_SCOPE_UNVERIFIED');
+test('a Dock click with no new focus is dropped with a warning', async () => {
+  const recording = await recordFixture('dock-click-unproven');
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'click']);
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'DOCK_CLICK_UNPROVEN'));
 });
 
 test('a drag that crosses a window boundary leaves CROSS_SCOPE_GESTURE', async () => {
@@ -612,16 +614,18 @@ test('an editor click inside the focused textfield records the field, not the gr
 });
 
 // The helper reports the focused control on every text event, so the container
-// a click hit is corrected without reading the tree at all.
+// a click hit is corrected without losing the characters. The click itself
+// still reads the tree once for identity (the group names nothing); the read
+// failing costs a point, which the text evidence then replaces.
 const EDITOR_FOCUS = {
   role: 'AXTextField', name: 'manifest.json', editable: true, bounds: [300, 120, 900, 660],
 };
 
-test('a container click is retargeted from the text event focus evidence, with no read', async () => {
+test('a container click whose tree read fails is retargeted from the text event focus evidence', async () => {
   let reads = 0;
   const recording = vscodeRecording(async () => {
     reads += 1;
-    throw new Error('focus evidence must be enough');
+    throw new Error('the container names nothing, so the tree read cannot answer');
   });
   for (const event of [
     vscodeEvent('click', 100, {
@@ -632,7 +636,7 @@ test('a container click is retargeted from the text event focus evidence, with n
   ]) await recording.add(parseCaptureEvent(event));
 
   const flow = recording.finish();
-  assert.equal(reads, 0);
+  assert.equal(reads, 1);
   assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'type']);
   assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'textfield', name: 'manifest.json' });
   assert.deepEqual(flow.steps[1].target, flow.steps[0].target);
@@ -649,7 +653,7 @@ test('an AXTextArea focus records the driver textfield role and resolves at repl
   let reads = 0;
   const recording = vscodeRecording(async () => {
     reads += 1;
-    throw new Error('focus evidence must be enough');
+    throw new Error('the container names nothing, so the tree read cannot answer');
   });
   await recording.add(parseCaptureEvent(vscodeEvent('click', 100, {
     point: EDITOR_POINT, decision: 'record', owner: { ...VSCODE_OWNER, role: 'AXGroup' },
@@ -659,7 +663,7 @@ test('an AXTextArea focus records the driver textfield role and resolves at repl
   }
 
   const flow = recording.finish();
-  assert.equal(reads, 0);
+  assert.equal(reads, 1);
   assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'type']);
   const expected = { kind: 'element', role: 'textfield', name: 'manifest.json' };
   assert.deepEqual(flow.steps[0].target, expected);
@@ -820,6 +824,879 @@ test('a focus change between fields starts a new type step from evidence, with n
   assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'textfield', name: 'manifest.json' });
   assert.deepEqual(flow.steps[2].target, { kind: 'element', role: 'textfield', name: 'settings.json' });
   assert.notEqual(flow.steps[0].input, flow.steps[2].input);
+});
+
+// aTrust is an Electron app: AXUIElementCopyElementAtPosition answers with an
+// anonymous group above the control, so the click itself names nothing. The
+// window tree the driver reads does carry the button, and that read is what
+// turns the click into an element target instead of a point a dry run rejects.
+const ATRUST_OWNER = {
+  app: 'com.electron.atrust', pid: 500, processInstance: 1_700_000_000_500,
+  windowNumber: 44, windowTitle: 'aTrust',
+};
+
+test('an anonymous Electron container click reads the tree and binds the named control', async () => {
+  const snapshot = {
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@atrust:e1',
+      bounds: { x: 400, y: 200, width: 800, height: 640 }, states: [], secure: false,
+      children: [{
+        role: 'group', name: '', ref: '@atrust:e2',
+        bounds: { x: 400, y: 200, width: 800, height: 640 }, states: [], secure: false,
+        children: [
+          {
+            role: 'textfield', name: '请输入账号', ref: '@atrust:e3',
+            bounds: { x: 520, y: 380, width: 500, height: 40 }, states: [], secure: false, children: [],
+          },
+          {
+            role: 'button', name: '登录', ref: '@atrust:e4',
+            bounds: { x: 520, y: 480, width: 500, height: 80 }, states: [], secure: false, children: [],
+          },
+        ],
+      }],
+    },
+  };
+  let reads = 0;
+  const recording = new GlobalRecording(async () => {
+    reads += 1;
+    return structuredClone(snapshot);
+  }, { now: () => NOW });
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 1000, seen: NOW, focusGeneration: 1, secure: false,
+    point: [620, 520], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXGroup' },
+  }));
+
+  const flow = recording.finish();
+  assert.equal(reads, 1);
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
+  assert.equal(flow.steps[0].target.kind, 'element');
+  assert.equal(flow.steps[0].target.role, 'button');
+  assert.equal(flow.steps[0].target.name, '登录');
+  assert.equal(flow.steps[0].target.point, undefined);
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_ELEMENT_CLICK'), false);
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+// A click that opens a sheet or switches the page changes the screen before
+// its own tree read can run, so the click's element is only in the tree from
+// before it. That tree is read right after the previous click and is what
+// names the click that would otherwise keep a point a dry run rejects.
+test('a click that changes the page is named from the tree read before it', async () => {
+  const windowBounds = { x: 400, y: 200, width: 800, height: 500 };
+  const pageWithSidebar = {
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@atrust:e1', bounds: windowBounds, states: [], secure: false,
+      children: [
+        {
+          role: 'group', name: '', ref: '@atrust:e2', bounds: windowBounds, states: [], secure: false,
+          children: [
+            {
+              role: 'button', name: '设置', ref: '@atrust:e3',
+              bounds: { x: 430, y: 230, width: 60, height: 40 }, states: [], secure: false, children: [],
+            },
+          ],
+        },
+      ],
+    },
+  };
+  const settingsPage = {
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@atrust:e1', bounds: windowBounds, states: [], secure: false,
+      children: [
+        {
+          role: 'group', name: '', ref: '@atrust:e2', bounds: windowBounds, states: [], secure: false,
+          children: [
+            {
+              role: 'group', name: 'https://sdpc.sangfor.com:6440', ref: '@atrust:e3',
+              bounds: { x: 699, y: 246, width: 175, height: 24 }, states: [], secure: false,
+              children: [{
+                role: 'statictext', name: 'https://sdpc.sangfor.com:6440', ref: '@atrust:e4',
+                bounds: { x: 699, y: 249, width: 175, height: 17 }, states: [], secure: false, children: [],
+              }],
+            },
+          ],
+        },
+      ],
+    },
+  };
+  const sheetOpen = {
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@atrust:e1', bounds: windowBounds, states: [], secure: false,
+      children: [
+        {
+          role: 'group', name: '', ref: '@atrust:e2', bounds: { x: 600, y: 300, width: 400, height: 200 },
+          states: [], secure: false, children: [],
+        },
+      ],
+    },
+  };
+
+  let screen = pageWithSidebar;
+  const settles = [];
+  const recording = new GlobalRecording(async () => structuredClone(screen), {
+    now: () => NOW,
+    scheduleSettle: task => { settles.push(task); },
+  });
+
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 1000, seen: NOW + 1000, focusGeneration: 1, secure: false,
+    point: [450, 250], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXGroup' },
+  }));
+  // The sidebar click opened the settings page; the reads after it see that page.
+  screen = settingsPage;
+  for (const task of settles.splice(0)) await task();
+
+  // The next click opens the address sheet, so nothing is at its point any more.
+  screen = sheetOpen;
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 2000, seen: NOW + 2000, focusGeneration: 1, secure: false,
+    point: [821, 256], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXGroup' },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'click']);
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'button', name: '设置' });
+  const target = flow.steps[1].target;
+  assert.equal(target.kind, 'element');
+  assert.equal(target.name, 'https://sdpc.sangfor.com:6440');
+  assert.equal(target.point, undefined);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_NAMED_FROM_SETTLED_TREE'));
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_ELEMENT_CLICK'), false);
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+// Reading an Electron window can take most of a second. The tree such a read
+// returns is the screen the walk started on, so a read that began before the
+// next click is that click's screen even though it only finished after it.
+test('a tree read that began before the click names it even when it finished after', async () => {
+  const windowBounds = { x: 400, y: 200, width: 800, height: 500 };
+  const pageWithSidebar = {
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@atrust:e1', bounds: windowBounds, states: [], secure: false,
+      children: [
+        {
+          role: 'group', name: '', ref: '@atrust:e2', bounds: windowBounds, states: [], secure: false,
+          children: [
+            {
+              role: 'button', name: '设置', ref: '@atrust:e3',
+              bounds: { x: 430, y: 230, width: 60, height: 40 }, states: [], secure: false, children: [],
+            },
+          ],
+        },
+      ],
+    },
+  };
+  const settingsPage = {
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@atrust:e1', bounds: windowBounds, states: [], secure: false,
+      children: [
+        {
+          role: 'group', name: '', ref: '@atrust:e2', bounds: windowBounds, states: [], secure: false,
+          children: [
+            {
+              role: 'group', name: 'https://sdpc.sangfor.com:6440', ref: '@atrust:e3',
+              bounds: { x: 699, y: 246, width: 175, height: 24 }, states: [], secure: false,
+              children: [{
+                role: 'statictext', name: 'https://sdpc.sangfor.com:6440', ref: '@atrust:e4',
+                bounds: { x: 699, y: 249, width: 175, height: 17 }, states: [], secure: false, children: [],
+              }],
+            },
+          ],
+        },
+      ],
+    },
+  };
+  const sheetOpen = {
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@atrust:e1', bounds: windowBounds, states: [], secure: false,
+      children: [{
+        role: 'group', name: '', ref: '@atrust:e2', bounds: { x: 600, y: 300, width: 400, height: 200 },
+        states: [], secure: false, children: [],
+      }],
+    },
+  };
+
+  let clock = NOW;
+  let slow = false;
+  let screen = pageWithSidebar;
+  const settles = [];
+  const recording = new GlobalRecording(async () => {
+    // The walk runs long: by the time it returns, the next click has arrived.
+    if (slow) clock = NOW + 1150;
+    return structuredClone(screen);
+  }, { now: () => clock, scheduleSettle: task => { settles.push(task); } });
+
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 1000, seen: NOW + 100, focusGeneration: 1, secure: false,
+    point: [450, 250], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXButton', name: '设置' },
+  }));
+  // The sidebar click opened the settings page, and its settle read starts at
+  // NOW+350 but only finishes at NOW+1150 — after the next click at NOW+400.
+  screen = settingsPage;
+  slow = true;
+  // Both settle reads the click scheduled start together at NOW+350; the clock
+  // only moves when a read returns, so each one still starts before the click.
+  for (const task of settles.splice(0)) { clock = NOW + 350; await task(); }
+  slow = false;
+
+  screen = sheetOpen;
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 2000, seen: NOW + 400, focusGeneration: 1, secure: false,
+    point: [721, 258], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXGroup' },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'click']);
+  const target = flow.steps[1].target;
+  assert.equal(target.kind, 'element');
+  assert.equal(target.role, 'statictext');
+  assert.equal(target.name, 'https://sdpc.sangfor.com:6440');
+  assert.equal(target.point, undefined);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_NAMED_FROM_SETTLED_TREE'));
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+// A click can arrive while the read taken after the previous click is still
+// walking the page it just drew. That read describes this click's screen, so
+// the click finishes it before naming itself instead of falling back to a point.
+test('a click waits for the read already walking its page', async () => {
+  const windowBounds = { x: 400, y: 100, width: 900, height: 600 };
+  const wrap = children => ({
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@atrust:e1', bounds: windowBounds, states: [], secure: false,
+      children,
+    },
+  });
+  const settingsPage = wrap([{
+    role: 'group', name: '添加地址', ref: '@atrust:e2',
+    bounds: { x: 700, y: 240, width: 120, height: 32 }, states: [], secure: false, children: [],
+  }]);
+  const stillEmpty = wrap([]);
+
+  let release;
+  let read = 0;
+  const settles = [];
+  const recording = new GlobalRecording(async () => {
+    read += 1;
+    // The read taken after the settings click is still under way when the next
+    // click arrives, and the click's own read sees an empty frame.
+    if (read === 1) return new Promise(resolve => { release = () => resolve(structuredClone(settingsPage)); });
+    return structuredClone(stillEmpty);
+  }, { now: () => NOW, scheduleSettle: task => settles.push(task) });
+
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 1000, seen: NOW, focusGeneration: 1, secure: false,
+    point: [450, 250], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXButton', name: '设置' },
+  }));
+  const walking = settles.shift()();
+  await Promise.resolve();
+
+  const adding = recording.add(parseCaptureEvent({
+    kind: 'click', t: 1900, seen: NOW + 100, focusGeneration: 1, secure: false,
+    point: [760, 256], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXGroup' },
+  }));
+  await Promise.resolve();
+  release();
+  await adding;
+  await walking;
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'click']);
+  assert.deepEqual(flow.steps[1].target, { kind: 'element', role: 'group', name: '添加地址' });
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_ELEMENT_CLICK'), false);
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+// In an Electron page a control is often a container with no action reference.
+// A click on its padding used to look like a click on empty space, which made
+// naming depend on which pixel of the control the pointer happened to land on.
+test('a click inside a control that carries no action reference is named by its container', async () => {
+  const tree = {
+    role: 'window', name: 'aTrust', ref: '@atrust:e1', bounds: { x: 400, y: 100, width: 900, height: 600 },
+    states: [], secure: false, children: [{
+      // Neither the control nor the card around it carries an action reference.
+      role: 'group', name: '接入地址',
+      bounds: { x: 600, y: 200, width: 400, height: 200 }, states: [], secure: false,
+      children: [{
+        role: 'group', bounds: { x: 610, y: 210, width: 380, height: 40 },
+        states: [], secure: false, children: [],
+      }],
+    }],
+  };
+  const recording = new GlobalRecording(
+    async () => ({ windowId: 'w-44', tree: structuredClone(tree) }),
+    { now: () => NOW },
+  );
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 400, seen: NOW, focusGeneration: 1, secure: false,
+    point: [700, 225], decision: 'record',
+    owner: { ...ATRUST_OWNER, windowNumber: 44, windowTitle: 'aTrust', role: 'AXGroup' },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'group', name: '接入地址' });
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_ELEMENT_CLICK'), false);
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+// An app that hides its window when it loses focus hands it a new number each
+// time. A read of the old window must not become a gap the flow can never close.
+test('a read of a window that was replaced is skipped instead of becoming a gap', async () => {
+  const recording = new GlobalRecording(async () => {
+    throw new Fault('WINDOW_NOT_FOUND', 'agent-desktop snapshot returned WINDOW_NOT_FOUND');
+  }, { now: () => NOW });
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 100, seen: NOW, focusGeneration: 1, secure: false,
+    point: [700, 240], decision: 'record',
+    owner: { ...ATRUST_OWNER, windowNumber: 44, windowTitle: 'aTrust', role: 'AXButton', name: '连接' },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'hover', t: 300, seen: NOW + 50, focusGeneration: 1, secure: false,
+    point: [760, 256], dwellMs: 320,
+    owner: { ...ATRUST_OWNER, windowNumber: 44, windowTitle: 'aTrust', role: 'AXGroup' },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'WINDOW_REPLACED'));
+});
+
+// A click on the desktop or another window-less surface has no window a replay
+// could look in. After the recording has started such a click is not part of
+// the flow: keeping it as a gap would block every addressable step around it.
+test('a click outside every window after a recorded step is dropped, not a gap', async () => {
+  const snapshot = {
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@atrust:e1',
+      bounds: { x: 400, y: 200, width: 800, height: 500 }, states: [], secure: false,
+      children: [{
+        role: 'button', name: '设置', ref: '@atrust:e2',
+        bounds: { x: 430, y: 230, width: 60, height: 40 }, states: [], secure: false, children: [],
+      }],
+    },
+  };
+  const recording = new GlobalRecording(async () => structuredClone(snapshot), { now: () => NOW });
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 1000, seen: NOW, focusGeneration: 1, secure: false,
+    point: [450, 250], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXButton', name: '设置' },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 2000, seen: NOW, focusGeneration: 1, secure: false,
+    point: [40, 900], decision: 'record', owner: {},
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_OUTSIDE_WINDOW'));
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+// The first click on a window that is not focused yet is the press macOS
+// swallows to bring the window forward. The focus notification that follows
+// proves it did nothing, so it becomes the window activation, not a gap.
+test('a click on a window that is not focused yet becomes its activation, not a gap', async () => {
+  const recording = new GlobalRecording(async () => assert.fail('no window tree expected'), { now: () => NOW });
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 100, seen: NOW, focusGeneration: 1, secure: false,
+    owner: {
+      app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+      windowNumber: 11, windowTitle: 'client',
+    },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 200, seen: NOW, focusGeneration: 1, secure: false,
+    point: [500, 300], decision: 'gap', gapCode: 'CAPTURE_SCOPE_UNVERIFIED',
+    owner: {
+      app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+      windowNumber: 12, windowTitle: '下载', role: 'AXRow', pressable: true,
+    },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 260, seen: NOW, focusGeneration: 2, secure: false,
+    owner: {
+      app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+      windowNumber: 12, windowTitle: '下载',
+    },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['focus_window']);
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_ONLY_ACTIVATED_WINDOW'));
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+// A held click that something other than a focus followed did something, so it
+// is recorded where it landed: blocking the flow with a gap over a press the
+// recording already placed on screen would make the flow unreplayable.
+test('a click that cannot be proven is recorded at its point when the next event is not its focus', async () => {
+  const windowBounds = { x: 400, y: 200, width: 800, height: 500 };
+  const snapshot = {
+    windowId: 'w-11',
+    tree: {
+      role: 'window', name: 'client', ref: '@finder:e1', bounds: windowBounds, states: [], secure: false,
+      children: [{
+        role: 'button', name: '刷新', ref: '@finder:e2',
+        bounds: { x: 430, y: 230, width: 60, height: 40 }, states: [], secure: false, children: [],
+      }],
+    },
+  };
+  const recording = new GlobalRecording(async () => structuredClone(snapshot), { now: () => NOW });
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 100, seen: NOW, focusGeneration: 1, secure: false,
+    owner: {
+      app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+      windowNumber: 11, windowTitle: 'client',
+    },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 200, seen: NOW, focusGeneration: 1, secure: false,
+    point: [450, 250], decision: 'record',
+    owner: {
+      app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+      windowNumber: 11, windowTitle: 'client', role: 'AXButton', name: '刷新',
+    },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 300, seen: NOW, focusGeneration: 1, secure: false,
+    point: [500, 300], decision: 'gap', gapCode: 'CAPTURE_SCOPE_UNVERIFIED',
+    owner: {
+      app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+      windowNumber: 11, windowTitle: 'client', role: 'AXRow', pressable: true,
+    },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'click']);
+  assert.deepEqual(flow.steps[1].target, { kind: 'point', point: [500, 300] });
+  assert.equal(flow.steps[1].scope.windowKey, 'finder-1');
+  assert.equal(flow.steps[1].atMs, 100);
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_UNPROVEN'));
+  assert.equal(flowV2Check.Check(flow), true);
+  assert.doesNotThrow(() => parseFlowV2(flow));
+});
+
+// The second press of a double click names the control the first press could
+// only place; the merged step must keep the element, not the point.
+test('a double click upgrades a held point click to the control it names', async () => {
+  const recording = new GlobalRecording(async () => undefined, { now: () => NOW });
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 100, seen: NOW, focusGeneration: 1, secure: false,
+    owner: {
+      app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+      windowNumber: 11, windowTitle: 'client',
+    },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 300, seen: NOW, focusGeneration: 1, secure: false,
+    point: [500, 300], decision: 'gap', gapCode: 'CAPTURE_SCOPE_UNVERIFIED',
+    owner: {
+      app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+      windowNumber: 11, windowTitle: 'client', role: 'AXRow', pressable: true,
+    },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 420, seen: NOW, focusGeneration: 1, secure: false,
+    point: [501, 301], decision: 'record', count: 2,
+    owner: {
+      app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+      windowNumber: 11, windowTitle: 'client', role: 'AXButton', name: '刷新',
+    },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'button', name: '刷新' });
+  assert.equal(flow.steps[0].count, 2);
+});
+
+// Clicking the Dock icon of the app that is already frontmost changes nothing:
+// no focus follows, and a gap would block a flow over a press that had no effect.
+test('a Dock click that activated no application is dropped with a warning', async () => {
+  const recording = new GlobalRecording(async () => undefined, { now: () => NOW });
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 100, seen: NOW, focusGeneration: 1, secure: false,
+    owner: {
+      app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+      windowNumber: 11, windowTitle: 'client',
+    },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 200, seen: NOW, focusGeneration: 1, secure: false,
+    point: [450, 250], decision: 'record',
+    owner: {
+      app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+      windowNumber: 11, windowTitle: 'client', role: 'AXButton', name: '刷新',
+    },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 400, seen: NOW, focusGeneration: 1, secure: false,
+    point: [120, 900], decision: 'gap', gapCode: 'CAPTURE_SCOPE_UNVERIFIED',
+    owner: {
+      app: 'com.apple.dock', pid: 200, processInstance: 1700000000001,
+      windowNumber: 300, windowTitle: 'Dock', role: 'AXList', name: 'Finder', pressable: true,
+    },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 500, seen: NOW, focusGeneration: 1, secure: false,
+    point: [460, 251], decision: 'record',
+    owner: {
+      app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+      windowNumber: 11, windowTitle: 'client', role: 'AXButton', name: '刷新',
+    },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'click']);
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.equal(flow.steps.some(step => step.scope?.app === 'com.apple.dock'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'DOCK_CLICK_UNPROVEN'));
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+// One settle read can hang on a window that is still drawing; that must not
+// cost the next click its own tree, or every click after it keeps a point.
+test('a settle read that never finishes does not stop the next click from getting a tree', async () => {
+  const windowBounds = { x: 400, y: 200, width: 800, height: 500 };
+  const oldPage = {
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@atrust:e1', bounds: windowBounds, states: [], secure: false,
+      children: [
+        {
+          role: 'group', name: '设置', ref: '@atrust:e2', bounds: { x: 410, y: 230, width: 60, height: 40 },
+          states: [], secure: false, children: [],
+        },
+        {
+          role: 'group', name: '', ref: '@atrust:e3', bounds: windowBounds, states: [], secure: false,
+          children: [],
+        },
+      ],
+    },
+  };
+  const settingsPage = {
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@atrust:e1', bounds: windowBounds, states: [], secure: false,
+      children: [
+        {
+          role: 'group', name: '设置', ref: '@atrust:e2', bounds: { x: 410, y: 230, width: 60, height: 40 },
+          states: [], secure: false, children: [],
+        },
+        {
+          role: 'group', name: '', ref: '@atrust:e3', bounds: windowBounds, states: [], secure: false,
+          children: [{
+            role: 'group', name: 'https://10.242.5.14', ref: '@atrust:e4',
+            bounds: { x: 699, y: 246, width: 175, height: 24 }, states: [], secure: false,
+            children: [{
+              role: 'statictext', name: 'https://10.242.5.14', ref: '@atrust:e5',
+              bounds: { x: 699, y: 249, width: 175, height: 17 }, states: [], secure: false, children: [],
+            }],
+          }],
+        },
+      ],
+    },
+  };
+  const sheetOpen = {
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@atrust:e1', bounds: windowBounds, states: [], secure: false,
+      children: [{
+        role: 'group', name: '', ref: '@atrust:e2', bounds: { x: 600, y: 300, width: 300, height: 200 },
+        states: [], secure: false, children: [],
+      }],
+    },
+  };
+
+  let screen = oldPage;
+  const settles = [];
+  const recording = new GlobalRecording(async () => structuredClone(screen), {
+    now: () => NOW,
+    scheduleSettle: task => { settles.push(task); },
+  });
+
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 1000, seen: NOW, focusGeneration: 1, secure: false,
+    point: [430, 250], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXGroup' },
+  }));
+  const afterFirst = settles.length;
+  // The first settle never finishes (the window was still drawing); the click
+  // that opened the sheet still schedules one of its own.
+  screen = sheetOpen;
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 2000, seen: NOW + 1000, focusGeneration: 1, secure: false,
+    point: [817, 260], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXGroup' },
+  }));
+  assert.equal(settles.length, afterFirst + 1, 'the second click schedules its own settle');
+  screen = settingsPage;
+  await settles.at(-1)();
+
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 3000, seen: NOW + 2000, focusGeneration: 1, secure: false,
+    point: [817, 260], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXGroup' },
+  }));
+
+  const flow = recording.finish();
+  const clicks = flow.steps.filter(step => step.kind === 'click');
+  assert.equal(clicks.at(-1).target.kind, 'element');
+  assert.equal(clicks.at(-1).target.name, 'https://10.242.5.14');
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+// A click on a window that is not current is usually just the activation, and
+// the helper says so with `navigate`. Web content accepts the first mouse-down
+// though, so a click on a named control there also acted and must be replayed.
+test('a click that activates a window and lands on a named web control is recorded', async () => {
+  const finderTree = {
+    windowId: 'w-下载',
+    tree: {
+      role: 'window', name: '下载', ref: '@find:e1', bounds: { x: 0, y: 0, width: 800, height: 600 },
+      states: [], secure: false,
+      children: [{
+        role: 'group', name: '', ref: '@find:e2', bounds: { x: 0, y: 0, width: 800, height: 600 },
+        states: [], secure: false,
+        children: [{
+          role: 'cell', name: '下载', ref: '@find:e3', bounds: { x: 40, y: 60, width: 120, height: 24 },
+          states: [], secure: false, children: [],
+        }],
+      }],
+    },
+  };
+  const atrustTree = {
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@atrust:e1', bounds: { x: 400, y: 200, width: 800, height: 500 },
+      states: [], secure: false,
+      children: [{
+        role: 'webarea', name: 'aTrust', ref: '@atrust:e2', bounds: { x: 400, y: 200, width: 800, height: 500 },
+        states: [], secure: false,
+        children: [{
+          role: 'group', name: '', ref: '@atrust:e3', bounds: { x: 400, y: 200, width: 800, height: 500 },
+          states: [], secure: false,
+          children: [{
+            role: 'group', name: '设置', ref: '@atrust:e4', bounds: { x: 499, y: 323, width: 64, height: 32 },
+            states: [], secure: false, children: [],
+          }],
+        }],
+      }],
+    },
+  };
+  const trees = [finderTree, atrustTree];
+  const recording = new GlobalRecording(async () => structuredClone(trees.shift() ?? atrustTree), {
+    now: () => NOW,
+  });
+
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 1000, seen: NOW, focusGeneration: 1, secure: false,
+    point: [100, 70], decision: 'record',
+    owner: {
+      app: 'com.apple.finder', pid: 600, processInstance: 1_700_000_000_600,
+      windowNumber: 7, windowTitle: '下载', role: 'AXGroup',
+    },
+  }));
+  // aTrust is behind Finder: this click brought it forward and hit 设置.
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 3000, seen: NOW + 2000, focusGeneration: 2, secure: false,
+    point: [515, 335], decision: 'navigate', owner: { ...ATRUST_OWNER, role: 'AXGroup' },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'activate_app', 'click']);
+  assert.deepEqual(flow.steps[2].scope.app, 'com.electron.atrust');
+  assert.deepEqual(flow.steps[2].target, { kind: 'element', role: 'group', name: '设置' });
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_ACTIVATED_WINDOW'));
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+// The same navigate click on a window surface stays navigation only: nothing
+// there proves the click did anything past activating the window.
+test('a navigate click on a window surface is recorded as navigation only', async () => {
+  const atrustTree = {
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@atrust:e1', bounds: { x: 400, y: 200, width: 800, height: 500 },
+      states: [], secure: false,
+      children: [{
+        role: 'webarea', name: 'aTrust', ref: '@atrust:e2', bounds: { x: 400, y: 200, width: 800, height: 500 },
+        states: [], secure: false,
+        children: [{
+          role: 'group', name: '', ref: '@atrust:e3', bounds: { x: 400, y: 200, width: 800, height: 500 },
+          states: [], secure: false, children: [],
+        }],
+      }],
+    },
+  };
+  const finderTree = {
+    windowId: 'w-下载',
+    tree: {
+      role: 'window', name: '下载', ref: '@find:e1', bounds: { x: 0, y: 0, width: 800, height: 600 },
+      states: [], secure: false,
+      children: [{
+        role: 'cell', name: '下载', ref: '@find:e2', bounds: { x: 40, y: 60, width: 120, height: 24 },
+        states: [], secure: false, children: [],
+      }],
+    },
+  };
+  const trees = [finderTree, atrustTree];
+  const recording = new GlobalRecording(async () => structuredClone(trees.shift() ?? atrustTree), {
+    now: () => NOW,
+  });
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 500, seen: NOW, focusGeneration: 1, secure: false,
+    point: [100, 70], decision: 'record',
+    owner: {
+      app: 'com.apple.finder', pid: 600, processInstance: 1_700_000_000_600,
+      windowNumber: 7, windowTitle: '下载', role: 'AXGroup',
+    },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 2000, seen: NOW + 1500, focusGeneration: 2, secure: false,
+    point: [515, 335], decision: 'navigate', owner: { ...ATRUST_OWNER, role: 'AXGroup' },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'activate_app']);
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'CLICK_ACTIVATED_WINDOW'), false);
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+// Finder's column view shows a file's name in the value of the row's text
+// field, not in a name. Replay matches a target by that value, so the label is
+// a name the step can carry; without it the click would keep a point.
+test('a Finder column-view row is named by the file label in its text field', async () => {
+  const rowBounds = { x: 412, y: 500, width: 206, height: 23 };
+  const snapshot = {
+    windowId: 'w-下载',
+    tree: {
+      role: 'window', name: '下载', ref: '@find:e1', bounds: { x: 233, y: 252, width: 600, height: 500 },
+      states: [], secure: false,
+      children: [{
+        role: 'browser', name: '分栏视图', ref: '@find:e2', bounds: { x: 233, y: 252, width: 600, height: 500 },
+        states: [], secure: false,
+        children: [{
+          role: 'scrollarea', name: '', ref: '@find:e3', bounds: { x: 240, y: 300, width: 580, height: 440 },
+          states: [], secure: false,
+          children: [{
+            role: 'list', name: '', ref: '@find:e4', bounds: { x: 400, y: 300, width: 246, height: 440 },
+            states: [], secure: false,
+            children: [{
+              role: 'group', name: '', ref: '@find:e5', bounds: rowBounds, states: [], secure: false,
+              actions: ['Click'],
+              children: [{
+                role: 'textfield', name: '', value: 'ATrustSDK-arm64-macos11.0', ref: '@find:e6',
+                bounds: { x: 412, y: 503, width: 200, height: 17 }, states: [], secure: false,
+                actions: ['Click', 'RightClick', 'SetValue'], children: [],
+              }],
+            }],
+          }],
+        }],
+      }],
+    },
+  };
+  const recording = new GlobalRecording(async () => structuredClone(snapshot), { now: () => NOW });
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 1000, seen: NOW, focusGeneration: 1, secure: false,
+    point: [519, 507], decision: 'record',
+    owner: {
+      app: 'com.apple.finder', pid: 600, processInstance: 1_700_000_000_600,
+      windowNumber: 7, windowTitle: '下载', role: 'AXGroup',
+    },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
+  assert.equal(flow.steps[0].target.kind, 'element');
+  assert.equal(flow.steps[0].target.name, 'ATrustSDK-arm64-macos11.0');
+  assert.equal(flow.steps[0].target.role, 'textfield');
+  assert.equal(flow.steps[0].target.point, undefined);
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_FILE_CLICK'), false);
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+// A drop-down arrow has no accessible name at all, but it is the only pressable
+// part of a control whose display carries the name. The step clicks the named
+// control, which is the same control the arrow belongs to.
+test('an anonymous arrow next to one labelled control is recorded as that control', async () => {
+  const windowBounds = { x: 400, y: 200, width: 800, height: 500 };
+  const settingsPage = {
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@atrust:e1', bounds: windowBounds, states: [], secure: false,
+      children: [{
+        role: 'group', name: '', ref: '@atrust:e2', bounds: windowBounds, states: [], secure: false,
+        children: [{
+          role: 'group', name: '设置', ref: '@atrust:e3a', bounds: { x: 410, y: 230, width: 60, height: 40 },
+          states: [], secure: false, children: [],
+        }, {
+          role: 'group', name: '', ref: '@atrust:e3', bounds: { x: 699, y: 246, width: 721, height: 24 },
+          states: [], secure: false,
+          children: [{
+            role: 'group', name: 'https://10.242.5.14', ref: '@atrust:e4',
+            bounds: { x: 699, y: 246, width: 175, height: 24 }, states: [], secure: false,
+            actions: ['RightClick', 'ScrollTo'],
+            children: [{
+              role: 'statictext', name: 'https://10.242.5.14', ref: '@atrust:e5',
+              bounds: { x: 699, y: 249, width: 175, height: 17 }, states: [], secure: false, children: [],
+            }],
+          }, {
+            role: 'button', name: '', ref: '@atrust:e6', bounds: { x: 881, y: 247, width: 17, height: 22 },
+            states: [], secure: false, actions: ['Click', 'SetFocus'], children: [],
+          }],
+        }],
+      }],
+    },
+  };
+  // The arrow opens the address sheet, so nothing is left at the click point in
+  // the tree read after it; the tree read before it still shows the arrow.
+  const sheetOpen = {
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@atrust:e1', bounds: windowBounds, states: [], secure: false,
+      children: [{
+        role: 'group', name: '', ref: '@atrust:e2', bounds: { x: 500, y: 300, width: 400, height: 200 },
+        states: [], secure: false, children: [],
+      }],
+    },
+  };
+
+  let screen = settingsPage;
+  const settles = [];
+  const recording = new GlobalRecording(async () => structuredClone(screen), {
+    now: () => NOW,
+    scheduleSettle: task => { settles.push(task); },
+  });
+  // A click that leaves the page alone seeds the tree read before the arrow.
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 1000, seen: NOW, focusGeneration: 1, secure: false,
+    point: [430, 250], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXGroup' },
+  }));
+  for (const task of settles.splice(0)) await task();
+
+  screen = sheetOpen;
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 2000, seen: NOW + 1000, focusGeneration: 1, secure: false,
+    point: [887, 258], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXGroup' },
+  }));
+
+  const flow = recording.finish();
+  const click = flow.steps.filter(step => step.kind === 'click').at(-1);
+  assert.equal(click.target.kind, 'element');
+  assert.equal(click.target.role, 'group');
+  assert.equal(click.target.name, 'https://10.242.5.14');
+  assert.equal(click.target.point, undefined);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_NAMED_BY_CONTAINER_LABEL'));
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_ELEMENT_CLICK'), false);
+  assert.equal(flowV2Check.Check(flow), true);
 });
 
 test('a click in another field starts a new typing target in the same window', async () => {
@@ -1006,24 +1883,299 @@ test('a scroll names its element from the cached tree and invalidates it afterwa
   assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'scroll', 'click']);
 });
 
-test('a click the cached tree cannot place is read again and keeps its point', async () => {
+test('a click both trees leave empty is read again and not recorded', async () => {
   // One button in the top-left corner: everything else in the window is empty.
   const snapshot = plainWindow(33, 'Editor', { x: 0, y: 0, width: 1400, height: 900 }, [{
     role: 'button', name: 'Save', ref: '@plain:e2',
     bounds: { x: 20, y: 20, width: 80, height: 30 }, states: [], secure: false, children: [],
   }]);
   const { read, reads } = countingReader({ 33: snapshot });
-  const recording = new GlobalRecording(read, { now: () => NOW });
+  const settles = [];
+  const recording = new GlobalRecording(read, { now: () => NOW, scheduleSettle: task => settles.push(task) });
   await recording.add(parseCaptureEvent(vscodeEvent('click', 100, { point: [60, 35], decision: 'record' })));
-  // Nothing is under this point but the window root, in the cached tree and in
-  // any other: blank space is a point with a warning, never a guessed element.
+  // The tree read after the first click is the screen the next click is made
+  // against; it is empty at this point too.
+  for (const task of settles.splice(0)) await task();
   await recording.add(parseCaptureEvent(vscodeEvent('click', 2000, { point: [700, 400], decision: 'record' })));
   const flow = recording.finish();
-  assert.deepEqual(reads, [33, 33], 'an empty hit costs one fresh read, not a gap');
+  assert.deepEqual(reads, [33, 33, 33], 'two clicks, each with its own read, plus the settle read');
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_ELEMENT_CLICK'));
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+test('a settle read keeps reading until the page has finished building', async () => {
+  // Chromium builds a page's accessibility tree after the view changes, so the
+  // first read after a click can see a half-built page. The click that follows
+  // must be named from the finished screen, not from the half-built one.
+  const windowBounds = { x: 400, y: 100, width: 900, height: 600 };
+  const wrap = (children) => ({
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@trust:e1', bounds: windowBounds, states: [], secure: false,
+      children,
+    },
+  });
+  const building = wrap([{
+    role: 'group', name: '', ref: '@trust:e2', bounds: windowBounds, states: [], secure: false, children: [],
+  }]);
+  const built = wrap([{
+    role: 'group', name: 'https://sdpc.sangfor.com:6440', ref: '@trust:e2',
+    bounds: { x: 699, y: 246, width: 400, height: 24 }, states: [], secure: false, children: [],
+  }]);
+  const navigated = wrap([{
+    role: 'group', name: '', ref: '@trust:e2', bounds: windowBounds, states: [], secure: false,
+    children: [{
+      role: 'group', name: '', ref: '@trust:e3', bounds: windowBounds, states: [], secure: false, children: [],
+    }],
+  }]);
+
+  let screen = wrap([{
+    role: 'group', name: '设置', ref: '@trust:e2', bounds: { x: 430, y: 230, width: 60, height: 40 },
+    states: [], secure: false, children: [],
+  }]);
+  let reads = 0;
+  const reader = async () => { reads += 1; return structuredClone(screen); };
+  const settles = [];
+  const recording = new GlobalRecording(reader, { now: () => NOW, scheduleSettle: task => settles.push(task) });
+
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 1000, seen: NOW, focusGeneration: 1, secure: false,
+    point: [450, 250], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXButton', name: '设置' },
+  }));
+  // The settings page starts drawing: first read half-built, then finished.
+  screen = building;
+  await settles.shift()();
+  screen = built;
+  await settles.shift()();
+  await settles.shift()();
+  assert.equal(settles.length, 0, 'the chain stops once two reads agree');
+
+  // The address row click navigates, so its own read sees the next page.
+  screen = navigated;
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 3000, seen: NOW + 2000, focusGeneration: 1, secure: false,
+    point: [884, 256], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXGroup' },
+  }));
+
+  const flow = recording.finish();
+  assert.equal(reads, 4, 'three settle reads, then the click own read');
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'click']);
+  assert.equal(flow.steps[1].target.kind, 'element');
+  assert.equal(flow.steps[1].target.name, 'https://sdpc.sangfor.com:6440');
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_NAMED_FROM_SETTLED_TREE'));
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+test('a click that only one tree leaves empty keeps its point', async () => {
+  // The tree read before the click could not answer the point (the window was
+  // still drawing), so the point cannot be called empty space: the click stays
+  // as a point rather than losing a step the user performed.
+  const snapshot = plainWindow(33, 'Editor', { x: 0, y: 0, width: 1400, height: 900 }, [{
+    role: 'button', name: 'Save', ref: '@plain:e2',
+    bounds: { x: 20, y: 20, width: 80, height: 30 }, states: [], secure: false, children: [],
+  }]);
+  const { read } = countingReader({ 33: snapshot });
+  const recording = new GlobalRecording(read, { now: () => NOW, scheduleSettle: () => {} });
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 100, { point: [60, 35], decision: 'record' })));
+  await recording.add(parseCaptureEvent(vscodeEvent('click', 2000, { point: [700, 400], decision: 'record' })));
+  const flow = recording.finish();
   assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'click']);
   assert.deepEqual(flow.steps[1].target, { kind: 'point', point: [700, 400] });
   assert.ok(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_ELEMENT_CLICK'));
-  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+});
+
+test('a click on an anonymous page container keeps its point', async () => {
+  // An Electron page is a stack of unnamed groups; a click on one of them names
+  // nothing, so it keeps its point. Dropping it would lose a step the user made
+  // — the unnamed group can be the image that navigates the page.
+  const snapshot = {
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@trust:e1',
+      bounds: { x: 400, y: 100, width: 900, height: 600 }, states: [], secure: false,
+      children: [
+        {
+          role: 'group', name: '', ref: '@trust:e2', bounds: { x: 591, y: 254, width: 701, height: 393 },
+          states: [], secure: false,
+          children: [{
+            role: 'group', name: '', ref: '@trust:e3', bounds: { x: 591, y: 254, width: 701, height: 393 },
+            states: [], secure: false, children: [],
+          }],
+        },
+        {
+          role: 'button', name: '登录', ref: '@trust:e4',
+          bounds: { x: 860, y: 400, width: 100, height: 40 }, states: [], secure: false, children: [],
+        },
+      ],
+    },
+  };
+  const recording = new GlobalRecording(async () => structuredClone(snapshot), { now: () => NOW });
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 100, seen: NOW, focusGeneration: 1, secure: false,
+    point: [822, 255], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXGroup' },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 2000, seen: NOW, focusGeneration: 1, secure: false,
+    point: [880, 420], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXButton', name: '登录' },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'click']);
+  assert.deepEqual(flow.steps[0].target, { kind: 'point', point: [822, 255] });
+  assert.equal(flow.steps[1].target.name, '登录');
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_ELEMENT_CLICK'));
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+test('a click on a control that has only an identifier is recorded with it', async () => {
+  // The QR code on the aTrust page has no name at all, only Chromium's
+  // AXDOMIdentifier. The identifier addresses this exact element.
+  const snapshot = {
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@trust:e1',
+      bounds: { x: 400, y: 100, width: 900, height: 600 }, states: [], secure: false,
+      children: [
+        {
+          role: 'image', name: '', ref: '@trust:e2', identifier: 'qr-code',
+          bounds: { x: 600, y: 200, width: 120, height: 120 }, states: [], secure: false, children: [],
+        },
+        {
+          role: 'button', name: '确定接入', ref: '@trust:e3',
+          bounds: { x: 430, y: 480, width: 60, height: 40 }, states: [], secure: false, children: [],
+        },
+      ],
+    },
+  };
+  const recording = new GlobalRecording(async () => structuredClone(snapshot), { now: () => NOW });
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 100, seen: NOW, focusGeneration: 1, secure: false,
+    point: [650, 250], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXImage' },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 3000, seen: NOW, focusGeneration: 1, secure: false,
+    point: [450, 500], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXButton', name: '确定接入' },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'image', name: '', identifier: 'qr-code' });
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_NAMED_BY_IDENTIFIER'));
+  assert.doesNotThrow(() => parseFlowV2(flow));
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+test('the driver identifier reaches the node and other native ids are ignored', () => {
+  const snapshot = parseSnapshot({
+    complete: true,
+    window: { id: 'w-9', title: 'aTrust' },
+    tree: {
+      role: 'window', name: 'aTrust', bounds: { x: 0, y: 0, width: 20, height: 20 }, states: [],
+      children: [
+        {
+          role: 'image', native_id: { kind: 'ax_dom_identifier', value: 'qr-code' },
+          bounds: { x: 0, y: 0, width: 5, height: 5 }, states: [], children: [],
+        },
+        {
+          role: 'image', native_id: { kind: 'ax_ref', value: 'not-an-id' },
+          bounds: { x: 5, y: 5, width: 5, height: 5 }, states: [], children: [],
+        },
+      ],
+    },
+  }, { window: 'aTrust' });
+  assert.equal(snapshot.tree.children[0].identifier, 'qr-code');
+  assert.equal(snapshot.tree.children[1].identifier, undefined);
+});
+
+test('a click on an anonymous icon inside a named control is recorded as that control', async () => {
+  // The aTrust title bar draws "切换接入地址" as an anonymous glyph inside a
+  // named group; clicking the glyph is what switches to the address page.
+  const snapshot = {
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@trust:e1',
+      bounds: { x: 400, y: 100, width: 900, height: 600 }, states: [], secure: false,
+      children: [
+        {
+          role: 'group', name: '', ref: '@trust:e2', bounds: { x: 400, y: 100, width: 900, height: 600 },
+          states: [], secure: false,
+          children: [
+            {
+              role: 'group', name: '切换接入地址', ref: '@trust:e3',
+              bounds: { x: 1252, y: 129, width: 24, height: 24 }, states: [], secure: false,
+              children: [{
+                role: 'statictext', name: '', ref: '@trust:e4',
+                bounds: { x: 1256, y: 133, width: 16, height: 16 }, states: [], secure: false, children: [],
+              }],
+            },
+            {
+              role: 'button', name: '确定接入', ref: '@trust:e5',
+              bounds: { x: 430, y: 230, width: 60, height: 40 }, states: [], secure: false, children: [],
+            },
+          ],
+        },
+      ],
+    },
+  };
+  const recording = new GlobalRecording(async () => structuredClone(snapshot), { now: () => NOW });
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 100, seen: NOW, focusGeneration: 1, secure: false,
+    point: [1260, 140], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXImage' },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 3000, seen: NOW, focusGeneration: 1, secure: false,
+    point: [450, 250], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXButton', name: '确定接入' },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'click']);
+  assert.equal(flow.steps[0].target.kind, 'element');
+  assert.equal(flow.steps[0].target.role, 'group');
+  assert.equal(flow.steps[0].target.name, '切换接入地址');
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_NAMED_BY_CONTAINER_LABEL'));
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+test('a click on empty space under a page-sized named container is still dropped', async () => {
+  // The settings page is one named group covering the window; clicking its
+  // blank area must not become "click the page".
+  const windowBounds = { x: 400, y: 100, width: 900, height: 600 };
+  const snapshot = {
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@trust:e1', bounds: windowBounds, states: [], secure: false,
+      children: [
+        {
+          role: 'group', name: '基本设置', ref: '@trust:e2', bounds: windowBounds, states: [], secure: false,
+          children: [{
+            role: 'group', name: '', ref: '@trust:e3', bounds: { x: 500, y: 200, width: 600, height: 300 },
+            states: [], secure: false, children: [],
+          }],
+        },
+        {
+          role: 'button', name: '确定接入', ref: '@trust:e4',
+          bounds: { x: 430, y: 230, width: 60, height: 40 }, states: [], secure: false, children: [],
+        },
+      ],
+    },
+  };
+  const recording = new GlobalRecording(async () => structuredClone(snapshot), { now: () => NOW });
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 100, seen: NOW, focusGeneration: 1, secure: false,
+    point: [700, 300], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXGroup' },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 3000, seen: NOW, focusGeneration: 1, secure: false,
+    point: [450, 250], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXButton', name: '确定接入' },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'click']);
+  // The page container is too big to stand for the click, so the point stays.
+  assert.deepEqual(flow.steps[0].target, { kind: 'point', point: [700, 300] });
+  assert.equal(flow.steps[1].target.name, '确定接入');
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_ELEMENT_CLICK'));
   assert.equal(flowV2Check.Check(flow), true);
 });
 
@@ -1546,10 +2698,14 @@ test('record --global writes a v2 flow with scopes and no typed content', { skip
   assert.ok(!run.stderr.includes(secret));
   assert.ok(!JSON.stringify(run.response).includes(secret));
   // The click's own element evidence and its anchor carry the first text; only
-  // the TextEdit window needs one fallback read.
-  assert.equal(run.commands.filter(command => command.startsWith('snapshot')).length, 1);
-  // The same number is reported as the recording's accessibility cost.
-  assert.equal(run.response.data.snapshotReads, 1);
+  // the TextEdit window needs one fallback read. Clicks also schedule one read
+  // of the window they changed, which is what lets the next click in that
+  // window name an element a sheet or page switch would have hidden. Those run
+  // off the event stream and are independent of each other, so a run that ends
+  // before some of them fire does not wait for them; whatever ran is counted.
+  const reads = run.commands.filter(command => command.startsWith('snapshot')).length;
+  assert.ok(reads >= 1, `snapshot commands: ${reads}`);
+  assert.equal(run.response.data.snapshotReads, reads);
 });
 
 test('record --global consumes a drag pickup and saves the drag step', { skip: process.platform !== 'darwin' }, t => {
@@ -1867,4 +3023,60 @@ test('a window-less event never inherits a scope from another app', async () => 
   const flow = recording.finish();
   assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'gap']);
   assert.equal(flow.steps[1].code, 'CAPTURE_SCOPE_UNVERIFIED');
+});
+
+test('HAOC-175 review: a queued follow-up read waits out a secure interval', async () => {
+  const data = fixture('two-apps-three-windows');
+  const queued = [];
+  let reads = 0;
+  const read = readerFor(data);
+  const recording = new GlobalRecording(async window => {
+    reads += 1;
+    return read(window);
+  }, { now: () => NOW, scheduleSettle: task => queued.push(task) });
+  await recording.add(parseCaptureEvent(data.events[0]));
+  const readCountBeforeSecure = reads;
+  assert.equal(queued.length, 1);
+  await recording.add(parseCaptureEvent({
+    ...data.events[1], secure: true, secureEvidence: ['system_secure_input'],
+  }));
+  await queued.shift()();
+  recording.finish();
+  assert.equal(reads, readCountBeforeSecure, 'a queued task read an AX tree inside the secure interval');
+});
+
+test('HAOC-175 review: a read completed across secure input cannot name a later click', async () => {
+  const data = fixture('two-apps-three-windows');
+  const click = data.events[0];
+  const expired = structuredClone(data.snapshots[String(click.owner.windowNumber)]);
+  expired.tree.children = [{
+    role: 'button', name: 'Expired target', ref: '@w11:e42',
+    bounds: { x: 140, y: 100, width: 30, height: 30 },
+    states: [], secure: false, children: [],
+  }];
+  const queued = [];
+  let reads = 0;
+  let completeRead;
+  const delayed = new Promise(resolve => { completeRead = resolve; });
+  const recording = new GlobalRecording(async () => {
+    reads += 1;
+    if (reads === 1) return delayed;
+    throw new Error('fresh tree unavailable');
+  }, { now: () => NOW, scheduleSettle: task => queued.push(task) });
+
+  await recording.add(parseCaptureEvent(click));
+  const pending = queued.shift()();
+  assert.equal(reads, 1);
+  await recording.add(parseCaptureEvent({
+    ...data.events[1], secure: true, secureEvidence: ['system_secure_input'],
+  }));
+  completeRead(expired);
+  await pending;
+  await recording.add(parseCaptureEvent({
+    ...click, t: 300, seen: NOW + 200, owner: { ...click.owner, name: '' },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'manual_checkpoint', 'click']);
+  assert.deepEqual(flow.steps[2].target, { kind: 'point', point: click.point });
 });

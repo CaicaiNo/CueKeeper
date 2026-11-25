@@ -58,6 +58,10 @@
               "maxLength": 256,
               "type": "string"
             },
+            "identifier": {
+              "maxLength": 512,
+              "type": "string"
+            },
             "path": {
               "minItems": 1,
               "maxItems": 51,

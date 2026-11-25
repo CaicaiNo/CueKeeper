@@ -427,6 +427,10 @@
                                   "maxLength": 256,
                                   "type": "string"
                                 },
+                                "identifier": {
+                                  "maxLength": 512,
+                                  "type": "string"
+                                },
                                 "path": {
                                   "minItems": 1,
                                   "maxItems": 51,
@@ -480,6 +484,10 @@
                                 },
                                 "name": {
                                   "maxLength": 256,
+                                  "type": "string"
+                                },
+                                "identifier": {
+                                  "maxLength": 512,
                                   "type": "string"
                                 },
                                 "path": {
@@ -1124,6 +1132,10 @@
                         "maxLength": 256,
                         "type": "string"
                       },
+                      "identifier": {
+                        "maxLength": 512,
+                        "type": "string"
+                      },
                       "path": {
                         "minItems": 1,
                         "maxItems": 51,
@@ -1318,6 +1330,10 @@
                         "maxLength": 256,
                         "type": "string"
                       },
+                      "identifier": {
+                        "maxLength": 512,
+                        "type": "string"
+                      },
                       "path": {
                         "minItems": 1,
                         "maxItems": 51,
@@ -1466,6 +1482,10 @@
                       },
                       "name": {
                         "maxLength": 256,
+                        "type": "string"
+                      },
+                      "identifier": {
+                        "maxLength": 512,
                         "type": "string"
                       },
                       "path": {
@@ -1754,6 +1774,10 @@
                         "maxLength": 256,
                         "type": "string"
                       },
+                      "identifier": {
+                        "maxLength": 512,
+                        "type": "string"
+                      },
                       "path": {
                         "minItems": 1,
                         "maxItems": 51,
@@ -1910,6 +1934,10 @@
                       },
                       "name": {
                         "maxLength": 256,
+                        "type": "string"
+                      },
+                      "identifier": {
+                        "maxLength": 512,
                         "type": "string"
                       },
                       "path": {
@@ -2087,6 +2115,10 @@
                     "maxLength": 256,
                     "type": "string"
                   },
+                  "identifier": {
+                    "maxLength": 512,
+                    "type": "string"
+                  },
                   "path": {
                     "minItems": 1,
                     "maxItems": 51,
@@ -2122,6 +2154,10 @@
                   },
                   "name": {
                     "maxLength": 256,
+                    "type": "string"
+                  },
+                  "identifier": {
+                    "maxLength": 512,
                     "type": "string"
                   },
                   "path": {
@@ -2302,6 +2338,10 @@
                     "maxLength": 256,
                     "type": "string"
                   },
+                  "identifier": {
+                    "maxLength": 512,
+                    "type": "string"
+                  },
                   "path": {
                     "minItems": 1,
                     "maxItems": 51,
@@ -2447,6 +2487,10 @@
                   },
                   "name": {
                     "maxLength": 256,
+                    "type": "string"
+                  },
+                  "identifier": {
+                    "maxLength": 512,
                     "type": "string"
                   },
                   "path": {
@@ -2660,6 +2704,10 @@
                                 "maxLength": 256,
                                 "type": "string"
                               },
+                              "identifier": {
+                                "maxLength": 512,
+                                "type": "string"
+                              },
                               "path": {
                                 "minItems": 1,
                                 "maxItems": 51,
@@ -2713,6 +2761,10 @@
                               },
                               "name": {
                                 "maxLength": 256,
+                                "type": "string"
+                              },
+                              "identifier": {
+                                "maxLength": 512,
                                 "type": "string"
                               },
                               "path": {
@@ -3526,6 +3578,10 @@
                               },
                               "name": {
                                 "maxLength": 256,
+                                "type": "string"
+                              },
+                              "identifier": {
+                                "maxLength": 512,
                                 "type": "string"
                               },
                               "path": {
@@ -5101,6 +5157,10 @@
                                 "maxLength": 256,
                                 "type": "string"
                               },
+                              "identifier": {
+                                "maxLength": 512,
+                                "type": "string"
+                              },
                               "path": {
                                 "minItems": 1,
                                 "maxItems": 51,
@@ -5154,6 +5214,10 @@
                               },
                               "name": {
                                 "maxLength": 256,
+                                "type": "string"
+                              },
+                              "identifier": {
+                                "maxLength": 512,
                                 "type": "string"
                               },
                               "path": {
