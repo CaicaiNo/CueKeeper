@@ -9,6 +9,13 @@ export interface Node {
   value?: string;
   text?: string;
   ref?: string;
+  /**
+   * The accessibility identifier the platform exposes for this element:
+   * Chromium's AXDOMIdentifier for web content, Cocoa's AXIdentifier for native
+   * controls. It is stable across copy changes and unique within a window, which
+   * a name is not; replay prefers it and falls back to the name.
+   */
+  identifier?: string;
   states: string[];
   secure: boolean;
   bounds?: Bounds;
@@ -54,6 +61,16 @@ function parseBounds(value: unknown): Bounds | undefined {
   }
 }
 
+/** The driver's native identifier, whatever attribute the platform took it from. */
+function parseIdentifier(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const native = object(value);
+  if (typeof native.value !== 'string') return undefined;
+  if (typeof native.kind === 'string' && !/identifier/i.test(native.kind)) return undefined;
+  const trimmed = native.value.trim();
+  return trimmed && trimmed.length <= 512 ? trimmed : undefined;
+}
+
 function parseNode(input: unknown, depth: number): Node {
   const node = object(input);
   if (node.subtree_truncated === true || node.identity_unproven === true || depth > 50 ||
@@ -74,6 +91,7 @@ function parseNode(input: unknown, depth: number): Node {
     name: optionalString(node.name),
     value: optionalString(node.value),
     text: optionalString(node.text),
+    identifier: parseIdentifier(node.native_id),
     ref: typeof node.ref_id === 'string' && /^@[a-z\d]+:e\d+$/i.test(node.ref_id) ? node.ref_id : undefined,
     bounds: parseBounds(node.bounds),
     states,
@@ -244,8 +262,15 @@ function matches(tree: Node, locator: ElementLocator, names = elementNames(tree)
   // `outlinerow` for the same item. The row family is one addressable role;
   // the name still has to match exactly.
   const family = (role: string) => rowRoles.has(role) ? 'row' : role;
-  return flatten(tree).filter(entry =>
-    family(entry.node.role) === family(locator.role) &&
+  const candidates = flatten(tree).filter(entry => family(entry.node.role) === family(locator.role));
+  // The platform identifier is the first identity: it survives renamed labels
+  // and is unique within a window. When the page no longer carries it — rebuilt
+  // element, older app version — the recorded name and path still resolve it.
+  if (locator.identifier !== undefined) {
+    const identified = candidates.filter(entry => entry.node.identifier === locator.identifier);
+    if (identified.length) return identified;
+  }
+  return candidates.filter(entry =>
     (locator.name === undefined || (names.get(entry.node) ?? '') === locator.name) &&
     (locator.path === undefined ||
       (locator.path.length === entry.path.length &&
@@ -256,7 +281,9 @@ function matches(tree: Node, locator: ElementLocator, names = elementNames(tree)
 export function resolve(snapshot: Snapshot, locator: ElementLocator): Located {
   const candidates = matches(snapshot.tree, locator);
   if (locator.index !== undefined) {
-    const candidate = candidates[locator.index];
+    // An identifier match can be a single element where the recorded name had
+    // several; the position was recorded for the name, so one match wins.
+    const candidate = candidates[locator.index] ?? (candidates.length === 1 ? candidates[0] : undefined);
     if (candidate) return candidate;
   } else {
     if (candidates.length === 1) return candidates[0];
@@ -276,6 +303,9 @@ export function toLocator(snapshot: Snapshot, entry: Located): ElementLocator {
       locator.index = candidates.findIndex(candidate => candidate.node === entry.node);
     }
   }
+  // The name/path above is the fallback identity; the identifier is the
+  // preferred one and may be the only one a control has.
+  if (entry.node.identifier) locator.identifier = entry.node.identifier;
   return locator;
 }
 
@@ -284,9 +314,20 @@ export function contains(bounds: Bounds | undefined, [x, y]: Point): boolean {
     y >= bounds.y && y < bounds.y + bounds.height;
 }
 
-export function hitTest(snapshot: Snapshot, point: Point): Located | undefined {
+export interface HitOptions {
+  /**
+   * Consider only nodes that carry an action reference. The older single-window
+   * recorder ties a click to a control this way; the v2 recorder needs every
+   * node, because in an Electron page most controls are plain containers and a
+   * reference is only needed later, to press one.
+   */
+  referencedOnly?: boolean;
+}
+
+export function hitTest(snapshot: Snapshot, point: Point, options: HitOptions = {}): Located | undefined {
   const candidates = flatten(snapshot.tree)
-    .filter(({ node }) => node.ref && !node.states.includes('hidden') && contains(node.bounds, point))
+    .filter(({ node }) => node.bounds && (!options.referencedOnly || node.ref !== undefined)
+      && !node.states.includes('hidden') && contains(node.bounds, point))
     .map(entry => ({ entry, area: entry.node.bounds!.width * entry.node.bounds!.height }));
   candidates.sort((a, b) => b.entry.path.length - a.entry.path.length || a.area - b.area);
   const [first, second] = candidates;

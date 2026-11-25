@@ -19,6 +19,10 @@ const element = object({
   kind: T.Literal('element'),
   role: label,
   name: T.Optional(T.String({ maxLength: 256 })),
+  // The accessibility identifier the element carried when it was recorded
+  // (Chromium's AXDOMIdentifier, Cocoa's AXIdentifier). Replay prefers it and
+  // falls back to the name, so a renamed control or a rebuilt page still lands.
+  identifier: T.Optional(T.String({ maxLength: 512 })),
   path: T.Optional(T.Array(label, { minItems: 1, maxItems: 51 })),
   index: T.Optional(T.Integer({ minimum: 0 })),
 });

@@ -30,6 +30,11 @@ export interface WindowBinding {
   focusGeneration: number;
   /** The recorded title no longer matched; the app's only window was used. */
   rebound?: boolean;
+  /**
+   * Several windows carried the recorded title. `target` means the step's own
+   * target told them apart, `focused` that the app's focused window was used.
+   */
+  sharedTitle?: 'target' | 'focused' | false;
 }
 
 export interface AppBinding {
@@ -120,7 +125,10 @@ export class ScopeResolver {
    * so a retitled or moved window keeps its key and a same-titled new window
    * cannot capture it.
    */
-  async resolveWindow(scope: WindowScope): Promise<WindowBinding> {
+  async resolveWindow(
+    scope: WindowScope,
+    pick?: (candidates: WindowInfo[]) => Promise<{ window: WindowInfo; reason: 'target' | 'focused' } | undefined>,
+  ): Promise<WindowBinding> {
     this.signal.throwIfAborted();
     const existing = this.windows.get(scope.windowKey);
     if (existing) return this.refresh(existing);
@@ -128,11 +136,27 @@ export class ScopeResolver {
     const identity = this.identityFor(scope.app);
     const owned = await identity.ownedWindows(this.desktop);
     const matches = owned.filter(window => window.title === scope.windowTitle);
-    if (matches.length > 1) {
-      throw new Fault('AMBIGUOUS_TARGET', `More than one window titled "${scope.windowTitle}" belongs to ${scope.app}`);
-    }
     let chosen = matches[0];
     let rebound = false;
+    let sharedTitle: WindowBinding['sharedTitle'] = false;
+    if (matches.length > 1) {
+      // Two windows can carry one title — a folder open twice, two documents
+      // saved under one name. The flow was recorded in one of them, and the
+      // step's own target is what tells them apart, so the runner supplies that
+      // test; without one the title stays ambiguous.
+      if (!pick) {
+        throw new Fault('AMBIGUOUS_TARGET', `More than one window titled "${scope.windowTitle}" belongs to ${scope.app}`);
+      }
+      // A minimized window cannot be clicked, so it only stands in when every
+      // candidate is minimized.
+      const visible = matches.filter(window => window.minimized !== true);
+      const picked = await pick(visible.length ? visible : matches);
+      if (!picked) {
+        throw new Fault('AMBIGUOUS_TARGET', `More than one window titled "${scope.windowTitle}" belongs to ${scope.app}`);
+      }
+      chosen = picked.window;
+      sharedTitle = picked.reason;
+    }
     if (!chosen && scope.app === 'com.apple.finder') {
       // Finder's sidebar view ("最近使用") is a window title the replay can
       // reopen: the recorded click on that view only exists because the view
@@ -155,7 +179,11 @@ export class ScopeResolver {
         chosen = owned[0];
         rebound = true;
       } else {
-        throw new Fault('WINDOW_NOT_FOUND', `No window titled "${scope.windowTitle}" belongs to ${scope.app}`);
+        // Which windows the app does have is what tells the operator whether the
+        // recorded one was closed, renamed, or never reopened.
+        const open = owned.map(window => `"${titleOf(window)}"`).join(', ');
+        throw new Fault('WINDOW_NOT_FOUND',
+          `No window titled "${scope.windowTitle}" belongs to ${scope.app} (its windows: ${open || 'none'}); a flow starts in the window it was recorded in`);
       }
     }
     const windowNumber = parseWindowId(chosen.id);
@@ -173,6 +201,7 @@ export class ScopeResolver {
       observedTitle: titleOf(chosen),
       focusGeneration: 0,
       ...(rebound ? { rebound: true } : {}),
+      ...(sharedTitle ? { sharedTitle } : {}),
     };
     this.windows.set(scope.windowKey, binding);
     return binding;

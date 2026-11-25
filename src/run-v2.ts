@@ -11,7 +11,7 @@ import type {
   ProcessScope, ReportV2, ReportV2Entry, Scope, StepV2, WindowScope, WindowWaitCheck,
 } from './contracts-v2.js';
 import { DesktopFault } from './desktop.js';
-import type { Desktop, DragEndpoint } from './desktop.js';
+import type { Desktop, DragEndpoint, WindowInfo } from './desktop.js';
 import { parseFlowV2 } from './flow-v2.js';
 import { InstallState } from './install-state.js';
 import type { InstallStateDeps } from './install-state.js';
@@ -200,17 +200,47 @@ function chainTo(tree: Node, target: Node): Node[] | undefined {
 }
 
 /**
- * A click target without a name proves nothing: the recording saw an element it
- * could not address, so any same-role element in the window would satisfy it.
- * Refusing here is what keeps an unnamed AXTextField from being clicked
- * silently; the step must be edited into a named element first.
+ * A click target without a name or an identifier proves nothing: the recording
+ * saw an element it could not address, so any same-role element in the window
+ * would satisfy it. Refusing here is what keeps an unnamed AXTextField from
+ * being clicked silently. An identifier is an identity of its own — Chromium's
+ * AXDOMIdentifier and Cocoa's AXIdentifier address controls that carry no name.
  */
 function addressable(locator: ElementLocator): ElementLocator {
-  if (locator.name === '') {
+  if (locator.name === '' && !locator.identifier) {
     throw new Fault('AMBIGUOUS',
-      'A recorded element target has no name; edit the step into a named element before replay');
+      'A recorded element target has no name or identifier; edit the step into a named element before replay');
   }
   return locator;
+}
+
+/**
+ * The test a window must pass to be the one a step was recorded in. A window
+ * holds the step when it contains the recorded point, or when its tree
+ * addresses the recorded element exactly once. A step with nothing the tree can
+ * be asked about returns undefined and keeps its window ambiguity.
+ */
+function windowTest(step: StepV2): ((snapshot: Snapshot) => boolean) | undefined {
+  const points: Point[] = [];
+  const locators: ElementLocator[] = [];
+  if (step.kind === 'click') {
+    if (step.target.kind === 'point') points.push(step.target.point);
+    else locators.push(step.target);
+  } else if (step.kind === 'hover' || step.kind === 'scroll' || step.kind === 'type' || step.kind === 'paste') {
+    locators.push(step.target);
+  } else if (step.kind === 'drag') {
+    locators.push(step.from, step.to);
+  }
+  if (!points.length && !locators.length) return undefined;
+  return snapshot => {
+    if (!points.every(point => contains(snapshot.tree.bounds, point))) return false;
+    try {
+      for (const locator of locators) resolve(snapshot, addressable(locator));
+      return true;
+    } catch {
+      return false;
+    }
+  };
 }
 
 function dragEndpoint(snapshot: Snapshot, locator: ElementLocator): DragEndpoint {
@@ -524,7 +554,7 @@ class StepRunner {
             if (namePoint) this.lastRowNamePoint = namePoint;
           }
           return delivery === undefined ? {} : { delivery };
-        });
+        }, step);
       case 'type':
         return this.typeStep(step);
       case 'key':
@@ -536,13 +566,13 @@ class StepRunner {
           } finally {
             if (step.key === 'return' || step.key === 'escape') this.inlineRename = false;
           }
-        });
+        }, step);
       case 'scroll':
         return this.windowStep(step.scope, async (_binding, snapshot) => {
           const { node } = actionable(snapshot!, step.target as ElementLocator);
           const delivery = await this.desktop.scroll(node.ref!, scrollIntent(step));
           return delivery === undefined ? {} : { delivery };
-        });
+        }, step);
       case 'drag':
         return this.windowStep(step.scope, async (binding, snapshot) => {
           const delivery = await this.desktop.drag(
@@ -552,7 +582,7 @@ class StepRunner {
             { durationMs: step.durationMs, ...(step.button ? { button: step.button } : {}) },
           );
           return delivery === undefined ? {} : { delivery };
-        });
+        }, step);
       case 'hover':
         return this.windowStep(step.scope, async (binding, snapshot) => {
           const { node } = resolve(snapshot!, step.target as ElementLocator);
@@ -568,7 +598,7 @@ class StepRunner {
           const delivery = await this.desktop.hoverAt(snapshot!, this.targetOf(binding), point);
           if (step.durationMs > 0) await sleep(step.durationMs, undefined, { signal: this.signal });
           return delivery === undefined ? {} : { delivery };
-        });
+        }, step);
       case 'paste':
         return this.pasteStep(step);
       case 'wait':
@@ -594,6 +624,7 @@ class StepRunner {
   private async windowStep(
     scope: WindowScope,
     work: (binding: WindowBinding, snapshot: Snapshot | undefined) => Promise<StepOutcome>,
+    step?: StepV2,
   ): Promise<StepOutcome> {
     // A click that changes the window's content (Finder following a sidebar
     // folder) can answer the next step from a tree read a moment too early.
@@ -602,14 +633,25 @@ class StepRunner {
     // double-click.
     let lastError: unknown;
     for (let attempt = 0; attempt < 4; attempt += 1) {
-      const binding = await this.resolver.resolveWindow(scope);
+      const binding = await this.resolver.resolveWindow(
+        scope,
+        step ? candidates => this.pickSameTitled(candidates, step) : undefined,
+      );
       await this.resolver.confirmForeground(binding);
       const snapshot = await this.resolver.snapshot(binding);
       try {
         const outcome = await work(binding, snapshot);
-        if (!binding.rebound) return outcome;
-        binding.rebound = false;
-        const note = 'window rebound after the recorded window was recreated';
+        const notes: string[] = [];
+        if (binding.rebound) {
+          binding.rebound = false;
+          notes.push('window rebound after the recorded window was recreated');
+        }
+        if (binding.sharedTitle) {
+          const which = binding.sharedTitle === 'target' ? 'the one that held its target' : 'the focused one';
+          notes.push(`more than one window was titled "${scope.windowTitle}", so the step ran in ${which}`);
+        }
+        if (!notes.length) return outcome;
+        const note = notes.join('; ');
         return { ...outcome, message: outcome.message ? `${outcome.message}; ${note}` : note };
       } catch (error) {
         const retryable = error instanceof Fault && error.code === 'NOT_FOUND';
@@ -634,12 +676,22 @@ class StepRunner {
       } catch (error) {
         // Bringing an app forward does not need one specific window, just as
         // `open -a` does not. A click that still cannot tell two same-titled
-        // windows apart keeps failing; only the hand-off is relaxed.
-        if (!(error instanceof Fault) || error.code !== 'AMBIGUOUS_TARGET') throw error;
+        // windows apart keeps failing; only the hand-off is relaxed. An
+        // activate/launch step means exactly "open the app": the recorded window
+        // may have been closed since, and opening the app again is the step.
+        const opensApp = step.kind === 'activate_app' || step.kind === 'launch_app';
+        const tolerable = error instanceof Fault && (
+          ['AMBIGUOUS_TARGET', 'TIMEOUT', 'COMMAND_TIMEOUT'].includes(error.code) ||
+          (opensApp && ['WINDOW_NOT_FOUND', 'WINDOW_CHANGED'].includes(error.code)));
+        if (!tolerable || !(error instanceof Fault)) throw error;
         await this.resolver.activateApp(declared.app);
         return {
           focusAfter: { kind: 'app', app: declared.app },
-          message: `more than one window is titled "${declared.windowTitle}"; brought ${declared.app} forward instead`,
+          message: error.code === 'WINDOW_NOT_FOUND' || error.code === 'WINDOW_CHANGED' ?
+            `window "${declared.windowTitle}" was gone; opened ${declared.app} instead` :
+          error.code === 'AMBIGUOUS_TARGET' ?
+            `more than one window is titled "${declared.windowTitle}"; brought ${declared.app} forward instead` :
+            `could not focus "${declared.windowTitle}" in time; brought ${declared.app} forward instead`,
         };
       }
     }
@@ -655,6 +707,33 @@ class StepRunner {
       await this.resolver.absorbAppForeground(step.scope.app);
     }
     return {};
+  }
+
+  /**
+   * Settles which of several same-titled windows a step belongs to. The app's
+   * focused window comes first, because that is the window an operator is
+   * looking at; then the window whose tree can perform the step; then the first
+   * one the app lists, so one duplicate window cannot stop a whole flow.
+   */
+  private async pickSameTitled(
+    candidates: WindowInfo[],
+    step: StepV2,
+  ): Promise<{ window: WindowInfo; reason: 'target' | 'focused' } | undefined> {
+    const test = windowTest(step);
+    const holders: WindowInfo[] = [];
+    if (test) {
+      for (const candidate of candidates) {
+        const snapshot = await this.desktop.snapshotWindow(candidate.id).catch(() => undefined);
+        if (snapshot && test(snapshot)) holders.push(candidate);
+      }
+    }
+    if (holders.length === 1) return { window: holders[0], reason: 'target' };
+    // Several windows hold the target — the same folder open twice looks the
+    // same in both — so the operator's own window decides between them.
+    const among = holders.length ? holders : candidates;
+    const focused = among.filter(window => window.isFocused === true);
+    if (focused.length === 1) return { window: focused[0], reason: 'focused' };
+    return holders.length ? { window: holders[0], reason: 'target' } : undefined;
   }
 
   /**
@@ -823,7 +902,7 @@ class StepRunner {
         textMode: literal ? 'literal' : 'input',
         ...(input === undefined ? {} : { input }),
       };
-    });
+    }, step);
   }
 
   private async pasteStep(step: Extract<StepV2, { kind: 'paste' }>): Promise<StepOutcome> {
@@ -848,7 +927,7 @@ class StepRunner {
         ...(delivery === undefined ? {} : { delivery }),
         ...(input === undefined ? {} : { input }),
       };
-    });
+    }, step);
   }
 
   private async waitStep(step: Extract<StepV2, { kind: 'wait' }>): Promise<StepOutcome> {

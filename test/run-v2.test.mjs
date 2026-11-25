@@ -113,6 +113,7 @@ function fakeWorld(options = {}) {
     },
     async focusWindow(windowId) {
       state.calls.push(['focusWindow', windowId]);
+      state.hooks.beforeFocus?.(state, windowId);
       if (!byId(windowId)) throw new Fault('WINDOW_NOT_FOUND', 'no such window');
       state.focused = windowId;
       state.hooks.afterFocus?.(state, windowId);
@@ -427,7 +428,7 @@ test('a retitled, moved window keeps its key; a same-titled new window cannot ta
   assert.deepEqual(callsOf(world, 'focusWindow').map(call => call[1]), ['w-11']);
 });
 
-test('two windows with the recorded title stop the first bind as ambiguous', async t => {
+test('two windows with the recorded title are told apart by what they hold', async t => {
   const windows = [
     windowRecord({ id: 'w-21', app: textedit, pid: 601, title: 'QA Notes', fields: [['notes', '@w21:e1']] }),
     windowRecord({ id: 'w-23', app: textedit, pid: 601, title: 'QA Notes', fields: [['other', '@w23:e1']] }),
@@ -449,16 +450,15 @@ test('two windows with the recorded title stop the first bind as ambiguous', asy
 
   const report = await run(flow);
 
-  assert.equal(report.status, 'blocked');
-  // The hand-off only brings TextEdit forward; the ambiguity belongs to the
-  // step that needs one window, so the fault lands on the input step.
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
   assert.equal(entry(report, 'switch-notes').status, 'passed');
   assert.deepEqual(entry(report, 'switch-notes').focusAfter, { kind: 'app', app: textedit });
-  assert.equal(entry(report, 'type-note').status, 'blocked');
-  assert.equal(entry(report, 'type-note').code, 'AMBIGUOUS_TARGET');
-  // No input is ever guessed into one of the two windows.
-  assert.deepEqual(callsOf(world, 'type'), []);
-  assert.deepEqual(callsOf(world, 'focusWindow'), []);
+  // The window that holds the recorded field is the one that took the input.
+  assert.deepEqual(callsOf(world, 'type').map(call => [call[1], call[2]]), [['@w21:e1', 'hello']]);
+  assert.equal(callsOf(world, 'focusWindow').some(call => call[1] === 'w-23'), false);
+  // Both windows are read and compared, but the newcomer is never typed into.
+  assert.equal(callsOf(world, 'snapshotWindow').some(call => call[1] === 'w-23'), true);
+  assert.match(entry(report, 'type-note').message, /more than one window was titled "QA Notes", so the step ran in the one that held its target/);
 });
 
 test('a restarted process stops the run instead of rebinding', async t => {
@@ -711,6 +711,60 @@ test('a window-scope focusAfter with a duplicate title still activates the app',
   assert.deepEqual(entry(report, 'activate').focusAfter, { kind: 'app', app: textedit });
   assert.match(entry(report, 'activate').message, /more than one window/);
   assert.deepEqual(callsOf(world, 'open'), [['open', appPaths[textedit], true]]);
+});
+
+test('a focus timeout still brings the app forward for activate_app', async t => {
+  // `open -a`-style hand-off: the app is what matters, a slow focus command is
+  // not a reason to stop the whole replay.
+  const { world, run } = harness(t, {
+    hooks: { beforeFocus: () => { throw new Fault('TIMEOUT', 'focus-window timed out'); } },
+  });
+  const flow = parseFlowV2({
+    version: 2, id: 'focus-timeout', name: 'Focus timeout',
+    appPaths: { [textedit]: appPaths[textedit] },
+    steps: [{
+      id: 'activate', kind: 'activate_app', scope: { kind: 'app', app: textedit },
+      focusAfter: { kind: 'window', app: textedit, windowKey: 'notes', windowTitle: 'QA Notes' },
+    }],
+  });
+
+  const report = await run(flow);
+
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries, null, 2));
+  assert.deepEqual(entry(report, 'activate').focusAfter, { kind: 'app', app: textedit });
+  assert.match(entry(report, 'activate').message, /could not focus/);
+  assert.deepEqual(callsOf(world, 'open'), [['open', appPaths[textedit], true]]);
+});
+
+test('an activate step opens the app when its recorded window is gone', async t => {
+  // The window the flow was recorded in can be closed by replay time. An
+  // activate step means "open the app", as `open -a` does, so the missing
+  // window must not stop the replay.
+  const { world, run } = harness(t, {
+    windows: [
+      windowRecord({ id: 'w-31', app: safari, pid: 510, title: 'Start Page', fields: [] }),
+      windowRecord({ id: 'w-32', app: safari, pid: 510, title: 'Example', fields: [] }),
+    ],
+    apps: {
+      [safari]: [{ pid: 510, startedAt: '510.1', bundleId: safari, bundlePath: appPaths[safari] }],
+    },
+    focused: 'w-31',
+  });
+  const flow = parseFlowV2({
+    version: 2, id: 'window-gone', name: 'Window gone',
+    appPaths: { [safari]: appPaths[safari] },
+    steps: [{
+      id: 'activate', kind: 'activate_app', scope: { kind: 'app', app: safari },
+      focusAfter: { kind: 'window', app: safari, windowKey: 'client', windowTitle: 'client' },
+    }],
+  });
+
+  const report = await run(flow);
+
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries, null, 2));
+  assert.deepEqual(entry(report, 'activate').focusAfter, { kind: 'app', app: safari });
+  assert.match(entry(report, 'activate').message, /was gone/);
+  assert.deepEqual(callsOf(world, 'open'), [['open', appPaths[safari], true]]);
 });
 
 test('an app-scoped window assertion can prove an app is not running', async t => {
@@ -1021,6 +1075,68 @@ test('an unnamed element target is refused instead of clicking a look-alike', as
   assert.deepEqual(callsOf(world, 'click'), []);
 });
 
+function identifierClickFlow(target) {
+  return parseFlowV2({
+    version: 2, id: 'identifier-click', name: 'Identifier click',
+    appPaths: { [finderApp]: finderPath },
+    steps: [{
+      id: 'click-control', kind: 'click',
+      scope: { kind: 'window', app: finderApp, windowKey: 'finder', windowTitle: 'cuekeeper-demo' },
+      target,
+    }],
+  });
+}
+
+test('a recorded identifier resolves a control whose label has changed', async t => {
+  // Chromium reports AXDOMIdentifier for controls whose visible text is free to
+  // change; the identifier is the identity that survives a copy edit.
+  const { world, run } = finderItemsWorld(t, [{
+    role: 'button', ref_id: '@w99:e1', name: '继续', native_id: { kind: 'ax_dom_identifier', value: 'continue-btn' },
+    bounds: { x: 120, y: 150, width: 200, height: 40 }, states: [],
+  }]);
+  const report = await run(identifierClickFlow({
+    kind: 'element', role: 'button', name: 'Continue', identifier: 'continue-btn',
+  }));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w99:e1']]);
+});
+
+test('an identifier that the page no longer carries falls back to the name', async t => {
+  // An older build of the app has the same control without the DOM identifier.
+  const { world, run } = finderItemsWorld(t, [{
+    role: 'button', ref_id: '@w99:e1', name: 'Continue',
+    bounds: { x: 120, y: 150, width: 200, height: 40 }, states: [],
+  }]);
+  const report = await run(identifierClickFlow({
+    kind: 'element', role: 'button', name: 'Continue', identifier: 'continue-btn',
+  }));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w99:e1']]);
+});
+
+test('a renamed control without its identifier is not clicked blindly', async t => {
+  const { world, run } = finderItemsWorld(t, [{
+    role: 'button', ref_id: '@w99:e1', name: '继续',
+    bounds: { x: 120, y: 150, width: 200, height: 40 }, states: [],
+  }]);
+  const report = await run(identifierClickFlow({
+    kind: 'element', role: 'button', name: 'Continue', identifier: 'continue-btn',
+  }));
+  assert.equal(report.status, 'failed');
+  assert.equal(entry(report, 'click-control').code, 'NOT_FOUND');
+  assert.deepEqual(callsOf(world, 'click'), []);
+});
+
+test('a control with an identifier but no name is a usable element target', async t => {
+  const { world, run } = finderItemsWorld(t, [{
+    role: 'image', ref_id: '@w99:e1', native_id: { kind: 'ax_dom_identifier', value: 'qr-code' },
+    bounds: { x: 200, y: 200, width: 120, height: 120 }, states: [],
+  }]);
+  const report = await run(identifierClickFlow({ kind: 'element', role: 'image', name: '', identifier: 'qr-code' }));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w99:e1']]);
+});
+
 test('a file target named by an item label value is found and clicked', async t => {
   const { world, run } = finderItemsWorld(t, [{
     role: 'row', bounds: { x: 110, y: 140, width: 780, height: 24 }, children: [{
@@ -1031,6 +1147,72 @@ test('a file target named by an item label value is found and clicked', async t 
   const report = await run(fileClickFlow({ kind: 'element', role: 'statictext', name: 'manifest.json' }));
   assert.equal(report.status, 'passed', JSON.stringify(report.entries));
   assert.deepEqual(callsOf(world, 'click'), [['click', '@w99:e1']]);
+});
+
+// A folder opened twice leaves two windows under one title. The flow was
+// recorded in one of them, and the step's own target is what tells them apart.
+function gitWindow(id, item) {
+  return {
+    id, app: finderApp, pid: 700, title: 'git',
+    data: {
+      complete: true,
+      window: { id, title: 'git' },
+      tree: {
+        role: 'window', name: 'git', bounds: { x: 100, y: 100, width: 800, height: 600 }, children: [{
+          role: 'outline', bounds: { x: 110, y: 130, width: 780, height: 500 }, children: [{
+            role: 'row', bounds: { x: 110, y: 140, width: 780, height: 24 }, children: [{
+              role: 'statictext', value: item, ref_id: `@${id.replace('-', '')}:e1`,
+              bounds: { x: 140, y: 142, width: 200, height: 20 }, states: [],
+            }],
+          }],
+        }],
+      },
+    },
+  };
+}
+
+function gitClickFlow(name) {
+  return parseFlowV2({
+    version: 2, id: 'finder-git-click', name: 'Finder git click',
+    appPaths: { [finderApp]: finderPath },
+    steps: [{
+      id: 'click-control', kind: 'click',
+      scope: { kind: 'window', app: finderApp, windowKey: 'git', windowTitle: 'git' },
+      target: { kind: 'element', role: 'statictext', name },
+    }],
+  });
+}
+
+test('a same-titled window is chosen by the target it holds', async t => {
+  const { world, run } = finderWorld(t, {
+    windows: [gitWindow('w-98', 'README.md'), gitWindow('w-97', 'git')],
+  });
+  const report = await run(gitClickFlow('git'));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+});
+
+test('a missing window names the windows the app does have', async t => {
+  const { run } = finderWorld(t, {
+    windows: [
+      { id: 'w-98', app: finderApp, pid: 700, title: '下载', data: envelope('w-98', '下载', []) },
+      { id: 'w-97', app: finderApp, pid: 700, title: '桌面', data: envelope('w-97', '桌面', []) },
+    ],
+  });
+  const report = await run(gitClickFlow('git'));
+  const blocked = entry(report, 'click-control');
+  assert.equal(blocked.code, 'WINDOW_NOT_FOUND');
+  assert.match(blocked.message, /No window titled "git" belongs to com.apple.finder \(its windows: "下载", "桌面"\)/);
+});
+
+test('a same-titled window that is focused wins over an older duplicate', async t => {
+  const { world, run } = finderWorld(t, {
+    windows: [gitWindow('w-98', 'git'), gitWindow('w-97', 'git')],
+    focused: 'w-97',
+  });
+  const report = await run(gitClickFlow('git'));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w97:e1']]);
+  assert.match(entry(report, 'click-control').message ?? '', /more than one window was titled "git".*the focused one/);
 });
 // --- Deferred path preflight (HAOC-119) ---------------------------------------
 // A flow that installs the app before it uses it cannot fail before that

@@ -170,8 +170,24 @@ final class Capture {
      * the window the app already proved instead of inventing a scope no replay
      * can find.
      */
+    /**
+     * Chromium and Electron apps keep most of their tree hidden until a client
+     * asks for the enhanced interface. Without it a click on one of their
+     * controls is provable only by screen point, which replays fragilely.
+     */
+    static func enableEnhancedAccessibility(_ app: AXUIElement) {
+        AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+    }
+
+    static func axApplication(pid: Int32) -> AXUIElement {
+        let app = AXUIElementCreateApplication(pid)
+        enableEnhancedAccessibility(app)
+        return app
+    }
+
     private func focusedWindowInfo(_ application: NSRunningApplication) -> FocusedWindow? {
-        let axApp = AXUIElementCreateApplication(application.processIdentifier)
+        let axApp = Self.axApplication(pid: application.processIdentifier)
         guard let reported = axElement(axApp, kAXFocusedWindowAttribute as String) ??
                 axElement(axApp, kAXMainWindowAttribute as String) else { return nil }
         let transient = isTransientSurface(reported, axApp: axApp)
@@ -382,6 +398,11 @@ final class Capture {
         // A queued event can still prove its window after the live hit changed.
         // Only enrich it with AX while the same window is under the pointer.
         if targetMatches, target.canReadAX {
+            if let stackPid {
+                // Open the app's full tree before hit-testing so an Electron
+                // control under the pointer can be named, not merely pointed at.
+                Self.enableEnhancedAccessibility(AXUIElementCreateApplication(stackPid))
+            }
             let system = AXUIElementCreateSystemWide()
             var hit: AXUIElement?
             if AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &hit) == .success, let hit {
@@ -469,7 +490,7 @@ final class Capture {
             if let focusTitle, !focusTitle.isEmpty { title = focusTitle }
             return number
         }
-        let axApp = AXUIElementCreateApplication(pid)
+        let axApp = Self.axApplication(pid: pid)
         guard let main = axElement(axApp, kAXMainWindowAttribute as String),
               let number = windowNumber(for: main, pid: pid) else { return nil }
         if let label = axString(main, kAXTitleAttribute as String), !label.isEmpty { title = label }
@@ -685,7 +706,7 @@ final class Capture {
      */
     private func focusElementEvidence(_ application: NSRunningApplication? = nil) -> [String: Any]? {
         guard let targetPid = focusPid ?? application?.processIdentifier else { return nil }
-        let axApp = AXUIElementCreateApplication(targetPid)
+        let axApp = Self.axApplication(pid: targetPid)
         guard let element = axElement(axApp, kAXFocusedUIElementAttribute as String) else { return nil }
         let role = axString(element, kAXRoleAttribute as String)
         let subrole = axString(element, kAXSubroleAttribute as String)

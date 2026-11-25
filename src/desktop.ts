@@ -17,6 +17,8 @@ export interface WindowInfo {
   pid?: number;
   /** Whether the window is its app's front window; absent means unproven. */
   isFocused?: boolean;
+  /** A minimized window cannot be clicked, so it never stands in for another. */
+  minimized?: boolean;
 }
 
 /** One running application from the driver's app inventory. */
@@ -96,7 +98,12 @@ export interface Desktop {
   /** Read-only application inventory, for mapping a window's owner PID to a bundle ID. */
   listApps(timeoutMs?: number): Promise<RunningApp[]>;
   /** Window-only calls; no bundle ID is resolved by the driver. */
-  snapshotWindow(windowId: string, title?: string, timeoutMs?: number): Promise<Snapshot>;
+  snapshotWindow(
+    windowId: string,
+    title?: string,
+    timeoutMs?: number,
+    options?: { forceElectronA11y?: boolean },
+  ): Promise<Snapshot>;
   /** Menu/menubar surfaces, which have no window of their own. */
   snapshotSurface(surface: 'menu' | 'menubar', timeoutMs?: number): Promise<Snapshot>;
   /** A physical click at a screen point, with no window binding of its own. */
@@ -148,6 +155,7 @@ function windowList(data: unknown): WindowInfo[] {
       ...(processInstance === undefined ? {} : { processInstance }),
       ...(pid === undefined ? {} : { pid }),
       ...(typeof window.is_focused === 'boolean' ? { isFocused: window.is_focused } : {}),
+      ...(typeof window.minimized === 'boolean' ? { minimized: window.minimized } : {}),
     };
   });
 }
@@ -405,9 +413,12 @@ export async function withDesktop<T>(
           undefined, timeoutMs + 3000);
         return appList(data);
       },
-      async snapshotWindow(windowId, title, timeoutMs = 3000) {
+      async snapshotWindow(windowId, title, timeoutMs = 3000, options = {}) {
         const data = await call('snapshot', [
           '--include-bounds', '--max-depth', '50', '--timeout-ms', String(timeoutMs), '--window-id', windowId,
+          // The recorder's helper holds Chromium's accessibility mode on for the
+          // whole session, so the driver can skip its own activation guidance.
+          ...(options.forceElectronA11y ? ['--force-electron-a11y'] : []),
         ], undefined, timeoutMs + 3000);
         // A v2 scope follows its window by number, so a recorded title is only a
         // hint: an editor drops its unsaved dot and a Finder window follows its
