@@ -124,10 +124,13 @@ private final class IndicatorPanel: NSPanel {
         hasShadow = false
         hidesOnDeactivate = false
         ignoresMouseEvents = true
-        // Excluded from screen capture so the indicator never appears in a recording.
-        // The QA preview can opt in to verify the particles themselves.
-        sharingType = ProcessInfo.processInfo.environment["CUEKEEPER_INDICATOR_CAPTURE"] == "1"
-            ? .readOnly : .none
+        // A remote desktop (ToDesk, Screen Sharing) hands the operator a screen
+        // capture, so a window excluded from capture is invisible there while the
+        // recording keeps running. CueKeeper records accessibility events, never
+        // pixels, so staying capturable cannot leak the indicator into a flow.
+        // CUEKEEPER_INDICATOR_HIDDEN=1 restores the old exclusion for a clean demo.
+        sharingType = ProcessInfo.processInfo.environment["CUEKEEPER_INDICATOR_HIDDEN"] == "1"
+            ? .none : .readOnly
         level = .statusBar
         collectionBehavior = [.ignoresCycle]
         setFrame(frame, display: false)
