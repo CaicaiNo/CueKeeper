@@ -306,6 +306,7 @@ function harness(t, options = {}) {
     ...(overrides.checkpoints === undefined ? {} : { checkpoints: overrides.checkpoints }),
     ...(overrides.secureInputActive === undefined ? {} : { secureInputActive: overrides.secureInputActive }),
     ...(overrides.systemDialogVisible === undefined ? {} : { systemDialogVisible: overrides.systemDialogVisible }),
+    ...(overrides.systemCheckDeps === undefined ? {} : { systemCheckDeps: overrides.systemCheckDeps }),
   });
   return { dir, world, controller, run };
 }
@@ -459,6 +460,90 @@ test('two windows with the recorded title are told apart by what they hold', asy
   // Both windows are read and compared, but the newcomer is never typed into.
   assert.equal(callsOf(world, 'snapshotWindow').some(call => call[1] === 'w-23'), true);
   assert.match(entry(report, 'type-note').message, /more than one window was titled "QA Notes", so the step ran in the one that held its target/);
+});
+
+test('a matching state check leaves element addressing in charge of an ambiguous window', async t => {
+  // A machine fact and a window fact in one run: the file check proves the
+  // export exists, and the type step must still pick the window that holds the
+  // recorded field instead of the same-titled twin.
+  const twin = windowRecord({
+    id: 'w-23', app: textedit, pid: 601, title: 'QA Notes', fields: [['other', '@w23:e1']],
+  });
+  const { world, run } = harness(t, { windows: [...initialWindows(), twin] });
+  const flow = parseFlowV2({
+    version: 2, id: 'state-check-then-element', name: 'State check then element',
+    appPaths: { [textedit]: appPaths[textedit] },
+    steps: [
+      {
+        id: 'export-exists', kind: 'assert',
+        scope: { kind: 'file', path: '/tmp/report.pdf' },
+        check: { kind: 'file_exists', equals: true },
+      },
+      {
+        id: 'type-note', kind: 'type', scope: notesScope,
+        target: { kind: 'element', role: 'textfield', name: 'notes' }, text: 'hello',
+      },
+    ],
+  });
+
+  const report = await run(flow, { systemCheckDeps: { stat: async () => ({ isFile: () => true }) } });
+
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries, null, 2));
+  // The state check reports the observed machine fact, never a bare pass.
+  assert.deepEqual(entry(report, 'export-exists').stateCheck,
+    { kind: 'file_exists', expected: true, actual: true });
+  // Element addressing still decided which window ran the step, and only that
+  // window received the input.
+  assert.deepEqual(callsOf(world, 'type').map(call => [call[1], call[2]]), [['@w21:e1', 'hello']]);
+  assert.equal(callsOf(world, 'focusWindow').some(call => call[1] === 'w-23'), false);
+  assert.equal(callsOf(world, 'snapshotWindow').some(call => call[1] === 'w-23'), true);
+  assert.match(entry(report, 'type-note').message, /the one that held its target/);
+});
+
+test('a state check that already matched is not skipped when element addressing fails', async t => {
+  // Neither same-titled window addresses the recorded field, so the step cannot
+  // prove its window and must not type into a guess. The file check that already
+  // ran keeps its real observation; only the later step is skipped.
+  const twin = windowRecord({
+    id: 'w-23', app: textedit, pid: 601, title: 'QA Notes', fields: [['other', '@w23:e1']],
+  });
+  const { world, run } = harness(t, { windows: [...initialWindows(), twin] });
+  const flow = parseFlowV2({
+    version: 2, id: 'element-missing-after-check', name: 'Element missing after check',
+    appPaths: { [textedit]: appPaths[textedit] },
+    steps: [
+      {
+        id: 'export-exists', kind: 'assert',
+        scope: { kind: 'file', path: '/tmp/report.pdf' },
+        check: { kind: 'file_exists', equals: true },
+      },
+      {
+        id: 'type-ghost', kind: 'type', scope: notesScope,
+        target: { kind: 'element', role: 'textfield', name: 'ghost' }, text: 'nope',
+      },
+      {
+        id: 'second-check', kind: 'assert',
+        scope: { kind: 'file', path: '/tmp/never-checked.pdf' },
+        check: { kind: 'file_exists', equals: true },
+      },
+    ],
+  });
+
+  const report = await run(flow, { systemCheckDeps: { stat: async () => ({ isFile: () => true }) } });
+
+  assert.equal(report.status, 'failed', JSON.stringify(report.entries, null, 2));
+  // The state check that ran keeps its observation and is not relabelled.
+  assert.equal(entry(report, 'export-exists').status, 'passed');
+  assert.deepEqual(entry(report, 'export-exists').stateCheck,
+    { kind: 'file_exists', expected: true, actual: true });
+  // The element step failed to address its target and sent no input.
+  assert.equal(entry(report, 'type-ghost').status, 'failed');
+  assert.equal(entry(report, 'type-ghost').code, 'NOT_FOUND');
+  assert.deepEqual(callsOf(world, 'type'), []);
+  assert.deepEqual(callsOf(world, 'press'), []);
+  // The step after the failure is skipped without inventing a machine fact.
+  assert.equal(entry(report, 'second-check').status, 'skipped');
+  assert.equal(entry(report, 'second-check').stateCheck, undefined);
 });
 
 test('a restarted process stops the run instead of rebinding', async t => {
