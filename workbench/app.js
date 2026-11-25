@@ -2609,7 +2609,9 @@ try {
   setSession(initial.session ?? null);
   status(initial.session ? '已导入本地会话' : '会话与测试项保存在本机');
   // The workbench opens on the queue: most sessions are overnight batches.
-  setMode(location.hash === '#edit' ? 'edit' : 'batch');
+  // Editing is the everyday view: a fresh page (including the reload after a
+  // recording) must not land on batch mode. #batch is the explicit opt-in.
+  setMode(location.hash === '#batch' ? 'batch' : 'edit');
 } catch (error) {
   render();
   status(error.message, 'error');

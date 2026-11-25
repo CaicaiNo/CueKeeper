@@ -536,8 +536,20 @@ class StepRunner {
     if (step.kind === 'wait') return {};
     const declared = (step as { focusAfter?: ReportV2Entry['focusAfter'] }).focusAfter;
     if (declared?.kind === 'window') {
-      await this.resolver.focusAfter(declared);
-      return { focusAfter: declared };
+      try {
+        await this.resolver.focusAfter(declared);
+        return { focusAfter: declared };
+      } catch (error) {
+        // Bringing an app forward does not need one specific window, just as
+        // `open -a` does not. A click that still cannot tell two same-titled
+        // windows apart keeps failing; only the hand-off is relaxed.
+        if (!(error instanceof Fault) || error.code !== 'AMBIGUOUS_TARGET') throw error;
+        await this.resolver.activateApp(declared.app);
+        return {
+          focusAfter: { kind: 'app', app: declared.app },
+          message: `more than one window is titled "${declared.windowTitle}"; brought ${declared.app} forward instead`,
+        };
+      }
     }
     if (declared?.kind === 'app') {
       await this.resolver.activateApp(declared.app);
