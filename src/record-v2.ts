@@ -164,6 +164,18 @@ type StepDraft = Record<string, unknown> & { kind: StepV2['kind'] };
 /** A recorded click target: the element under the pointer, or its raw point. */
 type ClickTarget = ElementLocator | { kind: 'point'; point: Point };
 /**
+ * What actually raised a scope gap, when it is not the event being consumed: a
+ * held press settled later by a focus, a hover or a capture boundary.
+ */
+type GapOrigin = {
+  handler: string;
+  app?: string;
+  window?: number;
+  generation?: number;
+  decision?: string;
+};
+
+/**
  * A press that landed in a known window whose control it could not prove. It is
  * held only while the focus that would prove it "only brought the window
  * forward" can still be the next thing that happens.
@@ -2171,7 +2183,9 @@ export class GlobalRecording {
    * startup noise like any other unprovable opening event; every other gap is
    * evidence of lost input and is kept. A checkpoint gap is always kept.
    */
-  private pushGap(code: CaptureGapCode, { evidence = false, at = this.eventAt } = {}) {
+  private pushGap(code: CaptureGapCode, { evidence = false, at = this.eventAt, origin }: {
+    evidence?: boolean; at?: number; origin?: GapOrigin;
+  } = {}) {
     this.endBursts();
     if (!evidence && code === 'CAPTURE_SCOPE_UNVERIFIED' && !this.steps.length) {
       this.startupDropped += 1;
@@ -2182,7 +2196,7 @@ export class GlobalRecording {
     // A gap the step limit dropped has no id to point at; naming one anyway
     // would send the reader to a step the flow does not contain.
     if (code === 'CAPTURE_SCOPE_UNVERIFIED' && this.steps.length > before) {
-      this.noteGapOrigin(this.steps[this.steps.length - 1].id);
+      this.noteGapOrigin(this.steps[this.steps.length - 1].id, origin);
     }
   }
 
@@ -2195,22 +2209,27 @@ export class GlobalRecording {
    * window from an unattributable hover, and it extends no flow schema and
    * stores no screen content.
    *
+   * `origin` names the event that actually caused the gap when it is not the
+   * event being consumed — a held press settled later by a focus, a hover or a
+   * boundary. The gap then also keeps the press's own time (`pushGap`'s `at`),
+   * so the report never blames the event that merely triggered the settlement.
+   *
    * Read it from the record outcome's `warnings` (`code: CAPTURE_GAP_ORIGIN`):
    * `cuekeeper record --json` prints it, and the workbench keeps it in the
    * `api/record/stop` response (20 warnings, 500 characters each). A successful
    * import then replaces the page message with "timeline imported" and reloads,
    * so the line is read from that response, not from the page alert.
    */
-  private noteGapOrigin(id: string) {
+  private noteGapOrigin(id: string, origin?: GapOrigin) {
     const event = this.consuming;
     const owner = event?.owner;
     const line = [
       id,
-      `from=${this.gapHandler}`,
-      `app=${owner?.app ?? '-'}`,
-      `window=${owner?.windowNumber ?? '-'}`,
-      `gen=${event?.focusGeneration ?? '-'}`,
-      `decision=${event && 'decision' in event ? event.decision ?? '-' : '-'}`,
+      `from=${origin?.handler ?? this.gapHandler}`,
+      `app=${origin?.app ?? owner?.app ?? '-'}`,
+      `window=${origin?.window ?? owner?.windowNumber ?? '-'}`,
+      `gen=${origin?.generation ?? event?.focusGeneration ?? '-'}`,
+      `decision=${origin?.decision ?? (event && 'decision' in event ? event.decision ?? '-' : '-')}`,
     ].join(' ');
     if (this.gapOrigins.length < gapOriginLines) this.gapOrigins.push(line);
     else this.gapOriginsOmitted += 1;
@@ -2261,7 +2280,19 @@ export class GlobalRecording {
       // evidence: the flow can be completed by editing it, never replayed blind.
       this.warn('RIGHT_CLICK_UNPROVEN',
         `A right click on ${pending.where} at ${pending.point[0]},${pending.point[1]} could not be proven to target an element; it blocks the flow instead of becoming a left click`);
-      this.pushGap('CAPTURE_SCOPE_UNVERIFIED');
+      // The gap is the press's, not the settling event's: it keeps the press's
+      // own time and evidence, so a focus, a hover or a boundary that merely
+      // triggered this settlement is never named as what lost the input.
+      this.pushGap('CAPTURE_SCOPE_UNVERIFIED', {
+        at: pending.at,
+        origin: {
+          handler: 'click',
+          app: pending.binding.app,
+          window: pending.binding.windowNumber,
+          generation: pending.generation,
+          decision: 'gap',
+        },
+      });
       return;
     }
     // The trees already read are all this click can be named from; the click

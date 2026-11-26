@@ -1951,6 +1951,97 @@ test('an unproven right click blocks instead of becoming a left click', async ()
   assert.throws(() => parseFlowV2(flow), { code: 'CAPTURE_GAP' });
 });
 
+// The gap a settled press leaves is the press's gap: it keeps the press's own
+// time and its own window evidence, not those of the focus or hover that merely
+// triggered the settlement. Otherwise the diagnostic that is meant to locate a
+// real gap would blame the wrong event at the wrong moment.
+test('a settled right press keeps its own time and origin in the gap report', async () => {
+  const windows = {
+    11: {
+      windowId: 'w-11',
+      tree: {
+        role: 'window', name: '图片', ref: '@w11:e1',
+        bounds: { x: 0, y: 0, width: 800, height: 600 }, states: [], secure: false,
+        children: [{
+          role: 'cell', name: '下载', ref: '@w11:e2',
+          bounds: { x: 300, y: 280, width: 80, height: 24 }, states: [], secure: false, children: [],
+        }],
+      },
+    },
+    21: {
+      windowId: 'w-21',
+      tree: {
+        role: 'window', name: 'aTrust', ref: '@w21:e1',
+        bounds: { x: 900, y: 0, width: 800, height: 600 }, states: [], secure: false,
+        children: [{
+          role: 'group', name: '工作台', ref: '@w21:e2',
+          bounds: { x: 990, y: 100, width: 120, height: 24 }, states: [], secure: false, children: [],
+        }],
+      },
+    },
+  };
+  const owner = (app, pid, windowNumber, title, extra = {}) => ({
+    app, pid, processInstance: 1700000000000, windowNumber, windowTitle: title, ...extra,
+  });
+  const build = () => {
+    const settles = [];
+    const recording = new GlobalRecording(
+      async window => structuredClone(windows[window.windowNumber]),
+      { now: () => NOW, scheduleSettle: task => { settles.push(task); } },
+    );
+    return { recording, settles };
+  };
+  const press = {
+    kind: 'click', t: 1100, seen: NOW, point: [1000, 112], count: 1, button: 'right',
+    focusGeneration: 2, secure: false, decision: 'gap',
+    gapCode: 'CAPTURE_SCOPE_UNVERIFIED',
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
+  };
+  const open = async ({ recording, settles }) => {
+    await recording.add(parseCaptureEvent({
+      kind: 'focus', t: 0, seen: NOW, focusGeneration: 2, secure: false,
+      owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
+    }));
+    await recording.add(parseCaptureEvent({
+      kind: 'click', t: 0, seen: NOW, point: [1000, 112], count: 1,
+      focusGeneration: 2, secure: false, decision: 'record',
+      owner: owner('com.electron.atrust', 200, 21, 'aTrust', { role: 'AXGroup', name: '工作台', pressable: false }),
+    }));
+    while (settles.length) await settles.shift()();
+    await recording.add(parseCaptureEvent(press));
+  };
+  const originOf = recording => recording.captureWarnings
+    .find(warning => warning.code === 'CAPTURE_GAP_ORIGIN')?.message;
+
+  // Settled by another app's focus, 700 ms after the press.
+  const viaFocus = build();
+  await open(viaFocus);
+  await viaFocus.recording.add(parseCaptureEvent({
+    kind: 'focus', t: 1800, seen: NOW, focusGeneration: 3, secure: false,
+    owner: owner('com.apple.finder', 100, 11, '图片'),
+  }));
+  const focusFlow = viaFocus.recording.finish();
+  assert.deepEqual(focusFlow.steps.map(step => step.kind), ['click', 'gap', 'activate_app']);
+  assert.equal(focusFlow.steps[1].atMs, 1100);
+  assert.match(originOf(viaFocus.recording), /^s2 from=click app=com\.electron\.atrust window=21 gen=2 decision=gap$/);
+  assert.throws(() => parseFlowV2(focusFlow), { code: 'CAPTURE_GAP' });
+
+  // Settled by the end of the recording after a hover: the hover is not blamed.
+  const viaHover = build();
+  await open(viaHover);
+  await viaHover.recording.add(parseCaptureEvent({
+    kind: 'hover', t: 1500, seen: NOW, point: [1000, 112], dwellMs: 400,
+    focusGeneration: 2, secure: false, decision: 'record',
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust', { role: 'AXGroup', name: '工作台' }),
+  }));
+  const hoverFlow = viaHover.recording.finish();
+  assert.deepEqual(hoverFlow.steps.map(step => step.kind), ['click', 'gap']);
+  assert.equal(hoverFlow.steps[1].atMs, 1100);
+  assert.match(originOf(viaHover.recording), /^s2 from=click app=com\.electron\.atrust window=21 gen=2 decision=gap$/);
+  assert.ok(!originOf(viaHover.recording).includes('from=hover'));
+  assert.throws(() => parseFlowV2(hoverFlow), { code: 'CAPTURE_GAP' });
+});
+
 // The hover exemption is not a way to drop presses. A hover inside the press's
 // own generation proves nothing about it either, so it is skipped and the press
 // keeps its own evidence: it is still recorded where it landed, exactly once.
