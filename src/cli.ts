@@ -15,8 +15,13 @@ import { fixtureAppPath, offlineDesktop, withDesktop } from './desktop.js';
 import { ensureNew, readJson, writeNew } from './files.js';
 import { parseFlow, plan } from './flow.js';
 import {
-  UnsupportedFlowVersionError, describePlannedStep, dryRunFlowV2, isFlowV2, parseFlowV2, planFlowV2,
+  UnsupportedFlowVersionError, describePlannedStep, dryRunFlowV2, hashFlowV2, isFlowV2, parseFlowV2, planFlowV2,
 } from './flow-v2.js';
+import type { FlowV2 } from './contracts-v2.js';
+import {
+  mergeValues, resolveValues, usableValues, valuesPath, writeValues,
+} from './input-values.js';
+import type { InputValuesDocument } from './input-values.js';
 import {
   InputSourceManager, chooseAsciiSource, defaultImeDir, detectInputSource, nativeImeBackend,
   readImeLock, readImeRecord, releaseImeLock, removeImeRecord, restoreImeRecord,
@@ -54,7 +59,7 @@ const help = `Cuekeeper ${buildInfo().version}
   cuekeeper flow validate <flow.json|test.json> [--json]
   cuekeeper run <flow.json|test.json> [--data <rows.json>] [--dry-run [--snapshot <snapshot.json>]] [--headed] [--interactive|--non-interactive] [--report <report.json>] [--allow-shell] [--allow-sudo] [--capture-shell-output] [--input-source-switch [--input-source <id>] [--strict-ime]] [--json]
   cuekeeper run <flow-v2.json> --dry-run [--report <report-v2.json>] [--json]   (v2: scope plan only)
-  cuekeeper run <flow-v2.json> --foreground [--inputs <values.json>] [--headed] [--report <report-v2.json>] [--json [--checkpoint-events]]
+  cuekeeper run <flow-v2.json> --foreground [--inputs <values.json> | --no-stored-inputs] [--headed] [--report <report-v2.json>] [--json [--checkpoint-events]]
   cuekeeper run ... [--no-input-source-switch]   (accepted; equal to the default)
   cuekeeper sudo set|status|clear [--json]   (login-keychain credential for --non-interactive root steps)
   cuekeeper ime status|list [--input-source <id>] [--json]
@@ -65,7 +70,7 @@ const help = `Cuekeeper ${buildInfo().version}
   cuekeeper pick --app <bundle-id> --window <title> [--app-path <path>] [--select <ref>] [--snapshot <snapshot.json>] [--json]
   cuekeeper record [--seconds 25] [--countdown 3] [--no-indicator] [--sound] [--clipboard] [--trace-clicks] [--json]
   cuekeeper record --app <bundle-id> [--window <title>] [--out <flow.json>] [--app-path <path>] [--seconds 25] [--countdown 0] [--json]
-  cuekeeper record --global [--max-seconds 600] [--exclude <bundle-id,...>] [--out <flow-v2.json>] [--countdown 3] [--json]
+  cuekeeper record --global [--max-seconds 600] [--exclude <bundle-id,...>] [--out <flow-v2.json>] [--countdown 3] [--no-input-values] [--json]
   cuekeeper report pack <report.json> --flow <flow.json> --out <report.zip> [--assets <dir>] [--no-upload] [--queue <dir>] [--config <upload.json>] [--json]
   cuekeeper report upload [--queue <dir>] [--retry-paused] [--json]
   cuekeeper serve --config <server.json> --data <dir> [--host <host>] [--port <port>] [--json]
@@ -131,6 +136,34 @@ async function readInputs(path: string): Promise<Record<string, string>> {
     inputs[name] = value;
   }
   return inputs;
+}
+
+/**
+ * Values recorded next to the flow. Nothing is printed but the parameter names
+ * and the file they came from: the value itself never reaches stdout, stderr or
+ * a log line. A broken file is a warning, never a refusal: replay falls back to
+ * asking for the value.
+ */
+async function storedInputs(flow: FlowV2, flowPath: string) {
+  const resolved = await resolveValues(flowPath, flow.id);
+  if (resolved.warning) process.stderr.write(`${resolved.warning}\n`);
+  if (!resolved.doc) return undefined;
+  const usable = usableValues(resolved.doc, flow.inputs ?? []);
+  const names = Object.keys(usable);
+  if (!names.length) return undefined;
+  process.stderr.write(`inputs from ${resolved.path}: ${names.join(', ')}\n`);
+  return usable;
+}
+
+/** The sidecar document a finished global recording writes. */
+function inputValuesDocument(flow: FlowV2, values: InputValuesDocument['values']): InputValuesDocument {
+  return {
+    version: 1,
+    flowId: flow.id,
+    recordedFlowSha256: hashFlowV2(flow),
+    updatedAt: new Date().toISOString(),
+    values,
+  };
 }
 
 function checkPositionals(positionals: string[], count: number) {
@@ -401,6 +434,7 @@ async function main() {
       args: rest, allowPositionals: true, options: {
         ...common, 'dry-run': { type: 'boolean' }, headed: { type: 'boolean' },
         foreground: { type: 'boolean' }, inputs: { type: 'string' },
+        'no-stored-inputs': { type: 'boolean' },
         report: { type: 'string' }, snapshot: { type: 'string' }, data: { type: 'string' },
         'allow-shell': { type: 'boolean' }, 'allow-sudo': { type: 'boolean' },
         'capture-shell-output': { type: 'boolean' }, interactive: { type: 'boolean' },
@@ -478,7 +512,11 @@ async function main() {
           '--json alone has no operator confirmation channel');
       }
       macOnly();
-      const inputs = values.inputs ? await readInputs(values.inputs) : undefined;
+      // Explicit --inputs always wins; otherwise the sidecar next to the flow
+      // supplies what the last recording typed. `--no-stored-inputs` opts out.
+      const inputs = values.inputs
+        ? await readInputs(values.inputs)
+        : values['no-stored-inputs'] ? undefined : await storedInputs(flow, positionals[0]);
       const baselineDir = resolve(dirname(resolve(positionals[0])), 'baselines');
       const indicator = startReplayIndicator({
         enabled: values['no-indicator'] !== true,
@@ -514,8 +552,9 @@ async function main() {
         report.status === 'passed' ? 0 : 1);
       return;
     }
-    if (values['foreground'] || values.inputs) {
-      throw new UsageFault('UNSUPPORTED_FLAG', '--foreground and --inputs only apply to flow version 2');
+    if (values['foreground'] || values.inputs || values['no-stored-inputs']) {
+      throw new UsageFault('UNSUPPORTED_FLAG',
+        '--foreground, --inputs and --no-stored-inputs only apply to flow version 2');
     }
     if (values['checkpoint-events']) {
       throw new UsageFault('UNSUPPORTED_FLAG', '--checkpoint-events only applies to flow version 2');
@@ -746,6 +785,7 @@ async function main() {
         global: { type: 'boolean' }, exclude: { type: 'string' }, 'max-seconds': { type: 'string' },
         'no-indicator': { type: 'boolean' }, sound: { type: 'boolean' },
         'trace-clicks': { type: 'boolean' }, clipboard: { type: 'boolean' },
+        'no-input-values': { type: 'boolean' },
         'no-lifecycle': { type: 'boolean' }, 'progress-fd': { type: 'string' },
       },
     });
@@ -839,6 +879,24 @@ async function main() {
       const contents = JSON.stringify(result.flow, null, 2) + '\n';
       const saved = output ?? await writeRecording(directory!, recordingFileName(new Date()), contents);
       if (output) await writeNew(output, contents);
+      // The typed text lands in a sidecar next to the flow, never inside it.
+      // The path is the *saved* one, so a `-2` free-name suffix keeps the pair
+      // together. A write failure is a warning: the flow itself is already safe.
+      const inputValues = values['no-input-values'] ? {} : result.inputValues;
+      const inputValueNames = Object.keys(inputValues);
+      // The envelope reports what actually reached the disk: a refused write
+      // (for example past the file limit) must not claim entries that no later
+      // run could read back.
+      let writtenInputValues = 0;
+      let inputValuesWarning: string | undefined;
+      if (inputValueNames.length) {
+        try {
+          await writeValues(valuesPath(saved), inputValuesDocument(result.flow, inputValues));
+          writtenInputValues = inputValueNames.length;
+        } catch (error) {
+          inputValuesWarning = `未能写入已存参数值 ${valuesPath(saved)}：${(error as Error).message}`;
+        }
+      }
       // Lifecycle facts sit next to the flow so the workbench can propose wait
       // candidates from the recording itself. A recording with no such facts
       // writes no file instead of an empty one.
@@ -849,10 +907,14 @@ async function main() {
       const workbench = output ? undefined : `cuekeeper workbench ${displayRecordingsDirectory()}`;
       // Capture warnings first (they describe what was lost), then the input
       // source facts: the switch before capture and the restore after it.
-      const warnings = [...result.warnings, ...ime.warnings()];
+      const warnings = [
+        ...result.warnings, ...ime.warnings(),
+        ...(inputValuesWarning ? [{ code: 'INPUT_VALUES_WRITE_FAILED', message: inputValuesWarning }] : []),
+      ];
       const data = {
         version: 2, output: saved, flowId: result.flow.id, actions: result.flow.steps.length,
         snapshotReads: result.snapshotReads,
+        ...(writtenInputValues ? { inputValues: writtenInputValues } : {}),
         ...(result.lifecycle.length ? { lifecycle: result.lifecycle.length } : {}),
         ...(workbench ? { workbench } : {}),
         ...(inputSource ? { inputSource } : {}),
@@ -884,6 +946,9 @@ async function main() {
       return;
     }
 
+    if (values['no-input-values']) {
+      throw new Error('--no-input-values is a global recording option');
+    }
     const seconds = Number(values.seconds ?? '25');
     if (!Number.isInteger(seconds) || seconds < 1 || seconds > 90) throw new Error('--seconds must be an integer from 1 to 90');
     if (values.exclude !== undefined) throw new Error('--exclude needs --global');

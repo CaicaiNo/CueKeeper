@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
-  cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+  cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { parseCaptureEvent } from '../dist/capture-protocol.js';
@@ -66,6 +66,269 @@ test('one recording spans two apps and three windows with one scope per step', a
   assert.ok(!json.includes('Zq-file'));
   assert.ok(!json.includes('Zq-one'));
   assert.ok(!json.includes('Zq-two'));
+});
+
+test('two text bursts become text_1 and text_2 with exactly the typed characters', async () => {
+  const data = fixture('two-apps-three-windows');
+  const owner = data.events[0].owner;
+  const focus = { role: 'AXTextField', name: '地址栏', editable: true, bounds: [100, 100, 200, 24] };
+  const text = (t, chars) => ({
+    kind: 'text', t, seen: NOW, focusGeneration: 1, secure: false, owner, focus,
+    ...(chars === undefined ? {} : { chars }),
+  });
+  const recording = new GlobalRecording(readerFor(data), { now: () => NOW });
+  // One burst is two events a few milliseconds apart; the second event starts
+  // a new burst after a pause longer than the merge window.
+  for (const event of [text(200, '  hello'), text(260, ' world '), text(2200, 'second')]) {
+    await recording.add(parseCaptureEvent(event));
+  }
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['type', 'type']);
+  assert.deepEqual(flow.inputs, ['text_1', 'text_2']);
+  const values = recording.recordedInputValues();
+  // The value is the fixture's characters, including the leading and trailing
+  // spaces: a replay must type exactly what was typed.
+  assert.equal(values.text_1.value, '  hello world ');
+  assert.equal(values.text_1.complete, true);
+  assert.deepEqual(values.text_1.issues, undefined);
+  assert.deepEqual(values.text_1.steps, ['s1']);
+  assert.deepEqual(values.text_1.targets, [{ role: 'textfield', name: '地址栏' }]);
+  assert.equal(values.text_2.value, 'second');
+  assert.deepEqual(values.text_2.steps, ['s2']);
+  // The text itself stays out of the flow, which only names the parameters.
+  assert.ok(!JSON.stringify(flow).includes('hello world'));
+});
+
+test('an IME commit without chars keeps what was read and marks the value incomplete', async () => {
+  const data = fixture('two-apps-three-windows');
+  const owner = data.events[0].owner;
+  const focus = { role: 'AXTextField', name: '地址栏', editable: true, bounds: [100, 100, 200, 24] };
+  const recording = new GlobalRecording(readerFor(data), { now: () => NOW });
+  for (const event of [
+    { kind: 'text', t: 200, seen: NOW, focusGeneration: 1, secure: false, owner, focus, chars: 'abc', ime: true },
+    { kind: 'text', t: 260, seen: NOW, focusGeneration: 1, secure: false, owner, focus, ime: true },
+  ]) await recording.add(parseCaptureEvent(event));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['type']);
+  const values = recording.recordedInputValues();
+  assert.equal(values.text_1.value, 'abc');
+  assert.equal(values.text_1.complete, false);
+  assert.deepEqual(values.text_1.issues, ['chars_missing']);
+});
+
+test('a dropped first character is charged to the burst the survivors form', async () => {
+  const data = fixture('two-apps-three-windows');
+  const owner = data.events[0].owner;
+  const focus = { role: 'AXTextField', name: '地址栏', editable: true, bounds: [100, 100, 200, 24] };
+  // The helper's own event clock is current for the second character; only the
+  // first one sat in the queue for more than eight seconds and was dropped.
+  const recording = new GlobalRecording(readerFor(data), { now: () => NOW + 11_000 });
+  await recording.add(parseCaptureEvent({
+    kind: 'text', t: 200, seen: NOW, focusGeneration: 1, secure: false, owner, focus, chars: 'lost',
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'text', t: 260, seen: NOW + 11_000, focusGeneration: 1, secure: false, owner, focus, chars: 'kept',
+  }));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['type']);
+  const values = recording.recordedInputValues();
+  // The value can only say what arrived, and it must not claim to be whole.
+  assert.equal(values.text_1.value, 'kept');
+  assert.equal(values.text_1.complete, false);
+  assert.deepEqual(values.text_1.issues, ['backlog_dropped']);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'CAPTURE_BACKLOG'));
+});
+
+test('a backlog drop after a pause marks only the new burst, never the complete one', async () => {
+  const data = fixture('two-apps-three-windows');
+  const owner = data.events[0].owner;
+  const focus = { role: 'AXTextField', name: '地址栏', editable: true, bounds: [100, 100, 200, 24] };
+  const text = (t, seen, chars) => parseCaptureEvent({
+    kind: 'text', t, seen, focusGeneration: 1, secure: false, owner, focus, chars,
+  });
+  const recording = new GlobalRecording(readerFor(data), { now: () => NOW + 11_000 });
+  // A complete burst, a pause longer than the merge window, then a new burst
+  // whose first character sat in the backlog and was dropped.
+  await recording.add(text(100, NOW + 11_000, 'first'));
+  await recording.add(text(2100, NOW, 'lost'));
+  await recording.add(text(2160, NOW + 11_000, 'kept'));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['type', 'type']);
+  const values = recording.recordedInputValues();
+  assert.equal(values.text_1.value, 'first');
+  assert.equal(values.text_1.complete, true);
+  assert.deepEqual(values.text_1.issues, undefined);
+  assert.equal(values.text_2.value, 'kept');
+  assert.equal(values.text_2.complete, false);
+  assert.deepEqual(values.text_2.issues, ['backlog_dropped']);
+});
+
+test('a backlog drop is attributed to its control inside one window', async () => {
+  const data = fixture('two-apps-three-windows');
+  const owner = data.events[0].owner;
+  // Two fields in the same window share one focusGeneration: only the control
+  // evidence tells them apart.
+  const field = (name) => ({ role: 'AXTextField', name, editable: true, bounds: [100, 100, 200, 24] });
+  const text = (t, seen, name, chars) => parseCaptureEvent({
+    kind: 'text', t, seen, focusGeneration: 1, secure: false, owner, focus: field(name), chars,
+  });
+  const recording = new GlobalRecording(readerFor(data), { now: () => NOW + 11_000 });
+  await recording.add(text(100, NOW + 11_000, 'first field', 'alpha'));
+  // The first character typed into the second field sat in the backlog.
+  await recording.add(text(160, NOW, 'second field', 'lost'));
+  await recording.add(text(220, NOW + 11_000, 'second field', 'beta'));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['type', 'type']);
+  const values = recording.recordedInputValues();
+  assert.equal(values.text_1.value, 'alpha');
+  assert.equal(values.text_1.complete, true, 'the finished field is not blamed for the next field');
+  assert.deepEqual(values.text_1.issues, undefined);
+  assert.equal(values.text_2.value, 'beta');
+  assert.equal(values.text_2.complete, false);
+  assert.deepEqual(values.text_2.issues, ['backlog_dropped']);
+});
+
+test('a drop during a pending fallback read is charged to the control the read proves', async () => {
+  const data = fixture('two-apps-three-windows');
+  const owner = data.events[0].owner;
+  const other = { role: 'AXTextField', name: 'other field', editable: true, bounds: [100, 100, 200, 24] };
+  // The first field has no focus evidence, so its burst waits for one window
+  // read; the test holds that read until the drop has been seen.
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const recording = new GlobalRecording(async window => {
+    await gate;
+    return structuredClone(data.snapshots[String(window.windowNumber)]);
+  }, { now: () => NOW + 11_000 });
+  await recording.add(parseCaptureEvent({
+    kind: 'text', t: 100, seen: NOW + 11_000, focusGeneration: 1, secure: false, owner, chars: 'alpha',
+  }));
+  // A drop for the *other* control arrives while the read is still pending.
+  await recording.add(parseCaptureEvent({
+    kind: 'text', t: 160, seen: NOW, focusGeneration: 1, secure: false, owner, focus: other, chars: 'lost',
+  }));
+  release();
+  await recording.settlePending();
+  await recording.add(parseCaptureEvent({
+    kind: 'text', t: 220, seen: NOW + 11_000, focusGeneration: 1, secure: false, owner, focus: other, chars: 'beta',
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['type', 'type']);
+  const values = recording.recordedInputValues();
+  assert.equal(values.text_1.value, 'alpha');
+  assert.equal(values.text_1.complete, true, 'the buffered field stays complete');
+  assert.deepEqual(values.text_1.issues, undefined);
+  assert.equal(values.text_2.value, 'beta');
+  assert.equal(values.text_2.complete, false);
+  assert.deepEqual(values.text_2.issues, ['backlog_dropped']);
+});
+
+test('a drop within the merge window marks the buffered burst for its control', async () => {
+  const data = fixture('two-apps-three-windows');
+  const owner = data.events[0].owner;
+  // The fallback snapshot's focused control is also named "Search"; the
+  // drop's own evidence must name that same control.
+  const field = { role: 'AXTextField', name: 'Search', editable: true, bounds: [100, 100, 200, 24] };
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const recording = new GlobalRecording(async window => {
+    await gate;
+    return structuredClone(data.snapshots[String(window.windowNumber)]);
+  }, { now: () => NOW + 11_000 });
+  await recording.add(parseCaptureEvent({
+    kind: 'text', t: 100, seen: NOW + 11_000, focusGeneration: 1, secure: false, owner, chars: 'alpha',
+  }));
+  // 60 ms later, the same control loses a character to the backlog: it belongs
+  // to the buffered burst, whose read proves exactly this control.
+  await recording.add(parseCaptureEvent({
+    kind: 'text', t: 160, seen: NOW, focusGeneration: 1, secure: false, owner, focus: field, chars: 'lost',
+  }));
+  release();
+  await recording.settlePending();
+
+  recording.finish();
+  const values = recording.recordedInputValues();
+  assert.equal(values.text_1.value, 'alpha');
+  assert.equal(values.text_1.complete, false);
+  assert.deepEqual(values.text_1.issues, ['backlog_dropped']);
+});
+
+test('a drop past the merge window is left to the next burst, not the buffered one', async () => {
+  const data = fixture('two-apps-three-windows');
+  const owner = data.events[0].owner;
+  const next = { role: 'AXTextField', name: '下一个字段', editable: true, bounds: [100, 100, 200, 24] };
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const recording = new GlobalRecording(async window => {
+    await gate;
+    return structuredClone(data.snapshots[String(window.windowNumber)]);
+  }, { now: () => NOW + 12_000 });
+  await recording.add(parseCaptureEvent({
+    kind: 'text', t: 100, seen: NOW + 12_000, focusGeneration: 1, secure: false, owner, chars: 'alpha',
+  }));
+  // 2.1 s later the burst has long ended; this drop starts the next burst and
+  // carries no control evidence, so only the time window can separate them.
+  await recording.add(parseCaptureEvent({
+    kind: 'text', t: 2200, seen: NOW, focusGeneration: 1, secure: false, owner, chars: 'lost',
+  }));
+  release();
+  await recording.settlePending();
+  await recording.add(parseCaptureEvent({
+    kind: 'text', t: 2400, seen: NOW + 12_000, focusGeneration: 1, secure: false, owner, focus: next, chars: 'beta',
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['type', 'type']);
+  const values = recording.recordedInputValues();
+  assert.equal(values.text_1.value, 'alpha');
+  assert.equal(values.text_1.complete, true, 'a burst that ended 2.1 s earlier is complete');
+  assert.deepEqual(values.text_1.issues, undefined);
+  assert.equal(values.text_2.value, 'beta');
+  assert.equal(values.text_2.complete, false);
+  assert.deepEqual(values.text_2.issues, ['backlog_dropped']);
+});
+
+test('a secure text burst never becomes a type step or a stored value', async () => {
+  const data = fixture('secure-input');
+  const secret = `Zq${randomUUID().slice(0, 8)}`;
+  // The fixture's secure events carry no characters; give them some, so the
+  // test proves the engine refuses content rather than merely seeing none.
+  const events = data.events.map(event => event.secure
+    ? { ...event, chars: secret }
+    : event);
+  const recording = new GlobalRecording(readerFor(data), { now: () => NOW });
+  for (const event of events) await recording.add(parseCaptureEvent(event));
+  const flow = recording.finish();
+  // The two plain bursts (before and after the interval) are type steps; the
+  // secure interval is only a checkpoint.
+  assert.deepEqual(flow.steps.map(step => step.kind), ['type', 'manual_checkpoint', 'type']);
+  const values = recording.recordedInputValues();
+  assert.deepEqual(Object.values(values).map(entry => entry.value), ['ok', 'done']);
+  assert.ok(!JSON.stringify(values).includes(secret));
+  assert.ok(!JSON.stringify(flow).includes(secret));
+});
+
+test('text past the stored limit is cut to 4000 characters and marked truncated', async () => {
+  const data = fixture('two-apps-three-windows');
+  const owner = data.events[0].owner;
+  const focus = { role: 'AXTextField', name: '地址栏', editable: true, bounds: [100, 100, 200, 24] };
+  const recording = new GlobalRecording(readerFor(data), { now: () => NOW });
+  // The protocol allows at most 16 characters per event; 300 events are 4800.
+  for (let index = 0; index < 300; index++) {
+    await recording.add(parseCaptureEvent({
+      kind: 'text', t: 200 + index * 10, seen: NOW, focusGeneration: 1, secure: false, owner, focus,
+      chars: 'x'.repeat(16),
+    }));
+  }
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['type']);
+  const values = recording.recordedInputValues();
+  assert.equal(values.text_1.value.length, 4000);
+  assert.equal(values.text_1.complete, false);
+  assert.deepEqual(values.text_1.issues, ['truncated']);
 });
 
 test('every recorded step carries the time it happened, counted from the first step', async () => {
@@ -3929,6 +4192,7 @@ test('record --global is an explicit mode that rejects target flags', { skip: pr
     ['record', '--global', '--progress-fd', '2'],
     ['record', '--app', 'com.apple.TextEdit', '--progress-fd', '3'],
     ['record', '--exclude', 'com.apple.TextEdit'],
+    ['record', '--app', 'com.apple.TextEdit', '--no-input-values'],
   ]) {
     const result = spawnSync(process.execPath, [cliPath, ...args, '--json'], {
       encoding: 'utf8', timeout: 20_000, env: { ...process.env, HOME: process.env.HOME },
@@ -4097,6 +4361,19 @@ test('record --global writes a v2 flow with scopes and no typed content', { skip
   assert.ok(!run.written.includes(secret));
   assert.ok(!run.stderr.includes(secret));
   assert.ok(!JSON.stringify(run.response).includes(secret));
+  // The text exists in exactly one place: the 0600 sidecar next to the flow.
+  const sidecarPath = join(dirname(run.output), basename(run.output).replace(/\.json$/, '.values.json'));
+  const sidecar = JSON.parse(readFileSync(sidecarPath, 'utf8'));
+  assert.equal(sidecar.flowId, flow.id);
+  assert.equal(sidecar.version, 1);
+  // One entry per type step: the two bursts are in different windows.
+  assert.equal(sidecar.values.text_1.value, secret);
+  assert.equal(sidecar.values.text_2.value, secret);
+  assert.equal(sidecar.values.text_1.complete, true);
+  assert.deepEqual(sidecar.values.text_1.steps, ['s2']);
+  assert.deepEqual(sidecar.values.text_2.steps, ['s4']);
+  assert.equal(statSync(sidecarPath).mode & 0o777, 0o600);
+  assert.equal(run.response.data.inputValues, 2);
   // The click's own element evidence and its anchor carry the first text; only
   // the TextEdit window needs one fallback read. Clicks also schedule one read
   // of the window they changed, which is what lets the next click in that
@@ -4106,6 +4383,26 @@ test('record --global writes a v2 flow with scopes and no typed content', { skip
   const reads = run.commands.filter(command => command.startsWith('snapshot')).length;
   assert.ok(reads >= 1, `snapshot commands: ${reads}`);
   assert.equal(run.response.data.snapshotReads, reads);
+});
+
+test('record --global --no-input-values writes no sidecar and keeps the text out of every artifact', {
+  skip: process.platform !== 'darwin',
+}, t => {
+  const data = fixture('two-apps-three-windows');
+  const secret = `Zq${randomUUID().slice(0, 8)}`;
+  const run = globalCliFixture(t, {
+    events: [data.events[0], { ...data.events[1], chars: secret }],
+    snapshots: data.snapshots,
+    cliArgs: ['--no-input-values'],
+  });
+  assert.equal(run.code, 0, (run.stderr || '') + JSON.stringify(run.response));
+  assert.ok(run.written, 'the flow is still written');
+  assert.ok(!run.written.includes(secret));
+  assert.ok(!run.stderr.includes(secret));
+  assert.ok(!JSON.stringify(run.response).includes(secret));
+  assert.equal(run.response.data.inputValues, undefined);
+  const sidecarPath = join(dirname(run.output), basename(run.output).replace(/\.json$/, '.values.json'));
+  assert.equal(existsSync(sidecarPath), false, 'the opt-out writes nothing next to the flow');
 });
 
 test('record --global reports its stages with the helper ready moment', { skip: process.platform !== 'darwin' }, t => {

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -205,6 +206,107 @@ test('CLI: a v2 flow replays through the window-bound driver and writes a v2 rep
     assert.equal(type.input, 'hello from cli');
     // The foreground lease is released when the run ends.
     assert.equal(existsSync(join(cli.dir, 'state', 'run.lock')), false);
+  });
+
+/** The sidecar the recorder would have written next to `flow.json`. */
+function writeSidecar(cli, values, overrides = {}) {
+  const path = join(cli.dir, 'flow.values.json');
+  writeFileSync(path, JSON.stringify({
+    version: 1,
+    flowId: 'cli-cross-app',
+    updatedAt: '2026-11-26T08:00:00.000Z',
+    values,
+    ...overrides,
+  }), { mode: 0o600 });
+  return path;
+}
+
+test('CLI: a v2 run types the sidecar value verbatim and prints only its name',
+  { skip: process.platform !== 'darwin' }, t => {
+    const cli = fixture(t);
+    writeSidecar(cli, {
+      note: { value: '  padded note  ', complete: true, steps: ['type-note'] },
+    });
+    const reportPath = join(cli.dir, 'sidecar-report.json');
+    const result = cli.run(['run', cli.flowPath, '--foreground', '--report', reportPath, '--json']);
+    assert.equal(result.code, 0, result.stderr);
+
+    // The driver received the exact stored text, including its padding.
+    const type = cli.calls().find(call => call.command === 'type');
+    assert.equal(type.input, '  padded note  ');
+    // stderr names the file and the parameter, never the value.
+    assert.match(result.stderr, /inputs from .*flow\.values\.json: note/);
+    assert.ok(!result.stderr.includes('padded note'));
+    assert.ok(!result.stdout.includes('padded note'));
+    // The report carries the outcome, not the text of the step.
+    assert.ok(!readFileSync(reportPath, 'utf8').includes('padded note'));
+  });
+
+test('CLI: a broken sidecar warning never echoes the value it could not read',
+  { skip: process.platform !== 'darwin' }, t => {
+    const cli = fixture(t);
+    const secret = `Zq${randomUUID().slice(0, 8)}`;
+    // Both a schema error (an unknown issue names its own string) and a JSON
+    // error (the parser quotes the offending text) can carry the raw value.
+    for (const contents of [
+      JSON.stringify({
+        version: 1, flowId: 'cli-cross-app', updatedAt: '2026-11-26T08:00:00.000Z',
+        values: { note: { value: 'ok', complete: true, issues: [secret] } },
+      }),
+      `{"version":1,"flowId":"cli-cross-app","updatedAt":"x","values":{"note":{"value":${secret}}}}`,
+    ]) {
+      writeFileSync(join(cli.dir, 'flow.values.json'), contents);
+      const result = cli.run(['run', cli.flowPath, '--foreground', '--json']);
+      assert.equal(result.code, 1, result.stderr);
+      assert.match(result.stderr, /flow\.values\.json.*无效/);
+      assert.ok(!result.stderr.includes(secret), `stderr must not carry the value: ${result.stderr}`);
+      assert.ok(!result.stdout.includes(secret), 'the envelope must not carry the value');
+      assert.equal(cli.calls().filter(call => call.command === 'type').length, 0);
+    }
+  });
+
+test('CLI: --no-stored-inputs refuses, and explicit --inputs wins over the sidecar',
+  { skip: process.platform !== 'darwin' }, t => {
+    const cli = fixture(t);
+    writeSidecar(cli, { note: { value: 'stored note', complete: true } });
+
+    // Opting out leaves the parameter without a value: the run fails with
+    // INPUT_MISSING before typing anything.
+    const refused = cli.run(['run', cli.flowPath, '--foreground', '--no-stored-inputs', '--json']);
+    assert.equal(refused.code, 1, refused.stderr);
+    const envelope = JSON.parse(refused.stdout);
+    assert.notEqual(envelope.data.status, 'passed');
+    assert.ok(envelope.data.entries.some(entry => entry.code === 'INPUT_MISSING'));
+    assert.equal(cli.calls().filter(call => call.command === 'type').length, 0);
+
+    // An explicit file is never overridden by the sidecar.
+    const explicit = cli.run([
+      'run', cli.flowPath, '--foreground', '--inputs', cli.valuesPath, '--json',
+    ]);
+    assert.equal(explicit.code, 0, explicit.stderr);
+    const type = cli.calls().find(call => call.command === 'type');
+    assert.equal(type.input, 'hello from cli');
+  });
+
+test('CLI: a corrupt sidecar is a warning, and an explicit --inputs run still works',
+  { skip: process.platform !== 'darwin' }, t => {
+    const cli = fixture(t);
+    writeFileSync(join(cli.dir, 'flow.values.json'), '{ broken');
+
+    // Automatic loading reports the unusable file and falls back to "no value",
+    // which blocks on the missing parameter exactly like a flow with no file.
+    const automatic = cli.run(['run', cli.flowPath, '--foreground', '--json']);
+    assert.equal(automatic.code, 1, automatic.stderr);
+    assert.match(automatic.stderr, /flow\.values\.json.*已忽略/);
+    assert.ok(JSON.parse(automatic.stdout).data.entries.some(entry => entry.code === 'INPUT_MISSING'));
+
+    // The file never blocks the replay the operator asked for.
+    const result = cli.run([
+      'run', cli.flowPath, '--foreground', '--inputs', cli.valuesPath, '--json',
+    ]);
+    assert.equal(result.code, 0, result.stderr);
+    const type = cli.calls().find(call => call.command === 'type');
+    assert.equal(type.input, 'hello from cli');
   });
 
 test('CLI: a v2 live run refuses to start without --foreground',

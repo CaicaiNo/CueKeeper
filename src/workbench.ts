@@ -19,6 +19,10 @@ import { hashFlow, plan } from './flow.js';
 import { dryRunFlowV2, hashFlowV2, isFlowV2, pointTargetSteps } from './flow-v2.js';
 import type { FlowV2, StepV2, WindowScope } from './contracts-v2.js';
 import { Fault, object } from './locator.js';
+import {
+  mergeValues, resolveValues, usableValues, valuesPath, writeValues,
+} from './input-values.js';
+import type { InputValuesDocument, InputValuesRead } from './input-values.js';
 import { crop, decodePng, encodePng } from './png.js';
 import { runFlow } from './run.js';
 import type { ShellRunOptions } from './run.js';
@@ -179,6 +183,27 @@ function inputValues(names: readonly string[], raw: unknown): Record<string, str
   return values;
 }
 
+/**
+ * The sidecar as the page may see it: declared parameters only, and never the
+ * text of a sensitive entry. `path` is where a value would be written, so the
+ * page can name the file without guessing a suffix.
+ */
+function inputValuesView(doc: InputValuesDocument | undefined, declared: ReadonlySet<string>) {
+  const values: Record<string, Record<string, unknown>> = {};
+  for (const [name, entry] of Object.entries(doc?.values ?? {})) {
+    if (!declared.has(name)) continue;
+    values[name] = {
+      ...(entry.sensitive ? { sensitive: true } : {}),
+      ...(entry.value === undefined ? {} : { value: entry.value }),
+      complete: entry.complete,
+      ...(entry.issues ? { issues: entry.issues } : {}),
+      ...(entry.steps ? { steps: entry.steps } : {}),
+      ...(entry.targets ? { targets: entry.targets } : {}),
+    };
+  }
+  return values;
+}
+
 /** The v2 report a `run` subprocess printed as its last JSON line. */
 function cliReport(stdout: string, stderr = ''): unknown {
   const detail = stderr.trim().split('\n').at(-1);
@@ -219,6 +244,33 @@ interface CliRunHandle {
   write(line: string): boolean;
 }
 
+/** A preparation step interrupted by /api/stop before the CLI exists. */
+class PreparationStopped extends Error {
+  constructor() {
+    super('Stopped while preparing');
+  }
+}
+
+/**
+ * A caller may name the replay target it confirmed. A different current target
+ * means another tab saved a revision in between; the caller's values, clear or
+ * run belong to the file it saw, not to the new one.
+ */
+function targetChanged(expected: unknown, current: string | undefined) {
+  return typeof expected === 'string' && expected !== current;
+}
+
+function targetChangedBody() {
+  return {
+    error: 'REPLAY_TARGET_CHANGED',
+    message: 'The replay target changed since this dialog opened; reopen the replay dialog',
+  };
+}
+
+function sendTargetChanged(response: ServerResponse) {
+  return send(response, 409, targetChangedBody());
+}
+
 export async function startWorkbench(options: {
   directory?: string; port: number; library?: string; allowLive: boolean;
   allowShell?: boolean; allowSudo?: boolean; signal: AbortSignal;
@@ -232,6 +284,10 @@ export async function startWorkbench(options: {
   record?: { cli?: string; recordings?: string; stopTimeoutMs?: number };
   /** Tests replace the read-only probe that gates the record button. */
   recordHealth?: () => Promise<RecordHealth>;
+  /** Tests replace the sidecar reader a live run uses to prefill parameters. */
+  resolveInputValues?: (flowPath: string, flowId: string) => Promise<InputValuesRead>;
+  /** Tests replace the private directory a live run writes its inputs file to. */
+  createWorkdir?: (root: string) => Promise<{ directory: string }>;
   /** The login-keychain store the page writes an administrator password to. */
   sudoStore?: SudoKeychainStore;
   /** Tests replace the batch's blue overlay; the release spawns the helper. */
@@ -269,10 +325,22 @@ export async function startWorkbench(options: {
   const tokens = new Map<string, ConfirmationToken>();
   const cliPath = options.cliPath ?? fileURLToPath(new URL('./cli.js', import.meta.url));
   const sudoStore = options.sudoStore ?? createSudoKeychainStore();
+  const readInputValues = options.resolveInputValues ?? resolveValues;
+  const makeWorkdir = options.createWorkdir ?? createDesktopWorkdir;
   // A pick reads one window snapshot; it never focuses, captures or types.
   const pickWindow = options.pickWindow ?? ((scope: WindowScope, signal: AbortSignal) =>
     withDesktop({ headed: false, signal, workRoot }, desktop => pickWindowCandidates(desktop, scope)));
   let running = false;
+  /**
+   * One reader → merge → writer at a time: two dialogs saving different fields
+   * must both survive, and a replay must never read a half-applied file.
+   */
+  let inputValuesQueue: Promise<unknown> = Promise.resolve();
+  function queueInputValues<T>(action: () => Promise<T>): Promise<T> {
+    const next = inputValuesQueue.then(action, action);
+    inputValuesQueue = next.then(() => undefined, () => undefined);
+    return next;
+  }
   let currentRun: AbortController | undefined;
   let currentChild: ChildProcess | undefined;
   /** Step entries the replay has already finished, for the live timeline. */
@@ -882,6 +950,78 @@ export async function startWorkbench(options: {
         }
         return send(response, 200, v2View());
       }
+      // Runtime values live next to the flow, not in it: the page reads them to
+      // prefill the replay dialog and saves only what the operator confirmed.
+      if (path === '/api/v2/inputs') {
+        const flow = editable.flow;
+        const live = editable.replayTarget();
+        if (targetChanged(data.target, live?.path)) return sendTargetChanged(response);
+        const targetPath = live?.path ?? editable.source.path;
+        const resolved = await resolveValues(targetPath, flow.id);
+        return send(response, 200, {
+          // A missing file still names the path a save would create, so the
+          // page and the operator see the same target as the writer.
+          path: resolved.doc ? resolved.path : valuesPath(targetPath),
+          values: inputValuesView(resolved.doc, new Set(flow.inputs ?? [])),
+          ...(resolved.warning ? { warning: resolved.warning } : {}),
+        });
+      }
+      if (path === '/api/v2/inputs/save') {
+        const flow = editable.flow;
+        const declaredNames = flow.inputs ?? [];
+        const declared = new Set(declaredNames);
+        const raw = data.values === undefined ? {} : object(data.values);
+        const patch: Record<string, string | null> = {};
+        for (const [name, value] of Object.entries(raw)) {
+          if (!declared.has(name)) {
+            return send(response, 400, {
+              error: 'UNKNOWN_INPUT', message: `${name} is not an input of this flow`,
+            });
+          }
+          if (value !== null && typeof value !== 'string') {
+            return send(response, 400, {
+              error: 'INPUT_VALUES_INVALID', message: `A value for ${name} is text or null`,
+            });
+          }
+          patch[name] = value;
+        }
+        const source = editable.source;
+        const editor = editable;
+        const outcome = await queueInputValues(async () => {
+          // The run guard is re-read inside the queue: a replay that started
+          // while this save was waiting must win, not receive a late write.
+          if (running) return { status: 409, body: { error: 'A test is running' } };
+          // The dialog confirmed one replay target. Another tab may have saved
+          // a new revision while this request waited, and writing to it would
+          // confirm a file this operator never saw.
+          const targetPath = editor.replayTarget()?.path ?? editor.source.path;
+          if (targetChanged(data.target, editor.replayTarget()?.path)) {
+            return { status: 409, body: targetChangedBody() };
+          }
+          try {
+            const resolved = await resolveValues(targetPath, flow.id);
+            const doc = mergeValues(resolved.doc, flow.id, patch, {
+              recordedFlowSha256: source.flowSha256,
+              declaredNames,
+            });
+            // Write the file the lookup actually reads. With a revision the
+            // recording's sidecar is what /api/v2/inputs returned, so a clear
+            // must land there instead of creating a revision-only copy.
+            const output = resolved.doc ? resolved.path : valuesPath(targetPath);
+            await writeValues(output, doc);
+            return { status: 200, body: { path: output, values: inputValuesView(doc, declared) } };
+          } catch (error) {
+            return {
+              status: 400,
+              body: {
+                error: (error as { code?: string }).code ?? 'INPUT_VALUES_INVALID',
+                message: error instanceof Error ? error.message : String(error),
+              },
+            };
+          }
+        });
+        return send(response, outcome.status, outcome.body);
+      }
       if (path === '/api/save') {
         if (running) return send(response, 409, { error: 'A test is running' });
         let revision;
@@ -938,30 +1078,78 @@ export async function startWorkbench(options: {
         if (!live) {
           throw new Error('The flow has unsaved edits; save the workflow before a live replay');
         }
+        // The page names the file it confirmed; a revision written by another
+        // tab since then is not that file.
+        if (targetChanged(data.target, live.path)) return sendTargetChanged(response);
         const checkpoints = flow.steps.filter(step => step.kind === 'manual_checkpoint');
-        const inputs = (flow.inputs ?? []).length
-          ? inputValues(flow.inputs as string[], data.inputs)
-          : undefined;
-        const args = ['run', live.path, '--foreground', '--headed', '--json', '--progress'];
-        // A checkpoint flow uses the machine channel: the CLI announces the
-        // wait on stderr and reads one answer line from stdin.
-        if (checkpoints.length) args.push('--checkpoint-events');
-        let inputsFile: string | undefined;
-        let inputsDir: string | undefined;
-        if (inputs) {
-          // Values stay out of the flow: they travel to the CLI as a private,
-          // short-lived file and are removed once the replay exits. The file
-          // sits in the durable work root, never in the inherited TMPDIR.
-          inputsDir = (await createDesktopWorkdir(workRoot)).directory;
-          inputsFile = join(inputsDir, 'inputs.json');
-          await writeFile(inputsFile, `${JSON.stringify(inputs)}\n`, { mode: 0o600 });
-          args.push('--inputs', inputsFile);
-        }
-        childStopped = false;
+        // Claim the one desktop slot before the first await. Two requests that
+        // both passed the check above would otherwise both reach startCli.
         running = true;
+        childStopped = false;
         checkpointWait = undefined;
+        // The same guard a v1 run uses: /api/stop aborts it even while this
+        // request is still preparing, before any CLI child exists.
+        const guard = new AbortController();
+        currentRun = guard;
+        let inputsDir: string | undefined;
         let handle: CliRunHandle | undefined;
+        const sendStopped = () => send(response, 200, {
+          version: 2, flowId: flow.id, flowSha256: hashFlowV2(flow),
+          startedAt: new Date().toISOString(), mode: 'replay', status: 'failed',
+          stopped: true, entries: [],
+        });
+        /** Reports a stop that arrived while the run was still preparing. */
+        const stoppedBeforeStart = () => {
+          if (!guard.signal.aborted) return false;
+          sendStopped();
+          return true;
+        };
+        // A preparation step must not hold the run slot after a stop: race it
+        // against the abort, so a blocked read cannot delay the release.
+        const stopPreparation = new Promise<never>((_, reject) => {
+          const abort = () => reject(new PreparationStopped());
+          if (guard.signal.aborted) abort();
+          else guard.signal.addEventListener('abort', abort, { once: true });
+        });
+        stopPreparation.catch(() => { /* only ever observed through the race */ });
+        const prepare = <T>(work: Promise<T>): Promise<T> => Promise.race([work, stopPreparation]);
         try {
+          // A save already in flight finishes first: this run must read the
+          // values the operator confirmed, never a half-written file.
+          await prepare(inputValuesQueue);
+          if (stoppedBeforeStart()) return;
+          // Values the page did not send fall back to the sidecar, so a caller
+          // of /api/run gets the recorded text exactly like the CLI does.
+          const stored = usableValues((await prepare(readInputValues(live.path, flow.id))).doc, flow.inputs ?? []);
+          if (stoppedBeforeStart()) return;
+          const requested = data.inputs === undefined ? {} : object(data.inputs);
+          const inputs = (flow.inputs ?? []).length
+            ? inputValues(flow.inputs as string[], { ...stored, ...requested })
+            : undefined;
+          const args = ['run', live.path, '--foreground', '--headed', '--json', '--progress'];
+          // A checkpoint flow uses the machine channel: the CLI announces the
+          // wait on stderr and reads one answer line from stdin.
+          if (checkpoints.length) args.push('--checkpoint-events');
+          if (inputs) {
+            // Values stay out of the flow: they travel to the CLI as a private,
+            // short-lived file and are removed once the replay exits. The file
+            // sits in the durable work root, never in the inherited TMPDIR.
+            const workdir = makeWorkdir(workRoot);
+            // A stop may win the race below; a directory created afterwards
+            // still has to be removed, or an empty durable root leaks.
+            void workdir.then(result => {
+              if (guard.signal.aborted) {
+                void rm(result.directory, { recursive: true, force: true }).catch(() => { /* best effort */ });
+              }
+            }, () => { /* the race reports the failure */ });
+            inputsDir = (await prepare(workdir)).directory;
+            const inputsFile = join(inputsDir, 'inputs.json');
+            await prepare(writeFile(inputsFile, `${JSON.stringify(inputs)}\n`, { mode: 0o600 }));
+            args.push('--inputs', inputsFile);
+          }
+          // Last check before spawning: a stop that arrived during preparation
+          // must leave zero CLI processes behind.
+          if (stoppedBeforeStart()) return;
           handle = startCli(args, current.directory, checkpoints.length ? {
             stdin: true,
             onStderrLine: line => {
@@ -981,8 +1169,17 @@ export async function startWorkbench(options: {
           return send(response, 200, {
             ...(report as object), exitCode: result.code, signal: result.signal, stopped: childStopped,
           });
+        } catch (error) {
+          // The abort also interrupts a preparation step that is still waiting;
+          // it ends this request now instead of after the wait.
+          if (guard.signal.aborted) {
+            sendStopped();
+            return;
+          }
+          throw error;
         } finally {
           running = false;
+          currentRun = undefined;
           checkpointWait = undefined;
           checkpointAnswer = undefined;
           if (inputsDir) await rm(inputsDir, { recursive: true, force: true });

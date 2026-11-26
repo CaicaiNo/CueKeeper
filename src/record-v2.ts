@@ -13,6 +13,8 @@ import {
 } from './electron-accessibility.js';
 import { scopeKey, validateFlowV2 } from './flow-v2.js';
 import type { ElementLocator } from './contracts.js';
+import { inputValuesLimits } from './input-values.js';
+import type { InputValueEntry, InputValueIssue } from './input-values.js';
 import { defaultLifecyclePollMs, LifecycleWatcher } from './lifecycle.js';
 import type { LifecycleObservation, LifecycleWatchOptions } from './lifecycle.js';
 import type { Located, Node, Point, Snapshot } from './locator.js';
@@ -349,6 +351,19 @@ function captureCode(code: unknown) {
 /** How long a Dock click may wait for the focus that names the app it started. */
 const DOCK_FOCUS_WAIT_MS = 1500;
 
+/**
+ * Appends one text event to a value without ever crossing the sidecar limit.
+ * The cut is reported, never silent: a truncated value is marked incomplete so
+ * the replay dialog asks the operator to check it.
+ */
+function appendWithinLimit(current: string, chars: string) {
+  const room = inputValuesLimits.maxValueLength - current.length;
+  if (chars.length > room) {
+    return { text: current + chars.slice(0, Math.max(0, room)), truncated: true };
+  }
+  return { text: current + chars, truncated: false };
+}
+
 export class GlobalRecording {
   private steps: StepV2[] = [];
   private inputs = new Set<string>();
@@ -363,8 +378,21 @@ export class GlobalRecording {
   private secureEpoch = 0;
   private systemDialogVisible = false;
   private securityAgentWarned = false;
+  /**
+   * The text of every `type` step, keyed by parameter name. It never enters the
+   * flow: `finish()` returns it separately so the CLI can write the sidecar. A
+   * secure interval produces no `type` step, so no entry is ever created for it.
+   */
+  private readonly inputValues = new Map<string, {
+    value: string; complete: boolean; issues: Set<InputValueIssue>;
+    steps: string[]; targets: { role: string; name?: string }[];
+  }>();
   private textBurst?: {
     at: number; scope: string; locator: string; target: ElementLocator; snapshot?: Snapshot;
+    /** The parameter this burst writes, so its characters accumulate there. */
+    name: string;
+    /** Window and focus generation the burst belongs to, for drop attribution. */
+    key: string;
   };
   private scrollBurst?: {
     at: number; startedAt: number; scope: string; locator: string;
@@ -391,8 +419,26 @@ export class GlobalRecording {
    * becomes one `type` step when it does. A non-text event settles it first so
    * step order still follows event order.
    */
-  private pendingText?: { key: string; scope: WindowScope; scopeId: string; at: number };
+  private pendingText?: {
+    key: string; scope: WindowScope; scopeId: string; at: number;
+    /** Buffered characters travel with the burst; a fallback read must not lose them. */
+    chars: string; complete: boolean; issues: Set<InputValueIssue>;
+    /**
+     * Backlog drops seen while this burst waits for its tree read. Whether
+     * they belong to it is only known once the read names its control, so they
+     * are kept with the control evidence instead of being applied blindly.
+     */
+    drops: { locator?: string }[];
+  };
   private pendingSettle?: Promise<void>;
+  /**
+   * A text event the backlog dropped. The burst it belonged to may not exist
+   * yet (its first character is exactly the one that was lost), so the marker
+   * is applied to the next burst in the same window and focus, within one
+   * merge window. Without it a value missing its first characters would still
+   * read as complete.
+   */
+  private droppedText?: { scopeId: string; key: string; at: number; locator?: string };
   /**
    * A Dock click names no window of its own, so the app it activates only
    * becomes provable when the focus notification arrives. Until then the click
@@ -530,6 +576,7 @@ export class GlobalRecording {
    */
   noteBoundary() {
     this.endBursts();
+    this.droppedText = undefined;
     if (this.pendingGapClick) this.flushPendingGap();
   }
 
@@ -1569,33 +1616,67 @@ export class GlobalRecording {
     }
     const scope = this.windowScope(binding);
     const scopeId = scopeKey(scope);
+    // The focused control, when the helper carried it, is what separates two
+    // fields inside the same window: focusGeneration does not change between
+    // controls of one window.
+    const droppedTarget = focusedTarget(event.focus);
+    const key = this.focusKey(binding, event.focusGeneration);
     // An event this far behind the helper cannot be tied to the live focus any
     // more; the whole queue is late, so one warning is more useful than a gap
     // per character. The event is dropped, never guessed.
     if (this.now() - event.seen > captureBacklogMs) {
       this.warn('CAPTURE_BACKLOG',
         'The capture stream fell more than 8 seconds behind the helper; text events from the backlog were dropped');
+      // Only a burst that is still open in this exact window and focus, and
+      // whose last character is within one merge window, owns the dropped
+      // event. A burst that already ended before the gap is complete and must
+      // not be blamed for it.
+      const sameControl = !droppedTarget || !this.textBurst ||
+        locatorKey(this.textBurst.target) === locatorKey(droppedTarget);
+      if (this.textBurst && sameControl && this.textBurst.scope === scopeId &&
+          this.textBurst.key === this.focusKey(binding, event.focusGeneration) &&
+          event.t - this.textBurst.at <= textGapMs) {
+        const entry = this.inputValues.get(this.textBurst.name);
+        if (entry) {
+          entry.complete = false;
+          entry.issues.add('backlog_dropped');
+        }
+      }
+      // A buffered burst owns the drop only if this event belongs to the same
+      // window, focus generation and merge window. A drop that arrives much
+      // later belongs to the next burst, which the droppedText marker covers.
+      const pending = this.pendingText;
+      if (pending && pending.scopeId === scopeId && pending.key === key &&
+          event.t - pending.at >= 0 && event.t - pending.at <= textGapMs) {
+        pending.drops.push(droppedTarget ? { locator: locatorKey(droppedTarget) } : {});
+      }
+      // The first character of a burst is often the one that was lost, so the
+      // burst may not exist yet: remember where it belongs and mark it when it
+      // is bound.
+      this.droppedText = {
+        scopeId, key: this.focusKey(binding, event.focusGeneration), at: event.t,
+        ...(droppedTarget ? { locator: locatorKey(droppedTarget) } : {}),
+      };
       return;
     }
     if (event.focus?.secure) {
       this.enterSecure();
       return;
     }
-    const key = this.focusKey(binding, event.focusGeneration);
     // The helper's focused-element evidence is the normal path: role, label and
     // frame of the control that received the character, with no tree read.
-    const direct = focusedTarget(event.focus);
+    const direct = droppedTarget;
     if (direct) {
       this.rememberFocus(key, direct);
       this.retargetClickFromEvidence(event, direct, scopeId);
-      this.bindText(scope, scopeId, event.t, direct);
+      this.bindText(scope, scopeId, event.t, direct, undefined, { chars: event.chars, key });
       return;
     }
     // A burst already proved which control receives the characters; another
     // read per keystroke would prove nothing more.
     const burst = this.textBurst;
     if (burst && burst.scope === scopeId && event.t - burst.at <= textGapMs) {
-      this.bindText(scope, scopeId, event.t, burst.target);
+      this.bindText(scope, scopeId, event.t, burst.target, undefined, { chars: event.chars, key });
       return;
     }
     // The click that selected the control is proven evidence even without the tree.
@@ -1603,13 +1684,13 @@ export class GlobalRecording {
     if (anchor && anchor.scope === scopeId && event.t - anchor.at <= clickTextFallbackMs) {
       this.warn('TEXT_TARGET_FROM_CLICK',
         'A text event carried no focused-element evidence; its target was taken from the click that selected the control');
-      this.bindText(scope, scopeId, event.t, anchor.locator);
+      this.bindText(scope, scopeId, event.t, anchor.locator, undefined, { chars: event.chars, key });
       return;
     }
     // Evidence already proven for this window and focus generation is reused.
     const cached = this.focusTargets.get(key);
     if (cached) {
-      this.bindText(scope, scopeId, event.t, cached);
+      this.bindText(scope, scopeId, event.t, cached, undefined, { chars: event.chars, key });
       return;
     }
     // Fallback: buffer the burst and read the tree once, off the event path.
@@ -1635,7 +1716,9 @@ export class GlobalRecording {
   }
 
   /** Records one text event against a proven control, merging a running burst. */
-  private bindText(    scope: WindowScope, scopeId: string, at: number, target: ElementLocator, snapshot?: Snapshot,
+  private bindText(
+    scope: WindowScope, scopeId: string, at: number, target: ElementLocator, snapshot?: Snapshot,
+    text: { chars?: string; issues?: readonly InputValueIssue[]; key?: string } = {},
   ) {
     const locatorId = locatorKey(target);
     const burst = this.textBurst;
@@ -1645,18 +1728,96 @@ export class GlobalRecording {
       burst.target = target;
       if (snapshot) burst.snapshot = snapshot;
       this.textAnchor = { at, scope: scopeId, locator: target };
+      this.appendChars(burst.name, text);
+      this.markDropped(burst.name, scopeId, text.key, at, burst.target);
       return;
     }
     this.endBursts();
     const input = this.nextInputName();
     this.inputs.add(input);
+    const before = this.steps.length;
     this.push({ kind: 'type', scope, target, input }, at);
-    if (!this.steps.length || this.steps[this.steps.length - 1].kind !== 'type') return;
+    // A flow at its step limit drops the step; a value with no step to explain
+    // it would only confuse the next replay dialog.
+    if (this.steps.length === before) return;
+    const entry = {
+      value: '', complete: text.chars !== undefined, issues: new Set<InputValueIssue>(),
+      steps: [`s${this.steps.length}`],
+      targets: [{ role: target.role, ...(target.name === undefined ? {} : { name: target.name }) }],
+    };
+    this.inputValues.set(input, entry);
+    this.appendChars(input, text);
+    this.markDropped(input, scopeId, text.key, at, target);
     this.textBurst = {
-      at, scope: scopeId, locator: locatorId, target,
+      at, scope: scopeId, locator: locatorId, target, name: input, key: text.key ?? '',
       ...(snapshot ? { snapshot } : {}),
     };
     this.textAnchor = { at, scope: scopeId, locator: target };
+  }
+
+  /**
+   * Adds one text event's characters to the burst's value. A missing `chars`
+   * (some IME commits carry none) and a value past the limit both keep what was
+   * read and mark the entry incomplete, so the replay dialog can ask the
+   * operator to check it instead of silently replaying half a string.
+   */
+  private appendChars(name: string, text: { chars?: string; issues?: readonly InputValueIssue[] }) {
+    const entry = this.inputValues.get(name);
+    if (!entry) return;
+    for (const issue of text.issues ?? []) {
+      entry.complete = false;
+      entry.issues.add(issue);
+    }
+    if (text.chars === undefined) {
+      entry.complete = false;
+      entry.issues.add('chars_missing');
+      return;
+    }
+    const grown = appendWithinLimit(entry.value, text.chars);
+    entry.value = grown.text;
+    if (grown.truncated) {
+      entry.complete = false;
+      entry.issues.add('truncated');
+    }
+  }
+
+  /**
+   * Applies a backlog drop to the burst it belongs to. Window, focus generation
+   * and a merge-window distance all have to match, so a later burst in the same
+   * window is never blamed for characters it did read.
+   */
+  private markDropped(
+    name: string, scopeId: string, key: string | undefined, at: number, target: ElementLocator,
+  ) {
+    const dropped = this.droppedText;
+    if (!dropped || dropped.scopeId !== scopeId || dropped.key !== key) return;
+    if (Math.abs(at - dropped.at) > textGapMs) return;
+    // A drop for another control in the same window must wait for that
+    // control's burst instead of marking this one.
+    if (dropped.locator && dropped.locator !== locatorKey(target)) return;
+    this.droppedText = undefined;
+    const entry = this.inputValues.get(name);
+    if (!entry) return;
+    entry.complete = false;
+    entry.issues.add('backlog_dropped');
+  }
+
+  /** The recorded text of every `type` step, for the sidecar the CLI writes. */
+  recordedInputValues(): Record<string, InputValueEntry> {
+    const values: Record<string, InputValueEntry> = {};
+    for (const [name, entry] of this.inputValues) {
+      // A burst that never yielded a readable character has nothing to store;
+      // the dialog's required field is more honest than an empty value.
+      if (!entry.value.length) continue;
+      values[name] = {
+        value: entry.value,
+        complete: entry.complete,
+        ...(entry.issues.size ? { issues: [...entry.issues] } : {}),
+        ...(entry.steps.length ? { steps: entry.steps } : {}),
+        ...(entry.targets.length ? { targets: entry.targets } : {}),
+      };
+    }
+    return values;
   }
 
   /**
@@ -1676,16 +1837,39 @@ export class GlobalRecording {
     }
     const cached = this.focusTargets.get(key);
     if (cached) {
-      this.bindText(scope, scopeId, event.t, cached);
+      this.bindText(scope, scopeId, event.t, cached, undefined, { chars: event.chars, key });
       return;
     }
     const pending = this.pendingText;
     if (pending && pending.key === key) {
       pending.at = event.t;
+      this.bufferChars(pending, event.chars);
       return;
     }
-    this.pendingText = { key, scope, scopeId, at: event.t };
+    this.pendingText = {
+      key, scope, scopeId, at: event.t,
+      chars: '', complete: event.chars !== undefined, issues: new Set<InputValueIssue>(), drops: [],
+    };
+    this.bufferChars(this.pendingText, event.chars);
     this.pendingSettle = this.resolvePendingText(binding, key);
+  }
+
+  /** Accumulates one event's characters into the burst waiting for its read. */
+  private bufferChars(
+    pending: { chars: string; complete: boolean; issues: Set<InputValueIssue> },
+    chars: string | undefined,
+  ) {
+    if (chars === undefined) {
+      pending.complete = false;
+      pending.issues.add('chars_missing');
+      return;
+    }
+    const grown = appendWithinLimit(pending.chars, chars);
+    pending.chars = grown.text;
+    if (grown.truncated) {
+      pending.complete = false;
+      pending.issues.add('truncated');
+    }
   }
 
   /**
@@ -1726,7 +1910,15 @@ export class GlobalRecording {
     const target = toLocator(snapshot, single);
     this.rememberFocus(key, target);
     this.retargetClick(snapshot, single, pending.scopeId, pending.at);
-    this.bindText(pending.scope, pending.scopeId, pending.at, target, snapshot);
+    // A drop belongs to the buffered burst only when it named this same
+    // control; otherwise it stays on the droppedText marker for its own burst.
+    const ownDrop = pending.drops.some(drop =>
+      !drop.locator || drop.locator === locatorKey(target));
+    this.bindText(pending.scope, pending.scopeId, pending.at, target, snapshot, {
+      chars: pending.chars,
+      issues: [...pending.issues, ...(ownDrop ? ['backlog_dropped' as const] : [])],
+      key,
+    });
   }
 
   /** Waits for a buffered burst's fallback read, so its step lands in order. */
@@ -2417,6 +2609,7 @@ export class GlobalRecording {
    */
   finish(): FlowV2 {
     this.ended = true;
+    this.droppedText = undefined;
     // No focus ever proved the last held click was an activation.
     this.flushPendingGap();
     if (this.pendingDockGap) {
@@ -2493,6 +2686,12 @@ export interface GlobalCaptureResult {
   warnings: CaptureWarning[];
   partial: boolean;
   failure?: Fault;
+  /**
+   * The text behind each `type` step, keyed by parameter name. It is returned
+   * separately from the flow so the CLI can write the sidecar: the flow, its
+   * hash and its revisions never contain the value.
+   */
+  inputValues: Record<string, InputValueEntry>;
   /** Explicit lifecycle facts, for `lifecycle.json` next to the flow. */
   lifecycle: LifecycleEvent[];
   /** How many window trees the recording read; reused trees are not counted. */
@@ -2711,6 +2910,7 @@ export async function recordGlobal(
     partial: Boolean(failure),
     ...(failure ? { failure } : {}),
     lifecycle: recording.lifecycle,
+    inputValues: recording.recordedInputValues(),
     snapshotReads: recording.snapshotReadCount,
   };
 }
