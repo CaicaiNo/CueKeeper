@@ -60,6 +60,13 @@ const clickTextFallbackMs = 5000;
 const maxWindowBindings = 64;
 const maxFocusEntries = 64;
 /**
+ * How much of one capture warning the workbench keeps (500 characters). The
+ * gap-origin report stays well inside that: a handful of short lines, then a
+ * count of the gaps it left out.
+ */
+const gapOriginLines = 6;
+const gapOriginChars = 480;
+/**
  * How long one window's tree may be reused. A pointer event inside the same
  * window reuses the tree it already read; past this age the window is read
  * again, because nothing else can prove the tree still describes the screen.
@@ -368,13 +375,16 @@ export class GlobalRecording {
   private readonly settling = new Map<string, Promise<undefined>>();
 
   private pendingGapClick?: {
-    key: string; at: number; seen: number; generation: number;
+    key: string; at: number; seen: number;
     where: string; point: Point; binding: WindowBinding;
   };
   /** The event being consumed, kept so a gap can name the handler that raised it. */
   private consuming?: CaptureEvent;
   /** The handler the consuming event is going through; gap diagnostics only. */
   private gapHandler = 'unknown';
+  /** Lines of the report that name what raised each scope gap. */
+  private readonly gapOrigins: string[] = [];
+  private gapOriginsOmitted = 0;
   private startupOpen = true;
   private startupDropped = 0;
   private notes = new Map<string, string>();
@@ -487,22 +497,12 @@ export class GlobalRecording {
     this.eventSeen = event.seen;
     this.consuming = event;
     this.gapHandler = event.kind;
-    // A held first-mouse press waits for the proof of what it did. A hover from
-    // a newer focus generation over the press's own window is that proof — the
-    // window has just become focused, so the press only brought it forward —
-    // and it is the same fact the focus notification carries. Any other event
-    // that delivers input settles the press where it landed. A hover delivers
-    // none, so it can never turn the press into a click, and it is not recorded
-    // while the press is unresolved.
-    let hoverWhilePressed = false;
-    if (this.pendingGapClick && event.kind !== 'focus') {
-      if (event.kind === 'hover' && this.provesHeldActivation(event)) {
-        this.dropHeldClick();
-      } else if (event.kind === 'hover') {
-        hoverWhilePressed = true;
-      } else {
-        this.flushPendingGap();
-      }
+    // A held first-mouse press waits for the proof of what it did: a focus over
+    // its own window proves the press only brought that window forward, and an
+    // event that delivers input settles it where it landed. A hover delivers no
+    // input and cannot prove either, so it leaves the press untouched (onHover).
+    if (this.pendingGapClick && event.kind !== 'focus' && event.kind !== 'hover') {
+      this.flushPendingGap();
     }
     if (event.kind === 'system_dialog') {
       if (event.visible === this.systemDialogVisible) return;
@@ -585,11 +585,6 @@ export class GlobalRecording {
         await this.onScroll(event);
         return;
       case 'hover':
-        if (hoverWhilePressed) {
-          this.warn('HOVER_WHILE_CLICK_UNPROVEN',
-            'A hover arrived while a click was waiting for proof that it only activated its window; the hover was not recorded and did not change the click');
-          return;
-        }
         await this.onHover(event);
         return;
       case 'drag':
@@ -661,16 +656,14 @@ export class GlobalRecording {
     if (event.decision === 'gap') {
       // The click landed in a known window but its target could not be proven,
       // which is what a first-mouse press on an unfocused window looks like.
-      // Hold the press: a focus naming this window, or a hover from a newer
-      // generation over it, proves the window only came forward; input settles
-      // it where it landed (see add).
+      // Hold the press until the focus that names this window proves the press
+      // only brought it forward; input settles it where it landed (see add).
       this.endBursts();
       const where = [event.owner?.app, event.owner?.role, nativeLabel(event.owner?.name)].filter(Boolean).join(' ');
       this.pendingGapClick = {
         key: binding.key,
         at: event.t,
         seen: event.seen,
-        generation: event.focusGeneration,
         where: where || 'an unnamed control',
         point: event.point,
         binding,
@@ -1338,27 +1331,44 @@ export class GlobalRecording {
   }
 
   private async onHover(event: Extract<CaptureEvent, { kind: 'hover' }>) {
+    // A hover can carry a capture-side gap of its own. That is a fact about the
+    // recording, not about the pointer, so it blocks here exactly as it does for
+    // every other event kind — before any hover is skipped and whether or not a
+    // window can be bound.
+    if (event.decision === 'gap') {
+      const code = event.gapCode ?? 'CAPTURE_SCOPE_UNVERIFIED';
+      if (code !== 'CAPTURE_SCOPE_UNVERIFIED') {
+        this.pushGap(code);
+        return;
+      }
+    }
+    // A held press is waiting for the focus that proves it only activated its
+    // window. A hover delivers no input, so it cannot settle that press either
+    // way: settling it here would turn a swallowed press into a click the user
+    // never made, and the focus (or the next input) still gets its say.
+    if (this.pendingGapClick) {
+      this.warn('HOVER_WHILE_CLICK_UNPROVEN',
+        'A hover arrived while a click was waiting for the focus that proves it only activated its window; the hover was not recorded and the click kept waiting');
+      return;
+    }
     const binding = this.bindingFor(event);
     if (!binding) {
       // A hover names no action a replay must perform, and v2 has no coordinate
-      // hover, so a hover the helper could not attribute blocks nothing. This
-      // is not a lost step: the click or keystroke that follows a hover-opened
-      // tooltip or submenu is recorded on its own evidence.
+      // hover, so a hover the helper could not attribute blocks nothing. A
+      // hover over a menu item reaches this path as a real `record` action whose
+      // window is the app window that opened the menu; the menu choice itself is
+      // still recorded by the click that follows, on its own evidence.
       this.warn('UNTARGETED_HOVER',
         'A hover named no window this recording can address; it was skipped because a hover is read-only');
       return;
     }
     if (event.decision === 'gap') {
-      // The global helper only emits a hover for the focused window with
-      // provable evidence, so a gap here is conflicting evidence about a
-      // read-only event, not a missing user action. Any other gap code still
-      // blocks: a secure interval must never be swallowed.
-      if ((event.gapCode ?? 'CAPTURE_SCOPE_UNVERIFIED') === 'CAPTURE_SCOPE_UNVERIFIED') {
-        this.warn('UNTARGETED_HOVER',
-          'A hover could not prove the window under the pointer; it was skipped because a hover is read-only');
-        return;
-      }
-      this.pushGap(event.gapCode ?? 'CAPTURE_SCOPE_UNVERIFIED');
+      // Only a scope gap reaches here (every other code blocked above). The
+      // helper resolves a hover's evidence against the focused window, so a
+      // scope gap is conflicting evidence about a read-only event, not a missing
+      // user action: no replay could perform the hover anyway.
+      this.warn('UNTARGETED_HOVER',
+        'A hover could not prove the window under the pointer; it was skipped because a hover is read-only');
       return;
     }
     if (!this.claim(event, binding)) return;
@@ -2111,49 +2121,46 @@ export class GlobalRecording {
       this.startupDropped += 1;
       return;
     }
-    if (code === 'CAPTURE_SCOPE_UNVERIFIED') this.noteGapOrigin();
+    const before = this.steps.length;
     this.push({ kind: 'gap', code }, at);
+    // A gap the step limit dropped has no id to point at; naming one anyway
+    // would send the reader to a step the flow does not contain.
+    if (code === 'CAPTURE_SCOPE_UNVERIFIED' && this.steps.length > before) {
+      this.noteGapOrigin(this.steps[this.steps.length - 1].id);
+    }
   }
 
   /**
    * `CAPTURE_SCOPE_UNVERIFIED` is raised by many handlers and the step alone
    * cannot say which one, so a flow that blocks replay on it cannot be
    * diagnosed after the fact. The capture report carries one line per such gap:
-   * the handler, the event's own window evidence, its decision and generation.
-   * That is enough to tell a click that lost its window from an unattributable
-   * hover, and it extends no flow schema and stores no screen content.
+   * the step id it actually got, the handler, the event's own window evidence,
+   * its decision and generation. That is enough to tell a click that lost its
+   * window from an unattributable hover, and it extends no flow schema and
+   * stores no screen content.
+   *
+   * Read it from the record outcome's `warnings` (`code: CAPTURE_GAP_ORIGIN`):
+   * `cuekeeper record --json` prints it, and the workbench keeps it in the
+   * `api/record/stop` response (20 warnings, 500 characters each). A successful
+   * import then replaces the page message with "timeline imported" and reloads,
+   * so the line is read from that response, not from the page alert.
    */
-  private noteGapOrigin() {
+  private noteGapOrigin(id: string) {
     const event = this.consuming;
     const owner = event?.owner;
-    const where = [
-      `handler=${this.gapHandler}`,
+    const line = [
+      id,
+      `from=${this.gapHandler}`,
       `app=${owner?.app ?? '-'}`,
       `window=${owner?.windowNumber ?? '-'}`,
       `gen=${event?.focusGeneration ?? '-'}`,
       `decision=${event && 'decision' in event ? event.decision ?? '-' : '-'}`,
     ].join(' ');
-    const line = `s${this.steps.length + 1} ${where}`;
-    const existing = this.notes.get('CAPTURE_GAP_ORIGIN');
-    this.notes.set('CAPTURE_GAP_ORIGIN', existing === undefined ? line : `${existing}; ${line}`);
-  }
-
-  /**
-   * Whether a hover proves the held press only brought its window forward: the
-   * hover comes from a newer focus generation and names the press's own window.
-   * The helper stamps a hover with the same focus window and generation a focus
-   * notification carries, and a hover is emitted only for the window that is
-   * focused at that moment — so the window the press pointed at is now
-   * frontmost, which is exactly what the focus notification was meant to say.
-   */
-  private provesHeldActivation(event: Extract<CaptureEvent, { kind: 'hover' }>): boolean {
-    const pending = this.pendingGapClick;
-    const owner = event.owner;
-    if (!pending || !owner) return false;
-    if (event.focusGeneration <= pending.generation) return false;
-    return owner.app === pending.binding.app && owner.pid === pending.binding.pid &&
-      (owner.processInstance ?? 0) === (pending.binding.processInstance ?? 0) &&
-      owner.windowNumber === pending.binding.windowNumber;
+    if (this.gapOrigins.length < gapOriginLines) this.gapOrigins.push(line);
+    else this.gapOriginsOmitted += 1;
+    const lines = [...this.gapOrigins];
+    if (this.gapOriginsOmitted) lines.push(`+${this.gapOriginsOmitted} more`);
+    this.notes.set('CAPTURE_GAP_ORIGIN', lines.join('; ').slice(0, gapOriginChars));
   }
 
   /** A press the window activation swallowed is not a step. */
