@@ -211,13 +211,13 @@ button:disabled { cursor: default; }
 .pane-header .muted { font: 10.5px var(--mono); font-variant-numeric: tabular-nums; }
 .timeline-columns {
   display: grid;
-  grid-template-columns: 18px 84px 68px minmax(0, 1fr) 64px;
+  grid-template-columns: 18px 84px 68px minmax(0, 1fr) 64px 28px;
   gap: 12px;
   padding: 8px 26px 6px;
   color: var(--muted);
   font: 10px var(--mono);
 }
-.timeline-columns span:last-child { text-align: right; }
+.timeline-columns .col-duration { text-align: right; }
 .timeline-body, .inspector-body { flex: 1; min-height: 0; overflow: auto; }
 .timeline-body { display: flex; flex-direction: column; gap: 8px; padding: 4px 14px 14px; }
 .inspector-body { padding: 18px 16px; overflow-wrap: anywhere; }
@@ -266,7 +266,7 @@ button:disabled { cursor: default; }
 .row.active .row-line input[type="checkbox"] { opacity: 1; }
 .row-focus {
   display: grid;
-  grid-template-columns: 84px 68px minmax(0, 1fr) 64px;
+  grid-template-columns: 84px 68px minmax(0, 1fr) 64px 28px;
   align-items: center;
   gap: 12px;
   min-height: 46px;
@@ -298,7 +298,18 @@ button:disabled { cursor: default; }
 }
 .row-description strong { font-size: 12.5px; font-weight: 500; color: var(--color-base-content); }
 .row-description small { color: var(--muted); font-size: 10.5px; }
-.row-description .run-status { align-self: flex-start; }
+/* 运行状态：行最右侧 28px 窄列里只放一枚 16px 图标；中文含义与诊断只在 title/aria-label 里 */
+.row-status {
+  justify-self: center;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px;
+}
+.row-status svg { flex: none; }
+.row-status.status-passed { color: var(--color-success); }
+.row-status.status-failed { color: var(--color-error); }
+.row-status.status-blocked { color: var(--color-warning); }
+.row-status.status-skipped { color: color-mix(in oklab, var(--color-base-content) 50%, transparent); }
+.row-status.status-resolved { color: var(--color-info); }
 .row-duration { text-align: right; overflow-wrap: anywhere; align-items: flex-end; }
 
 .thumbnail { margin: 0 12px 10px 118px; font-size: 11px; }
@@ -524,13 +535,13 @@ body.v2-mode .draft { display: none; }
 .v2-header .select { width: auto; min-width: 150px; }
 .v2-rows { flex: 1; min-height: 0; overflow: auto; padding: 0 16px; }
 .v2-row {
-  display: grid; grid-template-columns: 40px 72px minmax(0, 1fr) auto auto;
+  display: grid; grid-template-columns: 40px 72px minmax(0, 1fr) 28px auto;
   align-items: center; gap: 10px; min-height: 44px; padding: 5px 6px;
   border-bottom: 1px solid var(--line-soft); border-radius: 10px; cursor: pointer;
 }
 .v2-row:hover { background: var(--color-base-300); }
 .v2-row.selected { outline: 2px solid var(--color-primary); outline-offset: -2px; background: var(--color-base-300); }
-.v2-rows.marking .v2-row { grid-template-columns: 26px 40px 72px minmax(0, 1fr) auto auto; }
+.v2-rows.marking .v2-row { grid-template-columns: 26px 40px 72px minmax(0, 1fr) 28px auto; }
 .v2-mark {
   position: relative; display: inline-flex; align-items: center; justify-content: center;
   width: 26px; height: 26px; padding: 0; cursor: pointer;
@@ -741,8 +752,8 @@ body.batch-view { grid-template-rows: 64px minmax(0, 1fr) 222px 30px; }
 
 @media (max-width: 1240px) {
   .workspace { grid-template-columns: 210px minmax(0, 1fr) 320px; }
-  .row-focus { grid-template-columns: 70px 58px minmax(0, 1fr) 54px; gap: 8px; }
-  .timeline-columns { grid-template-columns: 18px 70px 58px minmax(0, 1fr) 54px; gap: 8px; }
+  .row-focus { grid-template-columns: 70px 58px minmax(0, 1fr) 54px 28px; gap: 8px; }
+  .timeline-columns { grid-template-columns: 18px 70px 58px minmax(0, 1fr) 54px 28px; gap: 8px; }
   .thumbnail { margin-left: 102px; }
   .record-message { max-width: 200px; }
   .v2-header { gap: 6px; min-height: 48px; padding: 8px 12px; }
@@ -763,11 +774,11 @@ body.batch-view { grid-template-rows: 64px minmax(0, 1fr) 222px 30px; }
 }
 
 @media (max-width: 720px) {
-  .row-focus { grid-template-columns: 42px 58px minmax(0, 1fr); }
-  .row-duration { grid-column: 3; text-align: left; }
+  .row-focus { grid-template-columns: 42px 58px minmax(0, 1fr) 28px; }
+  .row-duration { grid-row: 2; grid-column: 2 / 4; text-align: left; }
   .row-description strong, .row-description small { white-space: normal; }
-  .v2-row { grid-template-columns: 40px 52px minmax(0, 1fr); }
-  .v2-rows.marking .v2-row { grid-template-columns: 24px 40px minmax(0, 1fr); }
+  .v2-row { grid-template-columns: 40px 52px minmax(0, 1fr) 28px; }
+  .v2-rows.marking .v2-row { grid-template-columns: 24px 40px minmax(0, 1fr) 28px; }
   .v2-row-actions { grid-column: 2 / -1; }
   .record-message { display: none; }
 }

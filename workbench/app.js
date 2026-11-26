@@ -67,8 +67,33 @@ const KIND_TONES = {
 };
 
 const STATUS_TONES = { resolved: 'info', passed: 'success', failed: 'error', blocked: 'warning', skipped: 'ghost' };
+// A timeline status is one 16px icon in a fixed 28px column at the right edge of
+// the row: the Chinese word lives in aria-label/title, so the badge never eats
+// width from the action name. Each status keeps its own glyph, so the row stays
+// readable without relying on color alone.
+const STATUS_MARKS = {
+  passed: { icon: 'checkCircle', label: '通过' },
+  failed: { icon: 'xCircle', label: '失败' },
+  blocked: { icon: 'alertTriangle', label: '阻塞' },
+  skipped: { icon: 'minusCircle', label: '跳过' },
+  resolved: { icon: 'infoCircle', label: '已解析' },
+};
+// The code and message only mean something on the states an operator has to
+// investigate; on the rest the tooltip is just the Chinese label.
+const STATUS_DIAGNOSTIC = new Set(['failed', 'blocked']);
 const statusBadge = status =>
   `run-status badge badge-soft badge-sm badge-${STATUS_TONES[status] ?? 'ghost'} ${status}`;
+const statusCell = (entry, detail) => {
+  if (!entry) return el('span', { className: 'row-status' });
+  const mark = STATUS_MARKS[entry.status] ?? { icon: 'list', label: resultStatus[entry.status] ?? entry.status };
+  const diagnostics = STATUS_DIAGNOSTIC.has(entry.status) ? [detail, entry.code, entry.message] : [];
+  return el('span', {
+    className: `row-status status-${entry.status}`,
+    role: 'img',
+    'aria-label': mark.label,
+    title: [mark.label, ...diagnostics].filter(Boolean).join(' · '),
+  }, icon(mark.icon, 16));
+};
 
 const STATE_TONES = { inferred: 'warning', confirmed: 'success', invalid: 'ghost', deleted: 'ghost' };
 const stateChip = (state, text) => el('span', {
@@ -491,11 +516,9 @@ function renderTimeline() {
       el('span', { className: 'step-id', title: `步骤 ${row.id}` }, row.id)),
     kindChip(row.action),
     el('span', { className: 'row-description' }, el('strong', {}, actionLabel(row.action)),
-      el('small', {}, `${row.scope ? scopeText(row.scope) : `${appLabel(row.app)} · ${row.window}`}${ignored ? ' · 已忽略' : ''}`),
-      runEntry ? el('span', {
-        className: statusBadge(runEntry.status), title: [runEntry.code, runEntry.message].filter(Boolean).join(' · '),
-      }, resultStatus[runEntry.status] ?? runEntry.status) : undefined),
-    el('span', { className: 'time row-duration', title: '动作耗时' }, duration(row.durationMs)));
+      el('small', {}, `${row.scope ? scopeText(row.scope) : `${appLabel(row.app)} · ${row.window}`}${ignored ? ' · 已忽略' : ''}`)),
+    el('span', { className: 'time row-duration', title: '动作耗时' }, duration(row.durationMs)),
+    statusCell(runEntry));
     const thumbnail = row.thumbnail && el('details', {
       className: 'thumbnail', open: state.expanded.has(row.id),
       ontoggle: event => {
@@ -1217,10 +1240,7 @@ function renderV2() {
       el('strong', {}, v2StepLabel(step, appLabel)),
       el('small', { className: 'muted' },
         `${step.kind === 'gap' ? gapReason(step.code) : v2ScopeText(step.scope)}`)),
-    entry ? el('span', {
-      className: statusBadge(entry.status),
-      title: [entry.code, entry.message, stateCheckLabel(entry.stateCheck)].filter(Boolean).join(' · '),
-    }, resultStatus[entry.status] ?? entry.status) : undefined,
+    statusCell(entry, stateCheckLabel(entry?.stateCheck)),
     rowActions(step));
   });
 
