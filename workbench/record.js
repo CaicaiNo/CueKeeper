@@ -64,10 +64,14 @@ else document.querySelector('.topbar')?.append(bar);
 
 const state = {
   recording: false, busy: false, elapsedMs: 0, countdownMs: 0, path: '', steps: undefined,
+  // Where the running recording is: countdown, preparing (started but not
+  // capturing yet), or recording. Absent on a finished recording.
+  phase: undefined, countdownEndsAt: undefined,
   stopFailed: false,
   // The last `GET /api/record/health`: undefined until the first probe answers.
   health: undefined,
-  // Epoch ms the recorder started, so the timer survives a throttled tab.
+  // Epoch ms capture really began, so the timer survives a throttled tab. It
+  // is the recorder's ready moment, not the moment its process started.
   startedAt: undefined,
 };
 let healthShown = false;
@@ -86,6 +90,24 @@ function renderTimer() {
     timer.textContent = state.steps === undefined ? '未录制' : `已保存 ${state.steps} 步`;
     return;
   }
+  if (state.phase === 'preparing') {
+    // Started, but the recorder has not begun capturing: the countdown is over
+    // and this gap is not recording time.
+    timer.textContent = '准备中…';
+    return;
+  }
+  if (state.phase === 'countdown') {
+    const endsAt = Number.isFinite(state.countdownEndsAt) ? state.countdownEndsAt
+      : Date.now() + Math.max(0, state.countdownMs - state.elapsedMs);
+    const left = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
+    timer.textContent = `${left} 秒后开始录制`;
+    return;
+  }
+  if (state.phase === 'recording') {
+    timer.textContent = `录制中 ${clock(state.elapsedMs)}`;
+    return;
+  }
+  // A server that predates the phase report still counts down from the start.
   if (state.elapsedMs < state.countdownMs) {
     const left = Math.ceil((state.countdownMs - state.elapsedMs) / 1000);
     timer.textContent = `${left} 秒后开始录制`;
@@ -177,6 +199,10 @@ function adopt(status) {
   state.recording = status.recording === true;
   state.elapsedMs = Number.isFinite(status.elapsedMs) ? status.elapsedMs : 0;
   state.countdownMs = Number.isFinite(status.countdownMs) ? status.countdownMs : 0;
+  state.phase = ['countdown', 'preparing', 'recording'].includes(status.phase)
+    ? status.phase : undefined;
+  const countdownEndsAt = Date.parse(status.countdownEndsAt ?? '');
+  state.countdownEndsAt = Number.isFinite(countdownEndsAt) ? countdownEndsAt : undefined;
   const startedAt = Date.parse(status.startedAt ?? '');
   state.startedAt = Number.isFinite(startedAt) ? startedAt : undefined;
   if (typeof status.flowPath === 'string') state.path = status.flowPath;
@@ -206,9 +232,14 @@ function tick() {
   if (!state.recording) return;
   // Browsers throttle timers in a background tab, so a recording the operator
   // watches elsewhere would freeze at "3 秒后开始录制". Derive the elapsed time
-  // from the recorder's start instead of counting ticks.
-  state.elapsedMs = state.startedAt === undefined ?
-    state.elapsedMs + TICK_MS : Math.max(0, Date.now() - state.startedAt);
+  // from the recorder's ready moment instead of counting ticks. Before that
+  // moment nothing is captured, so elapsed stays where the server put it.
+  if (state.phase === 'recording' && state.startedAt !== undefined) {
+    state.elapsedMs = Math.max(0, Date.now() - state.startedAt);
+  } else if (state.phase === undefined) {
+    state.elapsedMs = state.startedAt === undefined ?
+      state.elapsedMs + TICK_MS : Math.max(0, Date.now() - state.startedAt);
+  }
   renderTimer();
 }
 

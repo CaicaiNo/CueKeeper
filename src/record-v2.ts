@@ -2104,6 +2104,13 @@ export interface GlobalCaptureOptions {
    * object overrides the directories, quiet window or read-only seams.
    */
   lifecycle?: boolean | LifecycleWatchOptions;
+  /**
+   * Called once, with the epoch-ms moment the helper began capturing. That is
+   * the helper's own `readyAt`; when an older helper omits it, the moment its
+   * ready line arrived is used instead. A supervisor dates the recording from
+   * here, never from process start-up.
+   */
+  onReady?: (readyAt: number) => void;
 }
 
 export interface GlobalCaptureResult {
@@ -2256,6 +2263,11 @@ export async function recordGlobal(
         ready = true;
         clearTimeout(startupTimeout);
         sessionTimeout = setTimeout(() => child.kill('SIGKILL'), (options.seconds + 5) * 1000);
+        // The helper dates `ready` itself; without that field the arrival of
+        // the line is the closest observable moment. Neither is a sleep guess.
+        const readyAt = typeof data.readyAt === 'number' && Number.isSafeInteger(data.readyAt) &&
+          data.readyAt > 0 ? data.readyAt : Date.now();
+        options.onReady?.(readyAt);
         await startWatcher();
         process.stderr.write(
           `Recording globally for up to ${options.seconds} seconds. Ctrl+Option+P pauses or resumes. ` +

@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
+import type { Readable } from 'node:stream';
 import { lstat, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { recordingFileName, recordingsDirectory } from './recording-output.js';
@@ -28,14 +29,26 @@ export interface RecordFault {
   message: string;
 }
 
+/** Where a running recording is: before capture, or capturing. */
+export type RecordPhase = 'countdown' | 'preparing' | 'recording';
+
 export interface RecordStatus {
   recording: boolean;
+  /**
+   * Stage of a running recording. `countdown` and `preparing` have not captured
+   * anything yet, so `startedAt`/`elapsedMs` say nothing about them.
+   */
+  phase?: RecordPhase;
   /** Absolute path of the flow the CLI writes when it stops. */
   flowPath?: string;
+  /** Epoch the helper began capturing (its `readyAt`), not the process start. */
   startedAt?: string;
+  /** Milliseconds captured so far; zero until the helper is really reading input. */
   elapsedMs: number;
   /** Countdown before the first captured event, in milliseconds. */
   countdownMs?: number;
+  /** While the countdown runs: epoch ms it ends at, as the CLI reports it. */
+  countdownEndsAt?: string;
   /** Steps the CLI reported for the saved flow. */
   steps?: number;
   /** The saved flow is incomplete: interrupted, or killed after a stop timeout. */
@@ -50,9 +63,15 @@ export interface RecordStatus {
 interface Recording {
   child: ChildProcess;
   flowPath: string;
-  startedAt: number;
+  /** Countdown end in epoch ms; the CLI replaces the start-up estimate. */
+  countdownEndsAt: number;
   countdownMs: number;
+  phase: RecordPhase;
+  /** Epoch ms the helper reported it was ready; absent until then. */
+  captureStartedAt?: number;
   output: string;
+  /** Partial line from the CLI's stage-report descriptor. */
+  stageBuffer: string;
   stopping: boolean;
   settled?: RecordStatus;
   done: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
@@ -160,6 +179,42 @@ function readOutcome(output: string) {
 }
 
 /**
+ * One stage report the CLI wrote on its descriptor. This is display state, not
+ * a result: a malformed or late line is ignored, a stage never moves backwards,
+ * and the flow's contents still come only from the final envelope.
+ */
+function applyStage(recording: Recording, line: string) {
+  let data: Record<string, unknown> | undefined;
+  try {
+    data = record(JSON.parse(line));
+  } catch {
+    return;
+  }
+  if (data?.stage === 'countdown') {
+    // Only while the countdown is still the current stage; a late report must
+    // not pull a running capture back to the countdown.
+    if (recording.phase !== 'countdown') return;
+    const endsAt = data.endsAt;
+    if (typeof endsAt === 'number' && Number.isFinite(endsAt) && endsAt > 0) {
+      recording.countdownEndsAt = endsAt;
+    }
+    return;
+  }
+  if (data?.stage === 'preparing') {
+    if (recording.phase !== 'recording') recording.phase = 'preparing';
+    return;
+  }
+  if (data?.stage === 'recording') {
+    // The helper's own ready moment, sanity-checked against this clock; an
+    // impossible value falls back to when the report arrived.
+    const readyAt = data.readyAt;
+    recording.captureStartedAt = typeof readyAt === 'number' && Number.isSafeInteger(readyAt) &&
+      readyAt > 0 && readyAt <= Date.now() + 1000 ? readyAt : Date.now();
+    recording.phase = 'recording';
+  }
+}
+
+/**
  * Owns the one global `record --global` child the workbench may have. Every
  * route reads its state here, so a crashed child can never look like it is
  * still recording, and stop is the only place that imports the result.
@@ -198,8 +253,11 @@ export function createRecordController(options: RecordControllerOptions) {
     const status: RecordStatus = {
       recording: false,
       flowPath: recording.flowPath,
-      startedAt: new Date(recording.startedAt).toISOString(),
-      elapsedMs: Math.max(0, Date.now() - recording.startedAt),
+      ...(recording.captureStartedAt === undefined ? {} : {
+        startedAt: new Date(recording.captureStartedAt).toISOString(),
+      }),
+      elapsedMs: recording.captureStartedAt === undefined ? 0
+        : Math.max(0, Date.now() - recording.captureStartedAt),
       countdownMs: recording.countdownMs,
       ...(steps !== undefined ? { steps } : {}),
       partial: partial || timedOut,
@@ -219,10 +277,16 @@ export function createRecordController(options: RecordControllerOptions) {
     if (active) {
       return {
         recording: true,
+        phase: active.phase,
         flowPath: active.flowPath,
-        startedAt: new Date(active.startedAt).toISOString(),
-        elapsedMs: Math.max(0, Date.now() - active.startedAt),
+        ...(active.captureStartedAt === undefined ? {} : {
+          startedAt: new Date(active.captureStartedAt).toISOString(),
+        }),
+        elapsedMs: active.captureStartedAt === undefined ? 0
+          : Math.max(0, Date.now() - active.captureStartedAt),
         countdownMs: active.countdownMs,
+        ...(active.phase === 'countdown'
+          ? { countdownEndsAt: new Date(active.countdownEndsAt).toISOString() } : {}),
         warnings: [],
       };
     }
@@ -250,10 +314,19 @@ export function createRecordController(options: RecordControllerOptions) {
     // The recorder inherits this process's environment, including a TMPDIR
     // that may already be gone; give it the durable root explicitly.
     const env = options.workRoot ? { ...process.env, [workdirEnv]: options.workRoot } : process.env;
-    const child = spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'], env });
+    // Descriptor 3 carries stage reports. The CLI's stdout keeps its one-line
+    // result envelope, so nothing that already reads it has to change.
+    args.push('--progress-fd', '3');
+    const child = spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe', 'pipe'], env });
+    const spawnedAt = Date.now();
     const recording: Recording = {
-      child, flowPath, startedAt: Date.now(), countdownMs: countdown * 1000,
-      output: '', stopping: false,
+      child, flowPath,
+      countdownEndsAt: spawnedAt + countdown * 1000,
+      countdownMs: countdown * 1000,
+      // Nothing is captured before the CLI's countdown ends and the helper is
+      // ready; until the CLI says otherwise, the countdown is the honest stage.
+      phase: countdown > 0 ? 'countdown' : 'preparing',
+      output: '', stageBuffer: '', stopping: false,
       done: new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal }))),
     };
     child.stderr?.resume();
@@ -262,6 +335,14 @@ export function createRecordController(options: RecordControllerOptions) {
       if (recording.output.length < stdoutLimit) {
         recording.output = (recording.output + chunk).slice(0, stdoutLimit);
       }
+    });
+    const stages = child.stdio[3] as Readable | null | undefined;
+    stages?.setEncoding('utf8');
+    stages?.on('data', (chunk: string) => {
+      recording.stageBuffer += chunk;
+      const lines = recording.stageBuffer.split('\n');
+      recording.stageBuffer = lines.pop() ?? '';
+      for (const line of lines) applyStage(recording, line);
     });
     // A failed spawn emits `error` and then `close`; keep the error handled.
     child.on('error', () => { /* settled by close */ });
