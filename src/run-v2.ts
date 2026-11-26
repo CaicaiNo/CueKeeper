@@ -101,7 +101,21 @@ function deliveryOf(error: unknown): { delivery?: DeliveryV2 } {
   return error instanceof DesktopFault && error.delivery ? { delivery: error.delivery } : {};
 }
 
-function actionable(snapshot: Snapshot, locator: ElementLocator): { node: Node } {
+/** A recorded element and, when one exists, the node that can press it. */
+interface Actionable {
+  /** The node the recorded locator resolved to. */
+  node: Node;
+  /** The nearest node in its chain that the driver can press. */
+  press?: Node;
+}
+
+/** A control's identity in an operator-facing fault message. */
+function describeControl(node: Node): string {
+  const label = (node.name ?? node.value ?? node.text ?? '').trim() || node.identifier;
+  return label ? `${node.role} "${label.slice(0, 80)}"` : node.role;
+}
+
+function actionable(snapshot: Snapshot, locator: ElementLocator): Actionable {
   let found: Located;
   try {
     found = resolve(snapshot, locator);
@@ -134,6 +148,11 @@ function actionable(snapshot: Snapshot, locator: ElementLocator): { node: Node }
     found = candidates[0];
   }
   const chain = chainTo(snapshot.tree, found.node) ?? [found.node];
+  // A secure control is never pressed, nor is the container around it: a click
+  // on a password field's frame is as unplanned as one on the field.
+  if (found.node.secure) {
+    throw new Fault('UNSAFE_TARGET', `${describeControl(found.node)} is a secure control`);
+  }
   const clickable = (node: Node) => node.ref && !node.secure &&
     (node.actions ?? []).some(action => /^(click|press|axpress)$/i.test(action));
   // Finder's sidebar switches folders when the row is pressed; pressing the
@@ -141,15 +160,55 @@ function actionable(snapshot: Snapshot, locator: ElementLocator): { node: Node }
   // any clickable ancestor, then a bare ref for older drivers.
   const rowLevel = /^(treeitem|row|listitem|outlinerow|outlineitem)$/;
   for (let i = chain.length - 1; i >= 0; i -= 1) {
-    if (rowLevel.test(chain[i].role) && clickable(chain[i])) return { node: chain[i] };
+    if (rowLevel.test(chain[i].role) && clickable(chain[i])) return { node: found.node, press: chain[i] };
   }
   for (let i = chain.length - 1; i >= 0; i -= 1) {
-    if (clickable(chain[i])) return { node: chain[i] };
+    if (clickable(chain[i])) return { node: found.node, press: chain[i] };
   }
+  // An older driver reports no actions but does give a reference. The window,
+  // application and page roots are not controls, though: pressing one is not
+  // the click the flow recorded, so the walk stops below them.
   for (let i = chain.length - 1; i >= 0; i -= 1) {
-    if (chain[i].ref && !chain[i].secure) return { node: chain[i] };
+    if (/^(window|application|webarea)$/.test(chain[i].role)) break;
+    if (chain[i].ref && !chain[i].secure) return { node: found.node, press: chain[i] };
   }
-  throw new Fault('UNSAFE_TARGET', 'Control has no action reference');
+  // Nothing in the chain carries an action reference. The element is still
+  // exactly the recorded one, so a click can fall back to its own centre
+  // instead of pressing a neighbouring control; a step that needs a reference
+  // of its own reports which control was missing one.
+  return { node: found.node };
+}
+
+/** The reference a step that can only press requires, or a fault naming why. */
+function pressRef(target: Actionable, what: string): string {
+  if (!target.press?.ref) {
+    throw new Fault('UNSAFE_TARGET',
+      `${describeControl(target.node)} has no action reference to ${what}; edit the step and pick the target again`);
+  }
+  return target.press.ref;
+}
+
+/**
+ * The centre of a control that cannot be pressed. The click is physical, so the
+ * point must be inside the bound window: this is the same containment the
+ * coordinate path enforces, and the driver re-reads the window before delivery.
+ */
+function centreOf(node: Node, snapshot: Snapshot): Point {
+  const bounds = node.bounds;
+  if (!bounds) {
+    throw new Fault('UNSAFE_TARGET',
+      `${describeControl(node)} has no action reference and no bounds to click; ` +
+      'edit the step and pick the target from the window again');
+  }
+  const point: Point = [
+    Math.round(bounds.x + bounds.width / 2),
+    Math.round(bounds.y + bounds.height / 2),
+  ];
+  if (!contains(snapshot.tree.bounds, point)) {
+    throw new Fault('UNSAFE_POINT',
+      `${describeControl(node)} sits outside the bound window; edit the step and pick the target again`);
+  }
+  return point;
 }
 
 /** The item a right click on a container really targets. */
@@ -530,23 +589,38 @@ class StepRunner {
           const locator = step.button === 'right' && target.identifier === undefined
             ? (this.lastClickTarget ?? rightClickTarget(snapshot!, step.button, target))
             : target;
-          const { node } = actionable(snapshot!, addressable(locator));
+          const resolved = actionable(snapshot!, addressable(locator));
+          const node = resolved.press ?? resolved.node;
+          const options = {
+            ...(step.count === undefined ? {} : { count: step.count as 1 | 2 | 3 }),
+            ...(step.button === undefined ? {} : { button: step.button }),
+          };
           let delivery;
-          try {
-            delivery = await this.desktop.click(node.ref!, {
-              ...(step.count === undefined ? {} : { count: step.count as 1 | 2 | 3 }),
-              ...(step.button === undefined ? {} : { button: step.button }),
-            });
-          } catch (error) {
-            // Some AX elements advertise RightClick but reject the semantic
-            // action (Finder's list view). Fall back to a physical click at the
-            // element's centre, which is what the user's own right click does.
-            if (step.button !== 'right' || !node.bounds) throw error;
-            const point: Point = [
-              node.bounds.x + node.bounds.width / 2,
-              node.bounds.y + node.bounds.height / 2,
-            ];
-            delivery = await this.desktop.clickPoint(snapshot!, this.targetOf(binding), point, { button: 'right' });
+          let message: string | undefined;
+          if (!resolved.press) {
+            // The recorded control carries no AX action and no container above
+            // it does either — a common shape in an Electron page, where only
+            // the nodes the driver can press get a reference. The element itself
+            // is still resolved by name or identifier, so clicking its own
+            // centre is the same control, not a guess: it goes through the
+            // coordinate path, which proves the window and the point first.
+            const point = centreOf(resolved.node, snapshot!);
+            delivery = await this.desktop.clickPoint(snapshot!, this.targetOf(binding), point, options);
+            message = `${describeControl(resolved.node)} has no AX action; clicked its centre instead`;
+          } else {
+            try {
+              delivery = await this.desktop.click(resolved.press.ref!, options);
+            } catch (error) {
+              // Some AX elements advertise RightClick but reject the semantic
+              // action (Finder's list view). Fall back to a physical click at the
+              // element's centre, which is what the user's own right click does.
+              if (step.button !== 'right' || !node.bounds) throw error;
+              const point: Point = [
+                node.bounds.x + node.bounds.width / 2,
+                node.bounds.y + node.bounds.height / 2,
+              ];
+              delivery = await this.desktop.clickPoint(snapshot!, this.targetOf(binding), point, { button: 'right' });
+            }
           }
           if (step.button !== 'right') {
             this.lastClickTarget = locator;
@@ -556,7 +630,8 @@ class StepRunner {
             const namePoint = rowNamePoint(node);
             if (namePoint) this.lastRowNamePoint = namePoint;
           }
-          return delivery === undefined ? {} : { delivery };
+          const outcome = delivery === undefined ? {} : { delivery };
+          return message === undefined ? outcome : { ...outcome, message };
         }, step);
       case 'type':
         return this.typeStep(step);
@@ -572,8 +647,8 @@ class StepRunner {
         }, step);
       case 'scroll':
         return this.windowStep(step.scope, async (_binding, snapshot) => {
-          const { node } = actionable(snapshot!, step.target as ElementLocator);
-          const delivery = await this.desktop.scroll(node.ref!, scrollIntent(step));
+          const press = pressRef(actionable(snapshot!, step.target as ElementLocator), 'scroll');
+          const delivery = await this.desktop.scroll(press, scrollIntent(step));
           return delivery === undefined ? {} : { delivery };
         }, step);
       case 'drag':
@@ -918,7 +993,16 @@ class StepRunner {
         return { textMode: literal ? 'literal' : 'input', ...(input === undefined ? {} : { input }) };
       }
       const direct = focused ?? byName ?? near;
-      const node = direct?.node ?? actionable(snapshot!, addressable(locator)).node;
+      let node = direct?.node;
+      if (!node) {
+        const resolved = actionable(snapshot!, addressable(locator));
+        if (!resolved.press) {
+          throw new Fault('UNSAFE_TARGET',
+            `${describeControl(resolved.node)} has no action reference to type into; ` +
+            'edit the step and pick the target again');
+        }
+        node = resolved.press;
+      }
       // A rename field that AX does not flag as focused still needs a click to
       // take keyboard focus before the characters are typed into it.
       if (byName || near) await this.desktop.click(node.ref!).catch(() => undefined);

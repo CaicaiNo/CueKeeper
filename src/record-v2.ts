@@ -924,6 +924,7 @@ export class GlobalRecording {
               this.evidenceTarget(event) ?? this.identifiedTarget(snapshot, hit) ??
               this.ancestorLabel(snapshot, hit) ?? this.untargetedClick(binding, event, snapshot);
           }
+          if (target?.kind === 'element') this.noteUnpressable(snapshot, target);
         }
       } else {
         // The helper could not read the tree for this click. When it also saw
@@ -1289,6 +1290,38 @@ export class GlobalRecording {
     const identified = this.identifiedTarget(settled.snapshot, hit);
     if (identified) return { target: identified, miss: '' };
     return { miss: 'the tree read before it named nothing at the point', nothing };
+  }
+
+  /**
+   * A named control that no one can press: in an Electron page the container
+   * the pointer hits carries the accessible name while the driver gives a
+   * reference only to the nodes it can act on, so the recorded element has no
+   * action reference and neither does anything above it. Replay still clicks
+   * that exact element, at its centre, as physical input — this warns the
+   * person reviewing the flow that the step is no longer a semantic press.
+   * A click on a text field is left alone: clicking one to focus it is normal.
+   */
+  private noteUnpressable(snapshot: Snapshot, target: ClickTarget) {
+    if (target.kind !== 'element' || scopeRoles.has(target.role)) return;
+    let located: Located;
+    try {
+      located = resolve(snapshot, target as ElementLocator);
+    } catch {
+      return;
+    }
+    if (editableRole(located.node.role)) return;
+    let current: Node | undefined = located.node;
+    for (let depth = 0; current && depth < 50; depth += 1) {
+      // The window and page roots are not controls: a reference on one of them
+      // cannot stand for a press on the recorded element.
+      if (scopeRoles.has(current.role)) break;
+      if (current.ref || pressable(current)) return;
+      current = parentOf(snapshot.tree, current);
+    }
+    const name = nativeLabel(located.node.name) ?? nativeLabel(located.node.value) ?? '';
+    this.warn('CLICK_TARGET_UNPRESSABLE',
+      `The recorded control ${located.node.role}${name ? ` "${name.slice(0, 40)}"` : ''} exposes no AX action reference ` +
+      'and no container above it does; replay will click its centre as physical input — pick the target again if that is not what the step should do');
   }
 
   /**

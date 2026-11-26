@@ -1234,6 +1234,99 @@ test('a file target named by an item label value is found and clicked', async t 
   assert.deepEqual(callsOf(world, 'click'), [['click', '@w99:e1']]);
 });
 
+// --- HAOC-192: a click whose control carries no action reference --------------
+// A window shaped like an Electron page: the driver gives a reference only to
+// the nodes it can press, so a labelled container (and everything above it in
+// the tree) carries none. The recorded target is still the control the user
+// clicked, and replay must not fall through to a neighbouring control.
+
+function electronTree(children) {
+  return {
+    role: 'window', name: 'cuekeeper-demo', bounds: { x: 100, y: 100, width: 800, height: 600 },
+    children: [{ role: 'webarea', bounds: { x: 110, y: 120, width: 780, height: 480 }, children }],
+  };
+}
+
+function electronWindow(id, children) {
+  return {
+    id, app: finderApp, pid: 700, title: 'cuekeeper-demo',
+    data: { complete: true, window: { id, title: 'cuekeeper-demo' }, tree: electronTree(children) },
+  };
+}
+
+function electronWorld(t, children, options = {}) {
+  return finderWorld(t, { windows: [electronWindow('w-99', children)], ...options });
+}
+
+test('a control with no action reference is pressed through its actionable container', async t => {
+  // The label is what the recording could name; the container is what the
+  // driver can press, and it is the same control the user clicked.
+  const { world, run } = electronWorld(t, [{
+    role: 'button', ref_id: '@w99:e1', bounds: { x: 600, y: 200, width: 400, height: 60 },
+    children: [{
+      role: 'statictext', name: '接入地址', bounds: { x: 620, y: 215, width: 180, height: 20 }, states: [],
+    }],
+  }]);
+  const report = await run(identifierClickFlow({ kind: 'element', role: 'statictext', name: '接入地址' }));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w99:e1']]);
+  assert.deepEqual(callsOf(world, 'clickPoint'), []);
+  assert.equal(entry(report, 'click-control').message, undefined);
+});
+
+test('a control with no reference anywhere is clicked at its own centre, headed only', async t => {
+  const children = [{
+    role: 'group', name: '接入地址', bounds: { x: 600, y: 200, width: 400, height: 200 }, states: [],
+  }];
+  const plain = electronWorld(t, children);
+  const refused = await plain.run(identifierClickFlow({ kind: 'element', role: 'group', name: '接入地址' }));
+  assert.deepEqual({
+    code: entry(refused, 'click-control').code, click: callsOf(plain.world, 'click'),
+    point: callsOf(plain.world, 'clickPoint'),
+  }, { code: 'HEADED_REQUIRED', click: [], point: [] });
+
+  const headed = electronWorld(t, children, { headed: true });
+  const report = await headed.run(identifierClickFlow({ kind: 'element', role: 'group', name: '接入地址' }));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  // The centre of the recorded control, as physical input: the same element,
+  // proven by name, never a same-role neighbour.
+  assert.deepEqual(callsOf(headed.world, 'clickPoint'), [['clickPoint', [800, 300], 1]]);
+  assert.deepEqual(callsOf(headed.world, 'click'), []);
+  assert.match(entry(report, 'click-control').message ?? '', /has no AX action; clicked its centre instead/);
+});
+
+test('a control with neither a reference nor bounds names itself and sends nothing', async t => {
+  const { world, run } = electronWorld(t, [{
+    role: 'group', name: '接入地址', states: [],
+  }]);
+  const report = await run(identifierClickFlow({ kind: 'element', role: 'group', name: '接入地址' }));
+  const blocked = entry(report, 'click-control');
+  assert.equal(blocked.code, 'UNSAFE_TARGET');
+  assert.match(blocked.message, /group "接入地址" has no action reference and no bounds to click/);
+  assert.match(blocked.message, /pick the target/);
+  assert.deepEqual([callsOf(world, 'click'), callsOf(world, 'clickPoint'), callsOf(world, 'clickScreen')],
+    [[], [], []]);
+});
+
+test('a same-titled twin that lacks the control is not clicked even when focused', async t => {
+  // Both windows carry the recorded title. Only one addresses the recorded
+  // control, so that one runs the step; the operator's focus is not evidence
+  // strong enough to overrule the tree.
+  const holder = electronWindow('w-96', [{
+    role: 'group', name: '接入地址', bounds: { x: 600, y: 200, width: 400, height: 200 },
+    children: [{ role: 'button', name: '继续', ref_id: '@w96:e1', bounds: { x: 620, y: 215, width: 120, height: 32 } }],
+  }]);
+  const twin = electronWindow('w-97', [{
+    role: 'group', name: '接入地址', bounds: { x: 600, y: 200, width: 400, height: 200 },
+    children: [{ role: 'button', name: '取消', ref_id: '@w97:e1', bounds: { x: 620, y: 215, width: 120, height: 32 } }],
+  }]);
+  const { world, run } = finderWorld(t, { windows: [holder, twin], focused: 'w-97' });
+  const report = await run(identifierClickFlow({ kind: 'element', role: 'button', name: '继续' }));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w96:e1']]);
+  assert.match(entry(report, 'click-control').message ?? '', /held its target/);
+});
+
 // A folder opened twice leaves two windows under one title. The flow was
 // recorded in one of them, and the step's own target is what tells them apart.
 function gitWindow(id, item) {
