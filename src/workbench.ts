@@ -19,6 +19,10 @@ import { hashFlow, plan } from './flow.js';
 import { dryRunFlowV2, hashFlowV2, isFlowV2, pointTargetSteps } from './flow-v2.js';
 import type { FlowV2, StepV2, WindowScope } from './contracts-v2.js';
 import { Fault, object } from './locator.js';
+import {
+  mergeValues, resolveValues, usableValues, valuesPath, writeValues,
+} from './input-values.js';
+import type { InputValuesDocument } from './input-values.js';
 import { crop, decodePng, encodePng } from './png.js';
 import { runFlow } from './run.js';
 import type { ShellRunOptions } from './run.js';
@@ -175,6 +179,27 @@ function inputValues(names: readonly string[], raw: unknown): Record<string, str
       throw new Error(`Input ${name} needs a value before a live replay`);
     }
     values[name] = value;
+  }
+  return values;
+}
+
+/**
+ * The sidecar as the page may see it: declared parameters only, and never the
+ * text of a sensitive entry. `path` is where a value would be written, so the
+ * page can name the file without guessing a suffix.
+ */
+function inputValuesView(doc: InputValuesDocument | undefined, declared: ReadonlySet<string>) {
+  const values: Record<string, Record<string, unknown>> = {};
+  for (const [name, entry] of Object.entries(doc?.values ?? {})) {
+    if (!declared.has(name)) continue;
+    values[name] = {
+      ...(entry.sensitive ? { sensitive: true } : {}),
+      ...(entry.value === undefined ? {} : { value: entry.value }),
+      complete: entry.complete,
+      ...(entry.issues ? { issues: entry.issues } : {}),
+      ...(entry.steps ? { steps: entry.steps } : {}),
+      ...(entry.targets ? { targets: entry.targets } : {}),
+    };
   }
   return values;
 }
@@ -882,6 +907,58 @@ export async function startWorkbench(options: {
         }
         return send(response, 200, v2View());
       }
+      // Runtime values live next to the flow, not in it: the page reads them to
+      // prefill the replay dialog and saves only what the operator confirmed.
+      if (path === '/api/v2/inputs') {
+        const flow = editable.flow;
+        const targetPath = editable.replayTarget()?.path ?? editable.source.path;
+        const resolved = await resolveValues(targetPath, flow.id);
+        return send(response, 200, {
+          path: resolved.path,
+          values: inputValuesView(resolved.doc, new Set(flow.inputs ?? [])),
+          ...(resolved.warning ? { warning: resolved.warning } : {}),
+        });
+      }
+      if (path === '/api/v2/inputs/save') {
+        if (running) return send(response, 409, { error: 'A test is running' });
+        const flow = editable.flow;
+        const declared = new Set(flow.inputs ?? []);
+        const raw = data.values === undefined ? {} : object(data.values);
+        const patch: Record<string, string | null> = {};
+        for (const [name, value] of Object.entries(raw)) {
+          if (!declared.has(name)) {
+            return send(response, 400, {
+              error: 'UNKNOWN_INPUT', message: `${name} is not an input of this flow`,
+            });
+          }
+          if (value !== null && typeof value !== 'string') {
+            return send(response, 400, {
+              error: 'INPUT_VALUES_INVALID', message: `A value for ${name} is text or null`,
+            });
+          }
+          patch[name] = value;
+        }
+        const targetPath = editable.replayTarget()?.path ?? editable.source.path;
+        const resolved = await resolveValues(targetPath, flow.id);
+        let doc: InputValuesDocument;
+        try {
+          doc = mergeValues(resolved.doc, flow.id, patch, {
+            recordedFlowSha256: editable.source.flowSha256,
+          });
+        } catch (error) {
+          return send(response, 400, {
+            error: (error as { code?: string }).code ?? 'INPUT_VALUES_INVALID',
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+        // Clearing the last entry keeps the file: its 0600 mode and its
+        // flowId stay put, so a later save does not have to guess them again.
+        const output = valuesPath(editable.source.path);
+        await writeValues(output, doc);
+        return send(response, 200, {
+          path: output, values: inputValuesView(doc, declared),
+        });
+      }
       if (path === '/api/save') {
         if (running) return send(response, 409, { error: 'A test is running' });
         let revision;
@@ -939,8 +1016,13 @@ export async function startWorkbench(options: {
           throw new Error('The flow has unsaved edits; save the workflow before a live replay');
         }
         const checkpoints = flow.steps.filter(step => step.kind === 'manual_checkpoint');
+        // Values the page did not send fall back to the sidecar, so a caller of
+        // /api/run gets the recorded text exactly like the CLI does. Anything
+        // the request does send wins.
+        const stored = usableValues((await resolveValues(live.path, flow.id)).doc, flow.inputs ?? []);
+        const requested = data.inputs === undefined ? {} : object(data.inputs);
         const inputs = (flow.inputs ?? []).length
-          ? inputValues(flow.inputs as string[], data.inputs)
+          ? inputValues(flow.inputs as string[], { ...stored, ...requested })
           : undefined;
         const args = ['run', live.path, '--foreground', '--headed', '--json', '--progress'];
         // A checkpoint flow uses the machine channel: the CLI announces the

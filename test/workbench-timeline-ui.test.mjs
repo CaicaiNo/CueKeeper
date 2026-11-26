@@ -191,6 +191,9 @@ test('the workbench page selects a clicked timeline step and keeps the list in p
     const button = liveButton(document);
     assert.equal(button.disabled, false);
     button.click();
+    // The dialog loads the stored values before opening, so it appears after
+    // one local round trip instead of synchronously.
+    await tick();
     const dialog = document.getElementById('dialog');
     assert.match(dialog.textContent, /将回放已保存的工作流：/);
     assert.doesNotMatch(dialog.textContent, /revision|version/i);

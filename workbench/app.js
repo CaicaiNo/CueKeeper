@@ -1285,7 +1285,7 @@ function renderV2() {
         ? button('取消标记', () => v2CancelTemplate(), { style: 'small', icon: 'x', disabled: busy })
         : undefined,
       button('dry-run', () => void v2DryRun(), { style: 'small', icon: 'checkCircle', disabled: busy }),
-      button(state.v2Running ? '回放中' : '实时回放', () => state.v2Running ? void v2StopRun() : v2LiveDialog(), {
+      button(state.v2Running ? '回放中' : '实时回放', () => state.v2Running ? void v2StopRun() : void v2LiveDialog(), {
         style: 'small primary', icon: 'play', loading: state.v2Running,
         title: state.v2Running ? '点击停止回放' : undefined,
         disabled: !state.v2Running && (busy || !state.allowLive),
@@ -1327,17 +1327,60 @@ function v2DryRun() {
   }).catch(() => {});
 }
 
-function v2LiveDialog() {
+/** One line explaining where a prefilled value came from, or why it is empty. */
+function v2InputStatus(entry) {
+  if (!entry) return '无值 · 回放前请填写';
+  if (entry.sensitive) return '敏感 · 不会自动填入，请手动填写';
+  if (entry.complete === false) return '来自录制但不完整 · 部分字符没读到（输入法或采集中断），请核对';
+  return '来自录制，可直接回放或修改';
+}
+
+async function v2LiveDialog() {
   const flow = v2Flow();
   if (!flow) return;
   // The server names the file the run would read: the newest revision, or the
   // recording itself when nothing was edited.
   const live = state.v2?.live;
+  // Values recorded next to the flow prefill the dialog. A read failure is a
+  // warning inside the dialog, never a reason to deny the replay: the operator
+  // can still type every value by hand.
+  let stored = { values: {} };
+  let storedWarning;
+  if (live) {
+    try {
+      stored = await api('v2/inputs', { session: state.session.id });
+      storedWarning = stored.warning;
+    } catch (error) {
+      storedWarning = error instanceof Error ? error.message : String(error);
+    }
+  }
   const confirmed = el('input', { type: 'checkbox', className: 'checkbox checkbox-sm' });
-  const values = new Map((flow.inputs ?? []).map(name => [name, input({
-    maxLength: 4000, spellcheck: false, autocomplete: 'off',
-    placeholder: '填写本次回放使用的值',
-  })]));
+  const remember = el('input', { type: 'checkbox', className: 'checkbox checkbox-sm' });
+  const controls = new Map((flow.inputs ?? []).map(name => {
+    const entry = stored.values?.[name];
+    const node = input({
+      id: `live-input-${name}`,
+      maxLength: 4000, spellcheck: false, autocomplete: 'off',
+      placeholder: entry?.sensitive ? '该参数标记为敏感，请手动填写' : '填写本次回放使用的值',
+    });
+    if (typeof entry?.value === 'string') node.value = entry.value;
+    const record = { node, entry, cleared: false };
+    const status = el('span', { className: 'muted', id: `live-input-status-${name}` }, v2InputStatus(entry));
+    // Only an entry that actually holds text can be cleared; a missing one
+    // needs no button.
+    const clear = entry
+      ? button('清除已存值', () => {
+        node.value = '';
+        record.cleared = true;
+        status.textContent = '已清除已存值，本次仍需填写';
+      }, { style: 'small', key: `live-clear-${name}` })
+      : undefined;
+    // The clear handler mutates this same record; the dialog reads its flags on
+    // submit, so a copy here would lose the "cleared" state.
+    record.status = status;
+    record.clear = clear;
+    return [name, record];
+  }));
   const checkpoints = flow.steps.filter(step => step.kind === 'manual_checkpoint');
   openDialog('实时回放全局录制流程', [
     muted(!live
@@ -1346,21 +1389,33 @@ function v2LiveDialog() {
         ? `将回放已保存的工作流：${live.path}`
         : `将直接回放导入的录制文件：${live.path}`),
     muted('会占用前台并可能触发 macOS 权限提示；运行期间点「停止回放」会中断 CLI。'),
+    ...(storedWarning ? [muted(`已存参数值读取失败，本次请手动填写：${storedWarning}`)] : []),
     ...(checkpoints.length ? [muted(
       `含 ${checkpoints.length} 个人工检查点：回放会暂停在检查点，由你在真实界面完成授权，` +
       '再回到工作台点「已完成授权，继续」。工作台不接收密码；超时或取消就停在检查点。')] : []),
     el('label', { className: 'check-row' }, confirmed, '我确认回放会操作当前桌面的应用窗口'),
-    ...(values.size ? [
+    ...(controls.size ? [
       el('h3', {}, '运行参数值'),
-      muted('参数值只传给本次回放进程，不写入 flow 或报告。'),
-      ...[...values.entries()].map(([name, node]) => field(name, node)),
+      muted('参数值只传给本次回放进程，不写入 flow 或报告；下面的默认值来自录制，保存在 flow 旁的本机值文件里。'),
+      ...[...controls.entries()].map(([name, control]) => el('label', { className: 'field' },
+        name, control.node,
+        el('span', { className: 'muted' }, control.status, control.clear ? el('span', {}, ' ') : undefined, control.clear))),
+      el('label', { className: 'check-row' }, remember, '把这次填写的值存为默认'),
     ] : []),
-  ], '开始回放', () => {
+  ], '开始回放', async () => {
     if (!confirmed.checked) throw new Error('确认后才会开始实时回放。');
     if (!state.v2?.live) throw new Error('当前有未保存的修改，请先保存工作流。');
-    const filled = [...values.entries()].map(([name, node]) => [name, node.value.trim()]);
+    // Values are submitted verbatim: trimming silently changed a filename or a
+    // URL that legitimately began or ended with a space. Only emptiness blocks.
+    const filled = [...controls.entries()].map(([name, control]) => [name, control.node.value]);
     const missing = filled.filter(([, value]) => !value).map(([name]) => name);
     if (missing.length) throw new Error(`请先填写运行参数：${missing.join('、')}`);
+    const patch = {};
+    for (const [name, control] of controls) if (control.cleared) patch[name] = null;
+    if (remember.checked) for (const [name, value] of filled) patch[name] = value;
+    if (Object.keys(patch).length) {
+      await api('v2/inputs/save', { session: state.session.id, values: patch });
+    }
     const inputs = Object.fromEntries(filled);
     // The replay may pause at a checkpoint; close the dialog and keep the page
     // live so the waiting panel can be answered.
@@ -1551,7 +1606,7 @@ function v2TypeDialog(step) {
   openDialog(withStepId('编辑输入步骤', step), [
     v2PickEntry(step, locator => picker.set(locator)),
     ...picker.keyControls, field('内容来源', mode), textBox, paramBox, picker.advanced,
-    muted('参数值保存在测试数据里，不写入 flow。'),
+    muted('参数值保存在 flow 旁的本机值文件里（不进 flow 与报告）；回放弹窗可预填、修改或清除。'),
   ], '应用', () => {
     const patch = picker.shouldSubmitTarget() ? { target: picker.value() } : {};
     if (mode.value === 'text') {

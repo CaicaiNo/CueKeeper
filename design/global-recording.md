@@ -53,7 +53,8 @@ v1 的 `flowSchema` 和 `reportSchema` 都是 `version: 1` 的封闭对象。全
 | 人工检查点 | `manual_checkpoint` 包含 `id`、触发块的 `scope`（窗口）、`triggerStepId`、`reason: "secure_input"`、`resume: { scope, check }` 和 `timeoutMs`。触发步紧邻检查点，且作用域一致。`resume` 用同一套只读条件，由录制结果提出或由工作台确认。占位未确认或未填恢复条件时，作为缺口阻塞实时回放 |
 | P3 与缺口 | `open_system_surface`、`surface_press` 使用 `surface`。`surface_press` 的 selector 按 surface 分支校验，例如 Dock 的 `bundleId`、App 菜单的标识路径。`gap` 只保存 `id`、`kind`、`code`，不包含原始事件。存在尚未处理的缺口时整条 flow 在产生副作用前被拒绝 |
 | `Intent` | 沿用 HAOC-99 顶层注释模型。每个可执行注释保存 `id`、`action`、封闭的 `params`、连续的 `sourceStepIds`、`equivalence`、`skippedUiStepIds` 和 `observableEffects`。跳过的界面步骤必须是来源区间的有序子集。`observableEffects` 由适配器定义，包含作用域及可验证条件，例如 Installer 打开指定 pkg。可执行的 `equivalence` 限于 `same_ui` 和 `same_end_state`。编译后的计划项继承原始区间的起止作用域。替换区间不得重叠，区间、参数、类别或效果变更后重新确认 |
-| 引用规则 | `app` 为已解析的 bundle ID。`windowKey` 在 flow 内唯一绑定 App，同键后续可携带新标题作为显示名。首次绑定使用首次实际需要时的精确标题。`appPaths` 每个 bundle ID 最多一条 macOS 绝对 `.app` 路径，且必须被该 flow 引用。`inputs` 保存参数名，不保存值。引用必须存在，`copy.stepId` 必须指向已出现的合规复制步。解析器另校验作用域、动作和 P2/P3 能力组合 |
+| 引用规则 | `app` 为已解析的 bundle ID。`windowKey` 在 flow 内唯一绑定 App，同键后续可携带新标题作为显示名。首次绑定使用首次实际需要时的精确标题。`appPaths` 每个 bundle ID 最多一条 macOS 绝对 `.app` 路径，且必须被该 flow 引用。`inputs` 只保存参数名，值不进 flow。引用必须存在，`copy.stepId` 必须指向已出现的合规复制步。解析器另校验作用域、动作和 P2/P3 能力组合 |
+| 输入参数值 | 录制时把 `type` 步骤读到的非安全文本写进 flow 同目录的 `<flow>.values.json`（`0600`，临时文件 + rename）。文件含 `version: 1`、`flowId`、`updatedAt`、每个参数的值、`complete`/`issues`、来源步骤与目标控件；`sensitive` 条目只有标记、没有值。它不进 `flowV2Schema`、`hashFlowV2`、`flow validate`、报告或发布集；`resolveValues()` 按同名文件 → 同目录 `flowId` 最新的顺序查找。文件损坏只警告并按「没有值」处理，缺值仍按必填。`record --global --no-input-values` 关闭写入，`run --no-stored-inputs` 关闭读取，显式 `--inputs` 永远优先 |
 | `Report` | `version: 2` 并保留 `flowId`、`flowSha256`、`startedAt`、`mode`、`status` 和顺序 `entries`。每个 action entry 带 `scope`，可带 `phase`、经验证的语义来源、`delivery` 与错误码。语义结果含 `intentId`、`sourceStepIds`、实际采用的 `equivalence`、实际跳过的 `skippedUiStepIds` 与效果核验结果。回退时按原始步骤记结果，并保留未采用的候选及原因。身份验证按 App 记录，移除单数 `appIdentity`。缺口、全局验证失败可以没有作用域。报告不含运行时 PID、绝对 App 路径或输入原文 |
 
 最小跨 App 样例，前两个窗口标题均来自待回放的测试夹具。
@@ -197,7 +198,7 @@ any failure/cancel → Stop → Release
 
 - `--global` 每次显式开启。首次显示采集范围、数据保存位置、暂停/停止热键、排除应用和敏感输入规则，并在用户确认前保持 tap 停用。持续显示录制状态，暂停立即切断事件管线并清空待合并内容。全局录制默认上限 10 分钟，可显式延长到 60 分钟。下载等无输入时段计入总上限，空闲时不提前关闭会话。会话结束即卸载观察器，文件仅当前用户可访问，默认留在本地。
 - 在解析字符、读取 AX value、创建快照或处理剪贴板之前检查系统 secure input、敏感控件、权限面板及排除规则。敏感或身份不明时拒绝录制内容，丢弃有疑问的待处理 burst，写人工检查点或无内容缺口。回放也拒绝对 secure 控件自动输入或截图，且交接过程无内容日志或临时文件。
-- 全局录制默认把文本输入建模为定位器和参数名，记录时不导出按键原文、剪贴板 payload 或 AX value。测试员可在工作台填入可分享的测试文字，或在执行时传入本机测试参数。复制场景由回放时的可信测试数据提供真实内容。全局录制的自动文字采集假定不足以判断普通字段里的 Token 或私聊，因此即使控件可编辑也使用同一默认规则。
+- 全局录制把文本输入建模为定位器和参数名；非安全的普通字段，其原文只写进 flow 同目录的 `<flow>.values.json`（`0600`），用于回放预填，不进 flow、修订、报告、日志、上传包，也不导出到任何交换格式。剪贴板 payload 与 AX value 仍不采集。`record --global --no-input-values` 完全不写该文件；工作台可逐项清除，或在弹窗里勾选「把这次填写的值存为默认」才写入。复制场景由回放时的可信测试数据提供真实内容。全局录制的自动文字采集假定不足以判断普通字段里的 Token 或私聊，因此文档要求不要把密码录进普通输入框；密码与令牌继续走 `SECURE_INPUT` 与人工检查点，不产生 `type` 步骤，也就不会落值。
 - 只有明确批准的测试范围可保存原始窗口标题或 AX label，默认优先用结构/稳定标识。隐私数据包含动态标题、通知和菜单项。无法安全产生可重定位信息时记 `PRIVACY_REDACTED`。过滤在调试日志、缓存文件、错误报告、归档与截图写盘之前生效。未经批准的 App 留下缺口，用户可在录制前指定测试范围。
 - 支持边界为同一交互 macOS 登录会话里的普通可访问 App。系统授权只承诺在可验证的检查点让操作者接手。锁屏、跨用户/Fast User Switching、远程桌面内层、IME 候选框逐帧、Mission Control/Space 动画、跨 App 拖放、不可访问控件及未知第三方 surface 均超出承诺。
 
