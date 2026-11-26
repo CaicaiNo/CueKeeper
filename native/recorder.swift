@@ -777,31 +777,31 @@ final class Capture {
         self.tap = tap
         self.hotkeyTap = hotkeyTap
         self.seconds = seconds
-        if let indicator {
-            if let detail = indicator.show() {
-                stop("INDICATOR_NOT_VISIBLE", detail: detail)
-                return
-            }
-        }
-        // Both run-loop sources are installed before prepare. Let the taps settle
-        // while the HUD still says it is preparing, then check both before READY.
+        // Nothing is on screen yet. The HUD is created in `begin`, in the same
+        // moment capture starts, so the tap warm-up cannot look like a running
+        // recording. The taps still settle here, before READY.
         CGEvent.tapEnable(tap: hotkeyTap, enable: true)
         CGEvent.tapEnable(tap: tap, enable: true)
         let now = ProcessInfo.processInfo.systemUptime
         readyNotBefore = now + 0.35
-        indicatorDeadline = now + 2
+        indicatorDeadline = 0
         traceMouseLifecycle("tap_enable_requested")
     }
 
-    private func begin(indicatorEvidence: Any) {
-        guard !stopped, let tap, let hotkeyTap else { return }
+    /// Starts capture and puts the HUD on screen in the same moment. Returns
+    /// `false` when the panel has not proved itself visible yet; the session
+    /// retries until `indicatorDeadline` and then stops, so a recording never
+    /// runs without the indicator it promised.
+    @discardableResult
+    private func begin() -> Bool {
+        guard !stopped, let tap, let hotkeyTap else { return true }
         guard CFMachPortIsValid(hotkeyTap), CGEvent.tapIsEnabled(tap: hotkeyTap) else {
             stop("HOTKEY_TAP_UNAVAILABLE", detail: "The recording hotkey filter did not enable")
-            return
+            return true
         }
         guard CFMachPortIsValid(tap), CGEvent.tapIsEnabled(tap: tap) else {
             stop("TAP_UNAVAILABLE", detail: "The input event tap did not enable")
-            return
+            return true
         }
         // A path-bound recording proves the selected window belongs to the
         // instance named by the caller before any input is attributed to it.
@@ -810,18 +810,40 @@ final class Capture {
             guard let application = boundApplication(), !application.isTerminated,
                   application.bundleIdentifier == app else {
                 stop("IDENTITY_MISMATCH", detail: "The bound process is no longer running")
-                return
+                return true
             }
             let owner = windowOwnerPid()
             guard owner == pid else {
                 stop("IDENTITY_MISMATCH", detail: "The selected window belongs to another process")
-                return
+                return true
             }
             identity = [
                 "pid": Int(pid),
                 "bundlePath": bundlePath ?? application.bundleURL?.resolvingSymlinksInPath().path ?? "",
                 "windowOwnerPid": Int(owner ?? 0),
             ]
+        }
+        var indicatorEvidence: Any = false
+        if let indicator {
+            if let detail = indicator.show() {
+                stop("INDICATOR_NOT_VISIBLE", detail: detail)
+                return true
+            }
+            switch indicator.visibility() {
+            case .confirmed(let evidence):
+                indicatorEvidence = evidence
+            case .waiting(let detail):
+                // The Window Server has not listed the panel yet. Pull it back
+                // so nothing on screen claims a recording that has not started,
+                // and retry from the session timer instead of recording blind.
+                indicator.hide()
+                let now = ProcessInfo.processInfo.systemUptime
+                if indicatorDeadline == 0 { indicatorDeadline = now + 2 }
+                if now >= indicatorDeadline {
+                    stop("INDICATOR_NOT_VISIBLE", detail: detail)
+                }
+                return false
+            }
         }
         startedUptimeNs = DispatchTime.now().uptimeNanoseconds
         started = ProcessInfo.processInfo.systemUptime
@@ -846,6 +868,7 @@ final class Capture {
         emit(ready)
         refreshSystemDialog()
         refreshFocus()
+        return true
     }
 
     func closeIndicator() {
@@ -863,7 +886,9 @@ final class Capture {
     }
 
     func rebuildIndicator() {
-        guard tap != nil, !stopped else { return }
+        // A display change before capture begins must not create the HUD early;
+        // `begin` will build it at the ready moment.
+        guard started != nil, !stopped else { return }
         if let detail = indicator?.show() {
             stop("INDICATOR_NOT_VISIBLE", detail: detail)
             return
@@ -903,17 +928,7 @@ final class Capture {
         if started == nil {
             let now = ProcessInfo.processInfo.systemUptime
             guard now >= readyNotBefore else { return }
-            guard let indicator else {
-                begin(indicatorEvidence: false)
-                return
-            }
-            switch indicator.visibility() {
-            case .confirmed(let evidence): begin(indicatorEvidence: evidence)
-            case .waiting(let detail):
-                if now >= indicatorDeadline {
-                    stop("INDICATOR_NOT_VISIBLE", detail: detail)
-                }
-            }
+            _ = begin()
             return
         }
         if let deadline = stopReleaseDeadline, ProcessInfo.processInfo.systemUptime >= deadline {

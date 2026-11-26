@@ -109,17 +109,20 @@ function renderTimer() {
     return;
   }
   if (state.phase === 'preparing') {
-    // Started, but the recorder has not begun capturing: the countdown is over
-    // and this gap is not recording time.
-    timer.textContent = '准备中…';
+    // Started, but the recorder has not begun capturing. The operator asked for
+    // no status here: the countdown is over and there is no recording time yet,
+    // so the timer stays empty instead of saying "准备中" or "录制中 00:00".
+    timer.textContent = '';
     return;
   }
   if (state.phase === 'countdown') {
     // The end comes from the CLI, so the digits are the countdown it really runs.
     const left = state.countdownEndsAt === undefined ? 0 : state.countdownEndsAt - Date.now();
     // At the countdown's end capture has not begun yet, and the next stage is
-    // exactly that wait; "0 秒后开始录制" would be a lie for however long it lasts.
-    timer.textContent = left > 0 ? `${Math.ceil(left / 1000)} 秒后开始录制` : '准备中…';
+    // exactly that wait; showing "0 秒后开始录制" would be a lie for however
+    // long it lasts, and any other label would describe a recording that is
+    // not running. Leave the timer empty until the recorder's ready moment.
+    timer.textContent = left > 0 ? `${Math.ceil(left / 1000)} 秒后开始录制` : '';
     return;
   }
   if (state.phase === 'recording') {
@@ -138,7 +141,10 @@ function renderTimer() {
 function render() {
   const blocked = state.health !== undefined && state.health.ok === false;
   startButton.disabled = state.recording || state.busy || blocked;
-  startButton.textContent = state.busy && !state.recording ? '正在开始…' : '开始录制';
+  // Until the recorder reports that capture began, pressing start again would
+  // only be refused; say that it is still starting rather than "开始录制".
+  startButton.textContent = state.phase === 'preparing' || (state.busy && !state.recording)
+    ? '正在开始…' : '开始录制';
   stopButton.hidden = !state.recording;
   stopButton.disabled = state.busy;
   stopButton.textContent = state.busy && state.recording ? '正在保存…' : '停止录制';

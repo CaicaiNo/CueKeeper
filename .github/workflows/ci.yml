@@ -45,6 +45,9 @@ jobs:
       - name: Build macOS recorder
         run: npm run build:recorder
 
+      - name: Test the recording HUD label
+        run: npm run test:label
+
       - name: Package unsigned release
         run: node scripts/package.mjs --skip-build --skip-recorder --out out/release
 

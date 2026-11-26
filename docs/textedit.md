@@ -8,7 +8,7 @@
 
 | 时间 | 操作 | 预期 | 失败判据 |
 | --- | --- | --- | --- |
-| 0–1 分钟 | 单次构建录制器并核对时间戳，准备专用空白纯文本文件。启动后等待终端 `INDICATOR_READY` 或 HUD「录制就绪」 | 窗口服务器确认主屏面板，主屏能看到边框和高亮 HUD。授权提示为 0–2 个 | 构建失败、窗口错配、额外弹窗或终端报告 `INDICATOR_NOT_VISIBLE` 时立即停止。终端就绪但主屏仍不可见时也停止 |
+| 0–1 分钟 | 单次构建录制器并核对时间戳，准备专用空白纯文本文件。启动后等待终端 `INDICATOR_READY` 或 HUD 出现「录制中」 | 窗口服务器确认主屏面板，主屏能看到边框和高亮 HUD。授权提示为 0–2 个 | 构建失败、窗口错配、额外弹窗或终端报告 `INDICATOR_NOT_VISIBLE` 时立即停止。终端就绪但主屏仍不可见时也停止 |
 | 1–3 分钟 | 点击正文一次，输入 `Cuekeeper M1`，按 Cmd+S。切到飞书再切回 TextEdit。按 `Ctrl+Option+P` 暂停两秒，再按一次继续，最后按 `Ctrl+Option+X`。按下 P 或 X 时保持 Ctrl 和 Option 按住 | 暂停时计时冻结，继续后恢复。切换时会话继续，停止后指示器消失。暂停及停止热键由录制器消费 | 热键进入正文或 flow，切换导致退出，计时或指示器异常 |
 | 3–4 分钟 | 另起一轮，分别点主屏边框和 HUD 下方可安全操作、效果可见的位置，再完成一次普通正文点击并停止 | 底层窗口收到点击，这轮 flow 只含一次普通点击 | 底层点击被拦截，指示器上的点击进入 flow，或普通点击缺失 |
 | 4–5 分钟 | 查看第一轮 flow、CLI 输出和磁盘上的专用文件，关闭测试文档 | 三步依次为 `click → type → key`，最后一步是 Cmd+S。文本与磁盘内容逐字节一致，CLI 提示 `FOCUS_CHANGED`。采集进程已退出 | flow 缺失、动作数量或顺序错误、文本不符，或采集进程仍存在 |
@@ -19,7 +19,7 @@
 
 1. 执行 `npm run build:recorder`，生成 `dist/cuekeeper-capture`。先用 `node dist/cli.js doctor` 做只读自检（Node、文件、agent-desktop 1.3.1、录制器、辅助功能与输入监控）；发布包用 `cuekeeper doctor`。agent-desktop 使用 1.3.1，`CUEKEEPER_AGENT_DESKTOP` 可指定可信二进制的绝对路径。
 2. 只使用专用空白纯文本文档 `Cuekeeper-M1.txt`，保存到新建测试目录。确认窗口标题与文件名一致且唯一，并把专用文档选为当前 TextEdit 窗口。
-3. 在终端执行以下录制命令。看到 `INDICATOR_READY` 或 HUD「录制就绪」后开始操作。启动失败时保留 CLI 诊断。使用英文键盘输入，切回 TextEdit 可用 Cmd+Tab。暂停时 HUD 计时冻结，会话仍在 `--seconds` 到点时收尾。
+3. 在终端执行以下录制命令。看到 `INDICATOR_READY` 或 HUD 出现「录制中 00:00」后开始操作；此前屏幕上不会出现任何录制状态。启动失败时保留 CLI 诊断。使用英文键盘输入，切回 TextEdit 可用 Cmd+Tab。暂停时 HUD 计时冻结，会话仍在 `--seconds` 到点时收尾。
 
 ```sh
 mkdir -p out
