@@ -182,13 +182,16 @@ function validateInputs(flow: FlowV2) {
 
 function validateSteps(flow: FlowV2, state: ScopeState, allowGaps = false) {
   const index = new Map<string, number>();
+  // A gap is named by the step it sits on and the evidence that made it, so the
+  // person reading the refusal can tell a stale capture from an unattributable
+  // event without opening the flow. The fault code stays CAPTURE_GAP.
   const gaps: string[] = [];
   for (const [position, step] of flow.steps.entries()) {
     if (index.has(step.id)) fail(`Flow steps: duplicate id ${step.id}`);
     index.set(step.id, position);
     const where = `Flow step ${step.id}`;
     if (step.kind === 'gap') {
-      gaps.push(step.id);
+      gaps.push(`${step.id}: ${step.code}`);
       continue;
     }
     validateScope(step.scope, where, state);

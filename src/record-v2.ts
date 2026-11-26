@@ -543,6 +543,7 @@ export class GlobalRecording {
       }
       if (this.secureOpen) this.closeSecure();
       this.endBursts();
+      this.noteGapReason(event);
       this.pushGap(event.gapCode);
       return;
     }
@@ -665,12 +666,81 @@ export class GlobalRecording {
       this.warn('CLICK_ACTIVATED_WINDOW',
         'The click activated its window and also landed on a named control in it; the step brings the window forward, then clicks the control');
     }
-    if (this.current && this.current.key !== binding.key) {
+    // A click that did not name the flow's current window is a gap unless its
+    // own evidence proves it was delivered to a window that was already
+    // frontmost. That proof is what separates it from a first mouse-down on a
+    // background window: the press reached the control, so it is navigation
+    // first and then the click, never a lost step (see clickProvesOwnWindow).
+    const recovering = this.current !== undefined && this.current.key !== binding.key;
+    if (recovering && !this.clickProvesOwnWindow(binding, event)) {
+      this.pushGap('CAPTURE_SCOPE_UNVERIFIED');
+      return;
+    }
+    // A recovery spends two slots: the navigation and the click. Reserving only
+    // one would push the navigation and drop the click, leaving a flow that
+    // looks complete but silently lost the press.
+    if (recovering && this.steps.length + 2 > this.stepLimit) {
       this.pushGap('CAPTURE_SCOPE_UNVERIFIED');
       return;
     }
     if (!this.claim(event, binding)) return;
     this.ensureScope(binding);
+    // A recovered click that still cannot become a step leaves the gap behind
+    // the navigation: navigation alone would hide the press it was holding.
+    if (!(await this.recordClick(binding, event, { requireElement: recovering })) && recovering) {
+      this.pushGap('CAPTURE_SCOPE_UNVERIFIED');
+    }
+  }
+
+  /**
+   * Whether a click whose window is not the flow's current scope still proves
+   * it landed in a frontmost window, so it can be kept after a navigation
+   * instead of becoming a capture gap.
+   *
+   * The helper sets `decision: record` only when the pointer's window is the
+   * focused window (`GlobalPointerEvidence.fields`), i.e. the press was
+   * delivered rather than swallowed by activation. The binding must come from
+   * the event's own app/pid/window number — the inheritance branch names no
+   * window and can never stand for this proof — and the process instance and
+   * focus generation must still be current. A menu item also reports
+   * `record`, but its window is the app window that opened the menu, so it is
+   * excluded here.
+   */
+  private clickProvesOwnWindow(
+    binding: WindowBinding, event: Extract<CaptureEvent, { kind: 'click' }>,
+  ): boolean {
+    if (event.decision !== 'record') return false;
+    if (event.focus?.secure) return false;
+    // Replay of a right click may address the control the previous left click
+    // selected (`lastClickTarget`); a recovered right click in a new window
+    // would then press a different control than the one recorded. Keep it a gap.
+    if (event.button === 'right') return false;
+    const owner = event.owner;
+    if (!owner?.app || !owner.pid || owner.windowNumber === undefined) return false;
+    const instance = owner.processInstance ?? 0;
+    if (this.bindings.get(`${owner.pid}:${instance}:${owner.windowNumber}`) !== binding) return false;
+    if (binding.app !== owner.app || binding.pid !== owner.pid) return false;
+    if ((binding.processInstance ?? 0) !== instance) return false;
+    // A late generation has already been moved past; it must not navigate back.
+    if (event.focusGeneration < this.lastGeneration) return false;
+    const role = bareRole(nativeLabel(owner.role) ?? '');
+    if (role === 'menuitem' || role === 'menubaritem' || role === 'menu' || role === 'menubar') return false;
+    return true;
+  }
+
+  /**
+   * Records one click in a window the recording has already made current.
+   * Returns whether a click step was kept; a secure interval, a step the limit
+   * dropped, or a point both trees missed records nothing and says so.
+   *
+   * `requireElement` is the recovery gate: a click that can only be placed at
+   * its screen point is not worth clearing a blocking gap for, because replay
+   * would click a bare coordinate.
+   */
+  private async recordClick(
+    binding: WindowBinding, event: Extract<CaptureEvent, { kind: 'click' }>,
+    { requireElement = false } = {},
+  ): Promise<boolean> {
     const scope = this.windowScope(binding);
     const scopeId = scopeKey(scope);
     const button = event.button ?? 'left';
@@ -680,7 +750,7 @@ export class GlobalRecording {
     this.endBursts();
     if (event.focus?.secure) {
       this.enterSecure();
-      return;
+      return false;
     }
     const hitRole = nativeLabel(event.owner?.role);
     const hitName = nativeLabel(event.owner?.name);
@@ -740,7 +810,7 @@ export class GlobalRecording {
           target = this.blankClick(binding, event, snapshot);
         } else if (hit.node.secure) {
           this.enterSecure();
-          return;
+          return false;
         } else {
           // Electron editors expose their text surface as a group above the
           // editable control. When the click lands inside the focused editable
@@ -748,7 +818,7 @@ export class GlobalRecording {
           const treeField = editableRole(hit.node.role) ? undefined : this.focusedField(snapshot, event.point);
           if (treeField?.node.secure) {
             this.enterSecure();
-            return;
+            return false;
           }
           const identity = treeField ? undefined : clickIdentity(snapshot.tree, hit);
           const chosen = identity ?? treeField;
@@ -779,6 +849,12 @@ export class GlobalRecording {
         if (!nativeLabel(event.owner?.role)) {
           const captured = await this.snapshot(binding, { gapOnFailure: false });
           const hit = captured ? this.hit(captured.snapshot, event.point) : undefined;
+          // The second read has to honour the same secure rule as the first;
+          // naming a protected control from here would replay a click on it.
+          if (hit?.node.secure) {
+            this.enterSecure();
+            return false;
+          }
           target = hit && hit.node.ref ? toLocator(captured!.snapshot, hit) : this.nativeTarget(binding, event);
         } else {
           target = this.nativeTarget(binding, event);
@@ -789,7 +865,12 @@ export class GlobalRecording {
     // reading the window once the change has drawn keeps the screen this click
     // was made against for the next one.
     this.startSettledTree(binding);
-    if (!target) return;
+    if (!target) return false;
+    if (requireElement && !this.addressableForRecovery(target)) {
+      this.warn('CLICK_RECOVERY_UNNAMED',
+        'A click was proven in another window but did not resolve to one addressable control (a bare point, a window/page root, or a control with no name or identifier); the capture gap stays');
+      return false;
+    }
     if (button === 'left' && target.kind === 'element' && editableRole(target.role)) {
       this.textAnchor = { at: event.t, scope: scopeId, locator: { ...target, role: bareRole(target.role) } };
     }
@@ -806,20 +887,38 @@ export class GlobalRecording {
         }
         previous.at = event.t;
         previous.point = event.point;
-        return;
+        return true;
       }
     }
+    const before = this.steps.length;
     this.push({
       kind: 'click', scope, target,
       ...(count > 1 ? { count } : {}),
       ...(button === 'right' ? { button } : {}),
     });
+    // The step limit drops a click without throwing; reporting success here
+    // would let the caller believe the press survived.
+    if (this.steps.length === before) return false;
     if (this.steps.length && this.steps[this.steps.length - 1].kind === 'click') {
       this.lastClick = {
         at: event.t, point: event.point, index: this.steps.length - 1,
         scope: scopeKey(scope), locator: locatorKey(target), button,
       };
     }
+    return true;
+  }
+
+  /**
+   * Whether a recovered click resolved to one replayable control. A bare point,
+   * a window/application/page root, or a control with neither a name nor an
+   * accessibility identifier cannot address a single element, so it must not
+   * clear a blocking gap. An identifier alone is enough.
+   */
+  private addressableForRecovery(target: ClickTarget): boolean {
+    if (target.kind !== 'element') return false;
+    if (scopeRoles.has(target.role)) return false;
+    if ((target.name ?? '').trim()) return true;
+    return (target.identifier ?? '').trim().length > 0;
   }
 
   /**
@@ -1946,6 +2045,22 @@ export class GlobalRecording {
     return flatten(snapshot.tree).some(entry =>
       entry.node.states.includes('focused') && entry.node.role === target.role &&
       (names.get(entry.node) ?? '') === (target.name ?? ''));
+  }
+
+  /**
+   * The helper's own reason for a stale capture, kept as a recording
+   * diagnostic. It explains the gap and never downgrades it: without the
+   * stream there is no proof that the interruption lost nothing.
+   */
+  private noteGapReason(event: Extract<CaptureEvent, { kind: 'gap' }>) {
+    if (event.gapCode !== 'STALE_CAPTURE') return;
+    if (event.detail === 'tap_interrupted') {
+      this.warn('STALE_CAPTURE_TAP_INTERRUPTED',
+        'The system disabled the event tap during recording; the capture gap stays because input in that interval could not be observed');
+    } else if (event.detail === 'event_lag') {
+      this.warn('STALE_CAPTURE_EVENT_LAG',
+        'The helper fell behind the event stream; the capture gap stays because a late event cannot be tied to the focus it was typed into');
+    }
   }
 
   /**

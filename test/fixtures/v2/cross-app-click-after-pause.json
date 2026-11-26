@@ -1,0 +1,76 @@
+{
+  "description": "The shape of global-6fad6ee0, derived from the helper's own path: while the recording was paused the front app changed to aTrust and the helper updated focusWindowNumber without emitting a focus line (noteFocus reports only when not paused). The first click after resume therefore carries a generation the engine never saw, and it is `record` because it hit the live focused window. It must become activate_app plus one click, not a CAPTURE_SCOPE_UNVERIFIED gap.",
+  "snapshots": {
+    "11": {
+      "windowId": "w-11",
+      "tree": {
+        "role": "window", "name": "Downloads", "ref": "@w11:e1",
+        "bounds": { "x": 0, "y": 0, "width": 800, "height": 600 },
+        "states": [], "secure": false,
+        "children": [
+          {
+            "role": "image", "name": "aTrustInstaller.pkg", "ref": "@w11:e2",
+            "bounds": { "x": 300, "y": 280, "width": 80, "height": 70 },
+            "states": [], "secure": false, "children": []
+          }
+        ]
+      }
+    },
+    "21": {
+      "windowId": "w-21",
+      "tree": {
+        "role": "window", "name": "aTrust", "ref": "@w21:e1",
+        "bounds": { "x": 900, "y": 0, "width": 800, "height": 600 },
+        "states": [], "secure": false,
+        "children": [
+          {
+            "role": "button", "name": "设置", "ref": "@w21:e2",
+            "bounds": { "x": 950, "y": 100, "width": 80, "height": 24 },
+            "states": [], "secure": false, "children": []
+          },
+          {
+            "role": "button", "name": "工作台", "ref": "@w21:e3",
+            "bounds": { "x": 1050, "y": 100, "width": 90, "height": 24 },
+            "states": [], "secure": false, "children": []
+          }
+        ]
+      }
+    }
+  },
+  "events": [
+    {
+      "kind": "focus", "t": 50, "seen": 1700000000000, "focusGeneration": 1, "secure": false,
+      "owner": {
+        "app": "com.apple.finder", "pid": 100, "processInstance": 1700000000000,
+        "windowNumber": 11, "windowTitle": "Downloads"
+      }
+    },
+    {
+      "kind": "click", "t": 100, "seen": 1700000000000, "point": [340, 320],
+      "count": 1, "focusGeneration": 1, "secure": false, "decision": "record",
+      "owner": {
+        "app": "com.apple.finder", "pid": 100, "processInstance": 1700000000000,
+        "windowNumber": 11, "windowTitle": "Downloads",
+        "role": "AXImage", "name": "aTrustInstaller.pkg", "pressable": true
+      }
+    },
+    {
+      "kind": "click", "t": 611, "seen": 1700000000000, "point": [990, 112],
+      "count": 1, "focusGeneration": 2, "secure": false, "decision": "record",
+      "owner": {
+        "app": "com.electron.atrust", "pid": 200, "processInstance": 1700000000000,
+        "windowNumber": 21, "windowTitle": "aTrust",
+        "role": "AXButton", "name": "设置", "pressable": true
+      }
+    },
+    {
+      "kind": "click", "t": 700, "seen": 1700000000000, "point": [1090, 112],
+      "count": 1, "focusGeneration": 2, "secure": false, "decision": "record",
+      "owner": {
+        "app": "com.electron.atrust", "pid": 200, "processInstance": 1700000000000,
+        "windowNumber": 21, "windowTitle": "aTrust",
+        "role": "AXButton", "name": "工作台", "pressable": true
+      }
+    }
+  ]
+}

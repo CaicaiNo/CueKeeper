@@ -116,7 +116,12 @@ export type CaptureEvent =
   | (CaptureEventBase & { kind: 'key'; key: string; modifiers: CaptureModifier[] })
   | (CaptureEventBase & { kind: 'focus' })
   | (CaptureEventBase & { kind: 'system_dialog'; visible: boolean })
-  | (CaptureEventBase & { kind: 'gap'; gapCode: CaptureGapCode });
+  /**
+   * `detail` is the helper's own bounded reason for a gap (`tap_interrupted`,
+   * `event_lag`, ...). It is optional so helpers that predate it still parse,
+   * and it never changes what a gap blocks.
+   */
+  | (CaptureEventBase & { kind: 'gap'; gapCode: CaptureGapCode; detail?: string });
 
 export type CaptureEventKind = CaptureEvent['kind'];
 
@@ -327,7 +332,8 @@ export function parseCaptureEvent(value: unknown): CaptureEvent {
       return { ...base, kind: 'focus' };
     case 'gap': {
       const code = gapCode(input.gapCode);
-      return { ...base, kind: 'gap', gapCode: code };
+      const detail = gapDetail(input.detail);
+      return { ...base, kind: 'gap', gapCode: code, ...(detail === undefined ? {} : { detail }) };
     }
   }
 }
@@ -335,6 +341,16 @@ export function parseCaptureEvent(value: unknown): CaptureEvent {
 function gapCode(value: unknown): CaptureGapCode {
   if (typeof value !== 'string' || !gapCodeSet.has(value)) fail('unknown gap code');
   return value as CaptureGapCode;
+}
+
+/**
+ * The helper's reason for a gap. It is diagnostic only, so only the two known
+ * values are carried: an unknown, malformed or missing reason is treated as
+ * "no reason". Rejecting the line here would drop the gap it explains and could
+ * leave a flow that no longer blocks replay.
+ */
+function gapDetail(value: unknown): string | undefined {
+  return value === 'tap_interrupted' || value === 'event_lag' ? value : undefined;
 }
 
 function decision(value: unknown): 'record' | 'navigate' | 'gap' {

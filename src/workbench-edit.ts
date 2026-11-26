@@ -635,8 +635,9 @@ function stepIdFromMessage(message: string): string | undefined {
   if (step) return step[1];
   const duplicate = /^Flow steps: duplicate id (\S+)/.exec(message);
   if (duplicate) return duplicate[1];
+  // Each gap reads `<step id>: <code>`, so the id is what precedes the colon.
   const gap = /gap[s]? at ([^;]+);/.exec(message);
-  if (gap) return gap[1].split(',')[0]?.trim();
+  if (gap) return gap[1].split(',')[0]?.split(':')[0]?.trim();
   return undefined;
 }
 

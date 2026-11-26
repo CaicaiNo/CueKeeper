@@ -202,6 +202,48 @@ console.log(JSON.stringify({ version: '2.6', command: process.argv[2], ok: true,
   assert.equal(existsSync(marker), false, 'no desktop driver may run for validate, dry-run or a gap');
 });
 
+test('a capture refusal names every gap with its real evidence', t => {
+  // The shape of the two real recordings that were blocked at replay:
+  // global-6fad6ee0 had s2 STALE_CAPTURE and s6 CAPTURE_SCOPE_UNVERIFIED.
+  const flow = {
+    version: 2, id: 'global-6fad6ee0', name: '跨 App 录制',
+    steps: [
+      { id: 's2', kind: 'gap', code: 'STALE_CAPTURE' },
+      { id: 's6', kind: 'gap', code: 'CAPTURE_SCOPE_UNVERIFIED' },
+    ],
+  };
+  const refusal = (() => {
+    try {
+      parseFlowV2(structuredClone(flow));
+      assert.fail('a flow with capture gaps must be refused');
+    } catch (error) {
+      return error;
+    }
+  })();
+  // The fault code stays the machine-readable one.
+  assert.equal(refusal.code, 'CAPTURE_GAP');
+  // The text names the step and the evidence, not a generic label per gap.
+  assert.match(refusal.message, /s2: STALE_CAPTURE/);
+  assert.match(refusal.message, /s6: CAPTURE_SCOPE_UNVERIFIED/);
+  assert.doesNotMatch(refusal.message, /at s2, s6;|at s2, s6$/);
+  // No gap may be reported by id alone: every listed gap carries `id: code`.
+  const listed = refusal.message.split('has unresolved capture gaps at ')[1].split(';')[0];
+  for (const gap of listed.split(', ')) {
+    assert.match(gap, /^s\d+: [A-Z_]+$/, `gap ${gap} must carry its evidence code`);
+  }
+
+  const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-gap-text-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, 'global-6fad6ee0.flow.json');
+  writeFileSync(path, JSON.stringify(flow));
+  const run = cli(['run', path, '--dry-run']);
+  assert.equal(run.code, 1);
+  assert.equal(run.error.code, 'CAPTURE_GAP');
+  assert.equal(run.error.message, refusal.message);
+  const validate = cli(['flow', 'validate', path]);
+  assert.equal(validate.error.message, refusal.message);
+});
+
 test('a flow that kept a recorded screen point is refused by the dry run', t => {
   const flow = {
     version: 2, id: 'point-flow', name: '坐标点击',
