@@ -136,6 +136,8 @@ function fakeWorld(options = {}) {
     },
     async click(ref) {
       state.calls.push(['click', ref]);
+      const fail = state.hooks.click?.(state, ref);
+      if (fail) throw fail;
       return delivered('click');
     },
     async clickPoint(_snapshot, _target, point, { count = 1 } = {}) {
@@ -145,6 +147,8 @@ function fakeWorld(options = {}) {
         throw new Fault('HEADED_REQUIRED', 'Physical coordinate input requires --headed');
       }
       state.calls.push(['clickPoint', point, count]);
+      const fail = state.hooks.clickPoint?.(state, point, count);
+      if (fail) throw fail;
       return delivered('click');
     },
     async type(ref, text) {
@@ -1451,6 +1455,126 @@ test('a control with neither a reference nor bounds names itself and sends nothi
   assert.match(blocked.message, /pick the target/);
   assert.deepEqual([callsOf(world, 'click'), callsOf(world, 'clickPoint'), callsOf(world, 'clickScreen')],
     [[], [], []]);
+});
+
+// --- HAOC-206: a semantic press that returns ACTION_FAILED --------------------
+// A window that was just raised (an Electron page, for one) can answer the
+// accessibility read while the control still rejects AXPress. The run re-reads
+// the tree once and retries the press; when that also fails it clicks the same
+// control's centre through the ordinary coordinate gate. One retry and one
+// fallback, never a loop.
+
+function actionFailed() {
+  return new DesktopFault('ACTION_FAILED', 'click', undefined);
+}
+
+const settingsGroup = () => ({
+  role: 'group', name: '设置', ref_id: '@w99:e1',
+  bounds: { x: 600, y: 200, width: 400, height: 200 }, states: [],
+});
+
+test('a first ACTION_FAILED is retried once against a re-read snapshot', async t => {
+  const pressedAt = [];
+  const { world, run } = electronWorld(t, [settingsGroup()], {
+    headed: true,
+    hooks: {
+      click(state, ref) {
+        pressedAt.push(performance.now());
+        // The page finished rendering between the two presses: same control,
+        // new driver reference. Reusing the stale ref cannot pass this test.
+        state.windows[0].data.tree.children[0].children[0].ref_id = '@w99:e2';
+        return ref === '@w99:e1' ? actionFailed() : undefined;
+      },
+    },
+  });
+  const report = await run(identifierClickFlow({ kind: 'element', role: 'group', name: '设置' }));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'click').map(call => call[1]), ['@w99:e1', '@w99:e2']);
+  assert.deepEqual(callsOf(world, 'clickPoint'), []);
+  assert.ok(pressedAt[1] - pressedAt[0] >= 200,
+    `the retry should wait for the app to settle; it fired after ${pressedAt[1] - pressedAt[0]}ms`);
+  const entryAfter = entry(report, 'click-control');
+  assert.equal(entryAfter.status, 'passed');
+  assert.match(entryAfter.message ?? '',
+    /the first AX press returned ACTION_FAILED; retried once against a re-read snapshot and it succeeded/);
+});
+
+test('a press that keeps failing falls back to the same control\'s centre', async t => {
+  const { world, run } = electronWorld(t, [settingsGroup()], {
+    headed: true,
+    hooks: { click: () => actionFailed() },
+  });
+  const report = await run(identifierClickFlow({ kind: 'element', role: 'group', name: '设置' }));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'click').map(call => call[1]), ['@w99:e1', '@w99:e1']);
+  assert.deepEqual(callsOf(world, 'clickPoint'), [['clickPoint', [800, 300], 1]]);
+  const entryAfter = entry(report, 'click-control');
+  assert.match(entryAfter.message ?? '', /CLICK_POINT_FALLBACK/);
+  assert.match(entryAfter.message ?? '', /the AX press kept returning ACTION_FAILED/);
+});
+
+test('a failed press with no bounds reports ACTION_FAILED and sends no input', async t => {
+  const { world, run } = electronWorld(t, [{
+    role: 'group', name: '设置', ref_id: '@w99:e1', states: [],
+  }], { hooks: { click: () => actionFailed() } });
+  const report = await run(identifierClickFlow({ kind: 'element', role: 'group', name: '设置' }));
+  const failed = entry(report, 'click-control');
+  assert.equal(report.status, 'failed');
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.code, 'ACTION_FAILED');
+  assert.match(failed.message, /group "设置" failed after 2 semantic click attempts and 0 physical centre clicks/);
+  assert.match(failed.message, /the control has no bounds to click at its centre/);
+  assert.equal(callsOf(world, 'click').length, 2);
+  assert.deepEqual(callsOf(world, 'clickPoint'), []);
+});
+
+test('a failed physical fallback reports ACTION_FAILED with both attempts', async t => {
+  const { world, run } = electronWorld(t, [settingsGroup()], {
+    headed: true,
+    hooks: {
+      click: () => actionFailed(),
+      clickPoint: () => new Fault('UNSAFE_POINT', 'The coordinate is outside the selected window'),
+    },
+  });
+  const report = await run(identifierClickFlow({ kind: 'element', role: 'group', name: '设置' }));
+  const failed = entry(report, 'click-control');
+  assert.equal(failed.code, 'ACTION_FAILED');
+  assert.match(failed.message, /group "设置" failed after 2 semantic click attempts and 1 physical centre click/);
+  assert.match(failed.message, /UNSAFE_POINT/);
+  assert.equal(callsOf(world, 'click').length, 2);
+  assert.equal(callsOf(world, 'clickPoint').length, 1);
+});
+
+test('a secure control is never retried or clicked physically', async t => {
+  const { world, run } = electronWorld(t, [{
+    ...settingsGroup(), states: ['secure'],
+  }], {
+    headed: true,
+    hooks: { click: () => actionFailed() },
+  });
+  const report = await run(identifierClickFlow({ kind: 'element', role: 'group', name: '设置' }));
+  assert.equal(entry(report, 'click-control').code, 'UNSAFE_TARGET');
+  assert.deepEqual([callsOf(world, 'click'), callsOf(world, 'clickPoint')], [[], []]);
+});
+
+test('a target that no longer resolves is not clicked at its old bounds', async t => {
+  const { world, run } = electronWorld(t, [settingsGroup()], {
+    headed: true,
+    hooks: {
+      click(state) {
+        // The control was replaced while the press failed: its old centre now
+        // belongs to something else, so neither a retry nor a fallback is safe.
+        state.windows[0].data.tree.children[0].children[0].name = '接入设置';
+        return actionFailed();
+      },
+    },
+  });
+  const report = await run(identifierClickFlow({ kind: 'element', role: 'group', name: '设置' }));
+  const failed = entry(report, 'click-control');
+  assert.equal(failed.code, 'ACTION_FAILED');
+  assert.match(failed.message, /could not be resolved again/);
+  assert.equal(callsOf(world, 'click').length, 1);
+  assert.deepEqual(callsOf(world, 'clickPoint'), []);
 });
 
 test('a same-titled twin that lacks the control is not clicked even when focused', async t => {

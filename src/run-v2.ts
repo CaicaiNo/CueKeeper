@@ -10,8 +10,9 @@ import type {
   AppWaitCheck, DeliveryV2, FileExistsCheck, FileScope, FileWaitCheck, FlowV2, ProcessRunningCheck,
   ProcessScope, ReportV2, ReportV2Entry, Scope, StepV2, WindowScope, WindowWaitCheck,
 } from './contracts-v2.js';
+import type { Delivery } from './contracts.js';
 import { DesktopFault } from './desktop.js';
-import type { Desktop, DragEndpoint, WindowInfo } from './desktop.js';
+import type { ClickOptions, Desktop, DragEndpoint, WindowInfo } from './desktop.js';
 import { parseFlowV2 } from './flow-v2.js';
 import { InstallState } from './install-state.js';
 import type { InstallStateDeps } from './install-state.js';
@@ -210,6 +211,14 @@ function centreOf(node: Node, snapshot: Snapshot): Point {
   }
   return point;
 }
+
+/**
+ * A semantic AX press that fails right after its window was raised is usually
+ * racing the app's own re-render: the tree answered, but the control did not
+ * accept a press yet. One re-read after this pause gives the app a chance to
+ * settle without turning a failure into a retry loop.
+ */
+const clickRetryDelayMs = 300;
 
 /**
  * A hover settles for at least this long even when the recording saw the
@@ -644,20 +653,30 @@ class StepRunner {
             const point = centreOf(resolved.node, snapshot!);
             delivery = await this.desktop.clickPoint(snapshot!, this.targetOf(binding), point, options);
             message = `${describeControl(resolved.node)} has no AX action; clicked its centre instead`;
-          } else {
+          } else if (step.button === 'right') {
             try {
               delivery = await this.desktop.click(resolved.press.ref!, options);
             } catch (error) {
               // Some AX elements advertise RightClick but reject the semantic
               // action (Finder's list view). Fall back to a physical click at the
               // element's centre, which is what the user's own right click does.
-              if (step.button !== 'right' || !node.bounds) throw error;
+              if (!node.bounds) throw error;
               const point: Point = [
                 node.bounds.x + node.bounds.width / 2,
                 node.bounds.y + node.bounds.height / 2,
               ];
               delivery = await this.desktop.clickPoint(snapshot!, this.targetOf(binding), point, { button: 'right' });
             }
+          } else if ((step.count ?? 1) === 1) {
+            // A single left click gets one re-read/retry and, if the press still
+            // fails, a physical click at the same control's centre. Multi-click
+            // commands are physical input of their own; retrying one could send
+            // a second double/triple click, so they keep the plain failure.
+            const recovered = await this.clickWithRecovery(binding, resolved, locator, options);
+            delivery = recovered.delivery;
+            message = recovered.message;
+          } else {
+            delivery = await this.desktop.click(resolved.press.ref!, options);
           }
           if (step.button !== 'right') {
             this.lastClickTarget = locator;
@@ -733,6 +752,85 @@ class StepRunner {
 
   private targetOf(binding: WindowBinding) {
     return { app: binding.app, window: binding.observedTitle };
+  }
+
+  /**
+   * One recovery pass for a semantic click that returned ACTION_FAILED. A
+   * freshly raised Electron window can answer the accessibility read while the
+   * control still rejects AXPress; the press is retried once against a re-read
+   * snapshot, and only when the recorded control still resolves uniquely. If it
+   * still fails, the same control is clicked physically at its centre through
+   * the ordinary coordinate gate. Never more than one retry and one fallback.
+   *
+   * A control that can no longer be proved in the window is not clicked at its
+   * old bounds: stale coordinates may belong to a different control by now.
+   */
+  private async clickWithRecovery(
+    binding: WindowBinding,
+    resolved: Actionable,
+    locator: ElementLocator,
+    options: ClickOptions,
+  ): Promise<{ delivery?: Delivery; message?: string }> {
+    try {
+      return { delivery: await this.desktop.click(resolved.press!.ref!, options) };
+    } catch (error) {
+      if (!(error instanceof Fault) || error.code !== 'ACTION_FAILED') throw error;
+    }
+    await sleep(clickRetryDelayMs, undefined, { signal: this.signal });
+    const fresh = await this.resolver.snapshot(binding);
+    let again: Actionable;
+    try {
+      again = actionable(fresh, addressable(locator));
+    } catch (error) {
+      // The re-read could not prove the recorded control any more. Falling back
+      // to the first snapshot's bounds would click whatever now sits there.
+      if (!(error instanceof Fault) ||
+          !['NOT_FOUND', 'AMBIGUOUS', 'UNSAFE_TARGET'].includes(error.code)) throw error;
+      throw this.clickFailure(resolved.node, 1, 0,
+        `the control could not be resolved again after re-reading the window (${error.code})`);
+    }
+    let semantic = 1;
+    if (again.press?.ref) {
+      semantic = 2;
+      try {
+        const delivery = await this.desktop.click(again.press.ref, options);
+        return {
+          delivery,
+          message: `${describeControl(again.node)}: the first AX press returned ACTION_FAILED; ` +
+            'retried once against a re-read snapshot and it succeeded',
+        };
+      } catch (error) {
+        if (!(error instanceof Fault) || error.code !== 'ACTION_FAILED') throw error;
+      }
+    }
+    let point: Point;
+    if (!again.node.bounds) {
+      throw this.clickFailure(again.node, semantic, 0, 'the control has no bounds to click at its centre');
+    }
+    try {
+      point = centreOf(again.node, fresh);
+    } catch (error) {
+      throw this.clickFailure(again.node, semantic, 0, error instanceof Fault
+        ? `${error.code}: ${error.message}` : String(error));
+    }
+    try {
+      const delivery = await this.desktop.clickPoint(fresh, this.targetOf(binding), point, options);
+      return {
+        delivery,
+        message: `${describeControl(again.node)}: the AX press kept returning ACTION_FAILED; ` +
+          `CLICK_POINT_FALLBACK clicked its centre (${point.join(',')}) as physical input`,
+      };
+    } catch (error) {
+      throw this.clickFailure(again.node, semantic, 1, error instanceof Fault
+        ? `${error.code}: ${error.message}` : String(error));
+    }
+  }
+
+  /** A click that exhausted its bounded attempts, naming the control and them. */
+  private clickFailure(node: Node, semantic: number, physical: number, detail: string): Fault {
+    const attempts = `${semantic} semantic click attempt${semantic === 1 ? '' : 's'} and ` +
+      `${physical} physical centre click${physical === 1 ? '' : 's'}`;
+    return new Fault('ACTION_FAILED', `${describeControl(node)} failed after ${attempts} (${detail})`);
   }
 
   /** Resolves and, for input steps, brings the scope window forward first. */

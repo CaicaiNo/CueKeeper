@@ -14,7 +14,7 @@
 
 | 操作 | 录制 | 回放 | 离线测试 | 真机状态 | 错误码 |
 | --- | --- | --- | --- | --- | --- |
-| 左键单击（元素定位器） | 支持。松开时入录；同点 120 ms / 3 px 内的重复按下合并，不产生新步骤；命中的控件没有 AX action 时给 `CLICK_TARGET_UNPRESSABLE` 警告 | 支持。驱动 `click <ref>`，元素路径无需 `--headed`；控件及其所有容器都没有 action ref 时，按最近可操作祖先 → 该控件中心物理点击（需 `--headed`）→ 都没有则报 `UNSAFE_TARGET` | `test/pointer-input.test.mjs`、`test/cuekeeper.test.mjs`、`test/run-v2.test.mjs`（祖先 / 中心坐标 / 两者皆无）、`test/record-v2.test.mjs` | 未验证 → HAOC-76/87 | `NOT_FOUND`、`AMBIGUOUS_TARGET`、`UNSAFE_TARGET`、`UNSAFE_POINT`、`HEADED_REQUIRED` |
+| 左键单击（元素定位器） | 支持。松开时入录；同点 120 ms / 3 px 内的重复按下合并，不产生新步骤；命中的控件没有 AX action 时给 `CLICK_TARGET_UNPRESSABLE` 警告 | 支持。驱动 `click <ref>`，元素路径无需 `--headed`；控件及其所有容器都没有 action ref 时，按最近可操作祖先 → 该控件中心物理点击（需 `--headed`）→ 都没有则报 `UNSAFE_TARGET`。语义按压返回 `ACTION_FAILED` 时：300 ms 后重读快照、目标仍唯一解析才重试一次 → 仍失败则按同一控件中心物理点击并注明 `CLICK_POINT_FALLBACK` → 无 bounds 或物理点击也失败则报 `ACTION_FAILED`（带控件与控制/物理尝试次数）。不做第二次重试；安全控件不进入该路径 | `test/pointer-input.test.mjs`、`test/cuekeeper.test.mjs`、`test/run-v2.test.mjs`（祖先 / 中心坐标 / 两者皆无 / ACTION_FAILED 重试与回退）、`test/record-v2.test.mjs` | 未验证 → HAOC-76/87 | `NOT_FOUND`、`AMBIGUOUS_TARGET`、`UNSAFE_TARGET`、`UNSAFE_POINT`、`HEADED_REQUIRED`、`ACTION_FAILED` |
 | 左键单击（坐标 `point`） | 支持。落点没有可绑定元素时记 `point`；固定应用路径的流程无法证明副本，跳过并报 `UNTARGETED_POINT` | 支持，必须 `--headed`。驱动 `mouse-click --xy`，先 `focus-window` 再核对窗口与落点 | `test/pointer-input.test.mjs`、`test/app-identity-replay.test.mjs` | 未验证 → HAOC-76/87 | `HEADED_REQUIRED`、`UNSAFE_POINT`、`WINDOW_CHANGED`、`OUTSIDE_WINDOW`（录制）、`UNTARGETED_POINT`（录制警告） |
 | 双击（元素） | 支持。原生按下事件带 `clickState = 2`，把上一步升级为 `count: 2`，不追加重复步骤；单击去重不作用于连击 | 支持，必须 `--headed`。驱动 `double-click <ref>` | `test/pointer-input.test.mjs`（录制升级、回放调用、驱动命令映射）、`test/recording-pointer-tests.swift`（double click） | 未验证 → HAOC-76/87 | `HEADED_REQUIRED`、`NOT_FOUND`、`AMBIGUOUS_TARGET`、`UNSAFE_TARGET`、`UNSUPPORTED_CLICK_COUNT` |
 | 双击（坐标） | 支持。连击落点没有可绑定元素时保留 `target.point` 与 `count: 2` | 支持，必须 `--headed`。驱动 `mouse-click --xy --count 2` | `test/pointer-input.test.mjs`（schema 接受、适配器参数） | 未验证 → HAOC-76/87 | `HEADED_REQUIRED`、`UNSAFE_POINT`、`WINDOW_CHANGED`、`UNSUPPORTED_CLICK_COUNT` |
@@ -114,6 +114,8 @@ Shell 的完整约束见 [Shell 步骤设计](shell-steps.md) 与 [Root 步骤�
 | `NOT_FOUND` | 目标元素在绑定的窗口里不存在 | 否，不会落到别的控件 |
 | `UNSAFE_POINT` | 坐标落在目标窗口之外，或固定应用路径的流程使用坐标输入，或 v2 dry-run 的流程里仍有 `target.kind: "point"` 的点击 | 否，不会点/滚到前台窗口 |
 | `UNSAFE_TARGET` | 目标控件是安全控件；或控件及其所有容器都没有可执行 ref，且没有 bounds 可点（消息会点名控件，并提示编辑该步重新拾取目标） | 否 |
+| `ACTION_FAILED` | 元素单击的语义按压持续失败：300 ms 后重读快照重试一次仍失败，且没有 bounds 可做中心点击，或中心点击本身也失败。消息点名控件并写明语义/物理尝试次数；安全控件不走回退 | 否，直接失败，后续步骤 skipped |
+| `CLICK_POINT_FALLBACK` | 不是独立错误码：单击语义按压两次失败后改点同一控件中心的物理点击成功时，报告 message 里的标注 | 否，报告为 passed 并注明走了回退 |
 | `UNSUPPORTED_CLICK_COUNT` | 右键带 `count > 1`，或内部传入 2/3 以外的连击数 | 否；规划期或适配器直接拒绝 |
 | `UNSUPPORTED_SCROLL` | 适配器收到双轴为 0 的滚动（规划期已先拒绝） | 否 |
 | `MULTI_CLICK_TRUNCATED` | 录制到第 4 次及以上的连击，按三击记录 | 是（录制警告），流程里能看到 |
