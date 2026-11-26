@@ -1482,16 +1482,24 @@ function v2TargetDialog(step) {
   const recorded = step.target ?? step.to;
   const picker = locatorFields(recorded?.kind === 'element' ? recorded : undefined,
     '要换控件，点上面的「从窗口拾取」，直接选中真实控件；下面只用于手动修正。');
+  const targetNote = recorded?.kind === 'point'
+    ? muted(`这一步录的是屏幕坐标 (${recorded.point.join(', ')})：录制时那个位置没有可单独定位的控件（画布、空白或自绘区域）。` +
+      '直接实时回放就行，它会在该坐标上点；只有干跑会拦下它，因为坐标没法证明还是同一个控件。')
+    : muted('这一步用的是元素定位器：换成具体控件后干跑才能通过，实时回放对窗口内的坐标步骤照常执行。');
   const title = step.kind === 'scroll' ? '编辑滚动目标'
     : step.kind === 'hover' ? '编辑悬停目标' : '编辑点击目标';
   openDialog(withStepId(title, step), [
-    recorded?.kind === 'point'
-      ? muted(`这一步录的是屏幕坐标 (${recorded.point.join(', ')})：录制时那个位置没有可单独定位的控件（画布、空白或自绘区域）。` +
-        '直接实时回放就行，它会在该坐标上点；只有干跑会拦下它，因为坐标没法证明还是同一个控件。')
-      : muted('这一步用的是元素定位器：换成具体控件后干跑才能通过，实时回放对窗口内的坐标步骤照常执行。'),
-    v2PickEntry(step, locator => picker.set(locator)),
+    targetNote,
+    v2PickEntry(step, locator => {
+      picker.set(locator);
+      targetNote.textContent = '当前目标已替换成元素定位器。';
+    }),
     ...picker.controls,
-  ], '应用', () => v2Edit({ kind: 'update', id: step.id, patch: { target: picker.value() } }));
+  ], '应用', () => {
+    if (picker.shouldSubmitTarget()) {
+      return v2Edit({ kind: 'update', id: step.id, patch: { target: picker.value() } });
+    }
+  });
 }
 
 function v2DragDialog(step) {
@@ -1522,7 +1530,7 @@ function v2TypeDialog(step) {
     ...picker.controls, field('内容来源', mode), textBox, paramBox,
     muted('参数值保存在测试数据里，不写入 flow。'),
   ], '应用', () => {
-    const patch = { target: picker.value() };
+    const patch = picker.shouldSubmitTarget() ? { target: picker.value() } : {};
     if (mode.value === 'text') {
       if (!text.value) throw new Error('填写输入文本。');
       patch.text = text.value;
@@ -2087,7 +2095,7 @@ async function v2PickDialog(step, onPicked) {
     muted(`${v2ScopeText(step.scope)} · 窗口 ${picked.windowId} · ${candidates.length} 个控件`),
     field('控件', chooser),
     detail,
-    muted(step.target?.kind === 'point'
+    muted(v2Step(step.id)?.target?.kind === 'point'
       ? '当前目标是坐标；确认后会替换成元素定位器（point → element）。'
       : '确认后会替换这一步的目标定位器。'),
     muted('只读快照：不会点击、聚焦或输入。'),
@@ -2444,6 +2452,7 @@ function locatorFields(original, emptyPickHint) {
   const index = el('input', { type: 'number', className: 'input input-sm', min: '0', step: '1', value: initial?.index ?? '' });
   const candidates = state.session.candidates;
   const detail = el('p', { className: 'muted' });
+  let pickedFields;
   const picker = select([['', '手动填写'], ...candidates.map((candidate, i) => [String(i), candidateLabel(candidate)])],
     event => {
       if (!event.target.value) {
@@ -2451,12 +2460,11 @@ function locatorFields(original, emptyPickHint) {
         return;
       }
       const candidate = candidates[Number(event.target.value)];
-      set(candidate.locator);
+      pickedFields = undefined;
+      fill(candidate.locator);
       detail.textContent = `${candidate.ref} · ${frameLabel(candidate)}`;
     });
-  // A window pick replaces the fields instead of the form around them, so the
-  // operator keeps everything else they already typed.
-  const set = target => {
+  const fill = target => {
     role.value = target.role ?? '';
     name.value = target.name ?? '';
     exactName.checked = target.name !== undefined;
@@ -2487,7 +2495,15 @@ function locatorFields(original, emptyPickHint) {
   exactName.onchange = refresh;
   refresh();
   return {
-    set,
+    set(target) {
+      fill(target);
+      pickedFields = JSON.stringify(locator());
+    },
+    shouldSubmitTarget() {
+      // Confirmation already saved the target. Only rewrite it if the
+      // operator changes the locator fields afterward.
+      return pickedFields !== JSON.stringify(locator());
+    },
     controls: [
       muted('这些值来自 macOS 辅助功能（Accessibility），用来在窗口里认出同一个控件，一般不用手改。'),
       candidates.length

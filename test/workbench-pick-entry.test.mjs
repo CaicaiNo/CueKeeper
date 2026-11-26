@@ -15,11 +15,12 @@ const canvasScope = {
   kind: 'window', app: 'com.apple.Safari', windowKey: 'canvas', windowTitle: 'Cuekeeper 画布',
 };
 
+const refreshPath = ['window', 'group / toolbar', 'button'];
 const candidates = [
   {
     ref: '@fake:e1', interactive: true, role: 'button',
-    locator: { kind: 'element', role: 'button', name: '刷新' },
-    path: ['window', 'button'], bounds: { x: 430, y: 40, width: 60, height: 30 }, point: [460, 55],
+    locator: { kind: 'element', role: 'button', name: '刷新', path: refreshPath },
+    path: refreshPath, bounds: { x: 430, y: 40, width: 60, height: 30 }, point: [460, 55],
   },
   {
     ref: '@fake:e2', interactive: true, role: 'textfield',
@@ -185,6 +186,12 @@ test('the click editor picks a control and replaces a coordinate target', async 
   const roleField = dialog(document).querySelectorAll('input')
     .find(node => node.getAttribute('placeholder') === '例如 textfield');
   assert.equal(roleField.value, 'textfield');
+  assert.match(dialog(document).textContent, /当前目标已替换成元素定位器/);
+  assert.doesNotMatch(dialog(document).textContent, /它会在该坐标上点/);
+  buttonByText(dialog(document), '从窗口拾取').click();
+  await tick();
+  assert.match(pickerDialog(document).textContent, /确认后会替换这一步的目标定位器/);
+  closeModal(pickerDialog(document));
   closeModal(dialog(document));
   assert.equal((await state()).v2.flow.steps.find(item => item.id === 'click-canvas').target.kind, 'element');
 });
@@ -243,16 +250,34 @@ test('cancelling the picker keeps the step editor and its unsaved values', async
   const chooser = pickerDialog(document).querySelectorAll('select')[0];
   chooser.value = '0';
   await submitPicker(document);
-  assert.equal((await state()).v2.flow.steps.find(item => item.id === 'type-address').target.name, '刷新');
+  assert.deepEqual((await state()).v2.flow.steps.find(item => item.id === 'type-address').target,
+    candidates[0].locator);
   assert.equal(editor.open, true);
   assert.equal(mode.value, 'text');
   assert.equal(text.value, '草稿文本');
 
   await submitDialog(document);
   const step = (await state()).v2.flow.steps.find(item => item.id === 'type-address');
-  assert.deepEqual(step.target, { kind: 'element', role: 'button', name: '刷新' },
-    'applying the editor keeps the picked target');
+  assert.deepEqual(step.target, candidates[0].locator,
+    'applying the editor keeps the exact path returned by the picker');
   assert.equal(step.text, '草稿文本', 'applying the editor writes the preserved draft');
+});
+
+test('editing the picked locator uses the manually entered target', async t => {
+  const { document, state } = await bootPage(t);
+  const editor = dialog(document);
+  buttonByText(rowOf(document, 'scroll-canvas'), '编辑').click();
+  buttonByText(editor, '从窗口拾取').click();
+  await tick();
+  pickerDialog(document).querySelector('select').value = '1';
+  await submitPicker(document);
+
+  const name = editor.querySelectorAll('input')
+    .find(node => node.getAttribute('placeholder') === '例如 保存');
+  name.value = '继续';
+  await submitDialog(document);
+  const step = (await state()).v2.flow.steps.find(item => item.id === 'scroll-canvas');
+  assert.deepEqual(step.target, { kind: 'element', role: 'textfield', name: '继续' });
 });
 
 test('a snapshot that arrives after the picker closed never reopens it', async t => {
@@ -300,6 +325,6 @@ test('a scroll editor shows what the entry would replace before applying', async
 
   const session = await state();
   const step = session.v2.flow.steps.find(item => item.id === 'scroll-canvas');
-  assert.deepEqual(step.target, { kind: 'element', role: 'button', name: '刷新' });
+  assert.deepEqual(step.target, candidates[0].locator);
   assert.match(rowOf(document, 'scroll-canvas').textContent, /滚轮 刷新/);
 });
