@@ -179,7 +179,9 @@ export function parsePidTable(output: string): PidRow[] {
   const rows: PidRow[] = [];
   for (const line of output.split('\n')) {
     if (!line.trim()) continue;
-    const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s*$/.exec(line);
+    // macOS prints a negative uid for a few kernel-owned processes, so the
+    // column is signed; a strict \d+ turned every check into "unparsable".
+    const match = /^\s*(\d+)\s+(-?\d+)\s+(\S+)\s*$/.exec(line);
     if (!match) {
       throw new Fault('SYSTEM_CHECK_FAILED', 'The process probe returned output that could not be parsed');
     }
