@@ -176,10 +176,14 @@ type HeldClick = {
   generation: number;
   /**
    * Whether this press can be the swallowed press that brought its window
-   * forward at all: only a press outside the window the flow already stands in
-   * can be that, because a window the flow is already in needs no activation.
+   * forward at all: only a press into a window that this generation had not
+   * already confirmed as focused can be that, because a window that was already
+   * focused needs no activation. The flow's last scope is not this proof: while
+   * the recording is paused the focus moves on without a line, and the flow
+   * keeps standing where it was.
    */
   activation: boolean;
+  button: 'left' | 'right';
   where: string;
   point: Point;
   binding: WindowBinding;
@@ -710,9 +714,12 @@ export class GlobalRecording {
         at: event.t,
         seen: event.seen,
         generation: event.focusGeneration,
-        // A window the flow is already standing in needs no activation, so this
-        // press cannot have been the swallowed press that brought it forward.
-        activation: this.current === undefined || this.current.key !== binding.key,
+        // A window this generation already confirmed as focused needs no
+        // activation, so this press cannot have been the swallowed press that
+        // brought it forward. A generation with no confirmed window (the focus
+        // moved while paused and was never reported) leaves that open.
+        activation: this.generationWindow.get(event.focusGeneration) !== this.bindingId(binding),
+        button: event.button ?? 'left',
         where: where || 'an unnamed control',
         point: event.point,
         binding,
@@ -2245,6 +2252,16 @@ export class GlobalRecording {
     if (!this.steps.length) {
       // Before the first step it names no window the flow could stand at.
       this.startupDropped += 1;
+      return;
+    }
+    if (pending.button === 'right') {
+      // Replay addresses a right click through the control the previous left
+      // click selected (run-v2 keeps `lastClickTarget`), so writing an unproven
+      // one as a plain click would press something else. It stays blocking
+      // evidence: the flow can be completed by editing it, never replayed blind.
+      this.warn('RIGHT_CLICK_UNPROVEN',
+        `A right click on ${pending.where} at ${pending.point[0]},${pending.point[1]} could not be proven to target an element; it blocks the flow instead of becoming a left click`);
+      this.pushGap('CAPTURE_SCOPE_UNVERIFIED');
       return;
     }
     // The trees already read are all this click can be named from; the click

@@ -1801,6 +1801,156 @@ test('an unrelated focus never erases the press it did not cause', async () => {
   assert.doesNotThrow(() => parseFlowV2(lateFocus.flow));
 });
 
+// While paused the focus moves on without a line, and the flow keeps standing in
+// the window it last recorded. The first press after resume is then a real
+// activation press on a window the flow already stands in — the window identity
+// confirmed for the press's own generation is what says whether that window was
+// already focused, not the flow's last scope. It must be dropped as activation,
+// never recorded as a second click.
+test('a press after a silent focus change is still the activation it was', async () => {
+  const windows = {
+    11: {
+      windowId: 'w-11',
+      tree: {
+        role: 'window', name: '图片', ref: '@w11:e1',
+        bounds: { x: 0, y: 0, width: 800, height: 600 }, states: [], secure: false,
+        children: [{
+          role: 'cell', name: '下载', ref: '@w11:e2',
+          bounds: { x: 300, y: 280, width: 80, height: 24 }, states: [], secure: false, children: [],
+        }],
+      },
+    },
+    21: {
+      windowId: 'w-21',
+      tree: {
+        role: 'window', name: 'aTrust', ref: '@w21:e1',
+        bounds: { x: 900, y: 0, width: 800, height: 600 }, states: [], secure: false,
+        children: [{
+          role: 'group', name: '工作台', ref: '@w21:e2',
+          bounds: { x: 990, y: 100, width: 120, height: 24 }, states: [], secure: false, children: [],
+        }],
+      },
+    },
+  };
+  const settles = [];
+  const recording = new GlobalRecording(
+    async window => structuredClone(windows[window.windowNumber]),
+    { now: () => NOW, scheduleSettle: task => { settles.push(task); } },
+  );
+  const owner = (app, pid, windowNumber, title, extra = {}) => ({
+    app, pid, processInstance: 1700000000000, windowNumber, windowTitle: title, ...extra,
+  });
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 50, seen: NOW, focusGeneration: 1, secure: false,
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 100, seen: NOW, point: [1000, 112], count: 1,
+    focusGeneration: 1, secure: false, decision: 'record',
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust', { role: 'AXGroup', name: '工作台', pressable: false }),
+  }));
+  while (settles.length) await settles.shift()();
+  // Paused: the front app becomes Finder and the generation advances, but the
+  // helper reports no focus line (noteFocus does not report while paused).
+  // Resume: the first press goes back to aTrust, so it activates it.
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 900, seen: NOW, point: [1000, 112], count: 1,
+    focusGeneration: 2, secure: false, decision: 'gap',
+    gapCode: 'CAPTURE_SCOPE_UNVERIFIED',
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
+  }));
+  // The focus the activation produced, with the full window identity.
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 1000, seen: NOW, focusGeneration: 3, secure: false,
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
+  assert.equal(flow.steps[0].target.name, '工作台');
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_ONLY_ACTIVATED_WINDOW'));
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'CLICK_NAMED_FROM_SETTLED_TREE'), false);
+  assert.equal(flowV2Check.Check(flow), true);
+  assert.doesNotThrow(() => parseFlowV2(flow));
+});
+
+// A right click that could not be proven must stay blocking evidence. Writing it
+// as a click would replay it as a left press, and replay addresses a right click
+// through the control the previous left click selected — pressing something the
+// user never touched.
+test('an unproven right click blocks instead of becoming a left click', async () => {
+  const windows = {
+    11: {
+      windowId: 'w-11',
+      tree: {
+        role: 'window', name: '图片', ref: '@w11:e1',
+        bounds: { x: 0, y: 0, width: 800, height: 600 }, states: [], secure: false,
+        children: [{
+          role: 'cell', name: '下载', ref: '@w11:e2',
+          bounds: { x: 300, y: 280, width: 80, height: 24 }, states: [], secure: false, children: [],
+        }],
+      },
+    },
+    21: {
+      windowId: 'w-21',
+      tree: {
+        role: 'window', name: 'aTrust', ref: '@w21:e1',
+        bounds: { x: 900, y: 0, width: 800, height: 600 }, states: [], secure: false,
+        children: [{
+          role: 'group', name: '工作台', ref: '@w21:e2',
+          bounds: { x: 990, y: 100, width: 120, height: 24 }, states: [], secure: false, children: [],
+        }],
+      },
+    },
+  };
+  const settles = [];
+  const recording = new GlobalRecording(
+    async window => structuredClone(windows[window.windowNumber]),
+    { now: () => NOW, scheduleSettle: task => { settles.push(task); } },
+  );
+  const owner = (app, pid, windowNumber, title, extra = {}) => ({
+    app, pid, processInstance: 1700000000000, windowNumber, windowTitle: title, ...extra,
+  });
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 50, seen: NOW, focusGeneration: 1, secure: false,
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 100, seen: NOW, point: [1000, 112], count: 1,
+    focusGeneration: 1, secure: false, decision: 'record',
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust', { role: 'AXGroup', name: '工作台', pressable: false }),
+  }));
+  while (settles.length) await settles.shift()();
+  // The same window, second button: the helper accepts the right press but
+  // cannot prove the control under it.
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 200, seen: NOW, point: [1000, 112], count: 1, button: 'right',
+    focusGeneration: 1, secure: false, decision: 'gap',
+    gapCode: 'CAPTURE_SCOPE_UNVERIFIED',
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
+  }));
+  // Cmd+Tab: the switcher is a capture boundary, then the two focus lines.
+  recording.noteBoundary();
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 300, seen: NOW, focusGeneration: 2, secure: false,
+    owner: owner('com.apple.finder', 100, 11, '图片'),
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 400, seen: NOW, focusGeneration: 3, secure: false,
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'gap', 'activate_app', 'activate_app']);
+  assert.equal(flow.steps[1].code, 'CAPTURE_SCOPE_UNVERIFIED');
+  // No second click, left or otherwise.
+  assert.equal(flow.steps.filter(step => step.kind === 'click').length, 1);
+  assert.equal(flow.steps.some(step => step.button !== undefined), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'RIGHT_CLICK_UNPROVEN'));
+  assert.throws(() => parseFlowV2(flow), { code: 'CAPTURE_GAP' });
+});
+
 // The hover exemption is not a way to drop presses. A hover inside the press's
 // own generation proves nothing about it either, so it is skipped and the press
 // keeps its own evidence: it is still recorded where it landed, exactly once.
