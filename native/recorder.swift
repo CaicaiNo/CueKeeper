@@ -825,6 +825,10 @@ final class Capture {
         }
         startedUptimeNs = DispatchTime.now().uptimeNanoseconds
         started = ProcessInfo.processInfo.systemUptime
+        // The moment capture really begins, on the same wall clock the CLI and
+        // the workbench read. A supervisor that dates the recording from this
+        // value cannot count the tap warm-up as recording time.
+        let readyAt = Int((Date().timeIntervalSince1970 * 1000).rounded())
         let deadline = Timer(timeInterval: seconds, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.stopReleaseDeadline == nil else { return }
@@ -837,7 +841,7 @@ final class Capture {
         playCue()
         traceMouseLifecycle("ready")
         var ready: [String: Any] = ["kind": "ready", "indicator": indicatorEvidence,
-                                    "hotkeysFiltered": true, "global": global]
+                                    "hotkeysFiltered": true, "global": global, "readyAt": readyAt]
         ready["identity"] = identity
         emit(ready)
         refreshSystemDialog()

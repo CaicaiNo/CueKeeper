@@ -14,12 +14,27 @@ import { startWorkbench } from '../dist/workbench.js';
 // the real CLI prints, so the server paths under test are the real ones.
 const stub = `
 const { appendFile, writeFile } = await import('node:fs/promises');
+const { appendFileSync, writeSync } = await import('node:fs');
 const args = process.argv.slice(2);
 const out = args[args.indexOf('--out') + 1];
 const marker = process.env.CUEKEEPER_RECORD_MARKER;
 const argvLog = process.env.CUEKEEPER_RECORD_ARGV;
 const envLog = process.env.CUEKEEPER_RECORD_ENV;
+const stageLog = process.env.CUEKEEPER_RECORD_STAGES;
 const mode = process.env.CUEKEEPER_RECORD_STUB ?? 'signal';
+// The stage-report descriptor the workbench asks for; the log records the same
+// lines so a test can compare the server's status with what was reported.
+const fdIndex = args.indexOf('--progress-fd');
+const progressFd = fdIndex < 0 ? undefined : Number(args[fdIndex + 1]);
+const report = value => {
+  if (stageLog) appendFileSync(stageLog, JSON.stringify(value) + '\\n');
+  if (progressFd === undefined) return;
+  try {
+    writeSync(progressFd, JSON.stringify(value) + '\\n');
+  } catch {
+    // The supervisor already closed the channel.
+  }
+};
 const flow = {
   version: 2, id: 'global-stub', name: 'stub 全局录制',
   steps: [
@@ -54,6 +69,21 @@ if (mode === 'crash') {
   log({ ok: false, error: { code: 'EMPTY_RECORDING', message: 'No supported actions were captured' } });
   clearInterval(keepAlive);
   process.exitCode = 1;
+} else if (mode === 'slow-ready') {
+  // The helper needs a moment before it really captures; the countdown is over
+  // long before that. Nothing may count this gap as recording time.
+  await new Promise(resolve => setTimeout(resolve, 900));
+  report({ stage: 'preparing' });
+  await new Promise(resolve => setTimeout(resolve, 500));
+  report({ stage: 'recording', readyAt: Date.now() });
+} else if (mode === 'countdown') {
+  // The CLI's own countdown end, which replaces the start-up estimate.
+  report({ stage: 'countdown', endsAt: Date.now() + 4000 });
+} else if (mode === 'slow-countdown') {
+  // Preflight and the input-source switch take a moment before the CLI's real
+  // countdown starts; nothing may count down during that gap.
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  report({ stage: 'countdown', endsAt: Date.now() + 3000 });
 } else {
   if (argvLog) await appendFile(argvLog, JSON.stringify(args) + '\\n');
   if (envLog) await appendFile(envLog, JSON.stringify({
@@ -80,9 +110,11 @@ async function fixture(t, { stopTimeoutMs = 5000, base } = {}) {
   const marker = join(root, 'signal.txt');
   const argvLog = join(root, 'argv.log');
   const envLog = join(root, 'env.log');
+  const stageLog = join(root, 'stages.log');
   process.env.CUEKEEPER_RECORD_MARKER = marker;
   process.env.CUEKEEPER_RECORD_ARGV = argvLog;
   process.env.CUEKEEPER_RECORD_ENV = envLog;
+  process.env.CUEKEEPER_RECORD_STAGES = stageLog;
   const cancellation = new AbortController();
   const { url, closed } = await startWorkbench({
     port: 0, allowLive: false, library: join(root, 'library'),
@@ -95,6 +127,7 @@ async function fixture(t, { stopTimeoutMs = 5000, base } = {}) {
     delete process.env.CUEKEEPER_RECORD_MARKER;
     delete process.env.CUEKEEPER_RECORD_ARGV;
     delete process.env.CUEKEEPER_RECORD_ENV;
+    delete process.env.CUEKEEPER_RECORD_STAGES;
     delete process.env.CUEKEEPER_RECORD_STUB;
   });
   const post = async (route, payload = {}, status = 200) => {
@@ -122,13 +155,17 @@ async function fixture(t, { stopTimeoutMs = 5000, base } = {}) {
     const text = await readFile(envLog, 'utf8').catch(() => '');
     return text.split('\n').filter(Boolean).map(line => JSON.parse(line));
   };
+  const stages = async () => {
+    const text = await readFile(stageLog, 'utf8').catch(() => '');
+    return text.split('\n').filter(Boolean).map(line => JSON.parse(line));
+  };
   // The stub only answers SIGINT once it has announced itself; waiting for the
   // announcement keeps the test about stop semantics, not process start-up.
   const started = async nth => {
     assert.ok(await waitFor(async () => (await runs()).length >= nth), `run ${nth} did not start`);
     return (await runs())[nth - 1];
   };
-  return { root, url, recordings, marker, post, status, runs, environments, started };
+  return { root, url, recordings, marker, post, status, runs, environments, stages, started };
 }
 
 test('starting a web recording spawns the global CLI once and stopping imports its flow', async t => {
@@ -193,6 +230,87 @@ test('starting a web recording spawns the global CLI once and stopping imports i
   assert.equal(secondStop.recording, false);
   assert.equal(secondStop.steps, 2);
   assert.ok((await stat(first.flowPath)).isFile());
+});
+
+test('a slow recorder start dates the clock from the helper ready moment, not from the spawn', async t => {
+  process.env.CUEKEEPER_RECORD_STUB = 'slow-ready';
+  const { post, status, stages } = await fixture(t);
+  const requestedAt = Date.now();
+  const start = await post('record/start', { mode: 'global', countdown: 0 });
+  assert.equal(start.recording, true);
+  // The process exists, but nothing is captured yet: no clock and no
+  // "recording" stage, while the stop route stays reachable.
+  assert.equal(start.phase, 'starting');
+  assert.equal(start.startedAt, undefined);
+  assert.equal(start.elapsedMs, 0);
+  const before = await status();
+  assert.equal(before.phase, 'starting');
+  assert.equal(before.startedAt, undefined);
+  assert.equal(before.elapsedMs, 0);
+
+  // The helper reports ready ~1.4 s later. Whatever long that took must not be
+  // counted as recording time.
+  assert.ok(await waitFor(async () => (await stages()).some(entry => entry.stage === 'recording'), 8000),
+    'the stub never reported ready');
+  const ready = (await stages()).find(entry => entry.stage === 'recording');
+  assert.ok(ready.readyAt - requestedAt >= 900,
+    `the gap between start and ready is ${ready.readyAt - requestedAt} ms; the test needs it to be long`);
+  assert.ok(await waitFor(async () => (await status()).phase === 'recording'));
+  const live = await status();
+  assert.equal(live.phase, 'recording');
+  assert.equal(Date.parse(live.startedAt), ready.readyAt);
+  assert.ok(live.elapsedMs < 900,
+    `elapsed ${live.elapsedMs} ms counts from the ready moment, not from the spawn`);
+
+  // Stopping still imports the flow, and the saved result keeps the same clock.
+  const stopped = await post('record/stop');
+  assert.equal(stopped.recording, false);
+  assert.equal(stopped.steps, 2);
+  assert.equal(stopped.startedAt, live.startedAt);
+});
+
+test('the CLI countdown end replaces the spawn-time estimate', async t => {
+  process.env.CUEKEEPER_RECORD_STUB = 'countdown';
+  const { post, status, stages } = await fixture(t);
+  await post('record/start', { mode: 'global', countdown: 3 });
+  assert.ok(await waitFor(async () => (await stages()).some(entry => entry.stage === 'countdown')));
+  const reported = (await stages()).find(entry => entry.stage === 'countdown');
+  assert.ok(await waitFor(async () => (await status()).countdownEndsAt !== undefined));
+  const live = await status();
+  assert.equal(live.phase, 'countdown');
+  // The CLI knows when its countdown really ends; the pre-spawn estimate does not.
+  assert.equal(Date.parse(live.countdownEndsAt), reported.endsAt);
+  assert.equal(live.startedAt, undefined);
+  assert.equal(live.elapsedMs, 0);
+  await post('record/stop');
+});
+
+test('a slow CLI start does not run the countdown before the recorder does', async t => {
+  process.env.CUEKEEPER_RECORD_STUB = 'slow-countdown';
+  const { post, status, stages } = await fixture(t);
+  const requestedAt = Date.now();
+  const start = await post('record/start', { mode: 'global', countdown: 3 });
+  // Preflight and the input-source switch run before the CLI's countdown. Until
+  // it reports that countdown, there is no end to show and nothing counts down.
+  assert.equal(start.phase, 'starting');
+  assert.equal(start.countdownEndsAt, undefined);
+  assert.equal(start.countdownMs, 3000);
+  const early = await status();
+  assert.equal(early.phase, 'starting');
+  assert.equal(early.countdownEndsAt, undefined);
+
+  assert.ok(await waitFor(async () => (await stages()).some(entry => entry.stage === 'countdown'), 8000),
+    'the stub never reported its countdown');
+  const reported = (await stages()).find(entry => entry.stage === 'countdown');
+  assert.ok(await waitFor(async () => (await status()).phase === 'countdown'));
+  const live = await status();
+  assert.equal(live.phase, 'countdown');
+  assert.equal(Date.parse(live.countdownEndsAt), reported.endsAt);
+  // The countdown the page shows ends where the CLI really ends it, later than
+  // spawn+countdown would have been — so the digits never run ahead and jump back.
+  assert.ok(reported.endsAt - requestedAt > 3900,
+    `the reported end is ${reported.endsAt - requestedAt} ms after the request; the test needs the start to be slow`);
+  await post('record/stop');
 });
 
 test('the recorder child gets the workbench work root, not the inherited TMPDIR', async t => {
