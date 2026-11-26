@@ -378,24 +378,43 @@ struct RecordingPointerTests {
     }
 
     /// Hover is a settled dwell, not a single move sample. Each assertion is a
-    /// real tracker sequence: a short pass, a settled dwell, a moved-away point
-    /// and an explicit reset.
+    /// real tracker sequence: a short pass, a settled dwell, a moved-away point,
+    /// the latest position reported by a move and by the timer, and a reset.
     private static func testHover() -> Int {
         func ms(_ value: UInt64) -> UInt64 { value * 1_000_000 }
 
-        // A 200 ms pass never becomes a hover.
+        // A 200 ms pass never becomes a hover, and the latest sample is kept.
         var passing = HoverTracker()
         precondition(passing.sample(location: CGPoint(x: 10, y: 10), timestamp: ms(0)) == nil)
         precondition(passing.sample(location: CGPoint(x: 11, y: 10), timestamp: ms(200)) == nil)
         precondition(passing.flush(now: ms(250)) == nil)
-        precondition(passing.location?.x == 10)
+        precondition(passing.location?.x == 11)
 
         // A settled point reports once with its dwell, then stays quiet.
         var settled = HoverTracker()
         precondition(settled.sample(location: CGPoint(x: 40, y: 50), timestamp: ms(0)) == nil)
         precondition(settled.sample(location: CGPoint(x: 41, y: 50), timestamp: ms(400)) == 400)
+        precondition(settled.location?.x == 41)
         precondition(settled.sample(location: CGPoint(x: 41, y: 51), timestamp: ms(900)) == nil)
         precondition(settled.flush(now: ms(1200)) == nil)
+        precondition(settled.location?.y == 51)
+
+        // A move inside the radius keeps the dwell's clock but the step reports
+        // where the pointer stopped, not the sample that opened the dwell.
+        var drifted = HoverTracker()
+        precondition(drifted.sample(location: CGPoint(x: 40, y: 50), timestamp: ms(0)) == nil)
+        precondition(drifted.sample(location: CGPoint(x: 41, y: 50), timestamp: ms(150)) == nil)
+        precondition(drifted.sample(location: CGPoint(x: 42, y: 50), timestamp: ms(400)) == 400)
+        precondition(drifted.location?.x == 42 && drifted.location?.y == 50)
+
+        // The timer callback (a pointer that stopped moving) reports the last
+        // position inside the radius too.
+        var flushed = HoverTracker()
+        precondition(flushed.sample(location: CGPoint(x: 40, y: 50), timestamp: ms(0)) == nil)
+        precondition(flushed.sample(location: CGPoint(x: 41.5, y: 50), timestamp: ms(120)) == nil)
+        precondition(flushed.location?.x == 41.5)
+        precondition(flushed.flush(now: ms(400)) == 400)
+        precondition(flushed.location?.x == 41.5)
 
         // Moving beyond the radius starts a new dwell anchored at the new point.
         var moved = HoverTracker()
@@ -409,6 +428,6 @@ struct RecordingPointerTests {
         precondition(reset.sample(location: CGPoint(x: 10, y: 10), timestamp: ms(0)) == nil)
         reset.reset()
         precondition(reset.flush(now: ms(1000)) == nil)
-        return 4
+        return 6
     }
 }

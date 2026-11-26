@@ -47,11 +47,11 @@ export interface WheelOptions {
 
 export interface HoverOptions {
   /**
-   * Screen points the pointer visits, in order, before it rests on the target.
-   * Each one is a separate `mouse-move`, so the app sees a pointer that travels
-   * instead of one that teleports onto the control.
+   * Walk the pointer in with a short path instead of jumping. The path is built
+   * from the window bounds read at delivery time, so every point sent was inside
+   * the window the driver had just answered for.
    */
-  approach?: Point[];
+  travel?: boolean;
 }
 
 /**
@@ -83,7 +83,10 @@ export interface Desktop {
   scroll(ref: string, options: ScrollOptions): Promise<Delivery | undefined>;
   /** Physical wheel at a screen point; requires headed mode. */
   scrollPoint(snapshot: Snapshot, target: Target, point: Point, options: WheelOptions): Promise<Delivery | undefined>;
-  /** Physical pointer move to a screen point; requires headed mode. */
+  /**
+   * Physical pointer move to a screen point; requires headed mode. Read-only:
+   * it re-reads the bound window instead of focusing it.
+   */
   hoverAt(snapshot: Snapshot, target: Target, point: Point, options?: HoverOptions): Promise<Delivery | undefined>;
   /** Physical press, move and release between two endpoints; requires headed mode. */
   drag(snapshot: Snapshot, target: Target, from: DragEndpoint, to: DragEndpoint, options: DragOptions): Promise<Delivery | undefined>;
@@ -133,6 +136,34 @@ export const agentDesktopVersion = '1.3.1';
  * separate mouse-moved events, short enough that a hover still lands quickly.
  */
 const hoverStepMs = 40;
+/** How far from the resting point the pointer starts its approach, in pixels. */
+const hoverApproachOffsetPx = 20;
+
+/**
+ * The pointer path of a travel hover: a start 20 px away, two steps along the
+ * way, then the resting point. A single move can produce no event at all when
+ * the pointer already sits on the target, and apps that only open a tooltip
+ * after a run of mouse-moved events never react to a teleport.
+ */
+function hoverPath(point: Point, window: NonNullable<Snapshot['tree']['bounds']>): Point[] {
+  const dx = window.x + window.width / 2 - point[0];
+  const dy = window.y + window.height / 2 - point[1];
+  const length = Math.hypot(dx, dy);
+  // A point at the very centre has no direction to walk in; head up-left.
+  const [ux, uy] = length < 1 ? [-Math.SQRT1_2, -Math.SQRT1_2] : [dx / length, dy / length];
+  const clamp = (value: number, low: number, high: number) =>
+    high < low ? low : Math.min(Math.max(value, low), high);
+  const start: Point = [
+    clamp(Math.round(point[0] + ux * hoverApproachOffsetPx), window.x + 1, window.x + window.width - 2),
+    clamp(Math.round(point[1] + uy * hoverApproachOffsetPx), window.y + 1, window.y + window.height - 2),
+  ];
+  const approach = [0, 1 / 3, 2 / 3].map((fraction): Point => [
+    Math.round(start[0] + (point[0] - start[0]) * fraction),
+    Math.round(start[1] + (point[1] - start[1]) * fraction),
+  ]);
+  return [...approach, point];
+}
+
 const deliveryStates = new Set(['delivered_verified', 'delivered_unverified', 'delivery_uncertain', 'not_delivered', 'unknown']);
 
 export class DesktopFault extends Fault {
@@ -557,18 +588,39 @@ export async function withDesktop<T>(
           `--dx=${deltaX}`, `--dy=${deltaY}`,
         ]);
       },
-      async hoverAt(current, target, point, { approach = [] } = {}) {
-        await requirePoint(current, target, point);
-        // A pointer that arrives in one jump produces no motion for apps that
-        // only open a tooltip after a run of mouse-moved events. Walk in from
-        // the approach points, then settle on the target; the resting move is
-        // the one whose delivery the step reports.
-        for (const step of approach) {
-          await act('mouse-move', [`--xy=${step.join(',')}`]);
-          await sleep(hoverStepMs);
+      async hoverAt(current, target, point, { travel = false } = {}) {
+        if (!options.headed) throw new Fault('HEADED_REQUIRED', 'Physical pointer movement requires --headed');
+        // A hover is read-only: it must not focus, raise or click its window.
+        // The bound window is read again by ID without moving focus, and the
+        // whole path is built from that one answer so no point sent was placed
+        // against a window that has since moved or shrunk. Any point that cannot
+        // be proven inside it stops the step before the first move.
+        const observed = await snapshot(target, 3000, current.windowId);
+        if (observed.windowId !== current.windowId) {
+          throw new Fault('WINDOW_CHANGED',
+            'The hover read answered a different window than the bound one; nothing was moved');
         }
-        // A negative coordinate must be written with `=` so it is not read as a flag.
-        return act('mouse-move', [`--xy=${point.join(',')}`]);
+        const bounds = observed.tree.bounds;
+        if (!bounds) {
+          throw new Fault('UNSAFE_POINT', 'The hover window has no bounds to place the pointer in; nothing was moved');
+        }
+        const path = travel ? hoverPath(point, bounds) : [point];
+        for (const step of path) {
+          if (!contains(bounds, step)) {
+            throw new Fault('UNSAFE_POINT',
+              `The hover point ${step.join(',')} is outside the bound window; nothing was moved`);
+          }
+        }
+        // A pointer that arrives in one jump produces no motion for apps that
+        // only open a tooltip after a run of mouse-moved events. The resting
+        // move is last; its delivery is what the step reports.
+        let delivery: Delivery | undefined;
+        for (const [index, step] of path.entries()) {
+          // A negative coordinate must be written with `=` so it is not read as a flag.
+          delivery = await act('mouse-move', [`--xy=${step.join(',')}`]);
+          if (index < path.length - 1) await sleep(hoverStepMs);
+        }
+        return delivery;
       },
       focus(ref) {
         return call('focus', [ref]).then(() => undefined);

@@ -217,8 +217,6 @@ function centreOf(node: Node, snapshot: Snapshot): Point {
  * pointer to rest, and a next step that reads that state would otherwise race.
  */
 const hoverDwellFloorMs = 400;
-/** How far from the resting point the pointer starts its approach, in pixels. */
-const hoverApproachOffsetPx = 20;
 
 /**
  * The screen point a hover rests on. A recorded point wins when it still lands
@@ -248,38 +246,6 @@ function hoverPoint(node: Node, recorded: Point | undefined, snapshot: Snapshot)
     throw new Fault('UNSAFE_POINT', `${describeControl(node)} sits outside the bound window`);
   }
   return centre;
-}
-
-/**
- * The points the pointer visits before it rests: a start 20 px away, then two
- * steps along the way. A single move can land as no event at all when the
- * pointer already sits on the target, and apps that open a tooltip only after
- * a run of mouse-moved events never react to a teleport.
- */
-function approachPoints(point: Point, window: Node['bounds']): Point[] {
-  // A window without bounds cannot say which points are inside it, so the
-  // approach is skipped rather than offsetting the pointer to a guess.
-  if (!window) return [];
-  const start = approachStart(point, window);
-  return [0, 1 / 3, 2 / 3].map((fraction): Point => [
-    Math.round(start[0] + (point[0] - start[0]) * fraction),
-    Math.round(start[1] + (point[1] - start[1]) * fraction),
-  ]);
-}
-
-/** A 20 px offset towards the window centre, clamped so it stays inside it. */
-function approachStart(point: Point, window: NonNullable<Node['bounds']>): Point {
-  const dx = window.x + window.width / 2 - point[0];
-  const dy = window.y + window.height / 2 - point[1];
-  const length = Math.hypot(dx, dy);
-  // A point at the very centre has no direction to walk in; head up-left.
-  const [ux, uy] = length < 1 ? [-Math.SQRT1_2, -Math.SQRT1_2] : [dx / length, dy / length];
-  const clamp = (value: number, low: number, high: number) =>
-    high < low ? low : Math.min(Math.max(value, low), high);
-  return [
-    clamp(Math.round(point[0] + ux * hoverApproachOffsetPx), window.x + 1, window.x + window.width - 2),
-    clamp(Math.round(point[1] + uy * hoverApproachOffsetPx), window.y + 1, window.y + window.height - 2),
-  ];
 }
 
 /** The item a right click on a container really targets. */
@@ -733,13 +699,12 @@ class StepRunner {
           return delivery === undefined ? {} : { delivery };
         }, step);
       case 'hover':
-        return this.windowStep(step.scope, async (binding, snapshot) => {
-          const { node } = resolve(snapshot!, step.target as ElementLocator);
+        return this.readOnlyWindowStep(step.scope, async (binding, snapshot) => {
+          const { node } = resolve(snapshot, step.target as ElementLocator);
           if (node.secure) throw new Fault('UNSAFE_TARGET', 'Hover target is secure');
-          const point = hoverPoint(node, step.point, snapshot!);
+          const point = hoverPoint(node, step.point, snapshot);
           const delivery = await this.desktop.hoverAt(
-            snapshot!, this.targetOf(binding), point,
-            { approach: approachPoints(point, snapshot!.tree.bounds) },
+            snapshot, this.targetOf(binding), point, { travel: true },
           );
           // A tooltip or submenu closes the moment the pointer leaves, so the
           // dwell is what the next step sees. A recording's own dwell can be
@@ -813,11 +778,49 @@ class StepRunner {
     throw lastError;
   }
 
+  /**
+   * Resolves a window and proves the run may act in it without moving focus.
+   * Hover is the one read-only input: it must not raise its window, click a
+   * Finder sidebar item to reopen one, or take a declared hand-off. The binding
+   * itself is the same evidence a focusable step uses, and the foreground is
+   * checked by reading it, never by taking it.
+   */
+  private async readOnlyWindowStep(
+    scope: WindowScope,
+    work: (binding: WindowBinding, snapshot: Snapshot) => Promise<StepOutcome>,
+    step: StepV2,
+  ): Promise<StepOutcome> {
+    const binding = await this.resolver.resolveWindow(
+      scope,
+      candidates => this.pickSameTitled(candidates, step),
+      { repair: false },
+    );
+    await this.resolver.requireForeground(binding);
+    const snapshot = await this.resolver.snapshot(binding);
+    const outcome = await work(binding, snapshot);
+    const notes: string[] = [];
+    if (binding.rebound) {
+      binding.rebound = false;
+      notes.push('window rebound after the recorded window was recreated');
+    }
+    if (binding.sharedTitle) {
+      const which = binding.sharedTitle === 'target' ? 'the one that held its target' : 'the focused one';
+      notes.push(`more than one window was titled "${scope.windowTitle}", so the step ran in ${which}`);
+    }
+    if (!notes.length) return outcome;
+    const note = notes.join('; ');
+    return { ...outcome, message: outcome.message ? `${outcome.message}; ${note}` : note };
+  }
+
   /** A declared focusAfter scope, or the launched app's own front window. */
   private async handOff(step: StepV2): Promise<StepOutcome> {
     // A wait observes only. It never moves focus, even if the file declares a
     // focusAfter, because a wait that changes the desktop is not a wait.
     if (step.kind === 'wait') return {};
+    // Hover is read-only for the same reason: raising another window after a
+    // hover would close the tooltip it just opened, and a hover must never take
+    // focus in the first place.
+    if (step.kind === 'hover') return {};
     const declared = (step as { focusAfter?: ReportV2Entry['focusAfter'] }).focusAfter;
     if (declared?.kind === 'window') {
       try {

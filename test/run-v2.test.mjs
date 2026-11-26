@@ -183,7 +183,7 @@ function fakeWorld(options = {}) {
       return delivered('drag');
     },
     async hoverAt(_snapshot, _target, point, options = {}) {
-      state.calls.push(['hoverAt', point, options.approach ?? [], performance.now()]);
+      state.calls.push(['hoverAt', point, options.travel === true, performance.now()]);
       return delivered('hover');
     },
     async focus(ref) {
@@ -1132,44 +1132,57 @@ function notesHover(id, extra = {}) {
   return { id, kind: 'hover', scope: notesScope, target: notesElement, durationMs: 0, ...extra };
 }
 
-/** Euclidean distance between two screen points, for approach-path assertions. */
-const distance = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+/** No step of a read-only hover may raise, focus or press anything. */
+const readOnlyCalls = world => [
+  callsOf(world, 'focusWindow'), callsOf(world, 'click'), callsOf(world, 'clickPoint'),
+  callsOf(world, 'clickScreen'), callsOf(world, 'clickSemantic'), callsOf(world, 'press'),
+];
 
-test('a hover rests on the recorded point and walks the pointer in before it', async t => {
+test('a hover rests on the recorded point, asks for a travel path and sends no input', async t => {
   const { world, run } = harness(t, { headed: true });
   // The pointer rested 60 px left of the field's centre when this was recorded;
   // the field's own centre is exactly what the old replay would have moved to.
   const report = await run(hoverFlow([notesHover('hover-notes', { point: [360, 170] })]));
   assert.equal(report.status, 'passed', JSON.stringify(report.entries));
 
-  const [, point, approach] = callsOf(world, 'hoverAt')[0];
+  const [, point, travel] = callsOf(world, 'hoverAt')[0];
   assert.deepEqual(point, [360, 170]);
-  // Three moves before the resting one: an offset start and two steps along
-  // the way, each inside the bound window.
-  assert.equal(approach.length, 3);
-  assert.ok(distance(approach[0], point) >= 16 && distance(approach[0], point) <= 24,
-    `approach start ${approach[0]} is not 16-24 px from ${point}`);
-  for (const step of approach) {
-    assert.ok(step[0] >= 100 && step[0] < 900 && step[1] >= 100 && step[1] < 700,
-      `approach point ${step} left the bound window`);
-  }
-  const gaps = approach.map(step => distance(step, point));
-  assert.ok(gaps[0] > gaps[1] && gaps[1] > gaps[2] && gaps[2] > 0,
-    `approach does not close in on the target: ${gaps.join(', ')}`);
-  // A hover is read-only: no click of any kind was sent.
-  assert.deepEqual([callsOf(world, 'click'), callsOf(world, 'clickPoint'), callsOf(world, 'clickScreen')],
-    [[], [], []]);
+  // The path itself is built by the driver adapter from the window it re-reads
+  // at delivery time; the runner only asks for a travel hover.
+  assert.equal(travel, true);
+  // Read-only: no focus, no activation, no click of any kind.
+  assert.deepEqual(readOnlyCalls(world), [[], [], [], [], [], []]);
 });
 
 test('a hover without a recorded point falls back to the control centre', async t => {
   const { world, run } = harness(t, { headed: true });
   const report = await run(hoverFlow([notesHover('hover-centre')]));
   assert.equal(report.status, 'passed', JSON.stringify(report.entries));
-  const [, point, approach] = callsOf(world, 'hoverAt')[0];
+  const [, point, travel] = callsOf(world, 'hoverAt')[0];
   assert.deepEqual(point, [420, 170]);
-  assert.equal(approach.length, 3);
-  assert.ok(approach.every(step => step[0] !== point[0] || step[1] !== point[1]),
-    'the approach must not repeat the resting point');
+  assert.equal(travel, true);
+  assert.deepEqual(readOnlyCalls(world), [[], [], [], [], [], []]);
+});
+
+test('a hover does not raise its window when another window is in front', async t => {
+  const { world, run } = harness(t, { headed: true, focused: 'w-22' });
+  const report = await run(hoverFlow([notesHover('hover-notes', { point: [360, 170] })]));
+  assert.equal(entry(report, 'hover-notes').code, 'HOVER_NOT_FOREGROUND');
+  assert.match(entry(report, 'hover-notes').message, /hover is read-only and does not bring a window forward/);
+  assert.deepEqual(callsOf(world, 'hoverAt'), []);
+  assert.deepEqual(readOnlyCalls(world), [[], [], [], [], [], []]);
+});
+
+test('a hover ignores a declared focusAfter instead of taking focus', async t => {
+  const { world, run } = harness(t, { headed: true });
+  const report = await run(hoverFlow([notesHover('hover-notes', {
+    point: [360, 170], focusAfter: draftScope,
+  })]));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  // A hand-off after the hover would close the tooltip it just opened, and a
+  // read-only step never moves focus in the first place.
+  assert.equal('focusAfter' in entry(report, 'hover-notes'), false);
+  assert.deepEqual(readOnlyCalls(world), [[], [], [], [], [], []]);
 });
 
 test('a hover keeps its recorded point when the container has no bounds', async t => {

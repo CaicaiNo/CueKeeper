@@ -305,14 +305,17 @@ console.log(JSON.stringify({ version: '2.6', command, ok: true, data }));
   const calls = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
   assert.deepEqual(calls.map(call => call.command), [
     'version',
-    'snapshot', 'focus-window', 'snapshot', 'mouse-move',
+    // The hover re-reads its window instead of focusing it: a pointer move is
+    // read-only, so no `focus-window` is sent before `mouse-move`.
+    'snapshot', 'snapshot', 'mouse-move',
     'snapshot', 'focus', 'clipboard-set', 'press',
   ]);
-  assert.deepEqual(calls[4].args, ['--headed', '--xy=420,319']);
-  assert.deepEqual(calls[6].args, ['@scuekeeper:e1']);
-  assert.deepEqual(calls[7].args, ['--stdin']);
-  assert.equal(calls[7].input, '粘贴文本');
-  assert.deepEqual(calls[8].args, ['--headed', 'meta+v', '--window-id', 'w-1234']);
+  assert.equal(calls.some(call => call.command === 'focus-window'), false);
+  assert.deepEqual(calls[3].args, ['--headed', '--xy=420,319']);
+  assert.deepEqual(calls[5].args, ['@scuekeeper:e1']);
+  assert.deepEqual(calls[6].args, ['--stdin']);
+  assert.equal(calls[6].input, '粘贴文本');
+  assert.deepEqual(calls[7].args, ['--headed', 'meta+v', '--window-id', 'w-1234']);
 });
 
 test('workbench labels and retargeting expose the two new step kinds', () => {
