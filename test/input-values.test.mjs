@@ -178,3 +178,29 @@ test('a document over the byte limit is refused before the old file changes', as
   assert.deepEqual(await readFile(path), before);
   assert.deepEqual((await readdir(root)).filter(name => name.includes('.tmp')), []);
 });
+
+test('writing never replaces a file that belongs to another flow or is not a sidecar', async t => {
+  const root = await workspace(t);
+  const path = valuesPath(join(root, 'taken.flow.json'));
+
+  // Another flow's valid sidecar sits at the name ours would use.
+  await writeFile(path, JSON.stringify(document({ flowId: 'global-other' })));
+  const foreignBytes = await readFile(path);
+  await assert.rejects(writeValues(path, document()), { code: 'INPUT_VALUES_FOREIGN_FILE' });
+  assert.deepEqual(await readFile(path), foreignBytes);
+
+  // A normal workflow can legitimately be called `*.values.json`; it is not ours.
+  const workflow = JSON.stringify({
+    version: 2, id: 'global-abc12345', name: 'ordinary flow',
+    steps: [{ id: 's1', kind: 'wait', scope: { kind: 'window', app: 'com.apple.TextEdit', windowKey: 'w', windowTitle: 'W' },
+      check: { kind: 'window_exists', equals: true } }],
+  });
+  await writeFile(path, workflow);
+  await assert.rejects(writeValues(path, document()), { code: 'INPUT_VALUES_FOREIGN_FILE' });
+  assert.equal(await readFile(path, 'utf8'), workflow);
+
+  // A file for this same flow is ours to update.
+  await writeFile(path, JSON.stringify(document()));
+  await writeValues(path, document({ values: { text_1: { value: 'updated', complete: true } } }));
+  assert.equal((await readValuesFile(path)).doc.values.text_1.value, 'updated');
+});

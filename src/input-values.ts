@@ -258,11 +258,21 @@ export async function resolveValues(flowPath: string, flowId: string): Promise<I
   return { path: exact, missing: true, ...(warning ? { warning } : {}) };
 }
 
-/** Write atomically with `0600`, so no half-written file ever becomes readable. */
+/**
+ * Write atomically with `0600`. A file that already occupies the target path is
+ * only replaced when it is a value file for this same flow: the name rule can
+ * collide with an ordinary workflow or another flow's sidecar, and silently
+ * overwriting either would destroy someone's file.
+ */
 export async function writeValues(path: string, doc: InputValuesDocument): Promise<void> {
   // Re-validate on the way out: the writer and the reader share one contract,
   // and a value past the limit must fail before it reaches the disk.
   const normalized = parseInputValues(doc);
+  const occupied = await readValuesFile(path);
+  if (!occupied.missing && (!occupied.doc || occupied.doc.flowId !== normalized.flowId)) {
+    throw new InputValuesError('INPUT_VALUES_FOREIGN_FILE',
+      `${path} already belongs to another flow or is not a value file; refusing to overwrite it`);
+  }
   const text = `${JSON.stringify(normalized, null, 2)}\n`;
   // The reader rejects a file over the byte limit, so a write that would create
   // one must fail here instead of producing a file the next run cannot read.

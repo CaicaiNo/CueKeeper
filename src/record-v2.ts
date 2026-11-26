@@ -391,6 +391,8 @@ export class GlobalRecording {
     at: number; scope: string; locator: string; target: ElementLocator; snapshot?: Snapshot;
     /** The parameter this burst writes, so its characters accumulate there. */
     name: string;
+    /** Window and focus generation the burst belongs to, for drop attribution. */
+    key: string;
   };
   private scrollBurst?: {
     at: number; startedAt: number; scope: string; locator: string;
@@ -1614,9 +1616,13 @@ export class GlobalRecording {
     if (this.now() - event.seen > captureBacklogMs) {
       this.warn('CAPTURE_BACKLOG',
         'The capture stream fell more than 8 seconds behind the helper; text events from the backlog were dropped');
-      // The dropped characters belong to whichever burst was open. Marking it
-      // keeps the replay dialog honest about a value it only saw part of.
-      if (this.textBurst) {
+      // Only a burst that is still open in this exact window and focus, and
+      // whose last character is within one merge window, owns the dropped
+      // event. A burst that already ended before the gap is complete and must
+      // not be blamed for it.
+      if (this.textBurst && this.textBurst.scope === scopeId &&
+          this.textBurst.key === this.focusKey(binding, event.focusGeneration) &&
+          event.t - this.textBurst.at <= textGapMs) {
         const entry = this.inputValues.get(this.textBurst.name);
         if (entry) {
           entry.complete = false;
@@ -1724,7 +1730,7 @@ export class GlobalRecording {
     this.appendChars(input, text);
     this.markDropped(input, scopeId, text.key, at);
     this.textBurst = {
-      at, scope: scopeId, locator: locatorId, target, name: input,
+      at, scope: scopeId, locator: locatorId, target, name: input, key: text.key ?? '',
       ...(snapshot ? { snapshot } : {}),
     };
     this.textAnchor = { at, scope: scopeId, locator: target };

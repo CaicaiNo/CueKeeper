@@ -139,6 +139,31 @@ test('a dropped first character is charged to the burst the survivors form', asy
   assert.ok(recording.captureWarnings.some(warning => warning.code === 'CAPTURE_BACKLOG'));
 });
 
+test('a backlog drop after a pause marks only the new burst, never the complete one', async () => {
+  const data = fixture('two-apps-three-windows');
+  const owner = data.events[0].owner;
+  const focus = { role: 'AXTextField', name: '地址栏', editable: true, bounds: [100, 100, 200, 24] };
+  const text = (t, seen, chars) => parseCaptureEvent({
+    kind: 'text', t, seen, focusGeneration: 1, secure: false, owner, focus, chars,
+  });
+  const recording = new GlobalRecording(readerFor(data), { now: () => NOW + 11_000 });
+  // A complete burst, a pause longer than the merge window, then a new burst
+  // whose first character sat in the backlog and was dropped.
+  await recording.add(text(100, NOW + 11_000, 'first'));
+  await recording.add(text(2100, NOW, 'lost'));
+  await recording.add(text(2160, NOW + 11_000, 'kept'));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['type', 'type']);
+  const values = recording.recordedInputValues();
+  assert.equal(values.text_1.value, 'first');
+  assert.equal(values.text_1.complete, true);
+  assert.deepEqual(values.text_1.issues, undefined);
+  assert.equal(values.text_2.value, 'kept');
+  assert.equal(values.text_2.complete, false);
+  assert.deepEqual(values.text_2.issues, ['backlog_dropped']);
+});
+
 test('a secure text burst never becomes a type step or a stored value', async () => {
   const data = fixture('secure-input');
   const secret = `Zq${randomUUID().slice(0, 8)}`;

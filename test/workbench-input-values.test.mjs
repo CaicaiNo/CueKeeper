@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { closeSync, existsSync, openSync, writeSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -431,4 +433,146 @@ test('concurrent live runs start one CLI, and concurrent saves keep both fields'
   const read = await post('v2/inputs', { session: session.id });
   assert.equal(read.values.address.value, 'first field');
   assert.equal(read.values.note.value, 'second field');
+});
+
+test('a prefill that finishes after a workflow switch never opens or writes the new flow', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'cuekeeper-input-switch-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const first = join(root, 'first');
+  const second = join(root, 'second');
+  await mkdir(first);
+  await mkdir(second);
+  const firstFlow = JSON.parse(await readFile(examplePath, 'utf8'));
+  firstFlow.id = 'global-input-values';
+  await writeFile(join(first, 'flow.json'), JSON.stringify(firstFlow, null, 2));
+  await writeFile(join(first, 'flow.values.json'), JSON.stringify({
+    version: 1, flowId: firstFlow.id, updatedAt: '2026-11-26T08:00:00.000Z',
+    values: { address: { value: 'first flow address', complete: true } },
+  }), { mode: 0o600 });
+  // A different workflow with one different parameter.
+  const secondFlow = {
+    version: 2, id: 'global-second', name: '第二个流程', inputs: ['second'],
+    steps: [{
+      id: 'type-second', kind: 'type',
+      scope: { kind: 'window', app: 'com.apple.TextEdit', windowKey: 'notes', windowTitle: 'Notes' },
+      target: { kind: 'element', role: 'textfield', name: 'second' }, input: 'second',
+    }],
+  };
+  await writeFile(join(second, 'flow.json'), JSON.stringify(secondFlow, null, 2));
+  const log = join(root, 'stub-inputs.json');
+  const cliPath = await stubCli(root, log);
+
+  // Hold the value read for the first flow, so the dialog cannot open yet.
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const { document } = await bootPage(t, { root, directory: first, cliPath });
+  const baseFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    if (String(url).endsWith('/api/v2/inputs')) await gate;
+    return baseFetch(url, init);
+  };
+
+  buttonByText(document.body, '实时回放').click();
+  await tick(60);
+  assert.equal(dialog(document).open, false, 'the dialog waits for its values');
+
+  // Switch to the second workflow while the first read is still pending.
+  document.getElementById('import-button').click();
+  const importDirectory = dialog(document).querySelectorAll('input')[0];
+  importDirectory.value = second;
+  await submitDialog(document);
+  assert.equal(dialog(document).open, false, 'the import dialog closed');
+
+  // Releasing the stale response must not open a dialog for the old flow.
+  release();
+  await tick(200);
+  assert.equal(dialog(document).open, false);
+  assert.equal(existsSync(join(second, 'flow.values.json')), false,
+    'the old flow values were never written next to the new one');
+  await assert.rejects(readFile(log), failure => failure.code === 'ENOENT',
+    'no replay was started for the new flow');
+
+  // The dialog opened again must belong to the new flow only.
+  buttonByText(document.body, '实时回放').click();
+  await tick(150);
+  assert.equal(dialog(document).open, true);
+  assert.equal(document.getElementById('live-input-address'), null);
+  assert.equal(document.getElementById('live-input-second').value, '');
+});
+
+test('saving values refuses to replace a sidecar name that holds another workflow', async t => {
+  const { root, directory } = await workspace(t, {});
+  const taken = join(directory, 'flow.values.json');
+  const workflow = JSON.stringify({
+    version: 2, id: 'someone-else', name: '另一个工作流',
+    steps: [{
+      id: 's1', kind: 'wait',
+      scope: { kind: 'window', app: 'com.apple.TextEdit', windowKey: 'w', windowTitle: 'W' },
+      check: { kind: 'window_exists', equals: true },
+    }],
+  });
+  await writeFile(taken, workflow);
+  const log = join(root, 'stub-inputs.json');
+  const cliPath = await stubCli(root, log);
+  const { post } = await server(t, { root, directory, cliPath });
+  const session = await post('import', { directory });
+
+  const refused = await post('v2/inputs/save', {
+    session: session.id, values: { address: 'mine' },
+  }, 400);
+  assert.equal(refused.error, 'INPUT_VALUES_FOREIGN_FILE');
+  assert.equal(await readFile(taken, 'utf8'), workflow, 'the occupying workflow is untouched');
+
+  // The same rule applies to another flow's valid sidecar at that name.
+  const foreign = JSON.stringify({
+    version: 1, flowId: 'someone-else', updatedAt: '2026-11-26T08:00:00.000Z',
+    values: { note: { value: 'theirs', complete: true } },
+  });
+  await writeFile(taken, foreign);
+  const again = await post('v2/inputs/save', { session: session.id, values: { address: 'mine' } }, 400);
+  assert.equal(again.error, 'INPUT_VALUES_FOREIGN_FILE');
+  assert.equal(await readFile(taken, 'utf8'), foreign);
+});
+
+test('stop during preparation leaves zero CLI processes', async t => {
+  const { root, directory } = await workspace(t, {});
+  // A FIFO at the sidecar name blocks the server's value read until the test
+  // writes it, which keeps the run in its preparation phase deterministically.
+  execFileSync('mkfifo', [join(directory, 'flow.values.json')]);
+  const log = join(root, 'stub-inputs.json');
+  const cliPath = await stubCli(root, log);
+  const { started, post } = await server(t, { root, directory, cliPath, allowLive: true });
+  const session = await post('import', { directory });
+  const send = (route, payload) => fetch(`${started.url}/api/${route}`, {
+    method: 'POST',
+    headers: { origin: started.url, 'content-type': 'application/json', 'x-cuekeeper-workbench': '1' },
+    body: JSON.stringify(payload),
+  });
+
+  const running = send('run', { session: session.id, mode: 'live', confirm: true });
+  let preparing = false;
+  for (let attempt = 0; attempt < 80; attempt++) {
+    await tick(25);
+    const status = await (await send('run/status', { session: session.id })).json();
+    if (status.running) { preparing = true; break; }
+  }
+  assert.equal(preparing, true, 'the run is preparing while the value read blocks');
+
+  const stop = await post('stop', {});
+  assert.equal(stop.stopped, true);
+
+  // Let the blocked read finish; the run must not spawn a CLI afterwards.
+  const fd = openSync(join(directory, 'flow.values.json'), 'w');
+  writeSync(fd, JSON.stringify({
+    version: 1, flowId: 'global-input-values', updatedAt: '2026-11-26T08:00:00.000Z',
+    values: { address: { value: 'a', complete: true }, note: { value: 'n', complete: true } },
+  }));
+  closeSync(fd);
+
+  const response = await running;
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.stopped, true);
+  await assert.rejects(readFile(log), failure => failure.code === 'ENOENT',
+    'a stopped preparation never starts the CLI');
 });

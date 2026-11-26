@@ -1042,15 +1042,31 @@ export async function startWorkbench(options: {
         running = true;
         childStopped = false;
         checkpointWait = undefined;
+        // The same guard a v1 run uses: /api/stop aborts it even while this
+        // request is still preparing, before any CLI child exists.
+        const guard = new AbortController();
+        currentRun = guard;
         let inputsDir: string | undefined;
         let handle: CliRunHandle | undefined;
+        /** Reports a stop that arrived while the run was still preparing. */
+        const stoppedBeforeStart = () => {
+          if (!guard.signal.aborted) return false;
+          send(response, 200, {
+            version: 2, flowId: flow.id, flowSha256: hashFlowV2(flow),
+            startedAt: new Date().toISOString(), mode: 'replay', status: 'failed',
+            stopped: true, entries: [],
+          });
+          return true;
+        };
         try {
           // A save already in flight finishes first: this run must read the
           // values the operator confirmed, never a half-written file.
           await inputValuesQueue;
+          if (stoppedBeforeStart()) return;
           // Values the page did not send fall back to the sidecar, so a caller
           // of /api/run gets the recorded text exactly like the CLI does.
           const stored = usableValues((await resolveValues(live.path, flow.id)).doc, flow.inputs ?? []);
+          if (stoppedBeforeStart()) return;
           const requested = data.inputs === undefined ? {} : object(data.inputs);
           const inputs = (flow.inputs ?? []).length
             ? inputValues(flow.inputs as string[], { ...stored, ...requested })
@@ -1068,6 +1084,9 @@ export async function startWorkbench(options: {
             await writeFile(inputsFile, `${JSON.stringify(inputs)}\n`, { mode: 0o600 });
             args.push('--inputs', inputsFile);
           }
+          // Last check before spawning: a stop that arrived during preparation
+          // must leave zero CLI processes behind.
+          if (stoppedBeforeStart()) return;
           handle = startCli(args, current.directory, checkpoints.length ? {
             stdin: true,
             onStderrLine: line => {
@@ -1089,6 +1108,7 @@ export async function startWorkbench(options: {
           });
         } finally {
           running = false;
+          currentRun = undefined;
           checkpointWait = undefined;
           checkpointAnswer = undefined;
           if (inputsDir) await rm(inputsDir, { recursive: true, force: true });

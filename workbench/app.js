@@ -1350,6 +1350,14 @@ async function v2LiveDialog() {
   // The server names the file the run would read: the newest revision, or the
   // recording itself when nothing was edited.
   const live = state.v2?.live;
+  // Everything this dialog reads, clears, saves and runs belongs to the session
+  // and replay target it was opened for. A load that finishes after another
+  // flow was imported must be dropped: its values are the other flow's text.
+  const openedSession = state.session?.id;
+  const openedTarget = live?.path;
+  const openedFlowId = flow.id;
+  const stillCurrent = () => state.session?.id === openedSession &&
+    state.v2?.live?.path === openedTarget && v2Flow()?.id === openedFlowId;
   // Values recorded next to the flow prefill the dialog. A read failure is a
   // warning inside the dialog, never a reason to deny the replay: the operator
   // can still type every value by hand.
@@ -1357,9 +1365,15 @@ async function v2LiveDialog() {
   let storedWarning;
   if (live) {
     try {
-      stored = await api('v2/inputs', { session: state.session.id });
+      stored = await api('v2/inputs', { session: openedSession });
+      // The flow changed while the values were loading; opening now would show
+      // this flow's text next to another flow's steps.
+      if (!stillCurrent()) return;
       storedWarning = stored.warning;
     } catch (error) {
+      // A stale session answers "Reload the current session"; that is not a
+      // warning for this dialog, it means this dialog is obsolete.
+      if (!stillCurrent()) return;
       storedWarning = error instanceof Error ? error.message : String(error);
     }
   }
@@ -1384,11 +1398,16 @@ async function v2LiveDialog() {
       ? button('清除已存值', async () => {
         clear.disabled = true;
         try {
-          await api('v2/inputs/save', { session: state.session.id, values: { [name]: null } });
+          if (!stillCurrent()) throw new Error('当前工作流已切换，请重新打开回放弹窗');
+          await api('v2/inputs/save', { session: openedSession, values: { [name]: null } });
+          // A response for a dialog that was replaced must not paint state onto
+          // the new one.
+          if (!stillCurrent()) return;
           node.value = '';
           record.entry = undefined;
           status.textContent = '已清除已存值，本次仍需填写';
         } catch (error) {
+          if (!stillCurrent()) return;
           clear.disabled = false;
           status.textContent = `清除失败：${error instanceof Error ? error.message : String(error)}`;
         }
@@ -1420,6 +1439,7 @@ async function v2LiveDialog() {
       el('label', { className: 'check-row' }, remember, '把这次填写的值存为默认'),
     ] : []),
   ], '开始回放', async () => {
+    if (!stillCurrent()) throw new Error('当前工作流已切换，请重新打开回放弹窗。');
     if (!confirmed.checked) throw new Error('确认后才会开始实时回放。');
     if (!state.v2?.live) throw new Error('当前有未保存的修改，请先保存工作流。');
     // Values are submitted verbatim: trimming silently changed a filename or a
@@ -1430,7 +1450,10 @@ async function v2LiveDialog() {
     // Clearing already happened when its button was pressed; this only writes
     // the optional "remember these values" choice.
     if (remember.checked) {
-      await api('v2/inputs/save', { session: state.session.id, values: Object.fromEntries(filled) });
+      await api('v2/inputs/save', { session: openedSession, values: Object.fromEntries(filled) });
+      // A flow imported while the save was in flight owns the page now; this
+      // dialog's values must neither be written to it nor replayed in it.
+      if (!stillCurrent()) throw new Error('当前工作流已切换，请重新打开回放弹窗。');
     }
     const inputs = Object.fromEntries(filled);
     // The replay may pause at a checkpoint; close the dialog and keep the page
