@@ -276,6 +276,56 @@ function windowReadinessSignature(snapshot: Snapshot): string {
     (bounds ? `${bounds.x},${bounds.y},${bounds.width},${bounds.height}` : 'no-bounds');
 }
 
+/** The element a readiness proof has to see, or undefined when the step names none. */
+function readinessElement(step: ReadinessGatedStep): ElementLocator | undefined {
+  if (step.kind === 'key') return undefined;
+  if (step.kind === 'click') return step.target.kind === 'element' ? step.target : undefined;
+  return step.target;
+}
+
+/** One read of the bound window, reduced to what the proof compares. */
+interface ReadinessRead {
+  /** Empty when this read proves nothing yet; two equal non-empty values pass. */
+  signature?: string;
+  /** Why this read did not prove the target, for the timeout message. */
+  problem: string;
+  /** The step's own secure-target rule applies; the proof stops here. */
+  secure?: boolean;
+}
+
+/**
+ * What one read says about the target. The element is resolved with the same
+ * rules the step dispatches with (`actionable`), so a target only the name/value
+ * fallback can prove still counts, and a secure one is left to the step's own
+ * `UNSAFE_TARGET` instead of turning into a readiness fault.
+ */
+function readinessOf(snapshot: Snapshot, element: ElementLocator | undefined, proveElement: boolean): ReadinessRead {
+  if (!proveElement || element === undefined) {
+    if (!snapshot.tree.bounds) return { problem: 'the window has no bounds to prove it has settled' };
+    return {
+      signature: windowReadinessSignature(snapshot),
+      problem: 'the window bounds were still changing between reads',
+    };
+  }
+  let node: Node;
+  try {
+    node = actionable(snapshot, addressable(element)).node;
+  } catch (error) {
+    const fault = toFault(error);
+    if (fault.code === 'UNSAFE_TARGET') return { problem: fault.message, secure: true };
+    if (fault.code === 'NOT_FOUND' || fault.code === 'AMBIGUOUS') {
+      return { problem: `${describeLocator(element)} is still not provable (${fault.code})` };
+    }
+    throw error;
+  }
+  if (node.secure) return { problem: `${describeControl(node)} is a secure control`, secure: true };
+  if (node.states.includes('disabled')) return { problem: `${describeControl(node)} is still disabled` };
+  return {
+    signature: readinessSignature(node),
+    problem: `${describeControl(node)} was still changing between reads`,
+  };
+}
+
 /** A locator's identity in a readiness fault message. */
 function describeLocator(locator: ElementLocator): string {
   const name = (locator.name ?? '').trim();
@@ -537,90 +587,85 @@ class StepRunner {
         throw new Fault('SYSTEM_DIALOG_VISIBLE', 'A macOS system dialog is already visible before automatic input');
       }
     }
-    // A window the run just raised may answer the tree before it can take
-    // input, so the first event into it waits for its target to be provable.
-    await this.gateFirstInput(step);
+    // A context-menu item is pressed through the menu's own surface, whose
+    // open-and-retry path already outlasts a repaint; it consumes the switch
+    // without the readiness proof (which reads a window, not a menu).
+    if (step.kind === 'click' && step.target.kind === 'element' && step.target.role === 'menuitem') {
+      this.pendingWindowSwitch = false;
+    }
     const outcome = await this.dispatch(step);
     if (switchesWindow(step)) this.pendingWindowSwitch = true;
     return { ...outcome, ...await this.handOff(step) };
   }
 
   /**
-   * The readiness gate for one step. Only the first input after a switch pays
-   * it: the step that follows a raise, not every later step in the same window.
-   * A context-menu item is pressed through the menu's own surface with its own
-   * open-and-retry path, so it consumes the switch without this proof.
+   * The readiness proof for the first input after a window switch. It resolves
+   * the bound window, brings it forward and reads it twice, readinessProbeIntervalMs
+   * apart, and hands back the window and the exact snapshot the step will
+   * dispatch from: two agreeing reads of the same control (same role, name and
+   * bounds, not disabled), or of the same window bounds for a step that names no
+   * control. Only a read-only resolve is used — preparing a window is the step's
+   * own business — and one monotonic deadline bounds window selection, identity
+   * checks and snapshot reads together: a result that lands after it is refused
+   * instead of used.
    */
-  private async gateFirstInput(step: StepV2): Promise<void> {
-    if (!this.pendingWindowSwitch || !readinessGated.has(step.kind)) return;
-    this.pendingWindowSwitch = false;
-    const menuItem = step.kind === 'click' &&
-      step.target.kind === 'element' && step.target.role === 'menuitem';
-    if (menuItem) return;
-    await this.awaitInputReady(step as ReadinessGatedStep);
-  }
-
-  /**
-   * Proves the target of the first input after a window switch before any event
-   * is posted. Two reads of the bound window, readinessProbeIntervalMs apart,
-   * must name the same enabled control with the same role, name and bounds — or,
-   * for a step that names no control, the same window bounds. The wait is
-   * bounded: a target that never becomes provable is `TARGET_NOT_READY` with
-   * zero input, not a shorter press. A control that proves ready but still
-   * rejects a press is the ordinary click recovery's case, not this one.
-   */
-  private async awaitInputReady(step: ReadinessGatedStep): Promise<void> {
-    const element: ElementLocator | undefined = step.kind === 'key'
-      ? undefined
-      : step.kind === 'click'
-        ? (step.target.kind === 'element' ? step.target : undefined)
-        : step.target as ElementLocator;
+  private async awaitReadyWindow(step: ReadinessGatedStep): Promise<{ binding: WindowBinding; snapshot: Snapshot }> {
+    const element = readinessElement(step);
     // A target with no name and no identifier cannot be told apart from its
     // neighbours, and the step itself reports that. Readiness proves the window
     // in that case rather than inventing a stricter rule here.
     const proveElement = element !== undefined && (element.name !== '' || element.identifier !== undefined);
     // The same same-title disambiguation the step itself will use: the gate must
-    // not turn a window the flow can prove into an ambiguity.
-    const pick = (candidates: WindowInfo[]) => this.pickSameTitled(candidates, step);
-    const deadline = Date.now() + readinessProofTimeoutMs;
+    // not turn a window the flow can prove into an ambiguity. A candidate tree
+    // that cannot be read right now is retried inside the budget instead.
+    const pick = (candidates: WindowInfo[]) =>
+      this.pickSameTitled(candidates, step, { retryUnreadable: true });
+    const deadline = performance.now() + readinessProofTimeoutMs;
+    const remaining = () => deadline - performance.now();
+    const fail = (problem: string, reads: number): Fault => new Fault('TARGET_NOT_READY',
+      `${element ? describeLocator(element) : 'the bound window'} was not ready ${readinessProofTimeoutMs} ms ` +
+      `after the window was brought forward: ${problem} ` +
+      `(${reads} read${reads === 1 ? '' : 's'}); no input was delivered`);
     let previous: string | undefined;
     let problem = 'the window has not been read yet';
     let reads = 0;
     for (;;) {
       this.signal.throwIfAborted();
-      let signature: string | undefined;
+      let binding: WindowBinding | undefined;
+      let snapshot: Snapshot | undefined;
+      let read: ReadinessRead | undefined;
       try {
-        const binding = await this.resolver.resolveWindow(step.scope, pick);
-        const snapshot = await this.resolver.snapshot(binding);
+        binding = await this.resolver.resolveWindow(step.scope, pick, { repair: false });
+        await this.resolver.confirmForeground(binding);
+        snapshot = await this.resolver.snapshot(binding);
         reads += 1;
-        if (!proveElement) {
-          signature = windowReadinessSignature(snapshot);
-          problem = 'the window bounds were still changing between reads';
-        } else {
-          const { node } = resolve(snapshot, element!);
-          if (node.secure) return; // the step reports UNSAFE_TARGET itself
-          if (node.states.includes('disabled')) {
-            problem = `${describeControl(node)} is still disabled`;
-          } else {
-            signature = readinessSignature(node);
-            problem = `${describeControl(node)} was still changing between reads (${signature})`;
-          }
-        }
+        read = readinessOf(snapshot, element, proveElement);
       } catch (error) {
         const fault = toFault(error);
         if (!readinessTransientCodes.has(fault.code)) throw error;
         problem = `${fault.code}: ${fault.message}`;
       }
-      if (signature !== undefined && signature === previous) return;
-      previous = signature;
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) {
-        const what = element ? describeLocator(element) : 'the bound window';
-        throw new Fault('TARGET_NOT_READY',
-          `${what} was not ready ${readinessProofTimeoutMs} ms after the window was brought forward: ` +
-          `${problem} (${reads} read${reads === 1 ? '' : 's'}); no input was delivered`);
+      // A read or a selection that outlived the deadline is not evidence.
+      if (remaining() <= 0) throw fail(read?.problem ?? problem, reads);
+      if (read?.secure) return { binding: binding!, snapshot: snapshot! };
+      if (read?.signature !== undefined && read.signature === previous) {
+        return { binding: binding!, snapshot: snapshot! };
       }
-      await sleep(Math.min(readinessProbeIntervalMs, remaining), undefined, { signal: this.signal });
+      previous = read?.signature;
+      if (read !== undefined) problem = read.problem;
+      await sleep(Math.max(0, Math.min(readinessProbeIntervalMs, remaining())), undefined, { signal: this.signal });
+    }
+  }
+
+  /**
+   * The readiness wait can span a password prompt or a system dialog, so the
+   * gate that ran before it is re-checked before the first event is posted.
+   */
+  private async recheckInputGates(): Promise<void> {
+    await this.guardSecureInput();
+    if (await this.ctx.systemDialogVisible?.()) {
+      throw new Fault('SYSTEM_DIALOG_VISIBLE',
+        'A macOS system dialog appeared while the window was becoming ready; the run stops instead of typing into it');
     }
   }
 
@@ -988,13 +1033,27 @@ class StepRunner {
     // the fault is raised before any input is delivered, so a retry cannot
     // double-click.
     let lastError: unknown;
+    // Only the first input after a window switch pays the readiness proof, and
+    // only on its first attempt: a NOT_FOUND retry is already acting on a
+    // proven window.
+    const gate = step !== undefined && readinessGated.has(step.kind) && this.pendingWindowSwitch;
+    if (gate) this.pendingWindowSwitch = false;
     for (let attempt = 0; attempt < 4; attempt += 1) {
-      const binding = await this.resolver.resolveWindow(
-        scope,
-        step ? candidates => this.pickSameTitled(candidates, step) : undefined,
-      );
-      await this.resolver.confirmForeground(binding);
-      const snapshot = await this.resolver.snapshot(binding);
+      let binding: WindowBinding;
+      let snapshot: Snapshot;
+      if (gate && attempt === 0) {
+        // The proof hands back the very snapshot the step dispatches from, so
+        // the target it accepted is the target that is pressed.
+        ({ binding, snapshot } = await this.awaitReadyWindow(step as ReadinessGatedStep));
+        await this.recheckInputGates();
+      } else {
+        binding = await this.resolver.resolveWindow(
+          scope,
+          step ? candidates => this.pickSameTitled(candidates, step) : undefined,
+        );
+        await this.resolver.confirmForeground(binding);
+        snapshot = await this.resolver.snapshot(binding);
+      }
       try {
         const outcome = await work(binding, snapshot);
         const notes: string[] = [];
@@ -1130,6 +1189,7 @@ class StepRunner {
   private async pickSameTitled(
     candidates: WindowInfo[],
     step: StepV2,
+    { retryUnreadable = false }: { retryUnreadable?: boolean } = {},
   ): Promise<{ window: WindowInfo; reason: 'target' | 'focused' } | undefined> {
     const test = windowTest(step);
     if (!test) {
@@ -1140,9 +1200,20 @@ class StepRunner {
     }
     const holders: WindowInfo[] = [];
     for (const candidate of candidates) {
-      const snapshot = await this.desktop.snapshotWindow(candidate.id).catch(() => undefined);
-      const result = snapshot && test(snapshot);
-      // A failed read or an ambiguous element keeps this window in contention.
+      let snapshot: Snapshot | undefined;
+      try {
+        snapshot = await this.desktop.snapshotWindow(candidate.id);
+      } catch (error) {
+        // A tree that cannot be read right now leaves the window in contention.
+        // A caller under its own deadline retries the whole selection; a plain
+        // step keeps the ambiguity it would otherwise report.
+        if (!retryUnreadable) return undefined;
+        throw new Fault('INCOMPLETE_TREE',
+          `window ${candidate.id} could not be read while telling same-titled windows apart: ` +
+          (error instanceof Error ? error.message : String(error)));
+      }
+      const result = test(snapshot);
+      // An ambiguous element keeps this window in contention.
       if (result === undefined) return undefined;
       if (result) holders.push(candidate);
     }
