@@ -60,6 +60,13 @@ const clickTextFallbackMs = 5000;
 const maxWindowBindings = 64;
 const maxFocusEntries = 64;
 /**
+ * How much of one capture warning the workbench keeps (500 characters). The
+ * gap-origin report stays well inside that: a handful of short lines, then a
+ * count of the gaps it left out.
+ */
+const gapOriginLines = 6;
+const gapOriginChars = 480;
+/**
  * How long one window's tree may be reused. A pointer event inside the same
  * window reuses the tree it already read; past this age the window is read
  * again, because nothing else can prove the tree still describes the screen.
@@ -156,6 +163,43 @@ type WindowTreeCache = {
 type StepDraft = Record<string, unknown> & { kind: StepV2['kind'] };
 /** A recorded click target: the element under the pointer, or its raw point. */
 type ClickTarget = ElementLocator | { kind: 'point'; point: Point };
+/**
+ * What actually raised a scope gap, when it is not the event being consumed: a
+ * held press settled later by a focus, a hover or a capture boundary.
+ */
+type GapOrigin = {
+  handler: string;
+  app?: string;
+  window?: number;
+  generation?: number;
+  decision?: string;
+};
+
+/**
+ * A press that landed in a known window whose control it could not prove. It is
+ * held only while the focus that would prove it "only brought the window
+ * forward" can still be the next thing that happens.
+ */
+type HeldClick = {
+  key: string;
+  at: number;
+  seen: number;
+  /** The focus generation the press was made in. */
+  generation: number;
+  /**
+   * Whether this press can be the swallowed press that brought its window
+   * forward at all: only a press into a window that this generation had not
+   * already confirmed as focused can be that, because a window that was already
+   * focused needs no activation. The flow's last scope is not this proof: while
+   * the recording is paused the focus moves on without a line, and the flow
+   * keeps standing where it was.
+   */
+  activation: boolean;
+  button: 'left' | 'right';
+  where: string;
+  point: Point;
+  binding: WindowBinding;
+};
 
 function nearPoint(a: Point, b: Point) {
   return Math.abs(a[0] - b[0]) <= multiClickDistance && Math.abs(a[1] - b[1]) <= multiClickDistance;
@@ -367,10 +411,14 @@ export class GlobalRecording {
   /** The tree read each window has under way, so a click can wait for it. */
   private readonly settling = new Map<string, Promise<undefined>>();
 
-  private pendingGapClick?: {
-    key: string; at: number; seen: number;
-    where: string; point: Point; binding: WindowBinding;
-  };
+  private pendingGapClick?: HeldClick;
+  /** The event being consumed, kept so a gap can name the handler that raised it. */
+  private consuming?: CaptureEvent;
+  /** The handler the consuming event is going through; gap diagnostics only. */
+  private gapHandler = 'unknown';
+  /** Lines of the report that name what raised each scope gap. */
+  private readonly gapOrigins: string[] = [];
+  private gapOriginsOmitted = 0;
   private startupOpen = true;
   private startupDropped = 0;
   private notes = new Map<string, string>();
@@ -474,6 +522,18 @@ export class GlobalRecording {
   }
 
   /**
+   * Input left the recorded scope: the system app switcher, a key or scroll
+   * outside the window, the overlay, or a pause boundary. A held press can no
+   * longer be proven to be the press that brought its window forward, and a
+   * focus on that window after the boundary must not erase it, so the press is
+   * recorded where it landed before the flow moves on.
+   */
+  noteBoundary() {
+    this.endBursts();
+    if (this.pendingGapClick) this.flushPendingGap();
+  }
+
+  /**
    * Consumes one validated capture event. A text burst is merged by scope and
    * control, never across windows; a continuous secure interval becomes one
    * manual checkpoint and every piece of content inside it is discarded.
@@ -481,10 +541,15 @@ export class GlobalRecording {
   async add(event: CaptureEvent): Promise<void> {
     this.eventAt = event.t;
     this.eventSeen = event.seen;
-    // A held unprovable click is resolved by the focus that follows it (in
-    // onFocus); any other event means the click was not just an activation and
-    // its gap stands.
-    if (this.pendingGapClick && event.kind !== 'focus') this.flushPendingGap();
+    this.consuming = event;
+    this.gapHandler = event.kind;
+    // A held first-mouse press waits for the proof of what it did: a focus over
+    // its own window proves the press only brought that window forward, and an
+    // event that delivers input settles it where it landed. A hover delivers no
+    // input and cannot prove either, so it leaves the press untouched (onHover).
+    if (this.pendingGapClick && event.kind !== 'focus' && event.kind !== 'hover') {
+      this.flushPendingGap();
+    }
     if (event.kind === 'system_dialog') {
       if (event.visible === this.systemDialogVisible) return;
       this.systemDialogVisible = event.visible;
@@ -597,12 +662,23 @@ export class GlobalRecording {
     // The focus a Dock click was waiting for has arrived; the scope step below
     // (or the first-window branch) replaces the held gap.
     this.pendingDockGap = undefined;
-    // A held unprovable click whose own window this focus confirms only brought
-    // that window forward; macOS swallowed the press, so it is not a step.
-    if (this.pendingGapClick?.key === binding.key) {
-      this.pendingGapClick = undefined;
-      this.warn('CLICK_ONLY_ACTIVATED_WINDOW',
-        'A click landed on a window that was not focused yet; it only brought the window forward and was not recorded as a click');
+    const pending = this.pendingGapClick;
+    if (pending) {
+      if (pending.key !== binding.key) {
+        // The focus left the window the press belongs to, so the press cannot be
+        // the press that brought it forward. It is recorded now, before this
+        // navigation, so the timeline keeps the order the user worked in.
+        this.flushPendingGap();
+      } else if (this.provesHeldActivation(pending, event)) {
+        // This focus is the one the press caused: macOS swallowed the press to
+        // bring the window forward, so it is not a step.
+        this.dropHeldClick();
+      } else {
+        // A focus on the press's own window that the press did not cause (the
+        // user left and came back, possibly across a capture boundary). It
+        // proves nothing about the press, which is kept where it landed.
+        this.flushPendingGap();
+      }
     }
     if (!this.current) {
       this.current = { app: binding.app, key: binding.key };
@@ -641,14 +717,21 @@ export class GlobalRecording {
     if (event.decision === 'gap') {
       // The click landed in a known window but its target could not be proven,
       // which is what a first-mouse press on an unfocused window looks like.
-      // Hold the gap: the focus notification that follows proves the press only
-      // activated the window, and any other event flushes it as a real gap.
+      // Hold the press until the focus that names this window proves the press
+      // only brought it forward; input settles it where it landed (see add).
       this.endBursts();
       const where = [event.owner?.app, event.owner?.role, nativeLabel(event.owner?.name)].filter(Boolean).join(' ');
       this.pendingGapClick = {
         key: binding.key,
         at: event.t,
         seen: event.seen,
+        generation: event.focusGeneration,
+        // A window this generation already confirmed as focused needs no
+        // activation, so this press cannot have been the swallowed press that
+        // brought it forward. A generation with no confirmed window (the focus
+        // moved while paused and was never reported) leaves that open.
+        activation: this.generationWindow.get(event.focusGeneration) !== this.bindingId(binding),
+        button: event.button ?? 'left',
         where: where || 'an unnamed control',
         point: event.point,
         binding,
@@ -1316,13 +1399,44 @@ export class GlobalRecording {
   }
 
   private async onHover(event: Extract<CaptureEvent, { kind: 'hover' }>) {
+    // A hover can carry a capture-side gap of its own. That is a fact about the
+    // recording, not about the pointer, so it blocks here exactly as it does for
+    // every other event kind — before any hover is skipped and whether or not a
+    // window can be bound.
+    if (event.decision === 'gap') {
+      const code = event.gapCode ?? 'CAPTURE_SCOPE_UNVERIFIED';
+      if (code !== 'CAPTURE_SCOPE_UNVERIFIED') {
+        this.pushGap(code);
+        return;
+      }
+    }
+    // A held press is waiting for the focus that proves it only activated its
+    // window. A hover delivers no input, so it cannot settle that press either
+    // way: settling it here would turn a swallowed press into a click the user
+    // never made, and the focus (or the next input) still gets its say.
+    if (this.pendingGapClick) {
+      this.warn('HOVER_WHILE_CLICK_UNPROVEN',
+        'A hover arrived while a click was waiting for the focus that proves it only activated its window; the hover was not recorded and the click kept waiting');
+      return;
+    }
     const binding = this.bindingFor(event);
     if (!binding) {
-      this.pushGap('CAPTURE_SCOPE_UNVERIFIED');
+      // A hover names no action a replay must perform, and v2 has no coordinate
+      // hover, so a hover the helper could not attribute blocks nothing. A
+      // hover over a menu item reaches this path as a real `record` action whose
+      // window is the app window that opened the menu; the menu choice itself is
+      // still recorded by the click that follows, on its own evidence.
+      this.warn('UNTARGETED_HOVER',
+        'A hover named no window this recording can address; it was skipped because a hover is read-only');
       return;
     }
     if (event.decision === 'gap') {
-      this.pushGap(event.gapCode ?? 'CAPTURE_SCOPE_UNVERIFIED');
+      // Only a scope gap reaches here (every other code blocked above). The
+      // helper resolves a hover's evidence against the focused window, so a
+      // scope gap is conflicting evidence about a read-only event, not a missing
+      // user action: no replay could perform the hover anyway.
+      this.warn('UNTARGETED_HOVER',
+        'A hover could not prove the window under the pointer; it was skipped because a hover is read-only');
       return;
     }
     if (!this.claim(event, binding)) return;
@@ -2069,13 +2183,78 @@ export class GlobalRecording {
    * startup noise like any other unprovable opening event; every other gap is
    * evidence of lost input and is kept. A checkpoint gap is always kept.
    */
-  private pushGap(code: CaptureGapCode, { evidence = false, at = this.eventAt } = {}) {
+  private pushGap(code: CaptureGapCode, { evidence = false, at = this.eventAt, origin }: {
+    evidence?: boolean; at?: number; origin?: GapOrigin;
+  } = {}) {
     this.endBursts();
     if (!evidence && code === 'CAPTURE_SCOPE_UNVERIFIED' && !this.steps.length) {
       this.startupDropped += 1;
       return;
     }
+    const before = this.steps.length;
     this.push({ kind: 'gap', code }, at);
+    // A gap the step limit dropped has no id to point at; naming one anyway
+    // would send the reader to a step the flow does not contain.
+    if (code === 'CAPTURE_SCOPE_UNVERIFIED' && this.steps.length > before) {
+      this.noteGapOrigin(this.steps[this.steps.length - 1].id, origin);
+    }
+  }
+
+  /**
+   * `CAPTURE_SCOPE_UNVERIFIED` is raised by many handlers and the step alone
+   * cannot say which one, so a flow that blocks replay on it cannot be
+   * diagnosed after the fact. The capture report carries one line per such gap:
+   * the step id it actually got, the handler, the event's own window evidence,
+   * its decision and generation. That is enough to tell a click that lost its
+   * window from an unattributable hover, and it extends no flow schema and
+   * stores no screen content.
+   *
+   * `origin` names the event that actually caused the gap when it is not the
+   * event being consumed — a held press settled later by a focus, a hover or a
+   * boundary. The gap then also keeps the press's own time (`pushGap`'s `at`),
+   * so the report never blames the event that merely triggered the settlement.
+   *
+   * Read it from the record outcome's `warnings` (`code: CAPTURE_GAP_ORIGIN`):
+   * `cuekeeper record --json` prints it, and the workbench keeps it in the
+   * `api/record/stop` response (20 warnings, 500 characters each). A successful
+   * import then replaces the page message with "timeline imported" and reloads,
+   * so the line is read from that response, not from the page alert.
+   */
+  private noteGapOrigin(id: string, origin?: GapOrigin) {
+    const event = this.consuming;
+    const owner = event?.owner;
+    const line = [
+      id,
+      `from=${origin?.handler ?? this.gapHandler}`,
+      `app=${origin?.app ?? owner?.app ?? '-'}`,
+      `window=${origin?.window ?? owner?.windowNumber ?? '-'}`,
+      `gen=${origin?.generation ?? event?.focusGeneration ?? '-'}`,
+      `decision=${origin?.decision ?? (event && 'decision' in event ? event.decision ?? '-' : '-')}`,
+    ].join(' ');
+    if (this.gapOrigins.length < gapOriginLines) this.gapOrigins.push(line);
+    else this.gapOriginsOmitted += 1;
+    const lines = [...this.gapOrigins];
+    if (this.gapOriginsOmitted) lines.push(`+${this.gapOriginsOmitted} more`);
+    this.notes.set('CAPTURE_GAP_ORIGIN', lines.join('; ').slice(0, gapOriginChars));
+  }
+
+  /**
+   * Whether this focus is the one the held press caused. Only the first focus
+   * after the press (the next generation) can be it: a later focus on the same
+   * window means the user left and came back — across another app, or across a
+   * capture boundary — and proves nothing about the press. A press into the
+   * window the flow already stood in can never be an activation press.
+   */
+  private provesHeldActivation(pending: HeldClick, event: Extract<CaptureEvent, { kind: 'focus' }>) {
+    return pending.activation && event.focusGeneration === pending.generation + 1;
+  }
+
+  /** A press the window activation swallowed is not a step. */
+  private dropHeldClick() {
+    if (!this.pendingGapClick) return;
+    this.pendingGapClick = undefined;
+    this.warn('CLICK_ONLY_ACTIVATED_WINDOW',
+      'A click landed on a window that was not focused yet; it only brought the window forward and was not recorded as a click');
   }
 
   /**
@@ -2092,6 +2271,28 @@ export class GlobalRecording {
     if (!this.steps.length) {
       // Before the first step it names no window the flow could stand at.
       this.startupDropped += 1;
+      return;
+    }
+    if (pending.button === 'right') {
+      // Replay addresses a right click through the control the previous left
+      // click selected (run-v2 keeps `lastClickTarget`), so writing an unproven
+      // one as a plain click would press something else. It stays blocking
+      // evidence: the flow can be completed by editing it, never replayed blind.
+      this.warn('RIGHT_CLICK_UNPROVEN',
+        `A right click on ${pending.where} at ${pending.point[0]},${pending.point[1]} could not be proven to target an element; it blocks the flow instead of becoming a left click`);
+      // The gap is the press's, not the settling event's: it keeps the press's
+      // own time and evidence, so a focus, a hover or a boundary that merely
+      // triggered this settlement is never named as what lost the input.
+      this.pushGap('CAPTURE_SCOPE_UNVERIFIED', {
+        at: pending.at,
+        origin: {
+          handler: 'click',
+          app: pending.binding.app,
+          window: pending.binding.windowNumber,
+          generation: pending.generation,
+          decision: 'gap',
+        },
+      });
       return;
     }
     // The trees already read are all this click can be named from; the click
@@ -2399,7 +2600,7 @@ export async function recordGlobal(
         continue;
       }
       if (data.kind === 'boundary') {
-        recording.endBursts();
+        recording.noteBoundary();
         continue;
       }
       // The helper announces a pickup so v1 can read the tree the gesture starts

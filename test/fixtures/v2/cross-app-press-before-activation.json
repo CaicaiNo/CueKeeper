@@ -1,0 +1,84 @@
+{
+  "description": "The shape of global-4f702beb and global-6fad6ee0: a click in a Finder window, then the first press on an aTrust window that is not focused yet, then the focus that proves the press only brought that window forward, then the hover that follows it. The press must become the navigation and nothing else: no CAPTURE_SCOPE_UNVERIFIED gap, no second click, no second navigation.",
+  "snapshots": {
+    "11": {
+      "windowId": "w-11",
+      "tree": {
+        "role": "window", "name": "图片", "ref": "@w11:e1",
+        "bounds": { "x": 0, "y": 0, "width": 800, "height": 600 },
+        "states": [], "secure": false,
+        "children": [
+          {
+            "role": "cell", "name": "下载", "ref": "@w11:e2",
+            "bounds": { "x": 300, "y": 280, "width": 80, "height": 24 },
+            "states": [], "secure": false, "children": []
+          }
+        ]
+      }
+    },
+    "21": {
+      "windowId": "w-21",
+      "tree": {
+        "role": "window", "name": "aTrust", "ref": "@w21:e1",
+        "bounds": { "x": 900, "y": 0, "width": 800, "height": 600 },
+        "states": [], "secure": false,
+        "children": [
+          {
+            "role": "group", "name": "设置", "ref": "@w21:e2",
+            "bounds": { "x": 950, "y": 100, "width": 80, "height": 24 },
+            "states": [], "secure": false, "children": []
+          },
+          {
+            "role": "group", "name": "工作台", "ref": "@w21:e3",
+            "bounds": { "x": 1050, "y": 100, "width": 90, "height": 24 },
+            "states": [], "secure": false, "children": []
+          }
+        ]
+      }
+    }
+  },
+  "events": [
+    {
+      "kind": "focus", "t": 50, "seen": 1700000000000, "focusGeneration": 1, "secure": false,
+      "owner": {
+        "app": "com.apple.finder", "pid": 100, "processInstance": 1700000000000,
+        "windowNumber": 11, "windowTitle": "图片"
+      }
+    },
+    {
+      "kind": "click", "t": 2558, "seen": 1700000000000, "point": [340, 290],
+      "count": 1, "focusGeneration": 1, "secure": false, "decision": "record",
+      "owner": {
+        "app": "com.apple.finder", "pid": 100, "processInstance": 1700000000000,
+        "windowNumber": 11, "windowTitle": "图片",
+        "role": "AXCell", "name": "下载", "pressable": true
+      }
+    },
+    {
+      "kind": "click", "t": 5435, "seen": 1700000000000, "point": [990, 112],
+      "count": 1, "focusGeneration": 1, "secure": false, "decision": "gap",
+      "gapCode": "CAPTURE_SCOPE_UNVERIFIED",
+      "owner": {
+        "app": "com.electron.atrust", "pid": 200, "processInstance": 1700000000000,
+        "windowNumber": 21, "windowTitle": "aTrust",
+        "role": "AXGroup", "pressable": false
+      }
+    },
+    {
+      "kind": "focus", "t": 5544, "seen": 1700000000000, "focusGeneration": 2, "secure": false,
+      "owner": {
+        "app": "com.electron.atrust", "pid": 200, "processInstance": 1700000000000,
+        "windowNumber": 21, "windowTitle": "aTrust"
+      }
+    },
+    {
+      "kind": "hover", "t": 5600, "seen": 1700000000000, "point": [990, 112],
+      "dwellMs": 320, "focusGeneration": 2, "secure": false, "decision": "record",
+      "owner": {
+        "app": "com.electron.atrust", "pid": 200, "processInstance": 1700000000000,
+        "windowNumber": 21, "windowTitle": "aTrust",
+        "role": "AXGroup", "name": "设置", "pressable": false
+      }
+    }
+  ]
+}

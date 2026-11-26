@@ -1561,6 +1561,960 @@ test('a click on a window that is not focused yet becomes its activation, not a 
   assert.equal(flowV2Check.Check(flow), true);
 });
 
+// global-4f702beb / global-6fad6ee0 in one fixture: the press on the window that
+// is not focused yet, the focus that proves it only brought the window forward,
+// and the hover that follows. The gap the user sees must not come from any of
+// these events.
+test('a press before its window is focused becomes activate_app with no gap, and the hover adds no click', async () => {
+  const flow = (await recordFixture('cross-app-press-before-activation')).finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'activate_app', 'hover']);
+  assert.equal(flow.steps[1].scope.app, 'com.electron.atrust');
+  // The press was swallowed by the activation; replay must not click it, and
+  // the flow must not need a gap resolution before it can run.
+  assert.equal(flow.steps.filter(step => step.kind === 'click').length, 1);
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.equal(flowV2Check.Check(flow), true);
+  assert.doesNotThrow(() => parseFlowV2(flow));
+});
+
+// The literal sequence in the native order: a press on a window that is not
+// focused yet, a hover 365 ms later (the helper needs a 300 ms dwell and resets
+// it on the button event), then the focus that proves the press only brought the
+// window forward. The hover must not settle the press — settling it here records
+// a click the user never made — and the focus must still navigate exactly once.
+test('a press, a hover, then the focus: one navigation, no invented click', async () => {
+  const windows = {
+    11: {
+      windowId: 'w-11',
+      tree: {
+        role: 'window', name: '图片', ref: '@w11:e1',
+        bounds: { x: 0, y: 0, width: 800, height: 600 }, states: [], secure: false,
+        children: [{
+          role: 'cell', name: '下载', ref: '@w11:e2',
+          bounds: { x: 300, y: 280, width: 80, height: 24 }, states: [], secure: false, children: [],
+        }],
+      },
+    },
+    21: {
+      windowId: 'w-21',
+      tree: {
+        role: 'window', name: 'aTrust', ref: '@w21:e1',
+        bounds: { x: 900, y: 0, width: 800, height: 600 }, states: [], secure: false,
+        children: [{
+          role: 'group', name: '设置', ref: '@w21:e2',
+          bounds: { x: 950, y: 100, width: 80, height: 24 }, states: [], secure: false, children: [],
+        }],
+      },
+    },
+  };
+  const settles = [];
+  const recording = new GlobalRecording(
+    async window => structuredClone(windows[window.windowNumber]),
+    { now: () => NOW, scheduleSettle: task => { settles.push(task); } },
+  );
+  const owner = (app, pid, windowNumber, title, extra = {}) => ({
+    app, pid, processInstance: 1700000000000, windowNumber, windowTitle: title, ...extra,
+  });
+  const drain = async () => { while (settles.length) await settles.shift()(); };
+
+  // The recording starts in aTrust, so that window's tree is the screen the
+  // press will be looked up in: a click in it leaves one settled read behind.
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 50, seen: NOW, focusGeneration: 1, secure: false,
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 100, seen: NOW, point: [1090, 112], count: 1,
+    focusGeneration: 1, secure: false, decision: 'record',
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust', { role: 'AXGroup', name: '工作台', pressable: false }),
+  }));
+  await drain();
+  // The user moves to Finder and works there.
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 300, seen: NOW, focusGeneration: 2, secure: false,
+    owner: owner('com.apple.finder', 100, 11, '图片'),
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 400, seen: NOW, point: [340, 290], count: 1,
+    focusGeneration: 2, secure: false, decision: 'record',
+    owner: owner('com.apple.finder', 100, 11, '图片', { role: 'AXCell', name: '下载', pressable: true }),
+  }));
+  // Back to aTrust: the first press is swallowed by the window activation. The
+  // helper proves the window but not the control under the pointer, so the press
+  // arrives with Quartz window identity only and a gap decision.
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 5435, seen: NOW, point: [990, 112], count: 1,
+    focusGeneration: 2, secure: false, decision: 'gap',
+    gapCode: 'CAPTURE_SCOPE_UNVERIFIED',
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
+  }));
+  // The press is held, and the pointer passes back over the still-focused
+  // Finder window before aTrust is proved frontmost: the hover arrives between
+  // the press and the focus that settles it, after a full dwell.
+  await recording.add(parseCaptureEvent({
+    kind: 'hover', t: 5800, seen: NOW, point: [340, 290], dwellMs: 365,
+    focusGeneration: 2, secure: false, decision: 'record',
+    owner: owner('com.apple.finder', 100, 11, '图片', { role: 'AXCell', name: '下载', pressable: true }),
+  }));
+  // The focus that proves the press only brought aTrust forward.
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 5900, seen: NOW, focusGeneration: 3, secure: false,
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
+  }));
+  // The hover the pointer settles on once aTrust is frontmost, a dwell later.
+  await recording.add(parseCaptureEvent({
+    kind: 'hover', t: 6300, seen: NOW, point: [990, 112], dwellMs: 400,
+    focusGeneration: 3, secure: false, decision: 'record',
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust', { role: 'AXGroup', name: '设置' }),
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'activate_app', 'click', 'activate_app', 'hover']);
+  assert.deepEqual(flow.steps.slice(1, 4).map(step => step.scope.app), [
+    'com.apple.finder', 'com.apple.finder', 'com.electron.atrust',
+  ]);
+  // The held press is the one that activated aTrust: nothing records a click in
+  // aTrust for it, so the recording holds exactly the two presses the user made.
+  assert.deepEqual(flow.steps.filter(step => step.kind === 'click').map(step => step.scope.app), [
+    'com.electron.atrust', 'com.apple.finder',
+  ]);
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_ONLY_ACTIVATED_WINDOW'));
+  // The press is never named from the screen that was read before it, and the
+  // hover is not replayed before the press is settled.
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'CLICK_NAMED_FROM_SETTLED_TREE'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'HOVER_WHILE_CLICK_UNPROVEN'));
+  assert.equal(flowV2Check.Check(flow), true);
+  assert.doesNotThrow(() => parseFlowV2(flow));
+});
+
+// A press inside the window the flow already stands in cannot be the press that
+// activated it, and a focus the press did not cause cannot erase it. Three native
+// shapes: Cmd+Tab (a boundary plus two focus lines), an excursion the helper
+// reported as two focus lines, and a late focus on the same window whose earlier
+// excursion was never reported (a silent switch while paused). In all three the
+// press stays, before the first navigation the excursion caused.
+test('an unrelated focus never erases the press it did not cause', async () => {
+  const windows = {
+    11: {
+      windowId: 'w-11',
+      tree: {
+        role: 'window', name: '图片', ref: '@w11:e1',
+        bounds: { x: 0, y: 0, width: 800, height: 600 }, states: [], secure: false,
+        children: [{
+          role: 'cell', name: '下载', ref: '@w11:e2',
+          bounds: { x: 300, y: 280, width: 80, height: 24 }, states: [], secure: false, children: [],
+        }],
+      },
+    },
+    21: {
+      windowId: 'w-21',
+      tree: {
+        role: 'window', name: 'aTrust', ref: '@w21:e1',
+        bounds: { x: 900, y: 0, width: 800, height: 600 }, states: [], secure: false,
+        children: [{
+          role: 'group', name: '工作台', ref: '@w21:e2',
+          bounds: { x: 990, y: 100, width: 120, height: 24 }, states: [], secure: false, children: [],
+        }],
+      },
+    },
+  };
+  const owner = (app, pid, windowNumber, title, extra = {}) => ({
+    app, pid, processInstance: 1700000000000, windowNumber, windowTitle: title, ...extra,
+  });
+  const press = (t) => ({
+    kind: 'click', t, seen: NOW, point: [1000, 112], count: 1,
+    focusGeneration: 1, secure: false, decision: 'gap',
+    gapCode: 'CAPTURE_SCOPE_UNVERIFIED',
+    // The helper knew the window and the generation, but its AX read of the
+    // element contradicted the Quartz window, so no role or name is reported.
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
+  });
+  const hoverInTrust = (t) => ({
+    kind: 'hover', t, seen: NOW, point: [1000, 112], dwellMs: 400,
+    focusGeneration: 1, secure: false, decision: 'record',
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust', { role: 'AXGroup', name: '工作台' }),
+  });
+  const record = async (extra, { boundary = false } = {}) => {
+    const settles = [];
+    const recording = new GlobalRecording(
+      async window => structuredClone(windows[window.windowNumber]),
+      { now: () => NOW, scheduleSettle: task => { settles.push(task); } },
+    );
+    // The recording stands in aTrust with one recorded press, so the flow is
+    // already in the window the next press lands in.
+    await recording.add(parseCaptureEvent({
+      kind: 'focus', t: 50, seen: NOW, focusGeneration: 1, secure: false,
+      owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
+    }));
+    await recording.add(parseCaptureEvent({
+      kind: 'click', t: 100, seen: NOW, point: [1000, 112], count: 1,
+      focusGeneration: 1, secure: false, decision: 'record',
+      owner: owner('com.electron.atrust', 200, 21, 'aTrust', { role: 'AXGroup', name: '工作台', pressable: false }),
+    }));
+    while (settles.length) await settles.shift()();
+    await recording.add(parseCaptureEvent(press(1200)));
+    await recording.add(parseCaptureEvent(hoverInTrust(1600)));
+    if (boundary) recording.noteBoundary();
+    for (const event of extra) await recording.add(parseCaptureEvent(event));
+    return { flow: recording.finish(), recording };
+  };
+
+  const kindsOf = flow => flow.steps.map(step => step.kind);
+  const firstNavigation = flow => flow.steps.findIndex(step => step.kind === 'activate_app');
+
+  // 1. Cmd+Tab: the helper emits a boundary for the switcher and then two focus
+  //    notifications. The press must be recorded before the first navigation.
+  const viaSwitcher = await record([
+    { kind: 'focus', t: 1700, seen: NOW, focusGeneration: 2, secure: false,
+      owner: owner('com.apple.finder', 100, 11, '图片') },
+    { kind: 'focus', t: 1800, seen: NOW, focusGeneration: 3, secure: false,
+      owner: owner('com.electron.atrust', 200, 21, 'aTrust') },
+  ], { boundary: true });
+  assert.deepEqual(kindsOf(viaSwitcher.flow), ['click', 'click', 'activate_app', 'activate_app']);
+  assert.equal(firstNavigation(viaSwitcher.flow), 2);
+  assert.equal(viaSwitcher.flow.steps[1].scope.app, 'com.electron.atrust');
+  assert.equal(viaSwitcher.recording.captureWarnings.some(warning => warning.code === 'CLICK_ONLY_ACTIVATED_WINDOW'), false);
+  assert.equal(viaSwitcher.flow.steps.some(step => step.kind === 'gap'), false);
+  assert.doesNotThrow(() => parseFlowV2(viaSwitcher.flow));
+
+  // 2. The same excursion without a boundary: the helper reported both focus
+  //    changes, so the press is settled by the first one that left its window.
+  const viaFocus = await record([
+    { kind: 'focus', t: 1700, seen: NOW, focusGeneration: 2, secure: false,
+      owner: owner('com.apple.finder', 100, 11, '图片') },
+    { kind: 'focus', t: 1800, seen: NOW, focusGeneration: 3, secure: false,
+      owner: owner('com.electron.atrust', 200, 21, 'aTrust') },
+  ]);
+  assert.deepEqual(kindsOf(viaFocus.flow), ['click', 'click', 'activate_app', 'activate_app']);
+  assert.equal(firstNavigation(viaFocus.flow), 2);
+
+  // 3. A silent excursion (a switch while paused): only the late focus on the
+  //    press's own window arrives, so nothing can be concluded about the press.
+  const lateFocus = await record([
+    { kind: 'focus', t: 1700, seen: NOW, focusGeneration: 3, secure: false,
+      owner: owner('com.electron.atrust', 200, 21, 'aTrust') },
+  ]);
+  assert.deepEqual(kindsOf(lateFocus.flow), ['click', 'click']);
+  assert.equal(lateFocus.recording.captureWarnings.some(warning => warning.code === 'CLICK_ONLY_ACTIVATED_WINDOW'), false);
+  assert.equal(lateFocus.flow.steps.some(step => step.kind === 'gap'), false);
+  assert.doesNotThrow(() => parseFlowV2(lateFocus.flow));
+});
+
+// While paused the focus moves on without a line, and the flow keeps standing in
+// the window it last recorded. The first press after resume is then a real
+// activation press on a window the flow already stands in — the window identity
+// confirmed for the press's own generation is what says whether that window was
+// already focused, not the flow's last scope. It must be dropped as activation,
+// never recorded as a second click.
+test('a press after a silent focus change is still the activation it was', async () => {
+  const windows = {
+    11: {
+      windowId: 'w-11',
+      tree: {
+        role: 'window', name: '图片', ref: '@w11:e1',
+        bounds: { x: 0, y: 0, width: 800, height: 600 }, states: [], secure: false,
+        children: [{
+          role: 'cell', name: '下载', ref: '@w11:e2',
+          bounds: { x: 300, y: 280, width: 80, height: 24 }, states: [], secure: false, children: [],
+        }],
+      },
+    },
+    21: {
+      windowId: 'w-21',
+      tree: {
+        role: 'window', name: 'aTrust', ref: '@w21:e1',
+        bounds: { x: 900, y: 0, width: 800, height: 600 }, states: [], secure: false,
+        children: [{
+          role: 'group', name: '工作台', ref: '@w21:e2',
+          bounds: { x: 990, y: 100, width: 120, height: 24 }, states: [], secure: false, children: [],
+        }],
+      },
+    },
+  };
+  const settles = [];
+  const recording = new GlobalRecording(
+    async window => structuredClone(windows[window.windowNumber]),
+    { now: () => NOW, scheduleSettle: task => { settles.push(task); } },
+  );
+  const owner = (app, pid, windowNumber, title, extra = {}) => ({
+    app, pid, processInstance: 1700000000000, windowNumber, windowTitle: title, ...extra,
+  });
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 50, seen: NOW, focusGeneration: 1, secure: false,
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 100, seen: NOW, point: [1000, 112], count: 1,
+    focusGeneration: 1, secure: false, decision: 'record',
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust', { role: 'AXGroup', name: '工作台', pressable: false }),
+  }));
+  while (settles.length) await settles.shift()();
+  // Paused: the front app becomes Finder and the generation advances, but the
+  // helper reports no focus line (noteFocus does not report while paused).
+  // Resume: the first press goes back to aTrust, so it activates it.
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 900, seen: NOW, point: [1000, 112], count: 1,
+    focusGeneration: 2, secure: false, decision: 'gap',
+    gapCode: 'CAPTURE_SCOPE_UNVERIFIED',
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
+  }));
+  // The focus the activation produced, with the full window identity.
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 1000, seen: NOW, focusGeneration: 3, secure: false,
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
+  assert.equal(flow.steps[0].target.name, '工作台');
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_ONLY_ACTIVATED_WINDOW'));
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'CLICK_NAMED_FROM_SETTLED_TREE'), false);
+  assert.equal(flowV2Check.Check(flow), true);
+  assert.doesNotThrow(() => parseFlowV2(flow));
+});
+
+// A right click that could not be proven must stay blocking evidence. Writing it
+// as a click would replay it as a left press, and replay addresses a right click
+// through the control the previous left click selected — pressing something the
+// user never touched.
+test('an unproven right click blocks instead of becoming a left click', async () => {
+  const windows = {
+    11: {
+      windowId: 'w-11',
+      tree: {
+        role: 'window', name: '图片', ref: '@w11:e1',
+        bounds: { x: 0, y: 0, width: 800, height: 600 }, states: [], secure: false,
+        children: [{
+          role: 'cell', name: '下载', ref: '@w11:e2',
+          bounds: { x: 300, y: 280, width: 80, height: 24 }, states: [], secure: false, children: [],
+        }],
+      },
+    },
+    21: {
+      windowId: 'w-21',
+      tree: {
+        role: 'window', name: 'aTrust', ref: '@w21:e1',
+        bounds: { x: 900, y: 0, width: 800, height: 600 }, states: [], secure: false,
+        children: [{
+          role: 'group', name: '工作台', ref: '@w21:e2',
+          bounds: { x: 990, y: 100, width: 120, height: 24 }, states: [], secure: false, children: [],
+        }],
+      },
+    },
+  };
+  const settles = [];
+  const recording = new GlobalRecording(
+    async window => structuredClone(windows[window.windowNumber]),
+    { now: () => NOW, scheduleSettle: task => { settles.push(task); } },
+  );
+  const owner = (app, pid, windowNumber, title, extra = {}) => ({
+    app, pid, processInstance: 1700000000000, windowNumber, windowTitle: title, ...extra,
+  });
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 50, seen: NOW, focusGeneration: 1, secure: false,
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 100, seen: NOW, point: [1000, 112], count: 1,
+    focusGeneration: 1, secure: false, decision: 'record',
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust', { role: 'AXGroup', name: '工作台', pressable: false }),
+  }));
+  while (settles.length) await settles.shift()();
+  // The same window, second button: the helper accepts the right press but
+  // cannot prove the control under it.
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 200, seen: NOW, point: [1000, 112], count: 1, button: 'right',
+    focusGeneration: 1, secure: false, decision: 'gap',
+    gapCode: 'CAPTURE_SCOPE_UNVERIFIED',
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
+  }));
+  // Cmd+Tab: the switcher is a capture boundary, then the two focus lines.
+  recording.noteBoundary();
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 300, seen: NOW, focusGeneration: 2, secure: false,
+    owner: owner('com.apple.finder', 100, 11, '图片'),
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 400, seen: NOW, focusGeneration: 3, secure: false,
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'gap', 'activate_app', 'activate_app']);
+  assert.equal(flow.steps[1].code, 'CAPTURE_SCOPE_UNVERIFIED');
+  // No second click, left or otherwise.
+  assert.equal(flow.steps.filter(step => step.kind === 'click').length, 1);
+  assert.equal(flow.steps.some(step => step.button !== undefined), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'RIGHT_CLICK_UNPROVEN'));
+  assert.throws(() => parseFlowV2(flow), { code: 'CAPTURE_GAP' });
+});
+
+// The gap a settled press leaves is the press's gap: it keeps the press's own
+// time and its own window evidence, not those of the focus or hover that merely
+// triggered the settlement. Otherwise the diagnostic that is meant to locate a
+// real gap would blame the wrong event at the wrong moment.
+test('a settled right press keeps its own time and origin in the gap report', async () => {
+  const windows = {
+    11: {
+      windowId: 'w-11',
+      tree: {
+        role: 'window', name: '图片', ref: '@w11:e1',
+        bounds: { x: 0, y: 0, width: 800, height: 600 }, states: [], secure: false,
+        children: [{
+          role: 'cell', name: '下载', ref: '@w11:e2',
+          bounds: { x: 300, y: 280, width: 80, height: 24 }, states: [], secure: false, children: [],
+        }],
+      },
+    },
+    21: {
+      windowId: 'w-21',
+      tree: {
+        role: 'window', name: 'aTrust', ref: '@w21:e1',
+        bounds: { x: 900, y: 0, width: 800, height: 600 }, states: [], secure: false,
+        children: [{
+          role: 'group', name: '工作台', ref: '@w21:e2',
+          bounds: { x: 990, y: 100, width: 120, height: 24 }, states: [], secure: false, children: [],
+        }],
+      },
+    },
+  };
+  const owner = (app, pid, windowNumber, title, extra = {}) => ({
+    app, pid, processInstance: 1700000000000, windowNumber, windowTitle: title, ...extra,
+  });
+  const build = () => {
+    const settles = [];
+    const recording = new GlobalRecording(
+      async window => structuredClone(windows[window.windowNumber]),
+      { now: () => NOW, scheduleSettle: task => { settles.push(task); } },
+    );
+    return { recording, settles };
+  };
+  const press = {
+    kind: 'click', t: 1100, seen: NOW, point: [1000, 112], count: 1, button: 'right',
+    focusGeneration: 2, secure: false, decision: 'gap',
+    gapCode: 'CAPTURE_SCOPE_UNVERIFIED',
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
+  };
+  const open = async ({ recording, settles }) => {
+    await recording.add(parseCaptureEvent({
+      kind: 'focus', t: 0, seen: NOW, focusGeneration: 2, secure: false,
+      owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
+    }));
+    await recording.add(parseCaptureEvent({
+      kind: 'click', t: 0, seen: NOW, point: [1000, 112], count: 1,
+      focusGeneration: 2, secure: false, decision: 'record',
+      owner: owner('com.electron.atrust', 200, 21, 'aTrust', { role: 'AXGroup', name: '工作台', pressable: false }),
+    }));
+    while (settles.length) await settles.shift()();
+    await recording.add(parseCaptureEvent(press));
+  };
+  const originOf = recording => recording.captureWarnings
+    .find(warning => warning.code === 'CAPTURE_GAP_ORIGIN')?.message;
+
+  // Settled by another app's focus, 700 ms after the press.
+  const viaFocus = build();
+  await open(viaFocus);
+  await viaFocus.recording.add(parseCaptureEvent({
+    kind: 'focus', t: 1800, seen: NOW, focusGeneration: 3, secure: false,
+    owner: owner('com.apple.finder', 100, 11, '图片'),
+  }));
+  const focusFlow = viaFocus.recording.finish();
+  assert.deepEqual(focusFlow.steps.map(step => step.kind), ['click', 'gap', 'activate_app']);
+  assert.equal(focusFlow.steps[1].atMs, 1100);
+  assert.match(originOf(viaFocus.recording), /^s2 from=click app=com\.electron\.atrust window=21 gen=2 decision=gap$/);
+  assert.throws(() => parseFlowV2(focusFlow), { code: 'CAPTURE_GAP' });
+
+  // Settled by the end of the recording after a hover: the hover is not blamed.
+  const viaHover = build();
+  await open(viaHover);
+  await viaHover.recording.add(parseCaptureEvent({
+    kind: 'hover', t: 1500, seen: NOW, point: [1000, 112], dwellMs: 400,
+    focusGeneration: 2, secure: false, decision: 'record',
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust', { role: 'AXGroup', name: '工作台' }),
+  }));
+  const hoverFlow = viaHover.recording.finish();
+  assert.deepEqual(hoverFlow.steps.map(step => step.kind), ['click', 'gap']);
+  assert.equal(hoverFlow.steps[1].atMs, 1100);
+  assert.match(originOf(viaHover.recording), /^s2 from=click app=com\.electron\.atrust window=21 gen=2 decision=gap$/);
+  assert.ok(!originOf(viaHover.recording).includes('from=hover'));
+  assert.throws(() => parseFlowV2(hoverFlow), { code: 'CAPTURE_GAP' });
+});
+
+// The hover exemption is not a way to drop presses. A hover inside the press's
+// own generation proves nothing about it either, so it is skipped and the press
+// keeps its own evidence: it is still recorded where it landed, exactly once.
+test('a hover in the press generation never settles the held press', async () => {
+  const snapshot = {
+    windowId: 'w-11',
+    tree: {
+      role: 'window', name: 'client', ref: '@finder:e1',
+      bounds: { x: 400, y: 200, width: 800, height: 500 }, states: [], secure: false,
+      children: [{
+        role: 'button', name: '刷新', ref: '@finder:e2',
+        bounds: { x: 430, y: 230, width: 60, height: 40 }, states: [], secure: false, children: [],
+      }],
+    },
+  };
+  const settles = [];
+  const recording = new GlobalRecording(
+    async () => structuredClone(snapshot),
+    { now: () => NOW, scheduleSettle: task => { settles.push(task); } },
+  );
+  const window = {
+    app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+    windowNumber: 11, windowTitle: 'client',
+  };
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 100, seen: NOW, focusGeneration: 1, secure: false, owner: window,
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 200, seen: NOW, point: [450, 250], count: 1,
+    focusGeneration: 1, secure: false, decision: 'record',
+    owner: { ...window, role: 'AXButton', name: '刷新' },
+  }));
+  while (settles.length) await settles.shift()();
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 300, seen: NOW, point: [450, 250], count: 1,
+    focusGeneration: 1, secure: false, decision: 'gap',
+    gapCode: 'CAPTURE_SCOPE_UNVERIFIED',
+    owner: { ...window, role: 'AXRow', pressable: true },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'hover', t: 340, seen: NOW, point: [450, 250], dwellMs: 300,
+    focusGeneration: 1, secure: false, decision: 'record',
+    owner: { ...window, role: 'AXButton', name: '刷新' },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'click']);
+  // The press is kept from the tree that was on screen before it, once.
+  assert.deepEqual(flow.steps[1].target, { kind: 'element', role: 'button', name: '刷新' });
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'HOVER_WHILE_CLICK_UNPROVEN'));
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+// A hover that proves nothing about the held press is skipped, never used as
+// the event that settles it: settling there would emit a navigation back to
+// whichever window the pointer drifted over.
+test('a hover elsewhere does not settle the held press or navigate to it', async () => {
+  const windows = {
+    11: {
+      windowId: 'w-11',
+      tree: {
+        role: 'window', name: '图片', ref: '@w11:e1',
+        bounds: { x: 0, y: 0, width: 800, height: 600 }, states: [], secure: false,
+        children: [{
+          role: 'cell', name: '下载', ref: '@w11:e2',
+          bounds: { x: 300, y: 280, width: 80, height: 24 }, states: [], secure: false, children: [],
+        }],
+      },
+    },
+    21: {
+      windowId: 'w-21',
+      tree: {
+        role: 'window', name: 'aTrust', ref: '@w21:e1',
+        bounds: { x: 900, y: 0, width: 800, height: 600 }, states: [], secure: false,
+        children: [{
+          role: 'group', name: '设置', ref: '@w21:e2',
+          bounds: { x: 950, y: 100, width: 80, height: 24 }, states: [], secure: false, children: [],
+        }],
+      },
+    },
+  };
+  const recording = new GlobalRecording(
+    async window => structuredClone(windows[window.windowNumber]), { now: () => NOW },
+  );
+  const owner = (app, pid, windowNumber, title, extra = {}) => ({
+    app, pid, processInstance: 1700000000000, windowNumber, windowTitle: title, ...extra,
+  });
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 50, seen: NOW, focusGeneration: 1, secure: false,
+    owner: owner('com.apple.finder', 100, 11, '图片'),
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 100, seen: NOW, point: [340, 290], count: 1,
+    focusGeneration: 1, secure: false, decision: 'record',
+    owner: owner('com.apple.finder', 100, 11, '图片', { role: 'AXCell', name: '下载', pressable: true }),
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 200, seen: NOW, point: [990, 112], count: 1,
+    focusGeneration: 1, secure: false, decision: 'gap',
+    gapCode: 'CAPTURE_SCOPE_UNVERIFIED',
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust', { role: 'AXGroup', pressable: false }),
+  }));
+  // The pointer drifts back over the still-focused Finder window.
+  await recording.add(parseCaptureEvent({
+    kind: 'hover', t: 240, seen: NOW, point: [340, 290], dwellMs: 300,
+    focusGeneration: 1, secure: false, decision: 'record',
+    owner: owner('com.apple.finder', 100, 11, '图片', { role: 'AXCell', name: '下载', pressable: true }),
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'activate_app', 'click']);
+  assert.equal(flow.steps.filter(step => step.kind === 'activate_app').length, 1);
+  assert.equal(flow.steps[1].scope.app, 'com.electron.atrust');
+  assert.equal(flow.steps.some(step => step.kind === 'hover'), false);
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'HOVER_WHILE_CLICK_UNPROVEN'));
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+// A hover is read-only. When the helper could not attribute it, recording a gap
+// blocks every replay over a step no replay could perform; the warning is the
+// honest record that the dwell was skipped.
+test('a hover that names no window is skipped instead of blocking the flow', async () => {
+  const recording = new GlobalRecording(async () => assert.fail('no window tree expected'), { now: () => NOW });
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 50, seen: NOW, focusGeneration: 1, secure: false,
+    owner: {
+      app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+      windowNumber: 11, windowTitle: 'client',
+    },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 100, seen: NOW, point: [450, 250], count: 1,
+    focusGeneration: 1, secure: false, decision: 'record',
+    owner: {
+      app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+      windowNumber: 11, windowTitle: 'client', role: 'AXButton', name: '刷新',
+    },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'hover', t: 160, seen: NOW, point: [900, 900], dwellMs: 300,
+    focusGeneration: 1, secure: false, decision: 'record', owner: {},
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_HOVER'));
+  assert.equal(flowV2Check.Check(flow), true);
+  assert.doesNotThrow(() => parseFlowV2(flow));
+});
+
+// The same rule for a hover whose own evidence is a scope gap — but only that
+// code: a hover inside a secure interval still opens the checkpoint, because
+// dropping it would hide protected input.
+test('a hover with a scope gap is skipped, and a secure hover still opens the interval', async () => {
+  const recording = new GlobalRecording(async () => assert.fail('no window tree expected'), { now: () => NOW });
+  const window = {
+    app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+    windowNumber: 11, windowTitle: 'client',
+  };
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 50, seen: NOW, focusGeneration: 1, secure: false, owner: window,
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 100, seen: NOW, point: [450, 250], count: 1,
+    focusGeneration: 1, secure: false, decision: 'record',
+    owner: { ...window, role: 'AXButton', name: '刷新' },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'hover', t: 150, seen: NOW, point: [450, 250], dwellMs: 300,
+    focusGeneration: 1, secure: false, decision: 'gap',
+    gapCode: 'CAPTURE_SCOPE_UNVERIFIED', owner: window,
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'hover', t: 200, seen: NOW, point: [450, 250], dwellMs: 300,
+    focusGeneration: 1, secure: true, secureEvidence: ['system_secure_input'],
+    decision: 'gap', gapCode: 'SECURE_INPUT', owner: window,
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 260, seen: NOW, point: [450, 250], count: 1,
+    focusGeneration: 1, secure: false, decision: 'record',
+    owner: { ...window, role: 'AXButton', name: '刷新' },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'manual_checkpoint', 'click']);
+  assert.equal(flow.steps[1].reason, 'secure_input');
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_HOVER'));
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+// A hover whose own evidence is a gap must not delete the held press either:
+// the press is settled by the same paths as before, and the hover's scope gap
+// stays read-only noise.
+test('a hover with a scope gap never deletes the held press', async () => {
+  const snapshot = {
+    windowId: 'w-11',
+    tree: {
+      role: 'window', name: 'client', ref: '@finder:e1',
+      bounds: { x: 400, y: 200, width: 800, height: 500 }, states: [], secure: false,
+      children: [{
+        role: 'button', name: '刷新', ref: '@finder:e2',
+        bounds: { x: 430, y: 230, width: 60, height: 40 }, states: [], secure: false, children: [],
+      }],
+    },
+  };
+  const settles = [];
+  const recording = new GlobalRecording(
+    async () => structuredClone(snapshot),
+    { now: () => NOW, scheduleSettle: task => { settles.push(task); } },
+  );
+  const window = {
+    app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+    windowNumber: 11, windowTitle: 'client',
+  };
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 100, seen: NOW, focusGeneration: 1, secure: false, owner: window,
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 200, seen: NOW, point: [450, 250], count: 1,
+    focusGeneration: 1, secure: false, decision: 'record',
+    owner: { ...window, role: 'AXButton', name: '刷新' },
+  }));
+  while (settles.length) await settles.shift()();
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 300, seen: NOW, point: [450, 250], count: 1,
+    focusGeneration: 1, secure: false, decision: 'gap',
+    gapCode: 'CAPTURE_SCOPE_UNVERIFIED',
+    owner: { ...window, role: 'AXRow', pressable: true },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'hover', t: 340, seen: NOW, point: [450, 250], dwellMs: 300,
+    focusGeneration: 1, secure: false, decision: 'gap',
+    gapCode: 'CAPTURE_SCOPE_UNVERIFIED', owner: window,
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'click']);
+  assert.deepEqual(flow.steps[1].target, { kind: 'element', role: 'button', name: '刷新' });
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'HOVER_WHILE_CLICK_UNPROVEN'));
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+// A capture-side gap is not a hover's to downgrade, whether the pointer can be
+// attributed to a window or not, and whether or not a press is held.
+test('an explicit capture gap on a hover still blocks the flow', async () => {
+  const window = {
+    app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+    windowNumber: 11, windowTitle: 'client',
+  };
+  const cases = [
+    { name: 'held press, bound window', owner: window, pending: true },
+    { name: 'held press, unbound window', owner: {}, pending: true },
+    { name: 'no press, unbound window', owner: {}, pending: false },
+  ];
+  for (const label of cases) {
+    const recording = new GlobalRecording(async () => assert.fail('no window tree expected'), { now: () => NOW });
+    await recording.add(parseCaptureEvent({
+      kind: 'focus', t: 50, seen: NOW, focusGeneration: 1, secure: false, owner: window,
+    }));
+    await recording.add(parseCaptureEvent({
+      kind: 'click', t: 100, seen: NOW, point: [450, 250], count: 1,
+      focusGeneration: 1, secure: false, decision: 'record',
+      owner: { ...window, role: 'AXButton', name: '刷新' },
+    }));
+    if (label.pending) {
+      await recording.add(parseCaptureEvent({
+        kind: 'click', t: 200, seen: NOW, point: [450, 250], count: 1,
+        focusGeneration: 1, secure: false, decision: 'gap',
+        gapCode: 'CAPTURE_SCOPE_UNVERIFIED',
+        owner: { ...window, role: 'AXRow', pressable: true },
+      }));
+    }
+    await recording.add(parseCaptureEvent({
+      kind: 'hover', t: 240, seen: NOW, point: [450, 250], dwellMs: 300,
+      focusGeneration: 1, secure: false, decision: 'gap',
+      gapCode: 'STALE_CAPTURE', owner: label.owner,
+    }));
+
+    const flow = recording.finish();
+    const gaps = flow.steps.filter(step => step.kind === 'gap').map(step => step.code);
+    assert.ok(gaps.includes('STALE_CAPTURE'), label.name);
+    assert.throws(() => parseFlowV2(flow), { code: 'CAPTURE_GAP' }, label.name);
+  }
+});
+
+// The input paths keep their existing settlement: a second press, a scroll or a
+// key shows the held press did something, so it is recorded where it landed and
+// no gap is invented. Only hover is exempt from settling the press.
+test('a second press, a scroll or a key still settles the held press', async () => {
+  const snapshot = {
+    windowId: 'w-11',
+    tree: {
+      role: 'window', name: 'client', ref: '@finder:e1',
+      bounds: { x: 400, y: 200, width: 800, height: 500 }, states: [], secure: false,
+      children: [{
+        role: 'button', name: '刷新', ref: '@finder:e2',
+        bounds: { x: 430, y: 230, width: 60, height: 40 }, states: [], secure: false, children: [],
+      }],
+    },
+  };
+  const window = {
+    app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+    windowNumber: 11, windowTitle: 'client',
+  };
+  const settleWith = async (event, expected) => {
+    const settles = [];
+    const recording = new GlobalRecording(
+      async () => structuredClone(snapshot),
+      { now: () => NOW, scheduleSettle: task => { settles.push(task); } },
+    );
+    await recording.add(parseCaptureEvent({
+      kind: 'focus', t: 100, seen: NOW, focusGeneration: 1, secure: false, owner: window,
+    }));
+    await recording.add(parseCaptureEvent({
+      kind: 'click', t: 200, seen: NOW, point: [450, 250], count: 1,
+      focusGeneration: 1, secure: false, decision: 'record',
+      owner: { ...window, role: 'AXButton', name: '刷新' },
+    }));
+    while (settles.length) await settles.shift()();
+    await recording.add(parseCaptureEvent({
+      kind: 'click', t: 300, seen: NOW, point: [450, 250], count: 1,
+      focusGeneration: 1, secure: false, decision: 'gap',
+      gapCode: 'CAPTURE_SCOPE_UNVERIFIED',
+      owner: { ...window, role: 'AXRow', pressable: true },
+    }));
+    await recording.add(parseCaptureEvent(event));
+    const flow = recording.finish();
+    assert.deepEqual(flow.steps.map(step => step.kind), expected, event.kind);
+    assert.equal(flow.steps.some(step => step.kind === 'gap'), false, event.kind);
+    // The held press is kept exactly once, before the event that settled it.
+    assert.equal(
+      flow.steps.filter(step => step.kind === 'click').length,
+      expected.filter(kind => kind === 'click').length,
+      event.kind,
+    );
+    assert.equal(flowV2Check.Check(flow), true, event.kind);
+  };
+
+  await settleWith({
+    kind: 'click', t: 340, seen: NOW, point: [450, 250], count: 1,
+    focusGeneration: 1, secure: false, decision: 'record',
+    owner: { ...window, role: 'AXButton', name: '刷新' },
+  }, ['click', 'click', 'click']);
+  await settleWith({
+    kind: 'scroll', t: 340, seen: NOW, point: [450, 250], deltaX: 0, deltaY: -3,
+    focusGeneration: 1, secure: false, decision: 'record',
+    owner: { ...window, role: 'AXButton', name: '刷新' },
+  }, ['click', 'click', 'scroll']);
+  await settleWith({
+    kind: 'key', t: 340, seen: NOW, key: 'return', modifiers: [],
+    focusGeneration: 1, secure: false, decision: 'record', owner: window,
+  }, ['click', 'click', 'key']);
+});
+
+// A menu item is the native exception to "hover only for the focused window":
+// the helper attributes the menu action to the app window that opened it and
+// reports `record`. The hover that follows must not change how the menu choice
+// is recorded — the click keeps the item name and the app window scope.
+test('a menu item hover keeps the menu choice that follows', async () => {
+  const snapshot = {
+    windowId: 'w-11',
+    tree: {
+      role: 'window', name: 'client', ref: '@finder:e1',
+      bounds: { x: 400, y: 200, width: 800, height: 500 }, states: [], secure: false,
+      children: [{
+        role: 'menuitem', name: '重新命名', ref: '@finder:e2',
+        bounds: { x: 430, y: 230, width: 90, height: 24 }, states: [], secure: false, children: [],
+      }],
+    },
+  };
+  const recording = new GlobalRecording(async () => structuredClone(snapshot), { now: () => NOW });
+  const window = {
+    app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+    windowNumber: 11, windowTitle: 'client',
+  };
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 100, seen: NOW, focusGeneration: 1, secure: false, owner: window,
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'hover', t: 150, seen: NOW, point: [450, 240], dwellMs: 320,
+    focusGeneration: 1, secure: false, decision: 'record',
+    owner: { ...window, role: 'AXMenuItem', name: '重新命名', pressable: true },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 200, seen: NOW, point: [450, 240], count: 1,
+    focusGeneration: 1, secure: false, decision: 'record',
+    owner: { ...window, role: 'AXMenuItem', name: '重新命名', pressable: true },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['hover', 'click']);
+  assert.deepEqual(flow.steps[1].target, { kind: 'element', role: 'menuitem', name: '重新命名' });
+  assert.equal(flow.steps[1].scope.app, 'com.apple.finder');
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.equal(flowV2Check.Check(flow), true);
+  assert.doesNotThrow(() => parseFlowV2(flow));
+});
+
+// CAPTURE_SCOPE_UNVERIFIED is raised by many handlers. The flow step alone
+// cannot say which one, so the capture report names the handler and the event's
+// own window evidence for every such gap — with the step id the flow really has.
+test('a capture gap names the handler and window that raised it', async () => {
+  const recording = new GlobalRecording(async () => assert.fail('no window tree expected'), { now: () => NOW });
+  await recording.add(parseCaptureEvent({
+    kind: 'focus', t: 50, seen: NOW, focusGeneration: 1, secure: false,
+    owner: {
+      app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+      windowNumber: 11, windowTitle: 'client',
+    },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 100, seen: NOW, point: [450, 250], count: 1,
+    focusGeneration: 1, secure: false, decision: 'record',
+    owner: {
+      app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+      windowNumber: 11, windowTitle: 'client', role: 'AXButton', name: '刷新',
+    },
+  }));
+  // A right click in another window is never recovered, so it still blocks.
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 200, seen: NOW, point: [990, 112], count: 1, button: 'right',
+    focusGeneration: 1, secure: false, decision: 'record',
+    owner: {
+      app: 'com.electron.atrust', pid: 200, processInstance: 1700000000000,
+      windowNumber: 21, windowTitle: 'aTrust', role: 'AXGroup', pressable: false,
+    },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'gap']);
+  assert.equal(flow.steps[1].code, 'CAPTURE_SCOPE_UNVERIFIED');
+  const origin = recording.captureWarnings.find(warning => warning.code === 'CAPTURE_GAP_ORIGIN');
+  assert.ok(origin);
+  // The id is the gap step the flow actually contains.
+  assert.match(origin.message, /^s2 from=click app=com\.electron\.atrust window=21 gen=1 decision=record$/);
+  assert.equal(origin.message.length <= 500, true);
+  // A gap the step limit dropped has no id, so the report says nothing rather
+  // than pointing at a step that is not there.
+  const limited = new GlobalRecording(async () => assert.fail('no window tree expected'), {
+    now: () => NOW, stepLimit: 1,
+  });
+  for (const event of [{
+    kind: 'focus', t: 50, seen: NOW, focusGeneration: 1, secure: false,
+    owner: {
+      app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+      windowNumber: 11, windowTitle: 'client',
+    },
+  }, {
+    kind: 'click', t: 100, seen: NOW, point: [450, 250], count: 1,
+    focusGeneration: 1, secure: false, decision: 'record',
+    owner: {
+      app: 'com.apple.finder', pid: 100, processInstance: 1700000000000,
+      windowNumber: 11, windowTitle: 'client', role: 'AXButton', name: '刷新',
+    },
+  }, {
+    kind: 'click', t: 200, seen: NOW, point: [990, 112], count: 1, button: 'right',
+    focusGeneration: 1, secure: false, decision: 'record',
+    owner: {
+      app: 'com.electron.atrust', pid: 200, processInstance: 1700000000000,
+      windowNumber: 21, windowTitle: 'aTrust', role: 'AXGroup', pressable: false,
+    },
+  }]) await limited.add(parseCaptureEvent(event));
+  const truncated = limited.finish();
+  assert.deepEqual(truncated.steps.map(step => step.kind), ['click']);
+  assert.equal(limited.captureWarnings.some(warning => warning.code === 'CAPTURE_GAP_ORIGIN'), false);
+  assert.throws(() => parseFlowV2(flow), { code: 'CAPTURE_GAP' });
+});
+
 // A held click that something other than a focus followed did something, so it
 // is recorded where it landed: blocking the flow with a gap over a press the
 // recording already placed on screen would make the flow unreplayable.
