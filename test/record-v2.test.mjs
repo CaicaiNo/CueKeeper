@@ -529,6 +529,70 @@ test('a recovered click only clears the gap for an addressable non-secure elemen
   assert.throws(() => parseFlowV2(pointFlow), { code: 'CAPTURE_GAP' });
 });
 
+test('a right click in another window keeps the gap instead of being recovered', async () => {
+  const data = fixture('same-app-window-click-after-pause');
+  const [finderFocus, finderClick, recovered] = data.events;
+  const rightClick = { ...recovered, button: 'right' };
+  const flow = (await replayEvents(data, [finderFocus, finderClick, rightClick])).finish();
+  // Replay of a right click may reuse the previous left click's target, so a
+  // recovered right click could press a different control than the one
+  // recorded. It must stay a blocking gap, with no navigation.
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'gap']);
+  assert.equal(flow.steps[1].code, 'CAPTURE_SCOPE_UNVERIFIED');
+  assert.equal(flow.steps.some(step => step.kind === 'focus_window'), false);
+  assert.throws(() => parseFlowV2(flow), { code: 'CAPTURE_GAP' });
+});
+
+test('a recovered click must resolve to one addressable control', async () => {
+  const data = fixture('same-app-window-click-after-pause');
+  const [finderFocus, finderClick, recovered] = data.events;
+  const nameless = { ...recovered, owner: { ...recovered.owner, role: undefined, name: undefined } };
+  const bounds = { x: 900, y: 0, width: 800, height: 600 };
+  const imagesTree = children => ({
+    windowId: 'w-12',
+    tree: {
+      role: 'window', name: 'Images', ref: '@w12:e1', bounds, states: [], secure: false, children,
+    },
+  });
+  // The first read fails so the fallback read answers; a shared reader state
+  // makes sure only the first attempt fails.
+  const failingOnce = snapshot => {
+    let failed = false;
+    return async window => {
+      if (window.windowNumber === 12 && !failed) { failed = true; throw new Error('first read failed'); }
+      return structuredClone(window.windowNumber === 12 ? snapshot : data.snapshots[String(window.windowNumber)]);
+    };
+  };
+  const cases = {
+    anonymousButton: imagesTree([{
+      role: 'button', ref: '@w12:e2', bounds: { x: 950, y: 100, width: 80, height: 24 },
+      states: [], secure: false, children: [],
+    }]),
+    windowRoot: imagesTree([]),
+  };
+  for (const [label, snapshot] of Object.entries(cases)) {
+    const recording = await replayEvents(data, [finderFocus, finderClick, nameless], failingOnce(snapshot));
+    const flow = recording.finish();
+    assert.ok(flow.steps.some(step => step.kind === 'gap' && step.code === 'CAPTURE_SCOPE_UNVERIFIED'),
+      `${label}: the gap must stay`);
+    assert.equal(flow.steps.some(step => step.kind === 'click' && step.scope.app === 'com.apple.finder' &&
+      step.scope.windowKey === 'finder-2'), false, `${label}: no click may be kept`);
+    assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_RECOVERY_UNNAMED'), label);
+    assert.throws(() => parseFlowV2(flow), { code: 'CAPTURE_GAP' }, label);
+  }
+  // An identifier alone is enough to address one control.
+  const identified = imagesTree([{
+    role: 'button', ref: '@w12:e2', identifier: 'atrust-sort',
+    bounds: { x: 950, y: 100, width: 80, height: 24 }, states: [], secure: false, children: [],
+  }]);
+  const identifiedFlow = (await replayEvents(data, [finderFocus, finderClick, nameless],
+    failingOnce(identified))).finish();
+  assert.deepEqual(identifiedFlow.steps.map(step => step.kind), ['click', 'focus_window', 'click']);
+  assert.equal(identifiedFlow.steps[2].target.identifier, 'atrust-sort');
+  assert.equal(identifiedFlow.steps.some(step => step.kind === 'gap'), false);
+  assert.equal(parseFlowV2(identifiedFlow).steps.length, 3);
+});
+
 test('a recovered click reserves room for the navigation and the click', async () => {
   const data = afterPause();
   const [finderFocus, finderClick, recovered] = data.events;

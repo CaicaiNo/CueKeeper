@@ -711,6 +711,10 @@ export class GlobalRecording {
   ): boolean {
     if (event.decision !== 'record') return false;
     if (event.focus?.secure) return false;
+    // Replay of a right click may address the control the previous left click
+    // selected (`lastClickTarget`); a recovered right click in a new window
+    // would then press a different control than the one recorded. Keep it a gap.
+    if (event.button === 'right') return false;
     const owner = event.owner;
     if (!owner?.app || !owner.pid || owner.windowNumber === undefined) return false;
     const instance = owner.processInstance ?? 0;
@@ -862,9 +866,9 @@ export class GlobalRecording {
     // was made against for the next one.
     this.startSettledTree(binding);
     if (!target) return false;
-    if (requireElement && target.kind !== 'element') {
+    if (requireElement && !this.addressableForRecovery(target)) {
       this.warn('CLICK_RECOVERY_UNNAMED',
-        'A click was proven in another window but could not be named as an element; the capture gap stays so replay never clicks a bare point');
+        'A click was proven in another window but did not resolve to one addressable control (a bare point, a window/page root, or a control with no name or identifier); the capture gap stays');
       return false;
     }
     if (button === 'left' && target.kind === 'element' && editableRole(target.role)) {
@@ -902,6 +906,19 @@ export class GlobalRecording {
       };
     }
     return true;
+  }
+
+  /**
+   * Whether a recovered click resolved to one replayable control. A bare point,
+   * a window/application/page root, or a control with neither a name nor an
+   * accessibility identifier cannot address a single element, so it must not
+   * clear a blocking gap. An identifier alone is enough.
+   */
+  private addressableForRecovery(target: ClickTarget): boolean {
+    if (target.kind !== 'element') return false;
+    if (scopeRoles.has(target.role)) return false;
+    if ((target.name ?? '').trim()) return true;
+    return (target.identifier ?? '').trim().length > 0;
   }
 
   /**
