@@ -441,6 +441,13 @@ dialog .modal-box.modal-wide {
 .dialog-head h2 { font-size: 17px; font-weight: 600; }
 .field { display: grid; gap: 5px; color: var(--muted); font-size: 11.5px; }
 .field > .input, .field > .select, .field > .textarea { width: 100%; }
+
+/* 步骤编辑弹窗：关键项常驻，「高级定位」默认收起，只在需要时展开 */
+.locator-advanced { border-top: 1px solid var(--line-soft); padding-top: 8px; }
+.locator-advanced > summary { cursor: pointer; font-size: 11.5px; color: var(--muted); }
+.locator-advanced[open] > summary { color: var(--color-base-content); }
+.locator-advanced > .field, .locator-advanced > .check-row { margin-top: 8px; }
+.locator-advanced > .muted { margin: 4px 0 0; font-size: 11px; }
 .parameter-list { padding: 12px; border-radius: 16px; background: var(--color-base-100); border: 1px solid var(--line); }
 .parameter-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(86px, .55fr); gap: 7px; align-items: center; }
 .parameter-row .check-row { white-space: nowrap; }

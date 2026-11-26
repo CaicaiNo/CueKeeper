@@ -1504,7 +1504,7 @@ function v2ScopeDialog(step) {
 function v2TargetDialog(step) {
   const recorded = step.target ?? step.to;
   const picker = locatorFields(recorded?.kind === 'element' ? recorded : undefined,
-    '要换控件，点上面的「从窗口拾取」，直接选中真实控件；下面只用于手动修正。');
+    '要换控件，点上面的「从窗口拾取」，直接选中真实控件；下面只用于手动修正。', { collapsible: true });
   const targetNote = recorded?.kind === 'point'
     ? muted(`这一步录的是屏幕坐标 (${recorded.point.join(', ')})：录制时那个位置没有可单独定位的控件（画布、空白或自绘区域）。` +
       '直接实时回放就行，它会在该坐标上点；只有干跑会拦下它，因为坐标没法证明还是同一个控件。')
@@ -1534,7 +1534,7 @@ function v2DragDialog(step) {
 
 function v2TypeDialog(step) {
   const picker = locatorFields(step.target,
-    '要换控件，点上面的「从窗口拾取」，直接选中真实控件；下面只用于手动修正。');
+    '要换控件，点上面的「从窗口拾取」，直接选中真实控件；下面只用于手动修正。', { collapsible: true });
   const mode = select([['text', '文本'], ['input', '参数名']]);
   mode.value = 'input' in step ? 'input' : 'text';
   const text = el('textarea', { className: 'textarea', rows: 3, maxLength: 4000 });
@@ -1550,7 +1550,7 @@ function v2TypeDialog(step) {
   sync();
   openDialog(withStepId('编辑输入步骤', step), [
     v2PickEntry(step, locator => picker.set(locator)),
-    ...picker.controls, field('内容来源', mode), textBox, paramBox,
+    ...picker.keyControls, field('内容来源', mode), textBox, paramBox, picker.advanced,
     muted('参数值保存在测试数据里，不写入 flow。'),
   ], '应用', () => {
     const patch = picker.shouldSubmitTarget() ? { target: picker.value() } : {};
@@ -2518,8 +2518,15 @@ function candidateLabel(candidate) {
  * The accessibility locator editor shared by the v1 and v2 target dialogs.
  * Picking the control from the window is the reliable path; the fields below
  * are macOS's description of that control, so each one says what it means.
+ *
+ * `collapsible` is for the step editors an operator uses every day: role, name
+ * and the replay preview stay visible and the narrowing conditions (exact
+ * name, path, index) move under a closed 「高级定位」 block. They are still
+ * submitted through the same `value()`; closing the block only hides them.
+ * A target that already carries a path or index opens the block, so an active
+ * condition is never hidden from the operator.
  */
-function locatorFields(original, emptyPickHint) {
+function locatorFields(original, emptyPickHint, { collapsible = false } = {}) {
   const initial = original?.kind === 'element' ? original : undefined;
   const role = input({ required: true, maxLength: 256, value: initial?.role ?? '', placeholder: '例如 textfield' });
   const name = input({ maxLength: 256, value: initial?.name ?? '', placeholder: '例如 保存' });
@@ -2540,12 +2547,29 @@ function locatorFields(original, emptyPickHint) {
       fill(candidate.locator);
       detail.textContent = `${candidate.ref} · ${frameLabel(candidate)}`;
     });
+  const narrowingControls = [
+    el('label', { className: 'check-row' }, exactName, '要求名称完全一致（勾选且名称留空 = 只匹配没有名称的控件）'),
+    field('层级路径（path，可选）', path, '从窗口往下的中间层类型，用 / 分隔；同名控件分不开时才填'),
+    field('同名控件序号（index，可选）', index, '类型和名称都相同的控件有多个时取第几个，从 0 开始'),
+  ];
+  const advanced = collapsible
+    ? el('details', {
+      className: 'locator-advanced',
+      open: Boolean(initial?.path?.length) || initial?.index !== undefined,
+    },
+    el('summary', {}, '高级定位'),
+    muted('同名控件分不开时才需要这些条件；一般不用改。'),
+    ...narrowingControls)
+    : undefined;
   const fill = target => {
     role.value = target.role ?? '';
     name.value = target.name ?? '';
     exactName.checked = target.name !== undefined;
     path.value = target.path?.join(' / ') ?? '';
     index.value = target.index ?? '';
+    // A pick or an edit can add a narrowing condition; show it rather than
+    // leaving a now-active filter inside a closed block.
+    if (advanced && (target.path?.length || target.index !== undefined)) advanced.open = true;
     refresh();
   };
   const locator = () => {
@@ -2570,6 +2594,17 @@ function locatorFields(original, emptyPickHint) {
   for (const node of [role, name, path, index]) node.oninput = refresh;
   exactName.onchange = refresh;
   refresh();
+  const keyControls = [
+    muted('这些值来自 macOS 辅助功能（Accessibility），用来在窗口里认出同一个控件，一般不用手改。'),
+    candidates.length
+      ? field('从快照拾取控件', picker)
+      : muted(emptyPickHint ??
+        '要换控件，请关掉对话框，在时间线点「重新拾取」，直接选中真实控件；下面只用于手动修正。'),
+    candidates.length ? detail : undefined,
+    field('控件类型（role）', role, '控件的类别：button 按钮、textfield 输入框、menuitem 菜单项……'),
+    field('控件名称（name）', name, '界面上显示的文字，例如按钮「保存」、输入框标签「地址栏」'),
+    preview,
+  ];
   return {
     set(target) {
       fill(target);
@@ -2580,20 +2615,11 @@ function locatorFields(original, emptyPickHint) {
       // operator changes the locator fields afterward.
       return pickedFields !== JSON.stringify(locator());
     },
-    controls: [
-      muted('这些值来自 macOS 辅助功能（Accessibility），用来在窗口里认出同一个控件，一般不用手改。'),
-      candidates.length
-        ? field('从快照拾取控件', picker)
-        : muted(emptyPickHint ??
-          '要换控件，请关掉对话框，在时间线点「重新拾取」，直接选中真实控件；下面只用于手动修正。'),
-      candidates.length ? detail : undefined,
-      field('控件类型（role）', role, '控件的类别：button 按钮、textfield 输入框、menuitem 菜单项……'),
-      field('控件名称（name）', name, '界面上显示的文字，例如按钮「保存」、输入框标签「地址栏」'),
-      el('label', { className: 'check-row' }, exactName, '要求名称完全一致（勾选且名称留空 = 只匹配没有名称的控件）'),
-      field('层级路径（path，可选）', path, '从窗口往下的中间层类型，用 / 分隔；同名控件分不开时才填'),
-      field('同名控件序号（index，可选）', index, '类型和名称都相同的控件有多个时取第几个，从 0 开始'),
-      preview,
-    ],
+    /** The always-visible fields: what control, and what a replay would look for. */
+    keyControls,
+    /** The collapsed 「高级定位」 block, when this editor asked for one. */
+    advanced,
+    controls: collapsible ? [...keyControls, advanced] : [...keyControls, ...narrowingControls],
     value() {
       const current = locator();
       const segments = current.path ?? [];
