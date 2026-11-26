@@ -1644,36 +1644,99 @@ function pickedTargetPatch(locator) {
 }
 
 /**
- * Click and scroll address exactly one control, so their editor keeps only the
- * summary and the pick entry. The macOS role/name/path/index fields describe a
- * control the operator can already see, and a recorded deep anonymous group
- * cannot be repaired by hand; picking from the window is the real edit.
+ * Click and scroll address exactly one control, so their editor keeps the
+ * summary, the pick entry and the three fields that repair a recorded locator:
+ * the control type (role), the name the operator sees, and which same-named
+ * control to take (index). A recorded deep anonymous group can be fixed by
+ * typing a name or by picking a control; path, the exact-name flag and the
+ * replay preview are not offered, because an everyday repair never needs them.
  *
  * The pick lands in this form and is written on 应用, so closing the editor
- * never leaves a half-edited target behind. A coordinate target says so in the
- * summary and becomes an element locator as soon as a control is picked.
+ * never leaves a half-edited target behind. Applying without touching anything
+ * keeps the recorded target as it is (a coordinate stays a coordinate, a
+ * recorded path survives), while an edited field rebuilds the target from
+ * exactly role/name/index: a path the form cannot show is cleared instead of
+ * narrowing the replay invisibly.
  */
 function v2TargetDialog(step) {
   const windowTitle = targetWindowLabel(step);
+  const recorded = step.target?.kind === 'element' ? step.target : undefined;
   let target = step.target;
   let picked;
   let frame;
+  const fieldValues = value => ({
+    role: String(value?.role ?? ''),
+    name: typeof value?.name === 'string' ? value.name : '',
+    index: value?.index === undefined ? '' : String(value.index),
+  });
+  const recordedFields = JSON.stringify(fieldValues(recorded));
   const summary = el('p', { className: 'target-summary' });
   const renderSummary = () => {
     summary.textContent = targetSummaryText(target, { window: windowTitle, frame });
   };
   renderSummary();
+  const role = input({ maxLength: 256, value: recorded?.role ?? '', placeholder: '例如 button' });
+  const name = input({ maxLength: 256, value: recorded?.name ?? '', placeholder: '例如 保存' });
+  const index = el('input', {
+    type: 'number', className: 'input input-sm', min: '0', step: '1',
+    value: recorded?.index === undefined ? '' : String(recorded.index),
+  });
+  const fill = locator => {
+    role.value = locator?.role ?? '';
+    name.value = typeof locator?.name === 'string' ? locator.name : '';
+    index.value = locator?.index === undefined ? '' : String(locator.index);
+  };
+  // The locator these three fields describe. An empty name or index means "not
+  // restricted", so the field is left out instead of matching an empty string.
+  const fields = () => {
+    const rawIndex = String(index.value ?? '').trim();
+    if (rawIndex !== '' && (!Number.isSafeInteger(Number(rawIndex)) || Number(rawIndex) < 0)) {
+      throw new Error('同名控件序号（index）填 0 或更大的整数，或留空。');
+    }
+    const nameValue = String(name.value ?? '');
+    return {
+      role: String(role.value ?? '').trim(),
+      ...(nameValue ? { name: nameValue } : {}),
+      ...(rawIndex === '' ? {} : { index: Number(rawIndex) }),
+    };
+  };
   openDialog(withStepId(step.kind === 'scroll' ? '编辑滚动目标' : '编辑点击目标', step), [
     summary,
     v2PickEntry(step, (locator, candidate) => {
       target = locator;
       picked = true;
       frame = candidate?.bounds;
+      fill(locator);
       renderSummary();
     }, { commit: false }),
+    field('控件类型（role）', role, '控件的类别：button 按钮、textfield 输入框、menuitem 菜单项……'),
+    field('控件名称（name）', name, '界面上显示的文字，例如按钮「保存」；留空表示不限定名称'),
+    field('同名控件序号（index，可选）', index, '类型与名称相同的控件有多个时取第几个，从 0 开始；留空表示不限定'),
   ], '应用', () => {
-    if (!picked) return;
-    return v2Edit({ kind: 'update', id: step.id, patch: { target: pickedTargetPatch(target) } });
+    const current = fields();
+    // Applying the untouched form preserves the recorded target byte for byte,
+    // including a path this editor does not show.
+    if (!picked && JSON.stringify(fieldValues(current)) === recordedFields) return;
+    if (picked && JSON.stringify(fieldValues(current)) === JSON.stringify(fieldValues(target))) {
+      return v2Edit({ kind: 'update', id: step.id, patch: { target: pickedTargetPatch(target) } });
+    }
+    if (!current.role) {
+      throw new Error('填写控件类型（role），或点「从窗口拾取」选一个控件。');
+    }
+    // An edited locator is exactly these three fields. The merge inherits any
+    // field the patch omits from the recorded target, so a hidden path and a
+    // now-empty name/index are cleared explicitly.
+    return v2Edit({
+      kind: 'update', id: step.id,
+      patch: {
+        target: {
+          kind: 'element', ...current,
+          ...(current.name === undefined ? { name: null } : {}),
+          ...(current.index === undefined ? { index: null } : {}),
+          path: null,
+        },
+      },
+    });
   });
 }
 

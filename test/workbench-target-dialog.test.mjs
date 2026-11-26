@@ -7,10 +7,11 @@ import { flowV2Check } from '../dist/contracts-v2.js';
 import { startWorkbench } from '../dist/workbench.js';
 import { installWorkbenchPage } from './support/workbench-dom.mjs';
 
-// Hover, click and scroll each address one control, so their editors keep only
-// a one-line target summary and the pick entry (hover adds its dwell). These
-// tests drive the real `app.js` through the DOM stand-in and read back the flow
-// the server actually holds.
+// Hover, click and scroll each address one control. Hover keeps a one-line
+// summary, the pick entry and its dwell; click and scroll keep the summary, the
+// pick entry and the three fields that repair a locator (role / name / index).
+// These tests drive the real `app.js` through the DOM stand-in and read back the
+// flow the server actually holds.
 
 const canvasScope = {
   kind: 'window', app: 'com.apple.Safari', windowKey: 'canvas', windowTitle: 'Cuekeeper 画布',
@@ -128,6 +129,15 @@ const submitDialog = document => submitModal(dialog(document));
 const submitPicker = document => submitModal(pickerDialog(document));
 const durationInput = node => node.querySelectorAll('input')
   .find(input => input.getAttribute('type') === 'number');
+/** The three editable locator fields, in the order the dialog shows them. */
+const locatorInputs = node => {
+  const inputs = node.querySelectorAll('input');
+  return {
+    role: inputs.find(item => item.getAttribute('placeholder') === '例如 button'),
+    name: inputs.find(item => item.getAttribute('placeholder') === '例如 保存'),
+    index: inputs.find(item => item.getAttribute('type') === 'number'),
+  };
+};
 
 async function openEditor(document, stepId) {
   buttonByText(rowOf(document, stepId), '编辑').click();
@@ -145,36 +155,161 @@ async function pickCandidate(document, editor, index) {
   assert.equal(pickerDialog(document).open, false);
 }
 
-test('点击、滚动、悬停的目标弹窗都只留摘要与拾取入口', async t => {
+test('点击与滚动弹窗只留摘要、拾取与 role / name / index 三个字段', async t => {
   const { document } = await bootPage(t);
   const cases = [
-    ['click-element', '编辑点击目标', 'button（保存）· Cuekeeper 画布', 0],
-    ['click-point', '编辑点击目标', '屏幕坐标 (120, 80)· Cuekeeper 画布', 0],
-    ['scroll-group', '编辑滚动目标', 'group（无名称）· Cuekeeper 画布', 0],
-    ['hover-group', '编辑悬停目标', 'group（无名称）· Cuekeeper 画布', 1],
+    ['click-element', '编辑点击目标', 'button（保存）· Cuekeeper 画布'],
+    ['click-point', '编辑点击目标', '屏幕坐标 (120, 80)· Cuekeeper 画布'],
+    ['scroll-group', '编辑滚动目标', 'group（无名称）· Cuekeeper 画布'],
   ];
-  for (const [stepId, title, summary, inputs] of cases) {
+  for (const [stepId, title, summary] of cases) {
     const editor = await openEditor(document, stepId);
     assert.match(editor.textContent, new RegExp(`${title} · ${stepId}`));
     assert.ok(editor.textContent.includes(summary), `${stepId} shows one summary line`);
     assert.ok(buttonByText(editor, '从窗口拾取'), `${stepId} keeps the pick entry`);
 
-    // No locator form survives: no role/name/path/index field, no preview, no
-    // 「高级定位」 block, no candidate dropdown.
+    // Exactly the three fields an everyday repair needs — nothing from the old
+    // locator form (path, exact-name flag, 高级定位, preview, snapshot dropdown).
+    const inputs = editor.querySelectorAll('input');
+    assert.equal(inputs.length, 3, `${stepId} has exactly role / name / index`);
+    const locator = locatorInputs(editor);
+    assert.ok(locator.role && locator.name && locator.index, `${stepId} names all three fields`);
+    assert.match(editor.textContent, /控件类型（role）/);
+    assert.match(editor.textContent, /控件名称（name）/);
+    assert.match(editor.textContent, /同名控件序号（index/);
     assert.equal(editor.querySelectorAll('details').length, 0, `${stepId} has no advanced block`);
     assert.doesNotMatch(editor.textContent, /高级定位/);
     assert.doesNotMatch(editor.textContent, /按这些值回放会找/);
     assert.doesNotMatch(editor.textContent, /要求名称完全一致/);
+    assert.doesNotMatch(editor.textContent, /层级路径/);
     assert.doesNotMatch(editor.textContent, /toolbar/, `${stepId} never prints the recorded path`);
     assert.equal(editor.querySelectorAll('select').length, 0, `${stepId} has no snapshot dropdown`);
     assert.equal(editor.querySelectorAll('textarea').length, 0);
-    assert.deepEqual(editor.querySelectorAll('input').map(input => input.getAttribute('placeholder')),
-      Array(inputs).fill(null), `${stepId} keeps only its own inputs`);
-    if (inputs === 1) assert.ok(durationInput(editor), 'hover keeps its dwell input');
 
     buttonByText(editor, '关闭').click();
     assert.equal(dialog(document).open, false);
   }
+});
+
+test('打开点击对象时三个字段按当前 target 回填', async t => {
+  const { document } = await bootPage(t);
+
+  const element = locatorInputs(await openEditor(document, 'click-element'));
+  assert.equal(element.role.value, 'button');
+  assert.equal(element.name.value, '保存');
+  assert.equal(element.index.value, '1');
+  buttonByText(dialog(document), '关闭').click();
+
+  const group = locatorInputs(await openEditor(document, 'scroll-group'));
+  assert.equal(group.role.value, 'group');
+  assert.equal(group.name.value, '', 'a control without a name leaves the field empty');
+  assert.equal(group.index.value, '', 'no recorded index leaves the field empty');
+  buttonByText(dialog(document), '关闭').click();
+
+  const point = locatorInputs(await openEditor(document, 'click-point'));
+  assert.equal(point.role.value, '', 'a coordinate target has no role to show');
+  assert.equal(point.name.value, '');
+  assert.equal(point.index.value, '');
+});
+
+test('拾取候选后 role / name / index 同步更新', async t => {
+  const { document } = await bootPage(t);
+  const editor = await openEditor(document, 'click-point');
+
+  await pickCandidate(document, editor, 1);
+  const textfield = locatorInputs(editor);
+  assert.equal(textfield.role.value, 'textfield');
+  assert.equal(textfield.name.value, '画布输入');
+  assert.equal(textfield.index.value, '');
+  assert.ok(editor.textContent.includes('textfield（画布输入）· Cuekeeper 画布'));
+
+  // A control the snapshot reports without a name clears the field again.
+  await pickCandidate(document, editor, 2);
+  const group = locatorInputs(editor);
+  assert.equal(group.role.value, 'group');
+  assert.equal(group.name.value, '');
+  assert.equal(group.index.value, '');
+});
+
+test('改 role / name / index 后应用，写回的定位器与输入一致', async t => {
+  const { document, stepOf } = await bootPage(t);
+  const editor = await openEditor(document, 'click-element');
+
+  const fields = locatorInputs(editor);
+  fields.role.value = 'button';
+  fields.name.value = '关闭';
+  fields.index.value = '2';
+  await submitDialog(document);
+
+  assert.equal(dialog(document).open, false);
+  assert.deepEqual((await stepOf('click-element')).target,
+    { kind: 'element', role: 'button', name: '关闭', index: 2 },
+    'the edited target is exactly the three fields; the invisible path is gone');
+});
+
+test('清空 name 与 index 后应用，只保留控件类型', async t => {
+  const { document, stepOf } = await bootPage(t);
+  const editor = await openEditor(document, 'click-element');
+
+  const fields = locatorInputs(editor);
+  fields.name.value = '';
+  fields.index.value = '';
+  await submitDialog(document);
+
+  assert.deepEqual((await stepOf('click-element')).target, { kind: 'element', role: 'button' },
+    'an empty name or index means "not restricted", not an empty string');
+});
+
+test('原样应用不丢掉 target 里隐藏的 path', async t => {
+  const { document, stepOf } = await bootPage(t);
+  const editor = await openEditor(document, 'click-element');
+
+  await submitDialog(document);
+  assert.deepEqual((await stepOf('click-element')).target,
+    { kind: 'element', role: 'button', name: '保存', path: ['window', 'toolbar', 'button'], index: 1 },
+    'opening and applying the untouched form changes nothing');
+});
+
+test('坐标目标不填字段时保持坐标，填 role 后变元素定位器', async t => {
+  const { document, stepOf } = await bootPage(t);
+  let editor = await openEditor(document, 'click-point');
+
+  await submitDialog(document);
+  assert.deepEqual((await stepOf('click-point')).target, { kind: 'point', point: [120, 80] },
+    'an untouched coordinate target stays a coordinate');
+
+  editor = await openEditor(document, 'click-point');
+  const fields = locatorInputs(editor);
+  fields.role.value = 'button';
+  fields.name.value = '确定';
+  fields.index.value = '1';
+  await submitDialog(document);
+  assert.deepEqual((await stepOf('click-point')).target,
+    { kind: 'element', role: 'button', name: '确定', index: 1 },
+    'a filled role turns the coordinate into an element locator');
+});
+
+test('只填名称不填 role 时应用被拒，且不落盘', async t => {
+  const { document, stepOf } = await bootPage(t);
+  const editor = await openEditor(document, 'click-point');
+
+  locatorInputs(editor).name.value = '确定';
+  await submitDialog(document);
+  assert.equal(editor.open, true, 'the refused apply keeps the editor open');
+  assert.match(editor.textContent, /填写控件类型（role）/);
+  assert.deepEqual((await stepOf('click-point')).target, { kind: 'point', point: [120, 80] });
+});
+
+test('index 不是非负整数时应用被拒，且不落盘', async t => {
+  const { document, stepOf } = await bootPage(t);
+  const editor = await openEditor(document, 'click-element');
+
+  locatorInputs(editor).index.value = '-1';
+  await submitDialog(document);
+  assert.equal(editor.open, true);
+  assert.match(editor.textContent, /同名控件序号（index）填 0 或更大的整数/);
+  assert.deepEqual((await stepOf('click-element')).target,
+    { kind: 'element', role: 'button', name: '保存', path: ['window', 'toolbar', 'button'], index: 1 });
 });
 
 test('坐标点击显示屏幕坐标，拾取后变元素定位器；不应用不落盘', async t => {
