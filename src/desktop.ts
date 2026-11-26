@@ -45,6 +45,15 @@ export interface WheelOptions {
   deltaY: number;
 }
 
+export interface HoverOptions {
+  /**
+   * Screen points the pointer visits, in order, before it rests on the target.
+   * Each one is a separate `mouse-move`, so the app sees a pointer that travels
+   * instead of one that teleports onto the control.
+   */
+  approach?: Point[];
+}
+
 /**
  * One drag endpoint. A resolved element keeps the drop target semantic; a point
  * keeps the exact recorded position (text selection, window moves).
@@ -75,7 +84,7 @@ export interface Desktop {
   /** Physical wheel at a screen point; requires headed mode. */
   scrollPoint(snapshot: Snapshot, target: Target, point: Point, options: WheelOptions): Promise<Delivery | undefined>;
   /** Physical pointer move to a screen point; requires headed mode. */
-  hoverAt(snapshot: Snapshot, target: Target, point: Point): Promise<Delivery | undefined>;
+  hoverAt(snapshot: Snapshot, target: Target, point: Point, options?: HoverOptions): Promise<Delivery | undefined>;
   /** Physical press, move and release between two endpoints; requires headed mode. */
   drag(snapshot: Snapshot, target: Target, from: DragEndpoint, to: DragEndpoint, options: DragOptions): Promise<Delivery | undefined>;
   type(ref: string, text: string): Promise<Delivery | undefined>;
@@ -119,6 +128,11 @@ export interface Desktop {
 }
 
 export const agentDesktopVersion = '1.3.1';
+/**
+ * Pause between two moves of a hover approach. Long enough for the app to see
+ * separate mouse-moved events, short enough that a hover still lands quickly.
+ */
+const hoverStepMs = 40;
 const deliveryStates = new Set(['delivered_verified', 'delivered_unverified', 'delivery_uncertain', 'not_delivered', 'unknown']);
 
 export class DesktopFault extends Fault {
@@ -543,8 +557,16 @@ export async function withDesktop<T>(
           `--dx=${deltaX}`, `--dy=${deltaY}`,
         ]);
       },
-      async hoverAt(current, target, point) {
+      async hoverAt(current, target, point, { approach = [] } = {}) {
         await requirePoint(current, target, point);
+        // A pointer that arrives in one jump produces no motion for apps that
+        // only open a tooltip after a run of mouse-moved events. Walk in from
+        // the approach points, then settle on the target; the resting move is
+        // the one whose delivery the step reports.
+        for (const step of approach) {
+          await act('mouse-move', [`--xy=${step.join(',')}`]);
+          await sleep(hoverStepMs);
+        }
         // A negative coordinate must be written with `=` so it is not read as a flag.
         return act('mouse-move', [`--xy=${point.join(',')}`]);
       },

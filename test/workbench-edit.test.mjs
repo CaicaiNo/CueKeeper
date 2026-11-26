@@ -68,8 +68,34 @@ test('target edits cover element fields and require a point to become an element
   assert.ok(!JSON.stringify(editor.flow).includes('"x":320'));
 });
 
-test('input edits rename parameters and never store values', async t => {
-  const { editor } = await fixture(t);
+test('retargeting a hover drops the point recorded on the old control', async t => {
+  const { root } = await fixture(t);
+  const path = join(root, 'hover.flow.json');
+  await writeFile(path, JSON.stringify({
+    version: 2, id: 'hover-point', name: 'Hover point',
+    steps: [{
+      id: 'hover-note', kind: 'hover',
+      scope: { kind: 'window', app: 'com.apple.TextEdit', windowKey: 'notes', windowTitle: 'QA Notes' },
+      target: { kind: 'element', role: 'group', name: 'canvas' },
+      durationMs: 405, point: [820, 420],
+    }],
+  }));
+  const editor = await loadEditableFlow(path);
+  assert.deepEqual(step(editor, 'hover-note').point, [820, 420]);
+
+  // Editing the dwell keeps the point: the control under it did not change.
+  editor.updateStep('hover-note', { durationMs: 600 });
+  assert.deepEqual(step(editor, 'hover-note').point, [820, 420]);
+
+  // A new target no longer proves that point still hits the intended control,
+  // so replay has to use the new target's own centre instead.
+  editor.updateStep('hover-note', { target: { kind: 'element', role: 'group', name: '工作台' } });
+  assert.equal('point' in step(editor, 'hover-note'), false);
+  assert.equal(step(editor, 'hover-note').durationMs, 600);
+  assert.equal(editor.validate().ok, true);
+});
+
+test('input edits rename parameters and never store values', async t => {  const { editor } = await fixture(t);
   editor.updateStep('type-address', { input: 'addr' });
   assert.equal(step(editor, 'type-address').input, 'addr');
   assert.deepEqual(editor.flow.inputs, ['addr', 'note']);

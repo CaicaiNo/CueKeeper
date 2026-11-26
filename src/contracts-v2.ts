@@ -261,9 +261,15 @@ const dragStep = object({
   from: element, to: element, durationMs: T.Integer({ minimum: 0, maximum: 60_000 }),
   path: T.Optional(T.Array(dragPoint, { maxItems: 64 })), button: clickButton,
 });
+// A hover keeps the screen point the pointer actually rested on. The element
+// locator still names the control a replay resolves, so a reflowed window binds
+// the same way; the point only says where inside it the pointer stopped, which
+// is what made the app open its tooltip or submenu. It is optional: an older
+// flow, or a hover that cannot keep a point, falls back to the element centre.
 const hoverStep = object({
   ...stepBase, kind: T.Literal('hover'), scope: windowScope, focusAfter,
   target: element, durationMs: T.Integer({ minimum: 0, maximum: 60_000 }),
+  point: T.Optional(clickPoint),
 });
 // Paste never embeds clipboard content in v2: it names the earlier copy step or
 // a runtime input parameter.

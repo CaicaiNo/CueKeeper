@@ -182,8 +182,8 @@ function fakeWorld(options = {}) {
       state.calls.push(['drag', from.ref, to.ref, options.durationMs]);
       return delivered('drag');
     },
-    async hoverAt(_snapshot, _target, point) {
-      state.calls.push(['hoverAt', point]);
+    async hoverAt(_snapshot, _target, point, options = {}) {
+      state.calls.push(['hoverAt', point, options.approach ?? [], performance.now()]);
       return delivered('hover');
     },
     async focus(ref) {
@@ -1118,6 +1118,138 @@ test('a recorded point outside the bound window is refused instead of clicked', 
   assert.equal(entry(report, 'open-pkg').status, 'blocked');
   assert.equal(entry(report, 'open-pkg').code, 'UNSAFE_POINT');
   assert.deepEqual(callsOf(world.world, 'clickPoint'), []);
+});
+
+const notesElement = { kind: 'element', role: 'textfield', name: 'notes' };
+
+function hoverFlow(steps) {
+  return parseFlowV2({
+    version: 2, id: 'hover-replay', name: 'Hover replay', steps,
+  });
+}
+
+function notesHover(id, extra = {}) {
+  return { id, kind: 'hover', scope: notesScope, target: notesElement, durationMs: 0, ...extra };
+}
+
+/** Euclidean distance between two screen points, for approach-path assertions. */
+const distance = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+
+test('a hover rests on the recorded point and walks the pointer in before it', async t => {
+  const { world, run } = harness(t, { headed: true });
+  // The pointer rested 60 px left of the field's centre when this was recorded;
+  // the field's own centre is exactly what the old replay would have moved to.
+  const report = await run(hoverFlow([notesHover('hover-notes', { point: [360, 170] })]));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+
+  const [, point, approach] = callsOf(world, 'hoverAt')[0];
+  assert.deepEqual(point, [360, 170]);
+  // Three moves before the resting one: an offset start and two steps along
+  // the way, each inside the bound window.
+  assert.equal(approach.length, 3);
+  assert.ok(distance(approach[0], point) >= 16 && distance(approach[0], point) <= 24,
+    `approach start ${approach[0]} is not 16-24 px from ${point}`);
+  for (const step of approach) {
+    assert.ok(step[0] >= 100 && step[0] < 900 && step[1] >= 100 && step[1] < 700,
+      `approach point ${step} left the bound window`);
+  }
+  const gaps = approach.map(step => distance(step, point));
+  assert.ok(gaps[0] > gaps[1] && gaps[1] > gaps[2] && gaps[2] > 0,
+    `approach does not close in on the target: ${gaps.join(', ')}`);
+  // A hover is read-only: no click of any kind was sent.
+  assert.deepEqual([callsOf(world, 'click'), callsOf(world, 'clickPoint'), callsOf(world, 'clickScreen')],
+    [[], [], []]);
+});
+
+test('a hover without a recorded point falls back to the control centre', async t => {
+  const { world, run } = harness(t, { headed: true });
+  const report = await run(hoverFlow([notesHover('hover-centre')]));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  const [, point, approach] = callsOf(world, 'hoverAt')[0];
+  assert.deepEqual(point, [420, 170]);
+  assert.equal(approach.length, 3);
+  assert.ok(approach.every(step => step[0] !== point[0] || step[1] !== point[1]),
+    'the approach must not repeat the resting point');
+});
+
+test('a hover keeps its recorded point when the container has no bounds', async t => {
+  // A canvas-like group: addressable by name, but the driver gives it no frame.
+  const { world, run } = harness(t, {
+    headed: true,
+    windows: [{
+      id: 'w-21', app: textedit, pid: 601, title: 'QA Notes',
+      data: {
+        complete: true, window: { id: 'w-21', title: 'QA Notes' },
+        tree: {
+          role: 'window', name: 'QA Notes', bounds: { x: 100, y: 100, width: 800, height: 600 },
+          children: [{ role: 'group', name: 'canvas', states: [] }],
+        },
+      },
+    }],
+  });
+  const report = await run(hoverFlow([{
+    id: 'hover-canvas', kind: 'hover', scope: notesScope,
+    target: { kind: 'element', role: 'group', name: 'canvas' },
+    durationMs: 0, point: [300, 260],
+  }]));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'hoverAt')[0][1], [300, 260]);
+});
+
+test('a hover target with no bounds and no recorded point is unresolved', async t => {
+  const { world, run } = harness(t, {
+    headed: true,
+    windows: [{
+      id: 'w-21', app: textedit, pid: 601, title: 'QA Notes',
+      data: {
+        complete: true, window: { id: 'w-21', title: 'QA Notes' },
+        tree: {
+          role: 'window', name: 'QA Notes', bounds: { x: 100, y: 100, width: 800, height: 600 },
+          children: [{ role: 'group', name: 'canvas', states: [] }],
+        },
+      },
+    }],
+  });
+  const report = await run(hoverFlow([{
+    id: 'hover-canvas', kind: 'hover', scope: notesScope,
+    target: { kind: 'element', role: 'group', name: 'canvas' }, durationMs: 0,
+  }]));
+  assert.equal(entry(report, 'hover-canvas').code, 'HOVER_UNRESOLVED');
+  assert.match(entry(report, 'hover-canvas').message, /group "canvas" has no bounds to move to/);
+  assert.deepEqual(callsOf(world, 'hoverAt'), []);
+});
+
+test('a recorded hover point outside the bound window stops before any move', async t => {
+  const { world, run } = harness(t, { headed: true });
+  const report = await run(hoverFlow([notesHover('hover-notes', { point: [2000, 2000] })]));
+  assert.equal(entry(report, 'hover-notes').code, 'UNSAFE_POINT');
+  assert.match(entry(report, 'hover-notes').message, /recorded hover point 2000,2000 is outside the bound window/);
+  assert.deepEqual(callsOf(world, 'hoverAt'), []);
+});
+
+test('a recorded point outside the control falls back to its centre, still inside the window', async t => {
+  const { world, run } = harness(t, { headed: true });
+  // Inside the window, but the field now sits elsewhere: the old point proves
+  // nothing about this control, so the centre is the safe resting place.
+  const report = await run(hoverFlow([notesHover('hover-notes', { point: [150, 500] })]));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'hoverAt')[0][1], [420, 170]);
+});
+
+test('a hover dwells at least 400 ms, and a longer recorded dwell is kept', async t => {
+  const { world, run } = harness(t, { headed: true });
+  const report = await run(hoverFlow([
+    notesHover('hover-short', { point: [360, 170] }),
+    notesHover('hover-long', { point: [360, 170], durationMs: 700 }),
+    notesHover('hover-tail', { point: [360, 170] }),
+  ]));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+
+  const [short, long, tail] = callsOf(world, 'hoverAt');
+  // Each start is the previous step's resting moment, so the gap to the next
+  // start is that step's dwell plus the next step's own preparation.
+  assert.ok(long[3] - short[3] >= 400, `short hover dwelled ${long[3] - short[3]} ms`);
+  assert.ok(tail[3] - long[3] >= 700, `long hover dwelled ${tail[3] - long[3]} ms`);
 });
 
 /** One Finder-style window: an item label whose name sits in its value. */

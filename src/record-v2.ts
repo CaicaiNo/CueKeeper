@@ -1537,6 +1537,11 @@ export class GlobalRecording {
     this.push({
       kind: 'hover', scope: this.windowScope(binding), target: toLocator(snapshot, hit),
       durationMs: Math.max(0, Math.min(60_000, Math.round(event.dwellMs))),
+      // The element's own bounds often belong to an anonymous container whose
+      // centre is not the row the pointer stopped on, so the screen point the
+      // helper resolved is kept with the step. It is inside the window because
+      // `hit` found the element there.
+      point: [Math.round(event.point[0]), Math.round(event.point[1])],
     });
   }
 

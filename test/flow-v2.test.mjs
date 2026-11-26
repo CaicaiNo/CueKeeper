@@ -154,6 +154,37 @@ test('a step time is optional, never negative, and leaves older flows valid', ()
   assert.equal(flowV2Check.Check(fraction), false);
 });
 
+test('a hover point is optional, bounded and leaves older flows valid', () => {
+  const hoverFlow = point => ({
+    version: 2, id: 'hover-point', name: 'Hover point',
+    steps: [{
+      id: 'h', kind: 'hover',
+      scope: { kind: 'window', app: 'com.apple.TextEdit', windowKey: 'notes', windowTitle: 'QA Notes' },
+      target: { kind: 'element', role: 'group', name: 'canvas' }, durationMs: 400,
+      ...(point === undefined ? {} : { point }),
+    }],
+  });
+
+  // A flow recorded before the field existed stays valid and dry-runs.
+  const legacy = parseFlowV2(hoverFlow(undefined));
+  assert.equal('point' in legacy.steps[0], false);
+  assert.doesNotThrow(() => dryRunFlowV2(legacy));
+
+  const recorded = parseFlowV2(hoverFlow([120, 340]));
+  assert.deepEqual(recorded.steps[0].point, [120, 340]);
+  // The point is part of the flow the hash identifies, not display metadata.
+  assert.notEqual(hashFlowV2(recorded), hashFlowV2(legacy));
+  // The published schema carries the field, so a hand-written flow can use it.
+  const hover = schema('flow-v2').properties.steps.items.anyOf
+    .find(branch => branch.properties?.kind?.const === 'hover');
+  assert.deepEqual(hover.properties.point.items.map(item => [item.minimum, item.maximum]),
+    [[-100000, 100000], [-100000, 100000]]);
+
+  assert.throws(() => parseFlowV2(hoverFlow([120.5, 340])), /Invalid flow version 2/);
+  assert.throws(() => parseFlowV2(hoverFlow([100001, 0])), /Invalid flow version 2/);
+  assert.throws(() => parseFlowV2(hoverFlow([120, 340, 0])), /Invalid flow version 2/);
+});
+
 test('a v2 dry run resolves every scope without starting the desktop driver', t => {
   const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-v2-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

@@ -556,6 +556,11 @@ function applyStepPatch(draft: FlowV2, index: number, patch: StepPatch) {
   }
   if (patch.target !== undefined) {
     next.target = mergeElement((step as unknown as Record<string, unknown>).target, patch.target, id, 'target');
+    // A recorded hover point belongs to the element it was recorded on. Once the
+    // step points somewhere else (or a hand-edit corrects the locator), that
+    // point no longer proves it still hits the intended control, so it is
+    // dropped and replay uses the new target's own centre.
+    if (step.kind === 'hover') delete next.point;
   }
   if (patch.from !== undefined) {
     next.from = mergeElement((step as unknown as Record<string, unknown>).from, patch.from, id, 'from');

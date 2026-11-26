@@ -1521,6 +1521,42 @@ test('an anonymous Electron container click reads the tree and binds the named c
   assert.equal(flowV2Check.Check(flow), true);
 });
 
+// A hover's element is often an anonymous container whose centre is not the
+// row the pointer stopped on. The recorded screen point is kept with the step
+// so replay can rest where the app actually opened its tooltip.
+test('a hover keeps the screen point the recorded pointer rested on', async () => {
+  const snapshot = {
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@atrust:e1',
+      bounds: { x: 400, y: 200, width: 800, height: 640 }, states: [], secure: false,
+      children: [{
+        role: 'group', name: '', ref: '@atrust:e2',
+        bounds: { x: 400, y: 200, width: 800, height: 640 }, states: [], secure: false,
+        children: [{
+          role: 'button', name: '登录', ref: '@atrust:e4',
+          bounds: { x: 520, y: 480, width: 500, height: 80 }, states: [], secure: false, children: [],
+        }],
+      }],
+    },
+  };
+  const recording = new GlobalRecording(async () => structuredClone(snapshot), { now: () => NOW });
+  await recording.add(parseCaptureEvent({
+    kind: 'hover', t: 1000, seen: NOW, focusGeneration: 1, secure: false,
+    point: [700, 520], dwellMs: 405, decision: 'record',
+    owner: { ...ATRUST_OWNER, role: 'AXGroup' },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['hover']);
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'button', name: '登录' });
+  // The pointer rested left of the button's centre (770, 520); that exact spot
+  // is what replay has to reproduce.
+  assert.deepEqual(flow.steps[0].point, [700, 520]);
+  assert.equal(flow.steps[0].durationMs, 405);
+  assert.doesNotThrow(() => parseFlowV2(flow));
+});
+
 // A click that opens a sheet or switches the page changes the screen before
 // its own tree read can run, so the click's element is only in the tree from
 // before it. That tree is read right after the previous click and is what
