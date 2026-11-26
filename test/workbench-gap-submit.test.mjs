@@ -70,17 +70,21 @@ async function bootPage(t) {
 function holdRoute(fragment) {
   const previous = globalThis.fetch;
   const held = [];
+  let received;
+  const responseReady = new Promise(resolve => { received = resolve; });
   let release;
   const gate = new Promise(resolve => { release = resolve; });
   globalThis.fetch = async (url, init) => {
     if (!String(url).includes(fragment)) return previous(url, init);
     held.push(String(url));
     const response = await previous(url, init);
+    received(response.status);
     await gate;
     return response;
   };
   return {
     calls: () => held.length,
+    responseReady,
     release: async () => { release(); await tick(80); },
     restore: () => { globalThis.fetch = previous; },
   };
@@ -98,6 +102,12 @@ const dismissButton = document => buttons(document)
   .find(node => node.getAttribute('title') === '关闭');
 const form = document => dialog(document).children.find(node => node.tagName === 'FORM');
 const inputs = document => dialog(document).querySelectorAll('input');
+
+function useBrowserChildLookup(document) {
+  // Element.children is an HTMLCollection in the browser. The stand-in's
+  // array otherwise lets production code accidentally use Array.includes().
+  Object.defineProperty(dialog(document).children, 'includes', { value: undefined });
+}
 
 function openGapDialog(document, id) {
   const row = rows(document).find(entry => entry.querySelector('.step-id')?.textContent === id);
@@ -140,8 +150,9 @@ test('the gap dialog serializes its two actions and binds its close to itself', 
 
     const replace = holdRoute('/api/v2/replace');
     t.after(() => replace.restore());
+    useBrowserChildLookup(document);
     const submitting = form(document).onsubmit({ preventDefault() {} });
-    await tick(20);
+    assert.equal(await replace.responseReady, 200, 'the server committed the conversion');
 
     // The conversion is in flight: removal is disabled and, even when clicked
     // or submitted again, neither a second conversion nor a delete is sent.
@@ -166,13 +177,18 @@ test('the gap dialog serializes its two actions and binds its close to itself', 
     const edit = holdRoute('/api/v2/edit');
     t.after(() => edit.restore());
     removeButton(document).click();
-    await tick(20);
+    assert.equal(await edit.responseReady, 200, 'the server committed the removal');
     assert.equal(edit.calls(), 1, 'the removal was sent');
 
-    // The operator gives up on the gap dialog and opens another dialog in the
-    // same <dialog> element before the answer arrives.
-    dismissButton(document).click();
+    assert.equal(dismissButton(document).disabled, true, 'the dialog cannot be dismissed during removal');
+    let escapeBlocked = false;
+    dialog(document).oncancel({ preventDefault() { escapeBlocked = true; } });
+    assert.equal(escapeBlocked, true, 'Escape cannot dismiss the dialog during removal');
+
+    // Simulate a programmatic close and reuse of the shared dialog node.
+    dialog(document).close();
     document.getElementById('import-button').click();
+    useBrowserChildLookup(document);
     assert.equal(dialog(document).open, true);
     assert.match(dialog(document).textContent, /导入工作流/);
 

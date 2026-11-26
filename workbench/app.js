@@ -2197,7 +2197,7 @@ function openDialog(title, content, submitLabel, submit, options = {}) {
   // in flight: while it is pending the other button, Escape and the close
   // button are disabled, and Enter cannot queue a second request.
   const pending = { busy: false };
-  const current = () => modal.open && modal.children.includes(form);
+  const current = () => modal.open && modal.children[0] === form;
   const sync = () => {
     if (confirm) confirm.disabled = pending.busy;
     dismiss.disabled = pending.busy;
