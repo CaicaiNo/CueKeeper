@@ -106,13 +106,18 @@ struct HoverTracker {
     static let radiusSquared: CGFloat = 9
 
     private struct Dwell {
-        let location: CGPoint
+        /// Where the dwell began; the radius is measured from here so a slow
+        /// drift cannot walk the dwell across the screen.
+        let origin: CGPoint
+        /// The most recent sample inside the radius, which is what gets reported.
+        var location: CGPoint
         let started: UInt64
         var emitted: Bool
     }
 
     private var dwell: Dwell?
 
+    /// The latest valid position of the current dwell, for the emitted event.
     var location: CGPoint? { dwell?.location }
 
     mutating func reset() {
@@ -121,10 +126,13 @@ struct HoverTracker {
 
     mutating func sample(location: CGPoint, timestamp: UInt64) -> Int? {
         guard let current = dwell, timestamp >= current.started,
-              current.location.squaredDistance(to: location) <= Self.radiusSquared else {
-            dwell = Dwell(location: location, started: timestamp, emitted: false)
+              current.origin.squaredDistance(to: location) <= Self.radiusSquared else {
+            dwell = Dwell(origin: location, location: location, started: timestamp, emitted: false)
             return nil
         }
+        // The pointer moved inside the dwell radius: keep the start and the
+        // clock, but report where it actually stopped.
+        dwell?.location = location
         guard !current.emitted, timestamp - current.started >= Self.minimumNs else { return nil }
         dwell?.emitted = true
         return Int((timestamp - current.started) / 1_000_000)

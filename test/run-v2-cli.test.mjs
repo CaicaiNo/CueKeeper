@@ -30,7 +30,7 @@ function fixture(t) {
 const fs = require('node:fs');
 const [command, ...args] = process.argv.slice(2);
 const input = fs.readFileSync(0, 'utf8');
-fs.appendFileSync(${JSON.stringify(driverLog)}, JSON.stringify({ command, args, input }) + '\\n');
+fs.appendFileSync(${JSON.stringify(driverLog)}, JSON.stringify({ command, args, input, at: Date.now() }) + '\\n');
 let data;
 if (command === 'version') data = { version: '1.3.1' };
 else if (command === 'list-windows') data = [{
@@ -206,6 +206,62 @@ test('CLI: a v2 flow replays through the window-bound driver and writes a v2 rep
     assert.equal(type.input, 'hello from cli');
     // The foreground lease is released when the run ends.
     assert.equal(existsSync(join(cli.dir, 'state', 'run.lock')), false);
+  });
+
+/**
+ * A real v2 hover through the driver adapter: the pointer walks in with
+ * separate `mouse-move` commands, rests on the recorded point, waits the dwell
+ * and never clicks.
+ */
+test('CLI: a v2 hover walks the pointer in, rests and dwells without clicking',
+  { skip: process.platform !== 'darwin' }, t => {
+    const cli = fixture(t);
+    const hoverFlowPath = join(cli.dir, 'flow-hover.json');
+    const hoverStep = (id, durationMs) => ({
+      id, kind: 'hover',
+      scope: { kind: 'window', app, windowKey: 'notes', windowTitle },
+      target: { kind: 'element', role: 'textfield', name: 'notes' },
+      durationMs, point: [180, 160],
+    });
+    writeFileSync(hoverFlowPath, JSON.stringify({
+      version: 2, id: 'cli-hover', name: 'CLI hover',
+      steps: [
+        { id: 'launch', kind: 'launch_app', scope: { kind: 'app', app },
+          focusAfter: { kind: 'window', app, windowKey: 'notes', windowTitle } },
+        // Two hovers around the floor: the first proves a recorded 0 ms waits
+        // 400 ms, the second proves a longer recorded dwell is kept.
+        hoverStep('hover-short', 0),
+        hoverStep('hover-long', 700),
+        hoverStep('hover-tail', 0),
+      ],
+    }));
+    const reportPath = join(cli.dir, 'hover-report.json');
+    const result = cli.run([
+      'run', hoverFlowPath, '--foreground', '--headed', '--report', reportPath, '--json',
+    ]);
+    assert.equal(result.code, 0, result.stderr);
+    const report = JSON.parse(readFileSync(reportPath, 'utf8'));
+    assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+
+    const calls = cli.calls();
+    const moves = calls.filter(call => call.command === 'mouse-move');
+    // Four moves per hover: an offset start, two steps in, then the rest.
+    assert.equal(moves.length, 12);
+    for (let index = 0; index < 3; index += 1) {
+      const group = moves.slice(index * 4, index * 4 + 4);
+      assert.deepEqual(group.at(-1).args, ['--headed', '--xy=180,160']);
+      // The first move is the approach start, not the resting point itself.
+      assert.notDeepEqual(group[0].args, group.at(-1).args);
+      for (const move of group.slice(0, -1)) {
+        assert.ok(move.args[1] !== '--xy=180,160');
+      }
+    }
+    // The next hover's first move comes after the previous dwell: a recorded
+    // 0 ms dwell still waits 400 ms, and 700 ms is kept as recorded.
+    assert.ok(moves[4].at - moves[3].at >= 400, `short hover dwelled ${moves[4].at - moves[3].at} ms`);
+    assert.ok(moves[8].at - moves[7].at >= 700, `long hover dwelled ${moves[8].at - moves[7].at} ms`);
+    // A hover is read-only: the driver never received a click command.
+    assert.deepEqual(calls.filter(call => /click/.test(call.command)), []);
   });
 
 /** The sidecar the recorder would have written next to `flow.json`. */

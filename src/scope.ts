@@ -128,6 +128,7 @@ export class ScopeResolver {
   async resolveWindow(
     scope: WindowScope,
     pick?: (candidates: WindowInfo[]) => Promise<{ window: WindowInfo; reason: 'target' | 'focused' } | undefined>,
+    { repair = true }: { repair?: boolean } = {},
   ): Promise<WindowBinding> {
     this.signal.throwIfAborted();
     const existing = this.windows.get(scope.windowKey);
@@ -157,7 +158,7 @@ export class ScopeResolver {
       chosen = picked.window;
       sharedTitle = picked.reason;
     }
-    if (!chosen && scope.app === 'com.apple.finder') {
+    if (!chosen && repair && scope.app === 'com.apple.finder') {
       // Finder's sidebar view ("最近使用") is a window title the replay can
       // reopen: the recorded click on that view only exists because the view
       // was already open. Pressing the sidebar item is preparation, not a
@@ -296,6 +297,29 @@ export class ScopeResolver {
       return;
     }
     await this.focus(binding);
+  }
+
+  /**
+   * Read-only foreground proof for a step that must not move focus (a hover).
+   * A window frame does not prove a window receives pointer events, so the
+   * foreground must be observable and must be the bound window: an inventory
+   * without `is_focused`, or one that names another window, stops the step
+   * instead of raising it.
+   */
+  async requireForeground(binding: WindowBinding): Promise<void> {
+    this.signal.throwIfAborted();
+    const focused = await this.observedForeground();
+    if (focused === undefined) {
+      throw new Fault('HOVER_NOT_FOREGROUND',
+        `Cannot prove the hover window "${binding.title}" is in front; ` +
+        'a hover is read-only and never takes focus');
+    }
+    if (focused.id !== binding.windowId) {
+      throw new Fault('HOVER_NOT_FOREGROUND',
+        `The hover window "${binding.title}" is not in front (${focused.id} is); ` +
+        'a hover is read-only and does not bring a window forward');
+    }
+    this.expectedForeground = binding.windowId;
   }
 
   /**

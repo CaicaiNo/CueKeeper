@@ -305,6 +305,8 @@ console.log(JSON.stringify({ version: '2.6', command, ok: true, data }));
   const calls = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
   assert.deepEqual(calls.map(call => call.command), [
     'version',
+    // v1 keeps its original delivery gate: the hover brings its window forward
+    // and re-reads it before the single move.
     'snapshot', 'focus-window', 'snapshot', 'mouse-move',
     'snapshot', 'focus', 'clipboard-set', 'press',
   ]);
@@ -313,6 +315,42 @@ console.log(JSON.stringify({ version: '2.6', command, ok: true, data }));
   assert.deepEqual(calls[7].args, ['--stdin']);
   assert.equal(calls[7].input, '粘贴文本');
   assert.deepEqual(calls[8].args, ['--headed', 'meta+v', '--window-id', 'w-1234']);
+});
+
+test('a v1 hover keeps its delivery gate: another focused window sends no move', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-input-ii-gate-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const previous = process.env.CUEKEEPER_AGENT_DESKTOP;
+  const previousIdentity = process.env.CUEKEEPER_APP_IDENTITY;
+  process.env.CUEKEEPER_AGENT_DESKTOP = join(dir, 'desktop');
+  process.env.CUEKEEPER_APP_IDENTITY = join(dir, 'identity');
+  t.after(() => {
+    if (previous === undefined) delete process.env.CUEKEEPER_AGENT_DESKTOP;
+    else process.env.CUEKEEPER_AGENT_DESKTOP = previous;
+    if (previousIdentity === undefined) delete process.env.CUEKEEPER_APP_IDENTITY;
+    else process.env.CUEKEEPER_APP_IDENTITY = previousIdentity;
+  });
+  const log = join(dir, 'calls');
+  writeFileSync(join(dir, 'desktop'), `#!/usr/bin/env node
+const fs = require('node:fs');
+const [command, ...args] = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ command, args }) + String.fromCharCode(10));
+const data = command === 'version' ? { version: '1.3.1' } :
+  command === 'snapshot' ? ${JSON.stringify(fixture.data)} :
+  // Another window answers focus-window: the bound one never came forward.
+  command === 'focus-window' ? { focused: { id: 'w-4455' } } :
+  { disposition: { delivery: 'delivered_unverified' } };
+console.log(JSON.stringify({ version: '2.6', command, ok: true, data }));
+`, { mode: 0o700 });
+
+  const flow = flowFor([{ id: 'hover', kind: 'hover', target: editor, durationMs: 1 }]);
+  const report = await withDesktop({ headed: true, signal },
+    desktop => runFlow(flow, desktop, { dryRun: false, signal }));
+  const hoverEntry = report.entries.find(entry => entry.id === 'hover');
+  assert.equal(hoverEntry.status, 'failed');
+  assert.equal(hoverEntry.code, 'UNSAFE_POINT');
+  const commands = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line).command);
+  assert.equal(commands.includes('mouse-move'), false, commands.join(','));
 });
 
 test('workbench labels and retargeting expose the two new step kinds', () => {

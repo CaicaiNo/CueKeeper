@@ -211,6 +211,43 @@ function centreOf(node: Node, snapshot: Snapshot): Point {
   return point;
 }
 
+/**
+ * A hover settles for at least this long even when the recording saw the
+ * pointer leave sooner: an app that opens a tooltip or a submenu needs the
+ * pointer to rest, and a next step that reads that state would otherwise race.
+ */
+const hoverDwellFloorMs = 400;
+
+/**
+ * The screen point a hover rests on. A recorded point wins when it still lands
+ * inside the resolved control — or when the control has no bounds to compare
+ * against, which is exactly the anonymous-container case the point exists for.
+ * A point outside that control falls back to its centre; a point outside the
+ * bound window is refused, because moving the pointer to another window would
+ * be a different action, not a hover of this step.
+ */
+function hoverPoint(node: Node, recorded: Point | undefined, snapshot: Snapshot): Point {
+  if (recorded) {
+    if (!contains(snapshot.tree.bounds, recorded)) {
+      throw new Fault('UNSAFE_POINT',
+        `The recorded hover point ${recorded.join(',')} is outside the bound window; ` +
+        'the window moved or resized since the recording — edit the step and pick the target again');
+    }
+    if (!node.bounds || contains(node.bounds, recorded)) return recorded;
+  }
+  if (!node.bounds) {
+    throw new Fault('HOVER_UNRESOLVED', `${describeControl(node)} has no bounds to move to`);
+  }
+  const centre: Point = [
+    Math.round(node.bounds.x + node.bounds.width / 2),
+    Math.round(node.bounds.y + node.bounds.height / 2),
+  ];
+  if (!contains(snapshot.tree.bounds, centre)) {
+    throw new Fault('UNSAFE_POINT', `${describeControl(node)} sits outside the bound window`);
+  }
+  return centre;
+}
+
 /** The item a right click on a container really targets. */
 function rightClickTarget(snapshot: Snapshot, button: string | undefined, locator: ElementLocator): ElementLocator {
   if (button !== 'right') return locator;
@@ -662,19 +699,19 @@ class StepRunner {
           return delivery === undefined ? {} : { delivery };
         }, step);
       case 'hover':
-        return this.windowStep(step.scope, async (binding, snapshot) => {
-          const { node } = resolve(snapshot!, step.target as ElementLocator);
+        return this.readOnlyWindowStep(step.scope, async (binding, snapshot) => {
+          const { node } = resolve(snapshot, step.target as ElementLocator);
           if (node.secure) throw new Fault('UNSAFE_TARGET', 'Hover target is secure');
-          if (!node.bounds) throw new Fault('HOVER_UNRESOLVED', 'Hover target has no bounds to move to');
-          const point: Point = [
-            Math.round(node.bounds.x + node.bounds.width / 2),
-            Math.round(node.bounds.y + node.bounds.height / 2),
-          ];
-          if (!contains(snapshot!.tree.bounds, point)) {
-            throw new Fault('UNSAFE_POINT', 'Hover target is outside the bound window');
-          }
-          const delivery = await this.desktop.hoverAt(snapshot!, this.targetOf(binding), point);
-          if (step.durationMs > 0) await sleep(step.durationMs, undefined, { signal: this.signal });
+          const point = hoverPoint(node, step.point, snapshot);
+          const delivery = await this.desktop.hoverAt(
+            snapshot, this.targetOf(binding), point, { readOnly: true, travel: true },
+          );
+          // A tooltip or submenu closes the moment the pointer leaves, so the
+          // dwell is what the next step sees. A recording's own dwell can be
+          // shorter than the time an app needs to settle its hover state, so
+          // the step waits at least the floor. The pointer is not moved away
+          // afterwards: the open tooltip is state the flow may rely on.
+          await sleep(Math.max(step.durationMs, hoverDwellFloorMs), undefined, { signal: this.signal });
           return delivery === undefined ? {} : { delivery };
         }, step);
       case 'paste':
@@ -741,11 +778,66 @@ class StepRunner {
     throw lastError;
   }
 
+  /**
+   * Resolves a window and proves the run may act in it without moving focus.
+   * Hover is the one read-only input: it must not raise its window, click a
+   * Finder sidebar item to reopen one, or take a declared hand-off. The binding
+   * itself is the same evidence a focusable step uses, and the foreground is
+   * checked by reading it, never by taking it.
+   */
+  private async readOnlyWindowStep(
+    scope: WindowScope,
+    work: (binding: WindowBinding, snapshot: Snapshot) => Promise<StepOutcome>,
+    step: StepV2,
+  ): Promise<StepOutcome> {
+    // A hover can land while its window is still repainting (a tooltip that
+    // appears late, a list that virtualises). The focusable path retries a
+    // missing target against a fresh tree, and a read-only step keeps the same
+    // patience without ever taking a side effect: every attempt binds, proves
+    // the foreground and reads the tree again, and the pointer is only moved by
+    // the attempt whose target resolved.
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const binding = await this.resolver.resolveWindow(
+        scope,
+        candidates => this.pickSameTitled(candidates, step),
+        { repair: false },
+      );
+      await this.resolver.requireForeground(binding);
+      const snapshot = await this.resolver.snapshot(binding);
+      try {
+        const outcome = await work(binding, snapshot);
+        const notes: string[] = [];
+        if (binding.rebound) {
+          binding.rebound = false;
+          notes.push('window rebound after the recorded window was recreated');
+        }
+        if (binding.sharedTitle) {
+          const which = binding.sharedTitle === 'target' ? 'the one that held its target' : 'the focused one';
+          notes.push(`more than one window was titled "${scope.windowTitle}", so the step ran in ${which}`);
+        }
+        if (!notes.length) return outcome;
+        const note = notes.join('; ');
+        return { ...outcome, message: outcome.message ? `${outcome.message}; ${note}` : note };
+      } catch (error) {
+        const retryable = error instanceof Fault && error.code === 'NOT_FOUND';
+        if (!retryable || attempt === 3) throw error;
+        lastError = error;
+        await sleep(200);
+      }
+    }
+    throw lastError;
+  }
+
   /** A declared focusAfter scope, or the launched app's own front window. */
   private async handOff(step: StepV2): Promise<StepOutcome> {
     // A wait observes only. It never moves focus, even if the file declares a
     // focusAfter, because a wait that changes the desktop is not a wait.
     if (step.kind === 'wait') return {};
+    // Hover is read-only for the same reason: raising another window after a
+    // hover would close the tooltip it just opened, and a hover must never take
+    // focus in the first place.
+    if (step.kind === 'hover') return {};
     const declared = (step as { focusAfter?: ReportV2Entry['focusAfter'] }).focusAfter;
     if (declared?.kind === 'window') {
       try {

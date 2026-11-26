@@ -2366,6 +2366,24 @@
                 "minimum": 0,
                 "maximum": 60000,
                 "type": "integer"
+              },
+              "point": {
+                "type": "array",
+                "items": [
+                  {
+                    "minimum": -100000,
+                    "maximum": 100000,
+                    "type": "integer"
+                  },
+                  {
+                    "minimum": -100000,
+                    "maximum": 100000,
+                    "type": "integer"
+                  }
+                ],
+                "additionalItems": false,
+                "minItems": 2,
+                "maxItems": 2
               }
             },
             "required": [
