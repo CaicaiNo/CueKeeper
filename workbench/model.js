@@ -590,6 +590,24 @@ export function diffSummary(diff) {
   return { changed: Boolean(diff.changed ?? lines.length), lines };
 }
 
+/**
+ * One entry per actual difference, so the page can list what changed instead of
+ * recapping every moved step in a single sentence.
+ */
+export function diffItems(diff) {
+  if (!diff) return [];
+  const items = [];
+  for (const item of diff.added ?? []) items.push(`新增步骤 ${item?.id ?? item}`);
+  for (const item of diff.removed ?? []) items.push(`删除步骤 ${item?.id ?? item}`);
+  for (const move of diff.moved ?? []) items.push(`移动步骤 ${move.id}：第 ${move.from} 步 → 第 ${move.to} 步`);
+  if (diff.orderChanged && !(diff.moved ?? []).length) items.push('步骤顺序变化');
+  for (const change of diff.modified ?? []) {
+    items.push(`修改步骤 ${change.id}${change.fields?.length ? `（${change.fields.join(' / ')}）` : ''}`);
+  }
+  if ((diff.flowFields ?? []).length) items.push(`修改流程字段 ${diff.flowFields.join('、')}`);
+  return items;
+}
+
 /** A run report's entries keyed by step id, so the timeline can mark each step. */
 export function statusMap(report) {
   const map = new Map();

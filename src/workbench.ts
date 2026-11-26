@@ -936,7 +936,7 @@ export async function startWorkbench(options: {
         }
         const live = editable.replayTarget();
         if (!live) {
-          throw new Error('The flow has unsaved edits; save a revision before a live replay');
+          throw new Error('The flow has unsaved edits; save the workflow before a live replay');
         }
         const checkpoints = flow.steps.filter(step => step.kind === 'manual_checkpoint');
         const inputs = (flow.inputs ?? []).length

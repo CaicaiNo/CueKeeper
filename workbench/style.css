@@ -250,7 +250,7 @@ button:disabled { cursor: default; }
 .scope-head strong { font: 11px var(--mono); color: var(--color-base-content); letter-spacing: .01em; }
 
 /* 时间线行：daisyUI card，业务状态只加修饰类 */
-.row { background: var(--color-base-300); transition: background-color 140ms ease; }
+.row { background: var(--color-base-300); cursor: pointer; transition: background-color 140ms ease; }
 .row:hover { background: color-mix(in oklab, var(--color-base-300) 88%, var(--color-base-content) 5%); }
 .row.active { outline: 2px solid var(--color-primary); outline-offset: -2px; }
 .row.ignored { opacity: .45; }
@@ -583,6 +583,9 @@ body.v2-mode .draft { display: none; }
   padding: 10px 16px; border-top: 1px solid var(--line-soft);
 }
 .v2-footer .muted { margin: 0; font-size: 11px; }
+.v2-diff summary { cursor: pointer; font-size: 11px; color: var(--muted); }
+.v2-diff[open] summary { color: var(--color-base-content); }
+.v2-diff-list { margin: 2px 0 0; padding-left: 18px; font-size: 11px; color: var(--muted); }
 .v2-errors { margin: 0; padding-left: 18px; color: var(--color-error); font-size: 11px; }
 .v2-checkpoint {
   display: grid; gap: 6px; margin: 8px 16px; padding: 12px 14px; border-radius: 16px;
