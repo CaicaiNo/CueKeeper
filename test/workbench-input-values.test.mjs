@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { closeSync, existsSync, openSync, writeSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -534,14 +533,20 @@ test('saving values refuses to replace a sidecar name that holds another workflo
   assert.equal(await readFile(taken, 'utf8'), foreign);
 });
 
-test('stop during preparation leaves zero CLI processes', async t => {
+test('stop during preparation ends the request and frees the run slot', async t => {
   const { root, directory } = await workspace(t, {});
-  // A FIFO at the sidecar name blocks the server's value read until the test
-  // writes it, which keeps the run in its preparation phase deterministically.
-  execFileSync('mkfifo', [join(directory, 'flow.values.json')]);
   const log = join(root, 'stub-inputs.json');
   const cliPath = await stubCli(root, log);
-  const { started, post } = await server(t, { root, directory, cliPath, allowLive: true });
+  // Hold the value read open: the run is genuinely still preparing.
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const { started, post } = await server(t, {
+    root, directory, cliPath, allowLive: true,
+    resolveInputValues: async () => {
+      await gate;
+      return { path: join(directory, 'flow.values.json'), missing: true };
+    },
+  });
   const session = await post('import', { directory });
   const send = (route, payload) => fetch(`${started.url}/api/${route}`, {
     method: 'POST',
@@ -556,23 +561,79 @@ test('stop during preparation leaves zero CLI processes', async t => {
     const status = await (await send('run/status', { session: session.id })).json();
     if (status.running) { preparing = true; break; }
   }
-  assert.equal(preparing, true, 'the run is preparing while the value read blocks');
+  assert.equal(preparing, true, 'the run is preparing while the value read waits');
 
   const stop = await post('stop', {});
   assert.equal(stop.stopped, true);
 
-  // Let the blocked read finish; the run must not spawn a CLI afterwards.
-  const fd = openSync(join(directory, 'flow.values.json'), 'w');
-  writeSync(fd, JSON.stringify({
-    version: 1, flowId: 'global-input-values', updatedAt: '2026-11-26T08:00:00.000Z',
-    values: { address: { value: 'a', complete: true }, note: { value: 'n', complete: true } },
-  }));
-  closeSync(fd);
+  // The request must finish before the read is released, or a blocked read
+  // would keep the desktop slot until it happens to return.
+  const outcome = await Promise.race([
+    running.then(async response => ({ response, body: await response.json() })),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('the run request is still waiting')), 1500)),
+  ]);
+  assert.equal(outcome.response.status, 200);
+  assert.equal(outcome.body.stopped, true);
+  const status = await (await send('run/status', { session: session.id })).json();
+  assert.equal(status.running, false, 'the run slot is free again');
+  assert.equal(existsSync(log), false, 'no CLI was started');
+  release();
+});
 
-  const response = await running;
-  const body = await response.json();
-  assert.equal(response.status, 200);
-  assert.equal(body.stopped, true);
-  await assert.rejects(readFile(log), failure => failure.code === 'ENOENT',
-    'a stopped preparation never starts the CLI');
+test('an old dialog cannot write or run a revision another tab saved', async t => {
+  const { root, directory, sidecar } = await workspace(t, {
+    values: {
+      address: { value: 'dialog address', complete: true },
+      note: { value: 'dialog note', complete: true },
+    },
+  });
+  const log = join(root, 'stub-inputs.json');
+  const cliPath = await stubCli(root, log);
+  const { document, url } = await bootPage(t, { root, directory, cliPath });
+  const call = async (route, payload) => {
+    const response = await fetch(`${url}/api/${route}`, {
+      method: 'POST',
+      headers: { origin: url, 'content-type': 'application/json', 'x-cuekeeper-workbench': '1' },
+      body: JSON.stringify(payload),
+    });
+    return { status: response.status, body: await response.json() };
+  };
+  const session = (await call('state', {})).body.session;
+
+  buttonByText(document.body, '实时回放').click();
+  await tick(150);
+  assert.equal(dialog(document).open, true);
+  const before = await readFile(sidecar);
+
+  // Another tab of the same session retargets a step and saves a revision. The
+  // open dialog never saw that file, so it must not confirm it.
+  const edited = await call('v2/edit', {
+    session: session.id,
+    op: { kind: 'update', id: 'type-address', patch: { target: { kind: 'element', role: 'textfield', name: '新地址栏' } } },
+  });
+  assert.equal(edited.status, 200);
+  const saved = await call('save', { session: session.id });
+  assert.equal(saved.status, 201);
+
+  const boxes = dialog(document).querySelectorAll('input')
+    .filter(node => node.getAttribute('type') === 'checkbox');
+  const confirm = boxes[0];
+  const remember = boxes.at(-1);
+  confirm.checked = true;
+  remember.checked = true;
+  await submitDialog(document);
+  const error = dialog(document).querySelector('.form-error');
+  assert.match(error.textContent, /replay target changed/i);
+  assert.deepEqual(await readFile(sidecar), before, 'the revision values were not overwritten');
+  await assert.rejects(readFile(log), failure => failure.code === 'ENOENT', 'no replay started');
+
+  // Even without "save as default", the run must be refused for the same file.
+  // The start is fire-and-forget once the dialog closes, so the refusal shows
+  // in the status bar; what matters is that no CLI was ever started.
+  remember.checked = false;
+  await submitDialog(document);
+  await tick(150);
+  assert.equal(dialog(document).open, false);
+  assert.match(document.getElementById('status').textContent, /replay target changed/i);
+  await assert.rejects(readFile(log), failure => failure.code === 'ENOENT', 'no replay started');
 });

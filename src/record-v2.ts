@@ -432,7 +432,7 @@ export class GlobalRecording {
    * merge window. Without it a value missing its first characters would still
    * read as complete.
    */
-  private droppedText?: { scopeId: string; key: string; at: number };
+  private droppedText?: { scopeId: string; key: string; at: number; locator?: string };
   /**
    * A Dock click names no window of its own, so the app it activates only
    * becomes provable when the focus notification arrives. Until then the click
@@ -1610,6 +1610,10 @@ export class GlobalRecording {
     }
     const scope = this.windowScope(binding);
     const scopeId = scopeKey(scope);
+    // The focused control, when the helper carried it, is what separates two
+    // fields inside the same window: focusGeneration does not change between
+    // controls of one window.
+    const droppedTarget = focusedTarget(event.focus);
     // An event this far behind the helper cannot be tied to the live focus any
     // more; the whole queue is late, so one warning is more useful than a gap
     // per character. The event is dropped, never guessed.
@@ -1620,7 +1624,9 @@ export class GlobalRecording {
       // whose last character is within one merge window, owns the dropped
       // event. A burst that already ended before the gap is complete and must
       // not be blamed for it.
-      if (this.textBurst && this.textBurst.scope === scopeId &&
+      const sameControl = !droppedTarget || !this.textBurst ||
+        locatorKey(this.textBurst.target) === locatorKey(droppedTarget);
+      if (this.textBurst && sameControl && this.textBurst.scope === scopeId &&
           this.textBurst.key === this.focusKey(binding, event.focusGeneration) &&
           event.t - this.textBurst.at <= textGapMs) {
         const entry = this.inputValues.get(this.textBurst.name);
@@ -1636,6 +1642,7 @@ export class GlobalRecording {
       // is bound.
       this.droppedText = {
         scopeId, key: this.focusKey(binding, event.focusGeneration), at: event.t,
+        ...(droppedTarget ? { locator: locatorKey(droppedTarget) } : {}),
       };
       return;
     }
@@ -1646,7 +1653,7 @@ export class GlobalRecording {
     const key = this.focusKey(binding, event.focusGeneration);
     // The helper's focused-element evidence is the normal path: role, label and
     // frame of the control that received the character, with no tree read.
-    const direct = focusedTarget(event.focus);
+    const direct = droppedTarget;
     if (direct) {
       this.rememberFocus(key, direct);
       this.retargetClickFromEvidence(event, direct, scopeId);
@@ -1710,7 +1717,7 @@ export class GlobalRecording {
       if (snapshot) burst.snapshot = snapshot;
       this.textAnchor = { at, scope: scopeId, locator: target };
       this.appendChars(burst.name, text);
-      this.markDropped(burst.name, scopeId, text.key, at);
+      this.markDropped(burst.name, scopeId, text.key, at, burst.target);
       return;
     }
     this.endBursts();
@@ -1728,7 +1735,7 @@ export class GlobalRecording {
     };
     this.inputValues.set(input, entry);
     this.appendChars(input, text);
-    this.markDropped(input, scopeId, text.key, at);
+    this.markDropped(input, scopeId, text.key, at, target);
     this.textBurst = {
       at, scope: scopeId, locator: locatorId, target, name: input, key: text.key ?? '',
       ...(snapshot ? { snapshot } : {}),
@@ -1767,10 +1774,15 @@ export class GlobalRecording {
    * and a merge-window distance all have to match, so a later burst in the same
    * window is never blamed for characters it did read.
    */
-  private markDropped(name: string, scopeId: string, key: string | undefined, at: number) {
+  private markDropped(
+    name: string, scopeId: string, key: string | undefined, at: number, target: ElementLocator,
+  ) {
     const dropped = this.droppedText;
     if (!dropped || dropped.scopeId !== scopeId || dropped.key !== key) return;
     if (Math.abs(at - dropped.at) > textGapMs) return;
+    // A drop for another control in the same window must wait for that
+    // control's burst instead of marking this one.
+    if (dropped.locator && dropped.locator !== locatorKey(target)) return;
     this.droppedText = undefined;
     const entry = this.inputValues.get(name);
     if (!entry) return;

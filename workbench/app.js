@@ -1365,7 +1365,9 @@ async function v2LiveDialog() {
   let storedWarning;
   if (live) {
     try {
-      stored = await api('v2/inputs', { session: openedSession });
+      stored = await api('v2/inputs', {
+        session: openedSession, ...(openedTarget ? { target: openedTarget } : {}),
+      });
       // The flow changed while the values were loading; opening now would show
       // this flow's text next to another flow's steps.
       if (!stillCurrent()) return;
@@ -1399,7 +1401,10 @@ async function v2LiveDialog() {
         clear.disabled = true;
         try {
           if (!stillCurrent()) throw new Error('当前工作流已切换，请重新打开回放弹窗');
-          await api('v2/inputs/save', { session: openedSession, values: { [name]: null } });
+          await api('v2/inputs/save', {
+            session: openedSession, ...(openedTarget ? { target: openedTarget } : {}),
+            values: { [name]: null },
+          });
           // A response for a dialog that was replaced must not paint state onto
           // the new one.
           if (!stillCurrent()) return;
@@ -1450,7 +1455,10 @@ async function v2LiveDialog() {
     // Clearing already happened when its button was pressed; this only writes
     // the optional "remember these values" choice.
     if (remember.checked) {
-      await api('v2/inputs/save', { session: openedSession, values: Object.fromEntries(filled) });
+      await api('v2/inputs/save', {
+        session: openedSession, ...(openedTarget ? { target: openedTarget } : {}),
+        values: Object.fromEntries(filled),
+      });
       // A flow imported while the save was in flight owns the page now; this
       // dialog's values must neither be written to it nor replayed in it.
       if (!stillCurrent()) throw new Error('当前工作流已切换，请重新打开回放弹窗。');
@@ -1459,7 +1467,7 @@ async function v2LiveDialog() {
     // The replay may pause at a checkpoint; close the dialog and keep the page
     // live so the waiting panel can be answered.
     dialog.close();
-    void v2StartLive(inputs);
+    void v2StartLive(inputs, openedTarget);
   });
 }
 
@@ -2152,7 +2160,7 @@ async function v2StopRun() {
  * Starts a v2 replay without blocking the page: the run POST stays in flight
  * while the page polls for a checkpoint and answers it.
  */
-async function v2StartLive(inputs) {
+async function v2StartLive(inputs, target) {
   state.v2Running = true;
   state.v2Checkpoint = null;
   renderV2();
@@ -2180,7 +2188,10 @@ async function v2StartLive(inputs) {
     }
   }, 500);
   try {
-    const report = await api('run', { session: state.session.id, mode: 'live', confirm: true, inputs });
+    const report = await api('run', {
+      session: state.session.id, mode: 'live', confirm: true, inputs,
+      ...(target ? { target } : {}),
+    });
     state.v2Report = report;
     renderV2();
     renderTimeline();

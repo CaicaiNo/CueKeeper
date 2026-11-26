@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -203,4 +204,41 @@ test('writing never replaces a file that belongs to another flow or is not a sid
   await writeFile(path, JSON.stringify(document()));
   await writeValues(path, document({ values: { text_1: { value: 'updated', complete: true } } }));
   assert.equal((await readValuesFile(path)).doc.values.text_1.value, 'updated');
+});
+
+test('two flows racing for a new sidecar name: one wins, the other cannot replace it', async t => {
+  const root = await workspace(t);
+  const path = valuesPath(join(root, 'race.flow.json'));
+  const first = document({ flowId: 'global-aa000001' });
+  const second = document({ flowId: 'global-bb000002' });
+  // Both see an empty path; the exclusive publish lets exactly one create it.
+  const results = await Promise.allSettled([writeValues(path, first), writeValues(path, second)]);
+  const fulfilled = results.filter(result => result.status === 'fulfilled');
+  const rejected = results.filter(result => result.status === 'rejected');
+  assert.equal(fulfilled.length, 1);
+  assert.equal(rejected.length, 1);
+  assert.equal(rejected[0].reason.code, 'INPUT_VALUES_FOREIGN_FILE');
+
+  const read = await readValuesFile(path);
+  assert.ok([first.flowId, second.flowId].includes(read.doc.flowId));
+  // The bytes belong to the winner, never a mix or the loser's document.
+  assert.deepEqual(read.doc, [first, second].find(doc => doc.flowId === read.doc.flowId));
+  assert.deepEqual(await readdir(root), ['race.flow.values.json']);
+});
+
+test('a fifo or an oversized file at the sidecar name is refused without reading it', async t => {
+  const root = await workspace(t);
+  const fifo = valuesPath(join(root, 'fifo.flow.json'));
+  execFileSync('mkfifo', [fifo]);
+  // The regular-file check decides before any read, so this cannot block.
+  const read = await readValuesFile(fifo);
+  assert.equal(read.doc, undefined);
+  assert.match(read.warning, /不是普通文件/);
+  await assert.rejects(writeValues(fifo, document()), { code: 'INPUT_VALUES_FOREIGN_FILE' });
+
+  const oversized = valuesPath(join(root, 'oversized.flow.json'));
+  await writeFile(oversized, 'x'.repeat(300 * 1024));
+  const tooBig = await readValuesFile(oversized);
+  assert.equal(tooBig.doc, undefined);
+  assert.match(tooBig.warning, /超过 262144 字节/);
 });

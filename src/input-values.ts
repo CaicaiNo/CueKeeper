@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { lstat, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
+import { writeNew } from './files.js';
 
 // Runtime values for `type` steps live next to the flow, never inside it: the
 // flow, its hash, its revisions and every report stay free of the text the
@@ -197,14 +198,30 @@ export function parseInputValues(raw: unknown): InputValuesDocument {
 
 /** Read one file. A missing file is not an error; a broken one is a warning. */
 export async function readValuesFile(path: string): Promise<InputValuesRead> {
-  let bytes: Buffer;
+  let info;
   try {
-    bytes = await readFile(path);
+    info = await lstat(path);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') return { path, missing: true };
     // Only the path and a fixed reason: a read error can never be allowed to
     // carry file content into stderr, a log or the page.
+    return { path, warning: `无法读取已存参数值文件 ${path}（${code ?? 'READ_FAILED'}），已忽略` };
+  }
+  // A FIFO or device under the sidecar name would block the reader (and, in the
+  // workbench, hold the run slot) forever; only a regular file is a value file.
+  if (!info.isFile()) {
+    return { path, warning: `已存参数值文件 ${path} 不是普通文件，已忽略` };
+  }
+  // The size is known before the read, so an oversized file is never loaded.
+  if (info.size > inputValuesLimits.maxBytes) {
+    return { path, warning: `已存参数值文件 ${path} 超过 ${inputValuesLimits.maxBytes} 字节，已忽略` };
+  }
+  let bytes: Buffer;
+  try {
+    bytes = await readFile(path);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
     return { path, warning: `无法读取已存参数值文件 ${path}（${code ?? 'READ_FAILED'}），已忽略` };
   }
   if (bytes.byteLength > inputValuesLimits.maxBytes) {
@@ -268,11 +285,6 @@ export async function writeValues(path: string, doc: InputValuesDocument): Promi
   // Re-validate on the way out: the writer and the reader share one contract,
   // and a value past the limit must fail before it reaches the disk.
   const normalized = parseInputValues(doc);
-  const occupied = await readValuesFile(path);
-  if (!occupied.missing && (!occupied.doc || occupied.doc.flowId !== normalized.flowId)) {
-    throw new InputValuesError('INPUT_VALUES_FOREIGN_FILE',
-      `${path} already belongs to another flow or is not a value file; refusing to overwrite it`);
-  }
   const text = `${JSON.stringify(normalized, null, 2)}\n`;
   // The reader rejects a file over the byte limit, so a write that would create
   // one must fail here instead of producing a file the next run cannot read.
@@ -281,6 +293,31 @@ export async function writeValues(path: string, doc: InputValuesDocument): Promi
     throw new InputValuesError('INPUT_VALUES_TOO_LARGE',
       `the value file would be ${bytes} bytes, over the ${inputValuesLimits.maxBytes} byte limit`);
   }
+  const foreign = (): never => {
+    throw new InputValuesError('INPUT_VALUES_FOREIGN_FILE',
+      `${path} already belongs to another flow or is not a value file; refusing to overwrite it`);
+  };
+  const occupied = await readValuesFile(path);
+  if (!occupied.missing) {
+    if (!occupied.doc || occupied.doc.flowId !== normalized.flowId) foreign();
+    await replaceValues(path, text);
+    return;
+  }
+  try {
+    // The first publish is exclusive: a value file that appeared between the
+    // ownership check and this write belongs to whoever published first.
+    await writeNew(path, text);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    // Re-check ownership after losing the race, never blind-overwrite.
+    const claimed = await readValuesFile(path);
+    if (!claimed.doc || claimed.doc.flowId !== normalized.flowId) foreign();
+    await replaceValues(path, text);
+  }
+}
+
+/** Replace a file we just proved ours; rename publishes it whole. */
+async function replaceValues(path: string, text: string) {
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   try {
     await writeFile(temporary, text, { mode: 0o600 });
