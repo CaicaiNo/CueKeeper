@@ -215,6 +215,8 @@ test('a gap cannot anchor an assertion and is resolved in place before saving', 
   assert.equal(blocked.ok, false);
   assert.equal(blocked.errors[0].code, 'CAPTURE_GAP');
   assert.equal(blocked.errors[0].stepId, 'g1');
+  // The editor still finds the step while the text carries its evidence code.
+  assert.match(blocked.errors[0].message, /g1: CAPTURE_GAP/);
 
   editor.replaceStep('g1', {
     id: 'ignored', kind: 'wait',
