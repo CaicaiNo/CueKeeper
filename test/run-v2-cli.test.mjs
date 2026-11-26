@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -239,6 +240,29 @@ test('CLI: a v2 run types the sidecar value verbatim and prints only its name',
     assert.ok(!result.stdout.includes('padded note'));
     // The report carries the outcome, not the text of the step.
     assert.ok(!readFileSync(reportPath, 'utf8').includes('padded note'));
+  });
+
+test('CLI: a broken sidecar warning never echoes the value it could not read',
+  { skip: process.platform !== 'darwin' }, t => {
+    const cli = fixture(t);
+    const secret = `Zq${randomUUID().slice(0, 8)}`;
+    // Both a schema error (an unknown issue names its own string) and a JSON
+    // error (the parser quotes the offending text) can carry the raw value.
+    for (const contents of [
+      JSON.stringify({
+        version: 1, flowId: 'cli-cross-app', updatedAt: '2026-11-26T08:00:00.000Z',
+        values: { note: { value: 'ok', complete: true, issues: [secret] } },
+      }),
+      `{"version":1,"flowId":"cli-cross-app","updatedAt":"x","values":{"note":{"value":${secret}}}}`,
+    ]) {
+      writeFileSync(join(cli.dir, 'flow.values.json'), contents);
+      const result = cli.run(['run', cli.flowPath, '--foreground', '--json']);
+      assert.equal(result.code, 1, result.stderr);
+      assert.match(result.stderr, /flow\.values\.json.*无效/);
+      assert.ok(!result.stderr.includes(secret), `stderr must not carry the value: ${result.stderr}`);
+      assert.ok(!result.stdout.includes(secret), 'the envelope must not carry the value');
+      assert.equal(cli.calls().filter(call => call.command === 'type').length, 0);
+    }
   });
 
 test('CLI: --no-stored-inputs refuses, and explicit --inputs wins over the sidecar',

@@ -160,3 +160,21 @@ test('writing a document that breaks the limit fails before touching the disk', 
   })), { code: 'INPUT_VALUES_TOO_LONG' });
   assert.deepEqual(await readdir(root), []);
 });
+
+test('a document over the byte limit is refused before the old file changes', async t => {
+  const root = await workspace(t);
+  const path = valuesPath(join(root, 'bytes.flow.json'));
+  await writeValues(path, document());
+  const before = await readFile(path);
+
+  // 64 × 4000 Chinese characters is 768 KB of UTF-8: valid per-field, but a
+  // file the reader would reject. The writer must refuse it and keep the old
+  // bytes intact, or the next run would silently lose every stored value.
+  const huge = document({
+    values: Object.fromEntries(Array.from({ length: 64 },
+      (_, index) => [`text_${index}`, { value: '汉'.repeat(4000), complete: true }])),
+  });
+  await assert.rejects(writeValues(path, huge), { code: 'INPUT_VALUES_TOO_LARGE' });
+  assert.deepEqual(await readFile(path), before);
+  assert.deepEqual((await readdir(root)).filter(name => name.includes('.tmp')), []);
+});

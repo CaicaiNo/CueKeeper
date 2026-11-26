@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -110,7 +110,10 @@ const confirmBox = document => dialog(document).querySelectorAll('input')
 test('the replay dialog prefills the recorded text and sends it verbatim to the CLI', async t => {
   const { root, directory } = await workspace(t, {
     values: {
-      address: { value: '  https://example.com/pkg  ', complete: true, steps: ['type-address'] },
+      address: {
+        value: '  https://example.com/pkg  ', complete: true, steps: ['type-address'],
+        targets: [{ role: 'textfield', name: '旧地址栏' }],
+      },
       note: { value: 'hello note', complete: false, issues: ['chars_missing'] },
     },
   });
@@ -127,6 +130,9 @@ test('the replay dialog prefills the recorded text and sends it verbatim to the 
   assert.equal(address.value, '  https://example.com/pkg  ');
   assert.equal(note.value, 'hello note');
   assert.match(statusOf(document, 'address'), /来自录制/);
+  // The step's current target is 「地址与搜索」 but the value was typed into
+  // 「旧地址栏」: the hint names the old control instead of hiding the change.
+  assert.match(statusOf(document, 'address'), /录制时用于「旧地址栏」/);
   // A value the recorder did not read completely is prefilled and flagged, not
   // silently treated as whole.
   assert.match(statusOf(document, 'note'), /不完整/);
@@ -168,7 +174,7 @@ test('a parameter without a value is still required, and a sensitive one never s
   await assert.rejects(readFile(log), failure => failure.code === 'ENOENT');
 });
 
-test('clearing a stored value removes the entry but keeps the file at 0600', async t => {
+test('clearing a stored value writes it immediately and survives reopening the dialog', async t => {
   const { root, directory, sidecar } = await workspace(t, {
     values: {
       address: { value: 'stored address', complete: true, steps: ['type-address'] },
@@ -180,24 +186,52 @@ test('clearing a stored value removes the entry but keeps the file at 0600', asy
   const { document } = await bootPage(t, { root, directory, cliPath });
 
   buttonByText(document.body, '实时回放').click();
-  await tick(120);
-  buttonByText(dialog(document), '清除已存值')?.click();
-  // Two fields have entries, so the first clear button belongs to `address`.
+  await tick(150);
+  buttonByText(dialog(document), '清除已存值').click();
+  await tick(150);
   assert.equal(document.getElementById('live-input-address').value, '');
   assert.match(statusOf(document, 'address'), /已清除已存值/);
-  document.getElementById('live-input-address').value = 'typed now';
-  confirmBox(document).checked = true;
-  await submitDialog(document);
+
+  // The clear is on disk before any replay starts: closing the dialog and
+  // reopening it must not bring the value back.
+  buttonByText(dialog(document), '关闭').click();
+  assert.equal(dialog(document).open, false);
+  buttonByText(document.body, '实时回放').click();
+  await tick(150);
+  assert.equal(document.getElementById('live-input-address').value, '');
+  assert.match(statusOf(document, 'address'), /无值/);
+  // Only `note` still has a value, so only it offers a clear button.
+  const clears = dialog(document).querySelectorAll('button')
+    .filter(node => node.textContent.includes('清除已存值'));
+  assert.equal(clears.length, 1);
 
   const read = JSON.parse(await readFile(sidecar, 'utf8'));
   assert.deepEqual(Object.keys(read.values), ['note']);
   assert.equal((await stat(sidecar)).mode & 0o777, 0o600);
+
+  // Replaying with a typed value does not store it unless asked to.
+  document.getElementById('live-input-address').value = 'typed now';
+  confirmBox(document).checked = true;
+  await submitDialog(document);
   const sent = JSON.parse(await readFile(log, 'utf8'));
   assert.equal(sent.inputs.address, 'typed now');
+  assert.equal(sent.inputs.note, 'stored note');
+  assert.deepEqual(Object.keys(JSON.parse(await readFile(sidecar, 'utf8')).values), ['note']);
 });
 
-test('a corrupt value file warns in the dialog and the replay can still be filled by hand', async t => {
-  const { root, directory } = await workspace(t, { corrupt: true });
+test('a corrupt value file warns in the dialog without echoing its content, and manual replay works', async t => {
+  const secret = `Zq${Date.now()}`;
+  const root = await mkdtemp(join(tmpdir(), 'cuekeeper-input-values-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const directory = join(root, 'run');
+  await mkdir(directory);
+  const flow = JSON.parse(await readFile(examplePath, 'utf8'));
+  flow.id = 'global-input-values';
+  await writeFile(join(directory, 'flow.json'), JSON.stringify(flow, null, 2));
+  // Unquoted JSON: the parser's own message quotes this text, so a warning that
+  // forwards the message would leak the value.
+  await writeFile(join(directory, 'flow.values.json'),
+    `{"version":1,"flowId":"global-input-values","updatedAt":"2026-11-26T08:00:00.000Z","values":{"address":{"value":${secret}}}}`);
   const log = join(root, 'stub-inputs.json');
   const cliPath = await stubCli(root, log);
   const { document } = await bootPage(t, { root, directory, cliPath });
@@ -205,6 +239,8 @@ test('a corrupt value file warns in the dialog and the replay can still be fille
   buttonByText(document.body, '实时回放').click();
   await tick(120);
   assert.match(dialog(document).textContent, /已存参数值读取失败/);
+  assert.ok(!dialog(document).textContent.includes(secret),
+    'the warning names the file, never a byte of its content');
   assert.match(statusOf(document, 'address'), /无值/);
   document.getElementById('live-input-address').value = 'manual address';
   document.getElementById('live-input-note').value = 'manual note';
@@ -287,4 +323,112 @@ test('the server reads, saves and clears values, and refuses to save while a run
   const sent = JSON.parse(await readFile(log, 'utf8'));
   assert.equal(sent.inputs.address, 'before run');
   assert.equal(sent.inputs.note, 'run note');
+});
+
+test('a revision clear lands on the sidecar the lookup actually reads', async t => {
+  const { root, directory, sidecar } = await workspace(t, {
+    values: {
+      address: { value: 'old address', complete: true },
+      note: { value: 'old note', complete: true },
+    },
+  });
+  const log = join(root, 'stub-inputs.json');
+  const cliPath = await stubCli(root, log);
+  const { post } = await server(t, { root, directory, cliPath });
+  const session = await post('import', { directory });
+  // The saved revision becomes the replay target, but the values belong to the
+  // recording's sidecar: the reader finds it by flowId.
+  const saved = await post('save', { session: session.id }, 201);
+  const state = await post('state', {});
+  assert.equal(state.session.v2.live.path, saved.output);
+
+  const read = await post('v2/inputs', { session: session.id });
+  assert.equal(read.path, join(await realpath(directory), 'flow.values.json'));
+  assert.equal(read.values.address.value, 'old address');
+
+  // Clearing through the revision must clear what the revision reads next.
+  const cleared = await post('v2/inputs/save', { session: session.id, values: { address: null } });
+  assert.equal(cleared.values.address, undefined);
+  const reread = await post('v2/inputs', { session: session.id });
+  assert.equal(reread.values.address, undefined);
+  assert.deepEqual(Object.keys(JSON.parse(await readFile(sidecar, 'utf8')).values), ['note']);
+});
+
+test('clearing a sensitive entry keeps its mark, and a later save never writes its text', async t => {
+  const { root, directory, sidecar } = await workspace(t, {
+    values: {
+      address: { value: 'address', complete: true },
+      note: { sensitive: true, complete: true },
+      orphan: { value: 'not declared', complete: true },
+    },
+  });
+  const log = join(root, 'stub-inputs.json');
+  const cliPath = await stubCli(root, log);
+  const { post } = await server(t, { root, directory, cliPath });
+  const session = await post('import', { directory });
+
+  // An explicit save drops a value whose parameter the flow no longer declares.
+  await post('v2/inputs/save', { session: session.id, values: { address: 'new' } });
+  const disk = JSON.parse(await readFile(sidecar, 'utf8'));
+  assert.equal(disk.values.orphan, undefined);
+  assert.deepEqual(Object.keys(disk.values).sort(), ['address', 'note']);
+
+  // Clearing the sensitive entry must not turn it into a normal one.
+  await post('v2/inputs/save', { session: session.id, values: { note: null } });
+  const read = await post('v2/inputs', { session: session.id });
+  assert.deepEqual(read.values.note, { sensitive: true, complete: true });
+
+  // "Save as default" for that parameter still must not store the text.
+  const typed = `Zq${Date.now()}`;
+  await post('v2/inputs/save', { session: session.id, values: { note: typed } });
+  const after = JSON.parse(await readFile(sidecar, 'utf8'));
+  assert.equal(after.values.note.sensitive, true);
+  assert.equal('value' in after.values.note, false);
+  assert.ok(!JSON.stringify(after).includes(typed));
+});
+
+test('concurrent live runs start one CLI, and concurrent saves keep both fields', async t => {
+  const { root, directory } = await workspace(t, {
+    values: {
+      address: { value: 'concurrent address', complete: true },
+      note: { value: 'concurrent note', complete: true },
+    },
+  });
+  const starts = join(root, 'starts.log');
+  const slow = join(root, 'slow-cli.mjs');
+  await writeFile(slow, [
+    "import { appendFileSync } from 'node:fs';",
+    'const args = process.argv.slice(2);',
+    `appendFileSync(${JSON.stringify(starts)}, 'start\\n');`,
+    'await new Promise(resolve => setTimeout(resolve, 250));',
+    'process.stdout.write(JSON.stringify({ ok: true, data: { version: 2, flowId: "global-input-values",',
+    '  flowSha256: "a".repeat(64), startedAt: new Date().toISOString(), mode: "replay", status: "passed", entries: [] } }) + "\\n");',
+    '',
+  ].join('\n'));
+  const { started, post } = await server(t, { root, directory, cliPath: slow, allowLive: true });
+  const session = await post('import', { directory });
+  const send = (route, payload) => fetch(`${started.url}/api/${route}`, {
+    method: 'POST',
+    headers: { origin: started.url, 'content-type': 'application/json', 'x-cuekeeper-workbench': '1' },
+    body: JSON.stringify(payload),
+  });
+  const run = () => send('run', { session: session.id, mode: 'live', confirm: true });
+
+  // Four confirmations arrive at once; only one may own the desktop.
+  const runs = await Promise.all([run(), run(), run(), run()]);
+  const statuses = runs.map(response => response.status).sort();
+  assert.deepEqual(statuses, [200, 400, 400, 400]);
+  const startedLines = (await readFile(starts, 'utf8')).trim().split('\n').filter(Boolean);
+  assert.equal(startedLines.length, 1, 'exactly one replay process was started');
+
+  // Two dialogs saving different fields at once must both survive.
+  const [first, second] = await Promise.all([
+    send('v2/inputs/save', { session: session.id, values: { address: 'first field' } }),
+    send('v2/inputs/save', { session: session.id, values: { note: 'second field' } }),
+  ]);
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  const read = await post('v2/inputs', { session: session.id });
+  assert.equal(read.values.address.value, 'first field');
+  assert.equal(read.values.note.value, 'second field');
 });

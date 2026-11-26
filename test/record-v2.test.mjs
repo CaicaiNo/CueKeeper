@@ -116,6 +116,29 @@ test('an IME commit without chars keeps what was read and marks the value incomp
   assert.deepEqual(values.text_1.issues, ['chars_missing']);
 });
 
+test('a dropped first character is charged to the burst the survivors form', async () => {
+  const data = fixture('two-apps-three-windows');
+  const owner = data.events[0].owner;
+  const focus = { role: 'AXTextField', name: '地址栏', editable: true, bounds: [100, 100, 200, 24] };
+  // The helper's own event clock is current for the second character; only the
+  // first one sat in the queue for more than eight seconds and was dropped.
+  const recording = new GlobalRecording(readerFor(data), { now: () => NOW + 11_000 });
+  await recording.add(parseCaptureEvent({
+    kind: 'text', t: 200, seen: NOW, focusGeneration: 1, secure: false, owner, focus, chars: 'lost',
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'text', t: 260, seen: NOW + 11_000, focusGeneration: 1, secure: false, owner, focus, chars: 'kept',
+  }));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['type']);
+  const values = recording.recordedInputValues();
+  // The value can only say what arrived, and it must not claim to be whole.
+  assert.equal(values.text_1.value, 'kept');
+  assert.equal(values.text_1.complete, false);
+  assert.deepEqual(values.text_1.issues, ['backlog_dropped']);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'CAPTURE_BACKLOG'));
+});
+
 test('a secure text burst never becomes a type step or a stored value', async () => {
   const data = fixture('secure-input');
   const secret = `Zq${randomUUID().slice(0, 8)}`;

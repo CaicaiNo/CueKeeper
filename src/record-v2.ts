@@ -424,6 +424,14 @@ export class GlobalRecording {
   };
   private pendingSettle?: Promise<void>;
   /**
+   * A text event the backlog dropped. The burst it belonged to may not exist
+   * yet (its first character is exactly the one that was lost), so the marker
+   * is applied to the next burst in the same window and focus, within one
+   * merge window. Without it a value missing its first characters would still
+   * read as complete.
+   */
+  private droppedText?: { scopeId: string; key: string; at: number };
+  /**
    * A Dock click names no window of its own, so the app it activates only
    * becomes provable when the focus notification arrives. Until then the click
    * is held, and hover noise from the pointer travelling to the new window is
@@ -560,6 +568,7 @@ export class GlobalRecording {
    */
   noteBoundary() {
     this.endBursts();
+    this.droppedText = undefined;
     if (this.pendingGapClick) this.flushPendingGap();
   }
 
@@ -1616,6 +1625,12 @@ export class GlobalRecording {
       }
       this.pendingText?.issues.add('backlog_dropped');
       if (this.pendingText) this.pendingText.complete = false;
+      // The first character of a burst is often the one that was lost, so the
+      // burst may not exist yet: remember where it belongs and mark it when it
+      // is bound.
+      this.droppedText = {
+        scopeId, key: this.focusKey(binding, event.focusGeneration), at: event.t,
+      };
       return;
     }
     if (event.focus?.secure) {
@@ -1629,14 +1644,14 @@ export class GlobalRecording {
     if (direct) {
       this.rememberFocus(key, direct);
       this.retargetClickFromEvidence(event, direct, scopeId);
-      this.bindText(scope, scopeId, event.t, direct, undefined, { chars: event.chars });
+      this.bindText(scope, scopeId, event.t, direct, undefined, { chars: event.chars, key });
       return;
     }
     // A burst already proved which control receives the characters; another
     // read per keystroke would prove nothing more.
     const burst = this.textBurst;
     if (burst && burst.scope === scopeId && event.t - burst.at <= textGapMs) {
-      this.bindText(scope, scopeId, event.t, burst.target, undefined, { chars: event.chars });
+      this.bindText(scope, scopeId, event.t, burst.target, undefined, { chars: event.chars, key });
       return;
     }
     // The click that selected the control is proven evidence even without the tree.
@@ -1644,13 +1659,13 @@ export class GlobalRecording {
     if (anchor && anchor.scope === scopeId && event.t - anchor.at <= clickTextFallbackMs) {
       this.warn('TEXT_TARGET_FROM_CLICK',
         'A text event carried no focused-element evidence; its target was taken from the click that selected the control');
-      this.bindText(scope, scopeId, event.t, anchor.locator, undefined, { chars: event.chars });
+      this.bindText(scope, scopeId, event.t, anchor.locator, undefined, { chars: event.chars, key });
       return;
     }
     // Evidence already proven for this window and focus generation is reused.
     const cached = this.focusTargets.get(key);
     if (cached) {
-      this.bindText(scope, scopeId, event.t, cached, undefined, { chars: event.chars });
+      this.bindText(scope, scopeId, event.t, cached, undefined, { chars: event.chars, key });
       return;
     }
     // Fallback: buffer the burst and read the tree once, off the event path.
@@ -1678,7 +1693,7 @@ export class GlobalRecording {
   /** Records one text event against a proven control, merging a running burst. */
   private bindText(
     scope: WindowScope, scopeId: string, at: number, target: ElementLocator, snapshot?: Snapshot,
-    text: { chars?: string; issues?: readonly InputValueIssue[] } = {},
+    text: { chars?: string; issues?: readonly InputValueIssue[]; key?: string } = {},
   ) {
     const locatorId = locatorKey(target);
     const burst = this.textBurst;
@@ -1689,6 +1704,7 @@ export class GlobalRecording {
       if (snapshot) burst.snapshot = snapshot;
       this.textAnchor = { at, scope: scopeId, locator: target };
       this.appendChars(burst.name, text);
+      this.markDropped(burst.name, scopeId, text.key, at);
       return;
     }
     this.endBursts();
@@ -1706,6 +1722,7 @@ export class GlobalRecording {
     };
     this.inputValues.set(input, entry);
     this.appendChars(input, text);
+    this.markDropped(input, scopeId, text.key, at);
     this.textBurst = {
       at, scope: scopeId, locator: locatorId, target, name: input,
       ...(snapshot ? { snapshot } : {}),
@@ -1737,6 +1754,22 @@ export class GlobalRecording {
       entry.complete = false;
       entry.issues.add('truncated');
     }
+  }
+
+  /**
+   * Applies a backlog drop to the burst it belongs to. Window, focus generation
+   * and a merge-window distance all have to match, so a later burst in the same
+   * window is never blamed for characters it did read.
+   */
+  private markDropped(name: string, scopeId: string, key: string | undefined, at: number) {
+    const dropped = this.droppedText;
+    if (!dropped || dropped.scopeId !== scopeId || dropped.key !== key) return;
+    if (Math.abs(at - dropped.at) > textGapMs) return;
+    this.droppedText = undefined;
+    const entry = this.inputValues.get(name);
+    if (!entry) return;
+    entry.complete = false;
+    entry.issues.add('backlog_dropped');
   }
 
   /** The recorded text of every `type` step, for the sidecar the CLI writes. */
@@ -1774,7 +1807,7 @@ export class GlobalRecording {
     }
     const cached = this.focusTargets.get(key);
     if (cached) {
-      this.bindText(scope, scopeId, event.t, cached, undefined, { chars: event.chars });
+      this.bindText(scope, scopeId, event.t, cached, undefined, { chars: event.chars, key });
       return;
     }
     const pending = this.pendingText;
@@ -1848,7 +1881,7 @@ export class GlobalRecording {
     this.rememberFocus(key, target);
     this.retargetClick(snapshot, single, pending.scopeId, pending.at);
     this.bindText(pending.scope, pending.scopeId, pending.at, target, snapshot, {
-      chars: pending.chars, issues: [...pending.issues],
+      chars: pending.chars, issues: [...pending.issues], key,
     });
   }
 
@@ -2540,6 +2573,7 @@ export class GlobalRecording {
    */
   finish(): FlowV2 {
     this.ended = true;
+    this.droppedText = undefined;
     // No focus ever proved the last held click was an activation.
     this.flushPendingGap();
     if (this.pendingDockGap) {

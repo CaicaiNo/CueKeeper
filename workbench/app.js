@@ -1328,11 +1328,20 @@ function v2DryRun() {
 }
 
 /** One line explaining where a prefilled value came from, or why it is empty. */
-function v2InputStatus(entry) {
+function v2InputStatus(entry, step) {
   if (!entry) return '无值 · 回放前请填写';
   if (entry.sensitive) return '敏感 · 不会自动填入，请手动填写';
-  if (entry.complete === false) return '来自录制但不完整 · 部分字符没读到（输入法或采集中断），请核对';
-  return '来自录制，可直接回放或修改';
+  // A value stays usable after the target was changed, but the operator has to
+  // know which control it was typed into while recording.
+  const recorded = Array.isArray(entry.targets) ? entry.targets[0] : undefined;
+  const current = step?.target?.kind === 'element' ? step.target : undefined;
+  const changed = Boolean(recorded && current &&
+    (recorded.role !== current.role || (recorded.name ?? '') !== (current.name ?? '')));
+  const altered = changed ? ` · 录制时用于「${recorded.name ?? recorded.role}」` : '';
+  if (entry.complete === false) {
+    return `来自录制但不完整 · 部分字符没读到（输入法或采集中断），请核对${altered}`;
+  }
+  return `来自录制，可直接回放或修改${altered}`;
 }
 
 async function v2LiveDialog() {
@@ -1358,25 +1367,33 @@ async function v2LiveDialog() {
   const remember = el('input', { type: 'checkbox', className: 'checkbox checkbox-sm' });
   const controls = new Map((flow.inputs ?? []).map(name => {
     const entry = stored.values?.[name];
+    const step = flow.steps.find(item => item.kind === 'type' && item.input === name);
     const node = input({
       id: `live-input-${name}`,
       maxLength: 4000, spellcheck: false, autocomplete: 'off',
       placeholder: entry?.sensitive ? '该参数标记为敏感，请手动填写' : '填写本次回放使用的值',
     });
     if (typeof entry?.value === 'string') node.value = entry.value;
-    const record = { node, entry, cleared: false };
-    const status = el('span', { className: 'muted', id: `live-input-status-${name}` }, v2InputStatus(entry));
-    // Only an entry that actually holds text can be cleared; a missing one
-    // needs no button.
-    const clear = entry
-      ? button('清除已存值', () => {
-        node.value = '';
-        record.cleared = true;
-        status.textContent = '已清除已存值，本次仍需填写';
+    const record = { node, entry };
+    const status = el('span', { className: 'muted', id: `live-input-status-${name}` },
+      v2InputStatus(entry, step));
+    // Clearing writes the file immediately and on its own: an operator who
+    // clears a value and closes the dialog must not be left with it on disk.
+    // A sensitive entry has no text to clear, so it gets no button.
+    const clear = typeof entry?.value === 'string'
+      ? button('清除已存值', async () => {
+        clear.disabled = true;
+        try {
+          await api('v2/inputs/save', { session: state.session.id, values: { [name]: null } });
+          node.value = '';
+          record.entry = undefined;
+          status.textContent = '已清除已存值，本次仍需填写';
+        } catch (error) {
+          clear.disabled = false;
+          status.textContent = `清除失败：${error instanceof Error ? error.message : String(error)}`;
+        }
       }, { style: 'small', key: `live-clear-${name}` })
       : undefined;
-    // The clear handler mutates this same record; the dialog reads its flags on
-    // submit, so a copy here would lose the "cleared" state.
     record.status = status;
     record.clear = clear;
     return [name, record];
@@ -1410,11 +1427,10 @@ async function v2LiveDialog() {
     const filled = [...controls.entries()].map(([name, control]) => [name, control.node.value]);
     const missing = filled.filter(([, value]) => !value).map(([name]) => name);
     if (missing.length) throw new Error(`请先填写运行参数：${missing.join('、')}`);
-    const patch = {};
-    for (const [name, control] of controls) if (control.cleared) patch[name] = null;
-    if (remember.checked) for (const [name, value] of filled) patch[name] = value;
-    if (Object.keys(patch).length) {
-      await api('v2/inputs/save', { session: state.session.id, values: patch });
+    // Clearing already happened when its button was pressed; this only writes
+    // the optional "remember these values" choice.
+    if (remember.checked) {
+      await api('v2/inputs/save', { session: state.session.id, values: Object.fromEntries(filled) });
     }
     const inputs = Object.fromEntries(filled);
     // The replay may pause at a checkpoint; close the dialog and keep the page

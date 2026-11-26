@@ -201,8 +201,11 @@ export async function readValuesFile(path: string): Promise<InputValuesRead> {
   try {
     bytes = await readFile(path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { path, missing: true };
-    return { path, warning: `无法读取已存参数值 ${path}：${(error as Error).message}` };
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return { path, missing: true };
+    // Only the path and a fixed reason: a read error can never be allowed to
+    // carry file content into stderr, a log or the page.
+    return { path, warning: `无法读取已存参数值文件 ${path}（${code ?? 'READ_FAILED'}），已忽略` };
   }
   if (bytes.byteLength > inputValuesLimits.maxBytes) {
     return { path, warning: `已存参数值文件 ${path} 超过 ${inputValuesLimits.maxBytes} 字节，已忽略` };
@@ -210,8 +213,12 @@ export async function readValuesFile(path: string): Promise<InputValuesRead> {
   try {
     return { path, doc: parseInputValues(JSON.parse(bytes.toString('utf8'))) };
   } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    return { path, warning: `已存参数值文件 ${path} 无效，已忽略：${reason}` };
+    // A JSON parser message quotes the offending text and a schema message can
+    // name a raw field; neither may travel with the warning. Keep the stable
+    // code only, so the operator still knows file and cause without seeing a
+    // byte of the value.
+    const code = error instanceof InputValuesError ? error.code : 'INPUT_VALUES_UNREADABLE';
+    return { path, warning: `已存参数值文件 ${path} 无效（${code}），已忽略` };
   }
 }
 
@@ -257,6 +264,13 @@ export async function writeValues(path: string, doc: InputValuesDocument): Promi
   // and a value past the limit must fail before it reaches the disk.
   const normalized = parseInputValues(doc);
   const text = `${JSON.stringify(normalized, null, 2)}\n`;
+  // The reader rejects a file over the byte limit, so a write that would create
+  // one must fail here instead of producing a file the next run cannot read.
+  const bytes = Buffer.byteLength(text, 'utf8');
+  if (bytes > inputValuesLimits.maxBytes) {
+    throw new InputValuesError('INPUT_VALUES_TOO_LARGE',
+      `the value file would be ${bytes} bytes, over the ${inputValuesLimits.maxBytes} byte limit`);
+  }
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   try {
     await writeFile(temporary, text, { mode: 0o600 });
@@ -276,17 +290,32 @@ export function mergeValues(
   existing: InputValuesDocument | undefined,
   flowId: string,
   patch: Readonly<Record<string, string | null>>,
-  options: { recordedFlowSha256?: string; now?: Date } = {},
+  options: {
+    recordedFlowSha256?: string;
+    now?: Date;
+    /** Parameter names the flow declares now; entries outside them are orphans. */
+    declaredNames?: readonly string[];
+  } = {},
 ): InputValuesDocument {
   const values: Record<string, InputValueEntry> = existing?.flowId === flowId
     ? Object.fromEntries(Object.entries(existing.values).map(([name, entry]) => [name, { ...entry }]))
     : {};
+  // A rename or a deleted step leaves an old name behind. It is dropped on the
+  // next explicit write instead of surviving as a value nothing can use.
+  if (options.declaredNames) {
+    const declared = new Set(options.declaredNames);
+    for (const name of Object.keys(values)) if (!declared.has(name)) delete values[name];
+  }
   for (const [name, value] of Object.entries(patch)) {
     if (!parameterNamePattern.test(name)) {
       throw new InputValuesError('INPUT_VALUES_INVALID', `${name} is not a parameter name`);
     }
     if (value === null) {
-      delete values[name];
+      // Clearing a sensitive entry removes its text but must keep its mark:
+      // otherwise the next save would write the operator's typing to disk for
+      // a parameter the recording deliberately treated as sensitive.
+      if (values[name]?.sensitive) values[name] = { sensitive: true, complete: true };
+      else delete values[name];
       continue;
     }
     if (typeof value !== 'string' || value.length === 0) {

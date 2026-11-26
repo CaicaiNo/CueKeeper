@@ -884,10 +884,15 @@ async function main() {
       // together. A write failure is a warning: the flow itself is already safe.
       const inputValues = values['no-input-values'] ? {} : result.inputValues;
       const inputValueNames = Object.keys(inputValues);
+      // The envelope reports what actually reached the disk: a refused write
+      // (for example past the file limit) must not claim entries that no later
+      // run could read back.
+      let writtenInputValues = 0;
       let inputValuesWarning: string | undefined;
       if (inputValueNames.length) {
         try {
           await writeValues(valuesPath(saved), inputValuesDocument(result.flow, inputValues));
+          writtenInputValues = inputValueNames.length;
         } catch (error) {
           inputValuesWarning = `未能写入已存参数值 ${valuesPath(saved)}：${(error as Error).message}`;
         }
@@ -909,7 +914,7 @@ async function main() {
       const data = {
         version: 2, output: saved, flowId: result.flow.id, actions: result.flow.steps.length,
         snapshotReads: result.snapshotReads,
-        ...(inputValueNames.length ? { inputValues: inputValueNames.length } : {}),
+        ...(writtenInputValues ? { inputValues: writtenInputValues } : {}),
         ...(result.lifecycle.length ? { lifecycle: result.lifecycle.length } : {}),
         ...(workbench ? { workbench } : {}),
         ...(inputSource ? { inputSource } : {}),
