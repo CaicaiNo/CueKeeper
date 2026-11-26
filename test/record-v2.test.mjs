@@ -2534,6 +2534,8 @@ test('record --global is an explicit mode that rejects target flags', { skip: pr
     ['record', '--global', '--max-seconds', '3601'],
     ['record', '--global', '--exclude', 'not-a-bundle-id'],
     ['record', '--global', '--clipboard'],
+    ['record', '--global', '--progress-fd', '2'],
+    ['record', '--app', 'com.apple.TextEdit', '--progress-fd', '3'],
     ['record', '--exclude', 'com.apple.TextEdit'],
   ]) {
     const result = spawnSync(process.execPath, [cliPath, ...args, '--json'], {
@@ -2554,7 +2556,7 @@ test('record --global is an explicit mode that rejects target flags', { skip: pr
  */
 function globalCliFixture(t, {
   events, snapshots, cliArgs = [], seconds = 2, exit = 0, ready, download, retitle = '',
-  imeSource = ABC_SOURCE,
+  imeSource = ABC_SOURCE, progress = false,
 }) {
   const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-global-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -2646,7 +2648,9 @@ process.exitCode = ${exit};
   const ime = imeStub(dir, { current: imeSource });
   const result = spawnSync(process.execPath, [join(dist, 'cli.js'), 'record', '--global',
     '--countdown', '0', '--no-indicator', '--max-seconds', String(seconds),
-    '--out', output, '--json', ...cliArgs], {
+    '--out', output, '--json',
+    // Descriptor 3 is the stage-report channel the workbench asks for.
+    ...(progress ? ['--progress-fd', '3'] : []), ...cliArgs], {
     env: {
       ...process.env,
       CUEKEEPER_AGENT_DESKTOP: desktop,
@@ -2660,11 +2664,15 @@ process.exitCode = ${exit};
       }),
     },
     encoding: 'utf8', timeout: 20_000,
+    ...(progress ? { stdio: ['ignore', 'pipe', 'pipe', 'pipe'] } : {}),
   });
   const response = JSON.parse(result.stdout);
+  const stages = progress
+    ? (result.output[3] ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line))
+    : undefined;
   const written = existsSync(output) ? readFileSync(output, 'utf8') : undefined;
   return {
-    dir, downloadDir, code: result.status, response, stderr: result.stderr, output, written,
+    dir, downloadDir, code: result.status, response, stderr: result.stderr, output, written, stages,
     captureArgs: JSON.parse(readFileSync(captureArgs, 'utf8')),
     commands: readFileSync(commandsLog, 'utf8').trim().split('\n').filter(Boolean),
     imeSelects: ime.selects(),
@@ -2708,8 +2716,41 @@ test('record --global writes a v2 flow with scopes and no typed content', { skip
   assert.equal(run.response.data.snapshotReads, reads);
 });
 
-test('record --global consumes a drag pickup and saves the drag step', { skip: process.platform !== 'darwin' }, t => {
-  const data = fixture('cross-window-drag');
+test('record --global reports its stages with the helper ready moment', { skip: process.platform !== 'darwin' }, t => {
+  const data = fixture('two-apps-three-windows');
+  // The helper dates its own ready moment; the CLI must carry that value, not
+  // the moment it happened to read the line.
+  const readyAt = Date.now() - 1500;
+  const run = globalCliFixture(t, {
+    events: [data.events[0]], snapshots: data.snapshots, progress: true,
+    ready: { kind: 'ready', global: true, hotkeysFiltered: true, indicator: false, readyAt },
+  });
+  // `JSON.parse(result.stdout)` inside the fixture already proves the result
+  // still leaves as one envelope; the stage reports go elsewhere.
+  assert.equal(run.code, 0, (run.stderr || '') + JSON.stringify(run.response));
+  assert.deepEqual(run.stages.map(entry => entry.stage), ['countdown', 'preparing', 'recording']);
+  assert.ok(Number.isFinite(run.stages[0].endsAt), 'the countdown report dates its real end');
+  assert.equal(run.stages[2].readyAt, readyAt);
+  assert.ok(run.written, 'the flow is still written');
+});
+
+test('record --global dates ready from the report when the helper omits it', { skip: process.platform !== 'darwin' }, t => {
+  const data = fixture('two-apps-three-windows');
+  const before = Date.now();
+  const run = globalCliFixture(t, {
+    events: [data.events[0]], snapshots: data.snapshots, progress: true,
+  });
+  const after = Date.now();
+  assert.equal(run.code, 0, (run.stderr || '') + JSON.stringify(run.response));
+  const ready = run.stages.at(-1);
+  assert.equal(ready.stage, 'recording');
+  // An older helper has no readyAt; the arrival of its ready line is the only
+  // honest substitute, and it is far better than a fixed sleep.
+  assert.ok(Number.isInteger(ready.readyAt) && ready.readyAt >= before && ready.readyAt <= after,
+    `readyAt ${ready.readyAt} must fall within ${before}..${after}`);
+});
+
+test('record --global consumes a drag pickup and saves the drag step', { skip: process.platform !== 'darwin' }, t => {  const data = fixture('cross-window-drag');
   // The helper announces every pickup before the drop. A same-window drag from
   // the note body back to itself must yield one drag step, not a protocol error
   // for the announcement the helper sends first.

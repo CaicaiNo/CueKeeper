@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { dirname, join, resolve } from 'node:path';
+import { writeSync } from 'node:fs';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
 import { discoverAssets } from './assets.js';
 import { countdown, detectTarget } from './auto-target.js';
@@ -745,12 +746,21 @@ async function main() {
         global: { type: 'boolean' }, exclude: { type: 'string' }, 'max-seconds': { type: 'string' },
         'no-indicator': { type: 'boolean' }, sound: { type: 'boolean' },
         'trace-clicks': { type: 'boolean' }, clipboard: { type: 'boolean' },
-        'no-lifecycle': { type: 'boolean' },
+        'no-lifecycle': { type: 'boolean' }, 'progress-fd': { type: 'string' },
       },
     });
     const countdownSeconds = Number(values.countdown);
     if (!Number.isInteger(countdownSeconds) || countdownSeconds < 0 || countdownSeconds > 60) {
       throw new Error('--countdown must be an integer from 0 to 60');
+    }
+    // A supervisor (the workbench) passes an inherited descriptor and reads the
+    // stage reports there. It is display plumbing, never the recording result.
+    const progressFd = values['progress-fd'] === undefined ? undefined : Number(values['progress-fd']);
+    if (progressFd !== undefined && (!Number.isInteger(progressFd) || progressFd < 3 || progressFd > 255)) {
+      throw new Error('--progress-fd must be an inherited file descriptor from 3 to 255');
+    }
+    if (progressFd !== undefined && values.global !== true) {
+      throw new Error('--progress-fd is only available with --global');
     }
     const app = values.app;
     const window = values.window;
@@ -794,15 +804,30 @@ async function main() {
       });
       const started = await ime.startRecording();
       const inputSource = started.original ?? started.final;
+      // Stage reports for a supervising process: the countdown's real end and
+      // the helper's ready moment. They are display plumbing, so a write that
+      // fails because the reader went away is ignored; the recording result
+      // still travels only in the final envelope on stdout.
+      const reportStage = (stage: Record<string, unknown>) => {
+        if (progressFd === undefined) return;
+        try {
+          writeSync(progressFd, `${JSON.stringify(stage)}\n`);
+        } catch {
+          // The supervisor stopped listening; nothing about the recording depends on it.
+        }
+      };
       // Restore inside the finally: a normal stop, a local stop, a capture
       // failure and SIGINT all end here, and none of them may leave the user
       // on ABC. A restore problem is a warning, never a second failure.
       const captureGlobal = async () => {
         try {
+          reportStage({ stage: 'countdown', endsAt: Date.now() + countdownSeconds * 1000 });
           await globalCountdown(countdownSeconds, signal);
+          reportStage({ stage: 'preparing' });
           const options = {
             seconds: maxSeconds, indicator: !values['no-indicator'], sound: values.sound ?? false,
             exclude, lifecycle: values['no-lifecycle'] ? false : true,
+            onReady: (readyAt: number) => reportStage({ stage: 'recording', readyAt }),
           };
           return await withDesktop({ headed: false, signal },
             desktop => recordGlobal(desktop, options, signal));
