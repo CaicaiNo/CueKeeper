@@ -2,11 +2,14 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 // The record bar's timer must say what is true: preparing to start, then a
-// countdown, then a "preparing" gap after the countdown and before capture, and
-// only then recording time. This file runs the real `record.js` on a virtual
+// countdown, then nothing at all after the countdown and before capture, and
+// only then recording time. Nothing may claim a recording before the
+// recorder's own ready moment. This file runs the real `record.js` on a virtual
 // clock with its real polling schedule, so the stages are the ones an operator
-// actually sees — the earlier version of this test fired `visibilitychange`,
-// which skipped the polling path and hid a 350 ms window the page used to miss.
+// actually sees — the earlier version of this test drove the whole progression
+// through `visibilitychange`, which skipped the polling path and hid a 350 ms
+// window the page used to miss. Here that handler is only used where the page
+// itself re-renders, never to move the stage along.
 
 class Element {
   constructor(tag, document) {
@@ -170,6 +173,13 @@ test('the record bar follows its real poll schedule through every stage', async 
   const timer = document.getElementById('record-timer');
   const stopButton = document.getElementById('record-stop');
 
+  // A running recording always offers stop, in every stage before and after
+  // capture begins.
+  const assertStoppable = () => {
+    assert.equal(stopButton.hidden, false);
+    assert.equal(stopButton.disabled, false);
+  };
+
   // Before the CLI reports its countdown the page says it is starting up; no
   // digits run here, so a slow preflight cannot count down twice.
   await advance(250);
@@ -178,22 +188,41 @@ test('the record bar follows its real poll schedule through every stage', async 
   // The CLI's countdown arrives and the digits follow its own end.
   await advance(300);
   assert.equal(timer.textContent, '3 秒后开始录制');
+  assertStoppable();
 
   await advance(2500);
   assert.equal(timer.textContent, '1 秒后开始录制');
+  assertStoppable();
 
-  // The regression the review found: inside the short preparing window the page
-  // must already say so, not sit on a countdown digit.
-  await advance(500);
-  assert.equal(timer.textContent, '准备中…');
-  assert.doesNotMatch(timer.textContent, /秒后开始录制/);
-  assert.equal(stopButton.hidden, false);
-  assert.equal(stopButton.disabled, false);
+  // The countdown has just ended but its last poll has not been answered yet.
+  // The page re-renders on a visibility change, so drive that own handler: the
+  // stale digit must turn into an empty timer, not stay or become a recording
+  // clock.
+  await advance(310);
+  document.listeners.get('visibilitychange')?.();
+  assert.equal(timer.textContent, '');
+  assert.doesNotMatch(timer.textContent, /准备中|录制中|00:00|秒后开始录制/);
+  await flush();
+  assert.equal(timer.textContent, '');
+  assertStoppable();
+
+  // Inside the preparing window itself the timer stays empty: the operator
+  // asked for no "准备中" and no fabricated "录制中 00:00" before capture.
+  await advance(190);
+  assert.equal(timer.textContent, '');
+  assert.doesNotMatch(timer.textContent, /准备中|录制中|00:00/);
+  assertStoppable();
+  // The start control says why it cannot be used yet; stop stays live.
+  const startButton = document.getElementById('record-start');
+  assert.equal(startButton.textContent, '正在开始…');
+  assert.equal(startButton.disabled, true);
 
   // The clock starts from the ready moment and appears promptly: a one-second
-  // poll would still be showing 准备中… 300 ms after capture began.
+  // poll would still be blank 300 ms after capture began.
   await advance(350);
   assert.equal(timer.textContent, '录制中 00:00');
+  assert.equal(startButton.textContent, '开始录制');
+  assertStoppable();
   await advance(2600);
   assert.equal(timer.textContent, '录制中 00:02');
 });

@@ -33,8 +33,11 @@ final class RecordingIndicator {
             return "AppKit did not create the indicator backing layer"
         }
         self.panel = panel
-        panel.update(text: mode == .recording ? "正在准备录制" : "正在准备回放",
-                     paused: false, starting: true)
+        // `show()` only runs at the helper's ready moment, so the very first
+        // frame already reads as a running capture rather than a warm-up.
+        panel.update(text: IndicatorLabel.text(mode: indicatorLabelMode, elapsed: 0,
+                                               paused: false, starting: false),
+                     paused: false, starting: false)
         panel.orderFrontRegardless()
         panel.displayIfNeeded()
         CATransaction.flush()
@@ -70,16 +73,13 @@ final class RecordingIndicator {
     }
 
     func update(elapsed: Int, paused: Bool, starting: Bool) {
-        let time = String(format: "%02d:%02d", elapsed / 60, elapsed % 60)
-        let text: String
-        if mode == .replay {
-            text = "回放中  \(time)     ⌃⌥X 取消"
-        } else {
-            let state = paused ? "已暂停" : starting ? "录制就绪" : "录制中"
-            let action = paused ? "继续" : "暂停"
-            text = "\(state)  \(time)     ⌃⌥P \(action)   ⌃⌥X 停止"
-        }
-        panel?.update(text: text, paused: paused, starting: starting)
+        panel?.update(text: IndicatorLabel.text(mode: indicatorLabelMode, elapsed: elapsed,
+                                                paused: paused, starting: starting),
+                      paused: paused, starting: starting)
+    }
+
+    private var indicatorLabelMode: IndicatorLabel.Mode {
+        mode == .replay ? .replay : .recording
     }
 
     func covers(_ point: NSPoint) -> Bool {
