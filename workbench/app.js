@@ -1604,35 +1604,84 @@ function v2ScopeDialog(step) {
   ], '应用', () => v2Edit({ kind: 'update', id: step.id, patch: { scope: fields.value() } }));
 }
 
+/**
+ * The window a step's target lives in, in the operator's words. The scope is
+ * where macOS resolves the control, so it belongs on the summary line.
+ */
+function targetWindowLabel(step) {
+  return step.scope?.kind === 'window' ? step.scope.windowTitle : '';
+}
+
+/**
+ * One readable line for a step's target: role and name (or 无名称), the window
+ * it lives in, and — once a pick resolved the rectangle — its size. A
+ * coordinate target has no role, so it says what it is instead.
+ */
+function targetSummaryText(target, { window: windowTitle = '', frame } = {}) {
+  if (!target) return '这一步没有可定位的目标。';
+  const head = target.kind === 'point'
+    ? `屏幕坐标 (${(target.point ?? []).join(', ')})`
+    : `${String(target.role ?? '').trim() || '控件'}（` +
+      `${(typeof target.name === 'string' ? target.name.trim() : '') || '无名称'}）`;
+  return head +
+    (windowTitle ? `· ${windowTitle}` : '') +
+    (frame ? ` · ${frame.width} × ${frame.height}` : '');
+}
+
+/**
+ * A picked locator describes the whole control. The element merge inherits any
+ * field the patch omits, so a stale path/index (and name) from the recorded
+ * target has to be cleared explicitly, or the replay would address a control
+ * that no longer matches.
+ */
+function pickedTargetPatch(locator) {
+  return {
+    ...locator,
+    ...(locator.name === undefined ? { name: null } : {}),
+    ...(locator.path === undefined ? { path: null } : {}),
+    ...(locator.index === undefined ? { index: null } : {}),
+  };
+}
+
+/**
+ * Click and scroll address exactly one control, so their editor keeps only the
+ * summary and the pick entry. The macOS role/name/path/index fields describe a
+ * control the operator can already see, and a recorded deep anonymous group
+ * cannot be repaired by hand; picking from the window is the real edit.
+ *
+ * The pick lands in this form and is written on 应用, so closing the editor
+ * never leaves a half-edited target behind. A coordinate target says so in the
+ * summary and becomes an element locator as soon as a control is picked.
+ */
 function v2TargetDialog(step) {
-  const recorded = step.target ?? step.to;
-  const picker = locatorFields(recorded?.kind === 'element' ? recorded : undefined,
-    '要换控件，点上面的「从窗口拾取」，直接选中真实控件；下面只用于手动修正。', { collapsible: true });
-  const targetNote = recorded?.kind === 'point'
-    ? muted(`这一步录的是屏幕坐标 (${recorded.point.join(', ')})：录制时那个位置没有可单独定位的控件（画布、空白或自绘区域）。` +
-      '直接实时回放就行，它会在该坐标上点；只有干跑会拦下它，因为坐标没法证明还是同一个控件。')
-    : muted('这一步用的是元素定位器：换成具体控件后干跑才能通过，实时回放对窗口内的坐标步骤照常执行。');
-  const title = step.kind === 'scroll' ? '编辑滚动目标' : '编辑点击目标';
-  openDialog(withStepId(title, step), [
-    targetNote,
-    v2PickEntry(step, locator => {
-      picker.set(locator);
-      targetNote.textContent = '当前目标已替换成元素定位器。';
-    }),
-    ...picker.controls,
+  const windowTitle = targetWindowLabel(step);
+  let target = step.target;
+  let picked;
+  let frame;
+  const summary = el('p', { className: 'target-summary' });
+  const renderSummary = () => {
+    summary.textContent = targetSummaryText(target, { window: windowTitle, frame });
+  };
+  renderSummary();
+  openDialog(withStepId(step.kind === 'scroll' ? '编辑滚动目标' : '编辑点击目标', step), [
+    summary,
+    v2PickEntry(step, (locator, candidate) => {
+      target = locator;
+      picked = true;
+      frame = candidate?.bounds;
+      renderSummary();
+    }, { commit: false }),
   ], '应用', () => {
-    if (picker.shouldSubmitTarget()) {
-      return v2Edit({ kind: 'update', id: step.id, patch: { target: picker.value() } });
-    }
+    if (!picked) return;
+    return v2Edit({ kind: 'update', id: step.id, patch: { target: pickedTargetPatch(target) } });
   });
 }
 
 /**
  * Hover is a dwell on one control, so its editor keeps only the two things an
  * operator can act on: which control (replaced by picking, never by typing a
- * role/name/path), and how long the pointer stays. The click/scroll locator
- * fields and the 「高级定位」 block would only describe a deep anonymous group
- * the operator cannot recognise, so this dialog never renders them.
+ * role/name/path), and how long the pointer stays. It shares the summary and
+ * the pick entry with click/scroll and adds the dwell.
  *
  * A flow stores a locator, not a rectangle: bounds are only known when the
  * picker returns the control from a read-only window snapshot. A picked control
@@ -1640,7 +1689,7 @@ function v2TargetDialog(step) {
  * HOVER_UNRESOLVED, so it is reported as that error and never saved.
  */
 function v2HoverDialog(step) {
-  const app = step.scope?.kind === 'window' ? appLabel(step.scope.app) : '';
+  const windowTitle = targetWindowLabel(step);
   let target = step.target?.kind === 'element' ? step.target : undefined;
   let picked;
   // `frame` is the picked control's rectangle; `frameMissing` records a pick
@@ -1648,22 +1697,13 @@ function v2HoverDialog(step) {
   let frame;
   let frameMissing = false;
   const boundsMessage = '这个控件在窗口快照里没有边界（bounds），悬停回放会以 HOVER_UNRESOLVED 失败；请换一个能读到位置的控件。';
-  const summary = el('p', { className: 'hover-target-summary' });
+  const summary = el('p', { className: 'target-summary' });
   const problem = el('p', { className: 'form-error', role: 'alert' });
   const renderSummary = () => {
-    if (!target) {
-      summary.textContent = '这一步没有可定位的目标。';
-      problem.textContent = '这一步的目标不是一个控件；用「从窗口拾取」选一个再应用。';
-      return;
-    }
-    const role = String(target.role ?? '').trim() || '控件';
-    const name = typeof target.name === 'string' ? target.name.trim() : '';
-    // One line: what the control is, which app owns it, and — only when a pick
-    // resolved the rectangle — its size. Never the recorded path.
-    summary.textContent = `${role}（${name || '无名称'}）` +
-      (app ? `· ${app}` : '') +
-      (frame ? ` · ${frame.width} × ${frame.height}` : '');
-    problem.textContent = frameMissing ? boundsMessage : '';
+    summary.textContent = targetSummaryText(target, { window: windowTitle, frame });
+    problem.textContent = !target
+      ? '这一步的目标不是一个控件；用「从窗口拾取」选一个再应用。'
+      : frameMissing ? boundsMessage : '';
   };
   renderSummary();
   const duration = input({
@@ -1695,17 +1735,7 @@ function v2HoverDialog(step) {
       kind: 'update', id: step.id,
       patch: {
         durationMs: ms,
-        // A picked locator describes the whole control: a field the pick does
-        // not carry (a stale path/index from the recorded group) must be
-        // cleared instead of inherited by the element merge.
-        ...(picked ? {
-          target: {
-            ...target,
-            ...(target.name === undefined ? { name: null } : {}),
-            ...(target.path === undefined ? { path: null } : {}),
-            ...(target.index === undefined ? { index: null } : {}),
-          },
-        } : {}),
+        ...(picked ? { target: pickedTargetPatch(target) } : {}),
       },
     });
   });
