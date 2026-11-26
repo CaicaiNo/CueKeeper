@@ -423,6 +423,12 @@ export class GlobalRecording {
     key: string; scope: WindowScope; scopeId: string; at: number;
     /** Buffered characters travel with the burst; a fallback read must not lose them. */
     chars: string; complete: boolean; issues: Set<InputValueIssue>;
+    /**
+     * Backlog drops seen while this burst waits for its tree read. Whether
+     * they belong to it is only known once the read names its control, so they
+     * are kept with the control evidence instead of being applied blindly.
+     */
+    drops: { locator?: string }[];
   };
   private pendingSettle?: Promise<void>;
   /**
@@ -1635,8 +1641,10 @@ export class GlobalRecording {
           entry.issues.add('backlog_dropped');
         }
       }
-      this.pendingText?.issues.add('backlog_dropped');
-      if (this.pendingText) this.pendingText.complete = false;
+      // The buffered burst may belong to another control in this window; its
+      // target is not known until its read returns, so record the drop and
+      // decide by control when the burst is bound.
+      this.pendingText?.drops.push(droppedTarget ? { locator: locatorKey(droppedTarget) } : {});
       // The first character of a burst is often the one that was lost, so the
       // burst may not exist yet: remember where it belongs and mark it when it
       // is bound.
@@ -1836,7 +1844,7 @@ export class GlobalRecording {
     }
     this.pendingText = {
       key, scope, scopeId, at: event.t,
-      chars: '', complete: event.chars !== undefined, issues: new Set<InputValueIssue>(),
+      chars: '', complete: event.chars !== undefined, issues: new Set<InputValueIssue>(), drops: [],
     };
     this.bufferChars(this.pendingText, event.chars);
     this.pendingSettle = this.resolvePendingText(binding, key);
@@ -1898,8 +1906,14 @@ export class GlobalRecording {
     const target = toLocator(snapshot, single);
     this.rememberFocus(key, target);
     this.retargetClick(snapshot, single, pending.scopeId, pending.at);
+    // A drop belongs to the buffered burst only when it named this same
+    // control; otherwise it stays on the droppedText marker for its own burst.
+    const ownDrop = pending.drops.some(drop =>
+      !drop.locator || drop.locator === locatorKey(target));
     this.bindText(pending.scope, pending.scopeId, pending.at, target, snapshot, {
-      chars: pending.chars, issues: [...pending.issues], key,
+      chars: pending.chars,
+      issues: [...pending.issues, ...(ownDrop ? ['backlog_dropped' as const] : [])],
+      key,
     });
   }
 

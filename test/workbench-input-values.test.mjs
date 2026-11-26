@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -70,6 +70,19 @@ async function server(t, options) {
 }
 
 const tick = (ms = 60) => new Promise(resolve => setTimeout(resolve, ms));
+
+/** The stub writes its log when the CLI starts; a dialog submit returns earlier. */
+async function startedInputs(log) {
+  for (let attempt = 0; attempt < 60; attempt++) {
+    try {
+      return JSON.parse(await readFile(log, 'utf8'));
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      await tick(50);
+    }
+  }
+  throw new Error(`the replay CLI never started (${log})`);
+}
 let page = 0;
 const nextPage = () => (page += 1);
 
@@ -146,7 +159,7 @@ test('the replay dialog prefills the recorded text and sends it verbatim to the 
   // Submitting must not trim: the padding is part of the recorded text.
   confirmBox(document).checked = true;
   await submitDialog(document);
-  const sent = JSON.parse(await readFile(log, 'utf8'));
+  const sent = await startedInputs(log);
   assert.equal(sent.inputs.address, '  https://example.com/pkg  ');
   assert.equal(sent.inputs.note, 'hello note');
   assert.ok(sent.argv.includes('--inputs'));
@@ -214,7 +227,7 @@ test('clearing a stored value writes it immediately and survives reopening the d
   document.getElementById('live-input-address').value = 'typed now';
   confirmBox(document).checked = true;
   await submitDialog(document);
-  const sent = JSON.parse(await readFile(log, 'utf8'));
+  const sent = await startedInputs(log);
   assert.equal(sent.inputs.address, 'typed now');
   assert.equal(sent.inputs.note, 'stored note');
   assert.deepEqual(Object.keys(JSON.parse(await readFile(sidecar, 'utf8')).values), ['note']);
@@ -247,7 +260,7 @@ test('a corrupt value file warns in the dialog without echoing its content, and 
   document.getElementById('live-input-note').value = 'manual note';
   confirmBox(document).checked = true;
   await submitDialog(document);
-  const sent = JSON.parse(await readFile(log, 'utf8'));
+  const sent = await startedInputs(log);
   assert.equal(sent.inputs.address, 'manual address');
   assert.equal(sent.inputs.note, 'manual note');
 });
@@ -321,7 +334,7 @@ test('the server reads, saves and clears values, and refuses to save while a run
   assert.match(refused.error, /running/i);
   await running;
   // /api/run falls back to the stored values the page did not send.
-  const sent = JSON.parse(await readFile(log, 'utf8'));
+  const sent = await startedInputs(log);
   assert.equal(sent.inputs.address, 'before run');
   assert.equal(sent.inputs.note, 'run note');
 });
@@ -540,6 +553,8 @@ test('stop during preparation ends the request and frees the run slot', async t 
   // Hold the value read open: the run is genuinely still preparing.
   let release;
   const gate = new Promise(resolve => { release = resolve; });
+  // Never leave the pending request blocked if an assertion fails early.
+  t.after(() => release());
   const { started, post } = await server(t, {
     root, directory, cliPath, allowLive: true,
     resolveInputValues: async () => {
@@ -636,4 +651,60 @@ test('an old dialog cannot write or run a revision another tab saved', async t =
   assert.equal(dialog(document).open, false);
   assert.match(document.getElementById('status').textContent, /replay target changed/i);
   await assert.rejects(readFile(log), failure => failure.code === 'ENOENT', 'no replay started');
+});
+
+test('a work directory created after a stop is removed instead of leaked', async t => {
+  const { root, directory } = await workspace(t, {
+    values: {
+      address: { value: 'leak address', complete: true },
+      note: { value: 'leak note', complete: true },
+    },
+  });
+  const workroot = join(root, 'workroot');
+  await mkdir(workroot);
+  const log = join(root, 'stub-inputs.json');
+  const cliPath = await stubCli(root, log);
+  // Hold the directory creation: the stop wins first, the directory arrives late.
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  // Never leave the pending request blocked if an assertion fails early.
+  t.after(() => release());
+  const { started, post } = await server(t, {
+    root, directory, cliPath, allowLive: true,
+    createWorkdir: async () => {
+      await gate;
+      return { directory: await mkdtemp(join(workroot, 'cuekeeper-')) };
+    },
+  });
+  const session = await post('import', { directory });
+  const send = (route, payload) => fetch(`${started.url}/api/${route}`, {
+    method: 'POST',
+    headers: { origin: started.url, 'content-type': 'application/json', 'x-cuekeeper-workbench': '1' },
+    body: JSON.stringify(payload),
+  });
+
+  const running = send('run', { session: session.id, mode: 'live', confirm: true });
+  let preparing = false;
+  for (let attempt = 0; attempt < 80; attempt++) {
+    await tick(25);
+    const status = await (await send('run/status', { session: session.id })).json();
+    if (status.running) { preparing = true; break; }
+  }
+  assert.equal(preparing, true);
+  assert.deepEqual(await readdir(workroot), [], 'nothing has been created yet');
+
+  const stop = await post('stop', {});
+  assert.equal(stop.stopped, true);
+  const outcome = await Promise.race([
+    running.then(async response => ({ response, body: await response.json() })),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('the run request is still waiting')), 1500)),
+  ]);
+  assert.equal(outcome.response.status, 200);
+  assert.equal(outcome.body.stopped, true);
+
+  // The directory the stopped run started creating arrives now and must not leak.
+  release();
+  await tick(200);
+  assert.deepEqual((await readdir(workroot)).filter(name => name.startsWith('cuekeeper-')), []);
+  assert.equal(existsSync(log), false, 'no CLI was started');
 });

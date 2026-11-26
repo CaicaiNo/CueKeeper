@@ -286,6 +286,8 @@ export async function startWorkbench(options: {
   recordHealth?: () => Promise<RecordHealth>;
   /** Tests replace the sidecar reader a live run uses to prefill parameters. */
   resolveInputValues?: (flowPath: string, flowId: string) => Promise<InputValuesRead>;
+  /** Tests replace the private directory a live run writes its inputs file to. */
+  createWorkdir?: (root: string) => Promise<{ directory: string }>;
   /** The login-keychain store the page writes an administrator password to. */
   sudoStore?: SudoKeychainStore;
   /** Tests replace the batch's blue overlay; the release spawns the helper. */
@@ -324,6 +326,7 @@ export async function startWorkbench(options: {
   const cliPath = options.cliPath ?? fileURLToPath(new URL('./cli.js', import.meta.url));
   const sudoStore = options.sudoStore ?? createSudoKeychainStore();
   const readInputValues = options.resolveInputValues ?? resolveValues;
+  const makeWorkdir = options.createWorkdir ?? createDesktopWorkdir;
   // A pick reads one window snapshot; it never focuses, captures or types.
   const pickWindow = options.pickWindow ?? ((scope: WindowScope, signal: AbortSignal) =>
     withDesktop({ headed: false, signal, workRoot }, desktop => pickWindowCandidates(desktop, scope)));
@@ -1131,7 +1134,15 @@ export async function startWorkbench(options: {
             // Values stay out of the flow: they travel to the CLI as a private,
             // short-lived file and are removed once the replay exits. The file
             // sits in the durable work root, never in the inherited TMPDIR.
-            inputsDir = (await prepare(createDesktopWorkdir(workRoot))).directory;
+            const workdir = makeWorkdir(workRoot);
+            // A stop may win the race below; a directory created afterwards
+            // still has to be removed, or an empty durable root leaks.
+            void workdir.then(result => {
+              if (guard.signal.aborted) {
+                void rm(result.directory, { recursive: true, force: true }).catch(() => { /* best effort */ });
+              }
+            }, () => { /* the race reports the failure */ });
+            inputsDir = (await prepare(workdir)).directory;
             const inputsFile = join(inputsDir, 'inputs.json');
             await prepare(writeFile(inputsFile, `${JSON.stringify(inputs)}\n`, { mode: 0o600 }));
             args.push('--inputs', inputsFile);

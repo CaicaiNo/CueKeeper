@@ -190,6 +190,42 @@ test('a backlog drop is attributed to its control inside one window', async () =
   assert.deepEqual(values.text_2.issues, ['backlog_dropped']);
 });
 
+test('a drop during a pending fallback read is charged to the control the read proves', async () => {
+  const data = fixture('two-apps-three-windows');
+  const owner = data.events[0].owner;
+  const other = { role: 'AXTextField', name: 'other field', editable: true, bounds: [100, 100, 200, 24] };
+  // The first field has no focus evidence, so its burst waits for one window
+  // read; the test holds that read until the drop has been seen.
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const recording = new GlobalRecording(async window => {
+    await gate;
+    return structuredClone(data.snapshots[String(window.windowNumber)]);
+  }, { now: () => NOW + 11_000 });
+  await recording.add(parseCaptureEvent({
+    kind: 'text', t: 100, seen: NOW + 11_000, focusGeneration: 1, secure: false, owner, chars: 'alpha',
+  }));
+  // A drop for the *other* control arrives while the read is still pending.
+  await recording.add(parseCaptureEvent({
+    kind: 'text', t: 160, seen: NOW, focusGeneration: 1, secure: false, owner, focus: other, chars: 'lost',
+  }));
+  release();
+  await recording.settlePending();
+  await recording.add(parseCaptureEvent({
+    kind: 'text', t: 220, seen: NOW + 11_000, focusGeneration: 1, secure: false, owner, focus: other, chars: 'beta',
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['type', 'type']);
+  const values = recording.recordedInputValues();
+  assert.equal(values.text_1.value, 'alpha');
+  assert.equal(values.text_1.complete, true, 'the buffered field stays complete');
+  assert.deepEqual(values.text_1.issues, undefined);
+  assert.equal(values.text_2.value, 'beta');
+  assert.equal(values.text_2.complete, false);
+  assert.deepEqual(values.text_2.issues, ['backlog_dropped']);
+});
+
 test('a secure text burst never becomes a type step or a stored value', async () => {
   const data = fixture('secure-input');
   const secret = `Zq${randomUUID().slice(0, 8)}`;
