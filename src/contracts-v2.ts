@@ -43,6 +43,8 @@ const element = object({
 // name the element under the pointer. It stays a window-scoped, editable step:
 // replay delivers it only as physical input, and the workbench can turn it into
 // an element target. Every other input step still requires an element.
+// A point is always a Quartz screen point (origin top-left), the space the
+// replay driver's `--xy` takes, so a hover and a click can be compared.
 const clickPoint = T.Tuple([
   T.Integer({ minimum: -100_000, maximum: 100_000 }),
   T.Integer({ minimum: -100_000, maximum: 100_000 }),

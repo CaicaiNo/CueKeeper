@@ -48,6 +48,9 @@ jobs:
       - name: Test the recording HUD label
         run: npm run test:label
 
+      - name: Test the recorder's pointer and hover coordinates
+        run: npm run test:pointer
+
       - name: Package unsigned release
         run: node scripts/package.mjs --skip-build --skip-recorder --out out/release
 

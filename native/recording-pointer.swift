@@ -146,6 +146,43 @@ struct HoverTracker {
     }
 }
 
+/**
+ * The hover step a dwell reports, in both coordinate spaces the recorder needs.
+ *
+ * A flow stores a pointer position the same way a click does: Quartz screen
+ * points with the origin at the top-left, which is what the replay driver's
+ * `--xy` takes. Window hit tests and the live pointer evidence need AppKit
+ * points with the origin at the bottom-left. Mapping the two here, once, is
+ * what keeps a hover from being written mirrored.
+ */
+struct HoverEmission {
+    /// Quartz screen point (origin top-left) — the one that goes into the flow.
+    let point: CGPoint
+    /// AppKit screen point (origin bottom-left) — only for hit tests.
+    let hitPoint: CGPoint
+
+    init(screenPoint: CGPoint, primaryScreenHeight: CGFloat) {
+        point = screenPoint
+        hitPoint = CGPoint(x: screenPoint.x, y: primaryScreenHeight - screenPoint.y)
+    }
+
+    var payloadPoint: [Int] {
+        [Int(point.x.rounded()), Int(point.y.rounded())]
+    }
+
+    func payload(dwellMs: Int, t: Int, seen: Int, evidence: [String: Any] = [:]) -> [String: Any] {
+        var row: [String: Any] = [
+            "kind": "hover",
+            "point": payloadPoint,
+            "dwellMs": max(300, min(60_000, dwellMs)),
+            "t": t,
+            "seen": seen,
+        ]
+        for (key, value) in evidence { row[key] = value }
+        return row
+    }
+}
+
 private extension CGPoint {
     func squaredDistance(to other: CGPoint) -> CGFloat {
         let x = self.x - other.x
