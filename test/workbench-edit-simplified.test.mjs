@@ -125,11 +125,10 @@ const byPlaceholder = {
   path: '例如 window / toolbar / button',
 };
 
-test('点击、滚动、悬停编辑默认只露出控件类型、名称与回放预览', async t => {
+test('点击、滚动编辑默认只露出控件类型、名称与回放预览', async t => {
   const { document } = await bootPage(t);
 
-  for (const [stepId, expectedRole] of [['click-plain', 'button'], ['scroll-plain', 'group'],
-    ['hover-plain', 'button']]) {
+  for (const [stepId, expectedRole] of [['click-plain', 'button'], ['scroll-plain', 'group']]) {
     buttonByText(rowOf(document, stepId), '编辑').click();
     const editor = dialog(document);
     assert.equal(editor.open, true, `${stepId} editor opens`);
@@ -163,6 +162,13 @@ test('点击、滚动、悬停编辑默认只露出控件类型、名称与回�
     closeDialog(document);
     assert.equal(dialog(document).open, false);
   }
+
+  // Hover has its own minimal editor: none of these locator fields belong there.
+  buttonByText(rowOf(document, 'hover-plain'), '编辑').click();
+  const hover = dialog(document);
+  assert.match(hover.textContent, /编辑悬停目标 · hover-plain/);
+  assert.equal(hover.querySelectorAll('details').length, 0, 'hover has no advanced block');
+  assert.equal(fieldInput(hover, byPlaceholder.role), undefined, 'hover shows no role field');
 });
 
 test('展开高级定位后可编辑 path/index，应用时按原规则写回', async t => {

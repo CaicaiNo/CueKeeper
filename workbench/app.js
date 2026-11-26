@@ -1519,9 +1519,9 @@ const withStepId = (title, step) => step?.id ? `${title} · ${step.id}` : title;
  * with the other target fields instead of on every timeline row. The capability
  * is unchanged: this still opens the same read-only window snapshot dialog.
  */
-function v2PickEntry(step, onPicked) {
+function v2PickEntry(step, onPicked, pickOptions) {
   return V2_TARGET_KINDS.has(step.kind) && step.kind !== 'drag'
-    ? button('从窗口拾取', () => void v2PickDialog(step, onPicked), {
+    ? button('从窗口拾取', () => void v2PickDialog(step, onPicked, pickOptions), {
       style: 'small', icon: 'crosshair', title: '从当前窗口拾取目标元素',
       disabled: state.v2Busy || state.v2Running,
     })
@@ -1531,8 +1531,9 @@ function v2PickEntry(step, onPicked) {
 /** The row's 编辑 button opens the editor that fits the step's kind. */
 function v2EditDialog(step) {
   switch (step.kind) {
-    case 'click': case 'scroll': case 'hover':
+    case 'click': case 'scroll':
       return v2TargetDialog(step);
+    case 'hover': return v2HoverDialog(step);
     case 'type': return v2TypeDialog(step);
     case 'drag': return v2DragDialog(step);
     case 'key': return v2KeyDialog(step);
@@ -1611,8 +1612,7 @@ function v2TargetDialog(step) {
     ? muted(`这一步录的是屏幕坐标 (${recorded.point.join(', ')})：录制时那个位置没有可单独定位的控件（画布、空白或自绘区域）。` +
       '直接实时回放就行，它会在该坐标上点；只有干跑会拦下它，因为坐标没法证明还是同一个控件。')
     : muted('这一步用的是元素定位器：换成具体控件后干跑才能通过，实时回放对窗口内的坐标步骤照常执行。');
-  const title = step.kind === 'scroll' ? '编辑滚动目标'
-    : step.kind === 'hover' ? '编辑悬停目标' : '编辑点击目标';
+  const title = step.kind === 'scroll' ? '编辑滚动目标' : '编辑点击目标';
   openDialog(withStepId(title, step), [
     targetNote,
     v2PickEntry(step, locator => {
@@ -1624,6 +1624,90 @@ function v2TargetDialog(step) {
     if (picker.shouldSubmitTarget()) {
       return v2Edit({ kind: 'update', id: step.id, patch: { target: picker.value() } });
     }
+  });
+}
+
+/**
+ * Hover is a dwell on one control, so its editor keeps only the two things an
+ * operator can act on: which control (replaced by picking, never by typing a
+ * role/name/path), and how long the pointer stays. The click/scroll locator
+ * fields and the 「高级定位」 block would only describe a deep anonymous group
+ * the operator cannot recognise, so this dialog never renders them.
+ *
+ * A flow stores a locator, not a rectangle: bounds are only known when the
+ * picker returns the control from a read-only window snapshot. A picked control
+ * without bounds is the same thing that makes a hover fail with
+ * HOVER_UNRESOLVED, so it is reported as that error and never saved.
+ */
+function v2HoverDialog(step) {
+  const app = step.scope?.kind === 'window' ? appLabel(step.scope.app) : '';
+  let target = step.target?.kind === 'element' ? step.target : undefined;
+  let picked;
+  // `frame` is the picked control's rectangle; `frameMissing` records a pick
+  // that came back without one, which is a real replay failure, not a guess.
+  let frame;
+  let frameMissing = false;
+  const boundsMessage = '这个控件在窗口快照里没有边界（bounds），悬停回放会以 HOVER_UNRESOLVED 失败；请换一个能读到位置的控件。';
+  const summary = el('p', { className: 'hover-target-summary' });
+  const problem = el('p', { className: 'form-error', role: 'alert' });
+  const renderSummary = () => {
+    if (!target) {
+      summary.textContent = '这一步没有可定位的目标。';
+      problem.textContent = '这一步的目标不是一个控件；用「从窗口拾取」选一个再应用。';
+      return;
+    }
+    const role = String(target.role ?? '').trim() || '控件';
+    const name = typeof target.name === 'string' ? target.name.trim() : '';
+    // One line: what the control is, which app owns it, and — only when a pick
+    // resolved the rectangle — its size. Never the recorded path.
+    summary.textContent = `${role}（${name || '无名称'}）` +
+      (app ? `· ${app}` : '') +
+      (frame ? ` · ${frame.width} × ${frame.height}` : '');
+    problem.textContent = frameMissing ? boundsMessage : '';
+  };
+  renderSummary();
+  const duration = input({
+    type: 'number', min: '0', max: '60000', step: '10',
+    value: String(step.durationMs ?? 0),
+  });
+  openDialog(withStepId('编辑悬停目标', step), [
+    summary,
+    problem,
+    // The pick lands in this form only; 应用 writes it with the duration, so a
+    // cancelled editor never leaves a half-edited step behind.
+    v2PickEntry(step, (locator, candidate) => {
+      target = locator;
+      picked = true;
+      frame = candidate?.bounds;
+      frameMissing = Boolean(candidate) && !candidate.bounds;
+      renderSummary();
+    }, { commit: false }),
+    field('悬停时长（毫秒）', duration),
+  ], '应用', () => {
+    if (!target) throw new Error('这一步的目标不是一个控件；用「从窗口拾取」选一个再应用。');
+    if (frameMissing) throw new Error(boundsMessage);
+    const raw = duration.value.trim();
+    const ms = Number(raw);
+    if (!raw || !Number.isSafeInteger(ms) || ms < 0 || ms > 60000) {
+      throw new Error('悬停时长填 0–60000 之间的整数毫秒。');
+    }
+    return v2Edit({
+      kind: 'update', id: step.id,
+      patch: {
+        durationMs: ms,
+        // A picked locator describes the whole control: a field the pick does
+        // not carry (a stale path/index from the recorded group) must be
+        // cleared instead of inherited by the element merge.
+        ...(picked ? {
+          target: {
+            ...target,
+            ...(target.name === undefined ? { name: null } : {}),
+            ...(target.path === undefined ? { path: null } : {}),
+            ...(target.index === undefined ? { index: null } : {}),
+          },
+        } : {}),
+      },
+    });
   });
 }
 
@@ -2217,14 +2301,19 @@ const pickDialogOptions = { dialog: pickDialog, titleId: 'v2-pick-dialog-title' 
  * the operator already filled in; a closed picker or a newer editor retires a
  * snapshot that arrives late.
  */
-async function v2PickDialog(step, onPicked) {
+async function v2PickDialog(step, onPicked, { commit = true } = {}) {
   const editor = editDialogEpoch;
+  // Without the locator fields an editor cannot offer manual repair, so the
+  // fallback is to make the window readable and pick again.
+  const manualHint = commit
+    ? '仍可以在「编辑」里手动填写角色/名称/路径。'
+    : '先把应用和窗口打开，再回到这里用「从窗口拾取」重新选控件。';
   const show = (title, content, submitLabel, submit) =>
     openDialog(withStepId(title, step), content, submitLabel, submit, pickDialogOptions);
   if (!step.scope || step.scope.kind !== 'window') {
     show('从当前窗口拾取', [
       muted('这个步骤没有窗口作用域，读不到可拾取的控件快照。请先把作用域改成窗口。'),
-      muted('仍可以在「编辑」里手动填写角色/名称/路径。'),
+      muted(manualHint),
     ]);
     return;
   }
@@ -2241,7 +2330,7 @@ async function v2PickDialog(step, onPicked) {
     show('从当前窗口拾取', [
       muted(`无法从窗口读取控件：${error.message}`),
       muted(`${v2ScopeText(step.scope)}；确认应用正在运行并打开了该窗口，且已授予 CueKeeper 辅助功能权限。`),
-      muted('仍可以在「编辑」里手动填写角色/名称/路径。'),
+      muted(manualHint),
     ]);
     return;
   }
@@ -2254,16 +2343,19 @@ async function v2PickDialog(step, onPicked) {
     muted(`${v2ScopeText(step.scope)} · 窗口 ${picked.windowId} · ${candidates.length} 个控件`),
     field('控件', chooser),
     detail,
-    muted(v2Step(step.id)?.target?.kind === 'point'
-      ? '当前目标是坐标；确认后会替换成元素定位器（point → element）。'
-      : '确认后会替换这一步的目标定位器。'),
+    muted(!commit
+      ? '确认后会替换编辑框里的目标；回到编辑框点「应用」才保存。'
+      : v2Step(step.id)?.target?.kind === 'point'
+        ? '当前目标是坐标；确认后会替换成元素定位器（point → element）。'
+        : '确认后会替换这一步的目标定位器。'),
     muted('只读快照：不会点击、聚焦或输入。'),
   ], '使用此控件', async () => {
-    const locator = candidates[Number(chooser.value)].locator;
-    await v2Edit({ kind: 'update', id: step.id, patch: { target: locator } });
-    // The step is already updated; mirror it into the editor still behind the
-    // picker so applying that form later cannot put the old target back.
-    onPicked?.(locator);
+    const candidate = candidates[Number(chooser.value)];
+    // `commit: false` hands the pick back to an editor that submits it with its
+    // own fields (the hover dialog); every other editor writes it right away,
+    // and its form mirrors the pick so applying it cannot restore the old target.
+    if (commit) await v2Edit({ kind: 'update', id: step.id, patch: { target: candidate.locator } });
+    onPicked?.(candidate.locator, candidate);
   });
 }
 
