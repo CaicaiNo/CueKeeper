@@ -234,30 +234,39 @@ async function bootPage(t) {
   t.after(() => rm(root, { recursive: true, force: true }));
   const directory = await recording(root);
   const cancellation = new AbortController();
+  // Live replay stays enabled so the page's own button opens the dialog; the
+  // dirty flow below means confirming it never starts a desktop run.
   const started = await startWorkbench({
-    directory, port: 0, library: join(root, 'library'), allowLive: false,
+    directory, port: 0, library: join(root, 'library'), allowLive: true,
     allowShell: false, signal: cancellation.signal,
   });
   t.after(async () => { cancellation.abort(); await started.closed; });
 
-  // The page asks the real server for its session; only the two fields the
-  // fixtures care about are rewritten, so everything else is the shipped view.
+  // Make one real edit through the server's editor, so the diff the page
+  // renders is the one a delete actually produces.
+  const call = async (route, body) => {
+    const response = await fetch(`${started.url}/api/${route}`, {
+      method: 'POST',
+      headers: { origin: started.url, 'content-type': 'application/json', 'x-cuekeeper-workbench': '1' },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(payload));
+    return payload;
+  };
+  const before = await call('state', {});
+  const edited = await call('v2/edit', { session: before.session.id, op: { kind: 'delete', id: 's6' } });
+  assert.equal(edited.dirty, true);
+  assert.deepEqual(edited.diff.removed.map(item => item.id), ['s6']);
+  assert.ok(edited.diff.moved.some(move => move.id === 's7' && move.from === 7 && move.to === 6),
+    'the delete reports the later steps as zero-based moves');
+
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url, init = {}) => {
     const target = typeof url === 'string' && url.startsWith('/') ? started.url + url : url;
-    const response = await realFetch(target, {
+    return realFetch(target, {
       ...init, headers: { ...(init.headers ?? {}), origin: started.url },
     });
-    if (url !== '/api/state') return response;
-    const state = await response.json();
-    state.session.v2.live = { path: join(directory, 'flow.edited-2026.json'), revision: true };
-    state.session.v2.dirty = false;
-    state.session.v2.diff = {
-      changed: true, added: [], removed: [{ id: 's6' }],
-      moved: [{ id: 's7', from: 6, to: 5 }, { id: 's8', from: 7, to: 6 }],
-      modified: [], orderChanged: false, flowFields: [],
-    };
-    return new Response(JSON.stringify(state), { status: 200, headers: { 'content-type': 'application/json' } });
   };
   t.after(() => { globalThis.fetch = realFetch; });
 
@@ -277,6 +286,12 @@ async function bootPage(t) {
   await new Promise(resolve => setTimeout(resolve, 30));
   return { document };
 }
+
+const tick = (ms = 80) => new Promise(resolve => setTimeout(resolve, ms));
+
+const v2Header = document => document.getElementById('v2-editor').querySelector('.v2-header');
+const liveButton = document => v2Header(document).children
+  .find(node => node.textContent === '实时回放' || node.textContent === '回放中');
 
 const actionRows = document =>
   document.getElementById('timeline').children.filter(node => node.classList.contains('row'));
@@ -325,36 +340,65 @@ test('the workbench page selects a clicked timeline step and keeps the list in p
     box.scrollTop = 600;
     const rows = box.children.filter(node => node.classList.contains('v2-row'));
     assert.ok(rows.length > 10, `v2 rows: ${rows.length}`);
+    const stepId = rows[14].querySelector('.step-id').textContent;
     rows[14].click();
 
     const after = v2RowBox(document);
     assert.equal(after.scrollTop, 600, 'the list kept its scroll position');
     const selected = after.children.find(node => node.classList.contains('selected'));
     assert.ok(selected, 'the clicked step stays selected');
-    assert.match(selected.textContent, /s14/, 'the selected step is the clicked one');
+    assert.equal(selected.querySelector('.step-id').textContent, stepId, 'the selected step is the clicked one');
   });
 
-  await t.test('the live replay dialog asks for the saved workflow, never a revision', () => {
-    const header = document.getElementById('v2-editor').querySelector('.v2-header');
-    const button = header.children.find(node => node.textContent === '实时回放');
+  await t.test('the diff footer drops the summary sentence and lists the real difference', () => {
+    const footer = document.getElementById('v2-editor').querySelector('.v2-footer');
+    assert.ok(footer, 'v2 footer renders');
+    assert.doesNotMatch(footer.textContent, /与录制相比：/, 'the recap sentence is gone');
+    assert.doesNotMatch(footer.textContent, /删除 s6；移动 s7/);
+    const list = footer.querySelector('.v2-diff-list');
+    assert.ok(list, 'the difference list still renders');
+    const items = list.children.map(node => node.textContent);
+    assert.ok(items.includes('删除步骤 s6'), items.join(' | '));
+    // The editor stores zero-based positions; the timeline numbers steps from
+    // one, so a delete of the 7th step moves s7 from 8 to 7 and never 7 to 6.
+    assert.ok(items.includes('移动步骤 s7：第 8 步 → 第 7 步'), items.join(' | '));
+    assert.ok(items.includes('移动步骤 s8：第 9 步 → 第 8 步'), items.join(' | '));
+    assert.equal(items.some(item => item.includes('第 7 步 → 第 6 步')), false, 'no off-by-one step numbers');
+  });
+
+  await t.test('an unsaved edit asks for the workflow before a live replay', async () => {
+    const button = liveButton(document);
     assert.ok(button, 'live replay button renders');
+    assert.equal(button.disabled, false, 'the button is enabled, so this goes through the real entry');
     button.click();
 
     const dialog = document.getElementById('dialog');
-    assert.match(dialog.textContent, /将回放已保存的工作流：/);
-    assert.doesNotMatch(dialog.textContent, /revision/i);
+    assert.match(dialog.textContent, /请先保存工作流/);
+    assert.doesNotMatch(dialog.textContent, /revision|version/i);
+
+    // Confirm the desktop takeover and submit: the page refuses the replay and
+    // names the missing action instead of starting anything.
+    const confirm = dialog.querySelectorAll('input').find(node => node.getAttribute('type') === 'checkbox');
+    confirm.checked = true;
+    const form = dialog.children.find(node => node.tagName === 'FORM');
+    await form.onsubmit({ preventDefault() {} });
+    const error = dialog.querySelectorAll('p').find(node => node.classList.contains('form-error'));
+    assert.match(error.textContent, /请先保存工作流/);
+    assert.doesNotMatch(error.textContent, /revision|version/i);
+    dialog.close();
   });
 
-  await t.test('the diff footer drops the summary sentence and keeps the difference list', () => {
-    const footer = document.getElementById('v2-editor').querySelector('.v2-footer');
-    assert.ok(footer, 'v2 footer renders');
-    assert.doesNotMatch(footer.textContent, /与录制相比：/);
-    assert.doesNotMatch(footer.textContent, /删除 s6；移动 s7 6→5/);
-    const list = footer.querySelector('.v2-diff-list');
-    assert.ok(list, 'the difference list still renders');
-    assert.match(list.textContent, /删除步骤 s6/);
-    assert.match(list.textContent, /移动步骤 s7：第 6 步 → 第 5 步/);
-    assert.match(list.textContent, /移动步骤 s8：第 7 步 → 第 6 步/);
-    assert.doesNotMatch(list.textContent, /、s8 7→6/, 'each difference is its own item');
+  await t.test('saving the workflow makes the replay use that saved workflow', async () => {
+    const save = v2Header(document).children.find(node => node.textContent === '保存工作流');
+    assert.ok(save, 'save button renders');
+    save.click();
+    await tick();
+
+    const button = liveButton(document);
+    assert.equal(button.disabled, false);
+    button.click();
+    const dialog = document.getElementById('dialog');
+    assert.match(dialog.textContent, /将回放已保存的工作流：/);
+    assert.doesNotMatch(dialog.textContent, /revision|version/i);
   });
 });
