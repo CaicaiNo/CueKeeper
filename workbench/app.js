@@ -4,7 +4,7 @@ import {
   deleteCondition, id, makeBehavior, retargetCondition, sameTarget, scopeDescription, scrollLabel, setupDraft,
   shellDraft, shellSummary, dragSummary, undoCondition, visibleRows, locatorDetail, targetLabel, roleLabel,
   V2_COPYABLE_KINDS, V2_INSERT_KINDS, V2_TARGET_KINDS, assertCheck, checkLabel, diffItems, diffSummary,
-  filterStepsByScope, scopeKey, scopeOptions, statusMap, stepTemplate, stepTiming, v2StepLabel,
+  filterStepsByScope, scopeKey, scopeOptions, statusMap, stepTemplate, stepTiming, v2StepLabel, gapReason,
   checkpointWaitFacts, pickCandidateLabel, durationLabel, sessionDurationLabel, stateCheckLabel,
   defaultLibraryExpanded, libraryGroups, toggleLibraryGroup,
 } from './model.js';
@@ -1170,8 +1170,11 @@ function renderV2() {
       style: 'small', icon: 'copy', iconOnly: true, title: '复制步骤',
       disabled: busy || !V2_COPYABLE_KINDS.has(step.kind),
     }),
-    button('删除', () => v2Delete(step.id), {
-      style: 'small danger', icon: 'trash', iconOnly: true, title: '删除步骤', disabled: busy,
+    button('删除', () => step.kind === 'gap' ? v2GapDialog(step) : v2Delete(step.id), {
+      style: 'small danger', icon: 'trash', iconOnly: true, disabled: busy,
+      // A gap is the one step whose deletion drops input evidence, so its row
+      // delete opens the same confirmation dialog instead of deleting silently.
+      title: step.kind === 'gap' ? '删除缺口需先确认' : '删除步骤',
     }));
 
   const rows = visible.map(step => {
@@ -1213,7 +1216,7 @@ function renderV2() {
     el('div', { className: 'v2-copy' },
       el('strong', {}, v2StepLabel(step, appLabel)),
       el('small', { className: 'muted' },
-        `${step.kind === 'gap' ? '缺口' : v2ScopeText(step.scope)}`)),
+        `${step.kind === 'gap' ? gapReason(step.code) : v2ScopeText(step.scope)}`)),
     entry ? el('span', {
       className: statusBadge(entry.status),
       title: [entry.code, entry.message, stateCheckLabel(entry.stateCheck)].filter(Boolean).join(' · '),
@@ -1842,12 +1845,43 @@ function v2GapDialog(step) {
   const fields = v2ScopeFields(step.scope);
   const timeout = el('input', { type: 'number', className: 'input input-sm', min: '1000', max: '1800000', step: '1000', value: '15000' });
   const trigger = v2Steps()[Math.max(0, v2Steps().findIndex(entry => entry.id === step.id) - 1)];
-  openDialog(withStepId(`处理缺口 · ${step.code}`, step), [
-    muted('缺口没有可回放的作用域，运行前必须转成等待或人工检查点。'),
+  const onlyStep = v2Steps().length <= 1;
+  // Dropping a gap is the one gap edit that throws away evidence, so it is never
+  // one click: the operator has to say that nothing in that stretch needs a
+  // replay. The timeline row's delete opens this same dialog, so there is no
+  // second path that could remove a gap unchecked.
+  const confirmed = el('input', { type: 'checkbox', className: 'checkbox checkbox-sm' });
+  const remove = button('确认没有需要重放的操作并移除', () => void removeGap(), {
+    style: 'small danger', icon: 'trash', disabled: true,
+  });
+  // The conversion submit and this removal share one in-flight state: while
+  // either request runs, the other action is disabled, so a second edit for the
+  // same step can never be queued behind the first.
+  const syncRemove = pending => {
+    remove.disabled = pending || onlyStep || !confirmed.checked;
+  };
+  confirmed.onchange = () => syncRemove(gapDialog.busy());
+  const removeGap = async () => {
+    if (!confirmed.checked || onlyStep) return;
+    if (!await gapDialog.run(() => v2Edit({ kind: 'delete', id: step.id }))) return;
+    // Only the dialog that asked may close: a late answer must not close the
+    // import dialog the operator opened meanwhile.
+    gapDialog.close();
+    status(`已移除缺口 ${step.id}；可用「撤销」恢复，差异里会记下这次删除。`, 'success');
+  };
+  const gapDialog = openDialog(withStepId(`处理缺口 · ${step.code}`, step), [
+    muted(gapReason(step.code)),
+    muted('缺口没有可回放的作用域，运行前必须转成等待或人工检查点，或在确认没有丢失操作后移除。'),
     field('转换方式', kind), ...fields.controls, field('超时（毫秒）', timeout),
     kind.value === 'manual_checkpoint'
       ? muted(`触发步骤沿用前一步 ${trigger?.id ?? '（无）'}；恢复条件为窗口存在。`)
       : undefined,
+    el('h3', {}, '或者：确认后移除'),
+    muted('只有确认这段缺口期间没有需要重放的操作时才移除。移除后这一步不再进 flow；它可用「撤销」恢复，也会出现在与录制的差异里。'),
+    onlyStep
+      ? muted('这是流程里唯一的一步：先插入别的步骤，才能移除最后一个缺口。')
+      : el('label', { className: 'check-row' }, confirmed, '我确认这段缺口期间没有需要重放的操作'),
+    remove,
   ], '转换', async () => {
     const scope = fields.value();
     const timeoutMs = Number(timeout.value);
@@ -1870,7 +1904,7 @@ function v2GapDialog(step) {
     renderV2();
     renderTimeline();
     status('缺口已转换，仍需复核并保存。', 'success');
-  });
+  }, { onBusyChange: syncRemove });
 }
 
 function v2InsertDialog() {
@@ -2154,41 +2188,63 @@ function openDialog(title, content, submitLabel, submit, options = {}) {
   const modal = options.dialog ?? dialog;
   if (modal === dialog) editDialogEpoch += 1;
   else pickDialogEpoch += 1;
-  let busy = false;
   const error = el('p', { className: 'form-error alert alert-soft alert-error', role: 'alert' });
   const dismiss = button('关闭', () => modal.close(), { icon: 'x', iconOnly: true, title: '关闭' });
   const confirm = submit && el('button', { className: 'btn btn-primary', type: 'submit' },
     icon('check'), el('span', {}, submitLabel));
+  // A dialog may carry a second action beside its default submit (the capture
+  // gap's confirmed removal). Both run through `run`, so only one edit is ever
+  // in flight: while it is pending the other button, Escape and the close
+  // button are disabled, and Enter cannot queue a second request.
+  const pending = { busy: false };
+  const current = () => modal.open && modal.children[0] === form;
+  const sync = () => {
+    if (confirm) confirm.disabled = pending.busy;
+    dismiss.disabled = pending.busy;
+    options.onBusyChange?.(pending.busy);
+  };
+  const run = async action => {
+    if (pending.busy) return false;
+    pending.busy = true;
+    sync();
+    error.textContent = '';
+    try {
+      await action();
+      return true;
+    } catch (failure) {
+      error.textContent = failure instanceof Error ? failure.message : String(failure);
+      return false;
+    } finally {
+      pending.busy = false;
+      sync();
+    }
+  };
   const form = el('form', {
     className: `modal-box stack-list${options.wide ? ' modal-wide' : ''}`,
     onsubmit: async event => {
       event.preventDefault();
-      if (!submit || busy) return;
-      busy = true;
-      confirm.disabled = true;
-      dismiss.disabled = true;
-      error.textContent = '';
-      try {
-        await submit();
-        modal.close();
-      } catch (failure) {
-        error.textContent = failure.message;
-      } finally {
-        busy = false;
-        confirm.disabled = false;
-        dismiss.disabled = false;
-      }
+      if (!submit) return;
+      // Closing is bound to this dialog: an answer that arrives after the
+      // operator opened another one must not close that other dialog.
+      if (await run(submit) && current()) modal.close();
     },
   },
   el('div', { className: 'dialog-head' },
     el('h2', { id: options.titleId ?? 'dialog-title' }, title), dismiss),
   ...content, error, confirm ? el('div', { className: 'actions' }, confirm) : undefined);
-  modal.oncancel = event => { if (busy) event.preventDefault(); };
+  modal.oncancel = event => { if (pending.busy) event.preventDefault(); };
   modal.replaceChildren(form);
   // A second answer for the same dialog (the picker's loading state, then its
   // candidates) replaces the content in place; only a closed dialog is opened.
   if (!modal.open) modal.showModal();
   requestAnimationFrame(() => modal.querySelector('input:not([type="checkbox"]), select, textarea')?.focus({ preventScroll: true }));
+  return {
+    busy: () => pending.busy,
+    /** Run a second action under the dialog's single in-flight edit. */
+    run,
+    /** Close only when this dialog is still the one on screen. */
+    close: () => { if (current()) modal.close(); },
+  };
 }
 
 function importDialog() {

@@ -474,6 +474,26 @@ export function checkLabel(check) {
   return waitKindLabels[check.kind] ?? check.kind;
 }
 
+/**
+ * One plain sentence per capture-gap code. The enum alone tells the operator
+ * nothing, and a gap never carries the events, coordinates or screen content
+ * behind it: the sentence names the kind of hole, not what was typed or clicked.
+ */
+export const GAP_REASONS = {
+  CAPTURE_SCOPE_UNVERIFIED: '有一次操作找不到归属窗口，无法确定它落在哪个窗口',
+  STALE_CAPTURE: '录制时事件采集短暂中断或延迟，这一小段可能漏掉事件',
+  CROSS_SCOPE_GESTURE: '一次拖拽跨了两个窗口，v2 无法把它当成一步重放',
+  PRIVACY_REDACTED: '这段内容为保护隐私已隐去，没有记录',
+  SECURE_INPUT: '这段是系统安全输入，内容不记录，回放时由人工完成',
+  IME_COMMIT_UNVERIFIED: '输入法的一次上屏无法确认，可能漏掉这段文字',
+  CAPTURE_GAP: '采集链路出现无法归类的中断，这一小段可能漏掉事件',
+};
+
+/** The operator-facing sentence for a gap code; an unknown code still says what a gap is. */
+export function gapReason(code) {
+  return GAP_REASONS[code] ?? '采集端报告了一个未知缺口，这一小段可能漏掉事件';
+}
+
 /** The timeline's one-line description of a v2 step. */
 export function v2StepLabel(step, appName = id => id) {
   if (!step) return '';
