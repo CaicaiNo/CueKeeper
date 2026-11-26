@@ -83,6 +83,16 @@ async function bootPage(t) {
 
 const tick = (ms = 80) => new Promise(resolve => setTimeout(resolve, ms));
 
+/** Poll the page instead of guessing how long a save or a dialog load takes. */
+const waitFor = async (predicate, message, timeoutMs = 4000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await tick(25);
+  }
+  throw new Error(message);
+};
+
 const v2Header = document => document.getElementById('v2-editor').querySelector('.v2-header');
 const liveButton = document => v2Header(document).children
   .find(node => node.textContent === '实时回放' || node.textContent === '回放中');
@@ -186,14 +196,20 @@ test('the workbench page selects a clicked timeline step and keeps the list in p
     const save = v2Header(document).children.find(node => node.textContent === '保存工作流');
     assert.ok(save, 'save button renders');
     save.click();
-    await tick();
+    // Wait for the save to land: the header reports it only after the API call
+    // returns, and the replay target is not the revision before that.
+    await waitFor(() => /已保存工作流/.test(document.getElementById('status').textContent),
+      'the save did not finish');
 
     const button = liveButton(document);
     assert.equal(button.disabled, false);
     button.click();
-    // The dialog loads the stored values before opening, so it appears after
-    // one local round trip instead of synchronously.
-    await tick();
+    // The dialog loads the stored values before opening, so wait for it to name
+    // the saved workflow instead of assuming one round trip is enough.
+    await waitFor(() => {
+      const panel = document.getElementById('dialog');
+      return panel.open && /将回放已保存的工作流：/.test(panel.textContent);
+    }, 'the replay dialog did not name the saved workflow');
     const dialog = document.getElementById('dialog');
     assert.match(dialog.textContent, /将回放已保存的工作流：/);
     assert.doesNotMatch(dialog.textContent, /revision|version/i);

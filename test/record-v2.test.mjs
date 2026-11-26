@@ -226,6 +226,71 @@ test('a drop during a pending fallback read is charged to the control the read p
   assert.deepEqual(values.text_2.issues, ['backlog_dropped']);
 });
 
+test('a drop within the merge window marks the buffered burst for its control', async () => {
+  const data = fixture('two-apps-three-windows');
+  const owner = data.events[0].owner;
+  // The fallback snapshot's focused control is also named "Search"; the
+  // drop's own evidence must name that same control.
+  const field = { role: 'AXTextField', name: 'Search', editable: true, bounds: [100, 100, 200, 24] };
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const recording = new GlobalRecording(async window => {
+    await gate;
+    return structuredClone(data.snapshots[String(window.windowNumber)]);
+  }, { now: () => NOW + 11_000 });
+  await recording.add(parseCaptureEvent({
+    kind: 'text', t: 100, seen: NOW + 11_000, focusGeneration: 1, secure: false, owner, chars: 'alpha',
+  }));
+  // 60 ms later, the same control loses a character to the backlog: it belongs
+  // to the buffered burst, whose read proves exactly this control.
+  await recording.add(parseCaptureEvent({
+    kind: 'text', t: 160, seen: NOW, focusGeneration: 1, secure: false, owner, focus: field, chars: 'lost',
+  }));
+  release();
+  await recording.settlePending();
+
+  recording.finish();
+  const values = recording.recordedInputValues();
+  assert.equal(values.text_1.value, 'alpha');
+  assert.equal(values.text_1.complete, false);
+  assert.deepEqual(values.text_1.issues, ['backlog_dropped']);
+});
+
+test('a drop past the merge window is left to the next burst, not the buffered one', async () => {
+  const data = fixture('two-apps-three-windows');
+  const owner = data.events[0].owner;
+  const next = { role: 'AXTextField', name: '下一个字段', editable: true, bounds: [100, 100, 200, 24] };
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const recording = new GlobalRecording(async window => {
+    await gate;
+    return structuredClone(data.snapshots[String(window.windowNumber)]);
+  }, { now: () => NOW + 12_000 });
+  await recording.add(parseCaptureEvent({
+    kind: 'text', t: 100, seen: NOW + 12_000, focusGeneration: 1, secure: false, owner, chars: 'alpha',
+  }));
+  // 2.1 s later the burst has long ended; this drop starts the next burst and
+  // carries no control evidence, so only the time window can separate them.
+  await recording.add(parseCaptureEvent({
+    kind: 'text', t: 2200, seen: NOW, focusGeneration: 1, secure: false, owner, chars: 'lost',
+  }));
+  release();
+  await recording.settlePending();
+  await recording.add(parseCaptureEvent({
+    kind: 'text', t: 2400, seen: NOW + 12_000, focusGeneration: 1, secure: false, owner, focus: next, chars: 'beta',
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['type', 'type']);
+  const values = recording.recordedInputValues();
+  assert.equal(values.text_1.value, 'alpha');
+  assert.equal(values.text_1.complete, true, 'a burst that ended 2.1 s earlier is complete');
+  assert.deepEqual(values.text_1.issues, undefined);
+  assert.equal(values.text_2.value, 'beta');
+  assert.equal(values.text_2.complete, false);
+  assert.deepEqual(values.text_2.issues, ['backlog_dropped']);
+});
+
 test('a secure text burst never becomes a type step or a stored value', async () => {
   const data = fixture('secure-input');
   const secret = `Zq${randomUUID().slice(0, 8)}`;

@@ -1620,6 +1620,7 @@ export class GlobalRecording {
     // fields inside the same window: focusGeneration does not change between
     // controls of one window.
     const droppedTarget = focusedTarget(event.focus);
+    const key = this.focusKey(binding, event.focusGeneration);
     // An event this far behind the helper cannot be tied to the live focus any
     // more; the whole queue is late, so one warning is more useful than a gap
     // per character. The event is dropped, never guessed.
@@ -1641,10 +1642,14 @@ export class GlobalRecording {
           entry.issues.add('backlog_dropped');
         }
       }
-      // The buffered burst may belong to another control in this window; its
-      // target is not known until its read returns, so record the drop and
-      // decide by control when the burst is bound.
-      this.pendingText?.drops.push(droppedTarget ? { locator: locatorKey(droppedTarget) } : {});
+      // A buffered burst owns the drop only if this event belongs to the same
+      // window, focus generation and merge window. A drop that arrives much
+      // later belongs to the next burst, which the droppedText marker covers.
+      const pending = this.pendingText;
+      if (pending && pending.scopeId === scopeId && pending.key === key &&
+          event.t - pending.at >= 0 && event.t - pending.at <= textGapMs) {
+        pending.drops.push(droppedTarget ? { locator: locatorKey(droppedTarget) } : {});
+      }
       // The first character of a burst is often the one that was lost, so the
       // burst may not exist yet: remember where it belongs and mark it when it
       // is bound.
@@ -1658,7 +1663,6 @@ export class GlobalRecording {
       this.enterSecure();
       return;
     }
-    const key = this.focusKey(binding, event.focusGeneration);
     // The helper's focused-element evidence is the normal path: role, label and
     // frame of the control that received the character, with no tree read.
     const direct = droppedTarget;
