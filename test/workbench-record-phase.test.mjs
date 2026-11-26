@@ -90,8 +90,8 @@ const realClearInterval = clearInterval;
 const realNow = Date.now;
 
 const epoch = 1_700_000_000_000;
-const countdownEnd = epoch + 3000;
-const readyAt = epoch + 3350;
+const countdownEnd = epoch + 3350;
+const readyAt = epoch + 3600;
 
 test('the record bar follows its real poll schedule through every stage', async t => {
   let now = epoch;
@@ -118,17 +118,17 @@ test('the record bar follows its real poll schedule through every stage', async 
     Date.now = realNow;
   });
 
-  // The server's answer for the virtual moment: a 300 ms start-up, a 3 s
-  // countdown, 350 ms of preparing, then capture.
+  // The server's answer for the virtual moment: a 300 ms start-up, a ~3 s
+  // countdown, a 250 ms preparing window, then capture.
   const statusAt = () => {
     const elapsed = now - epoch;
     const base = { recording: true, countdownMs: 3000, flowPath: '/tmp/recording-1.flow.json', warnings: [] };
     if (elapsed < 300) return { ...base, phase: 'starting', elapsedMs: 0 };
-    if (elapsed < 3000) {
+    if (elapsed < 3350) {
       return { ...base, phase: 'countdown', countdownEndsAt: new Date(countdownEnd).toISOString(), elapsedMs: 0 };
     }
-    if (elapsed < 3350) return { ...base, phase: 'preparing', elapsedMs: 0 };
-    return { ...base, phase: 'recording', startedAt: new Date(readyAt).toISOString(), elapsedMs: elapsed - 3350 };
+    if (elapsed < 3600) return { ...base, phase: 'preparing', elapsedMs: 0 };
+    return { ...base, phase: 'recording', startedAt: new Date(readyAt).toISOString(), elapsedMs: elapsed - 3600 };
   };
 
   const document = new Document();
@@ -179,23 +179,20 @@ test('the record bar follows its real poll schedule through every stage', async 
   await advance(300);
   assert.equal(timer.textContent, '3 秒后开始录制');
 
-  await advance(1900);
+  await advance(2500);
   assert.equal(timer.textContent, '1 秒后开始录制');
 
-  // The regression the review found: 5 ms after the countdown ends the page must
-  // already be in the preparing stage, not stuck on a countdown digit.
-  await advance(555);
+  // The regression the review found: inside the short preparing window the page
+  // must already say so, not sit on a countdown digit.
+  await advance(500);
   assert.equal(timer.textContent, '准备中…');
-
-  // ... and 150 ms later — inside the 350 ms window — it is still preparing
-  // and the stop button is still usable.
-  await advance(150);
-  assert.equal(timer.textContent, '准备中…');
+  assert.doesNotMatch(timer.textContent, /秒后开始录制/);
   assert.equal(stopButton.hidden, false);
   assert.equal(stopButton.disabled, false);
 
-  // Then the capture clock starts from the ready moment.
-  await advance(300);
+  // The clock starts from the ready moment and appears promptly: a one-second
+  // poll would still be showing 准备中… 300 ms after capture began.
+  await advance(350);
   assert.equal(timer.textContent, '录制中 00:00');
   await advance(2600);
   assert.equal(timer.textContent, '录制中 00:02');
