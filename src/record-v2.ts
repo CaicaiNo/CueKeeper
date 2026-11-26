@@ -1521,6 +1521,20 @@ export class GlobalRecording {
     const snapshot = read.snapshot;
     const from = this.hit(snapshot, event.from);
     const to = this.hit(snapshot, event.to);
+    // A drag whose two ends sit in one editable control selects text inside
+    // that control. v2 has no step that reproduces a selection: a recorded drag
+    // replays from element centers and would select something else, while the
+    // `type` step that follows writes the field's value directly, so the
+    // selection is not part of what a replay must reproduce. Dropping it with a
+    // warning keeps the flow runnable; a drag that merely happened to be
+    // off-center inside the address bar used to block every run.
+    const fromField = from && this.editableHost(snapshot, from);
+    const toField = to && this.editableHost(snapshot, to);
+    if (event.button === 'left' && fromField && fromField === toField && !fromField.secure) {
+      this.warn('DRAG_SELECTS_TEXT',
+        'A drag selected text inside one editable control; it was not recorded because replay writes text through that control, not by selecting it');
+      return;
+    }
     // A v2 drag names two elements and replays from their centers. An endpoint
     // that was not grabbed by its center cannot be represented safely.
     if (!from || !to || !this.centered(from, event.from) || !this.centered(to, event.to)) {
@@ -2035,6 +2049,18 @@ export class GlobalRecording {
     if (!bounds) return false;
     return Math.abs(bounds.x + bounds.width / 2 - point[0]) <= dragCenterTolerance &&
       Math.abs(bounds.y + bounds.height / 2 - point[1]) <= dragCenterTolerance;
+  }
+
+  /**
+   * The editable control an endpoint sits in, itself included. A text field's
+   * own children are part of the same control: a selection that starts and ends
+   * on two of them is still one selection.
+   */
+  private editableHost(snapshot: Snapshot, entry: Located) {
+    for (let node: Node | undefined = entry.node; node; node = parentOf(snapshot.tree, node)) {
+      if (editableRole(node.role)) return node;
+    }
+    return undefined;
   }
 
   /**
