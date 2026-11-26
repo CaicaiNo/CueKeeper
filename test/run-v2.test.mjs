@@ -2091,3 +2091,212 @@ test('HAOC-175 review: a right click with an identifier ignores an earlier click
   assert.equal(report.status, 'passed', JSON.stringify(report.entries));
   assert.deepEqual(callsOf(world, 'click'), [['click', '@w99:e1'], ['click', '@w99:e2']]);
 });
+
+// HAOC-207: the first input after a window switch proves its target is really
+// there. Every case below raises the window with `activate_app` and then presses
+// one control, so only that first press pays the wait.
+
+/** A raised window, then one control pressed in it. */
+function readinessFlow(step) {
+  return parseFlowV2({
+    version: 2,
+    id: 'readiness',
+    name: 'Readiness',
+    appPaths: { [textedit]: appPaths[textedit] },
+    inputs: ['note'],
+    steps: [
+      { id: 'activate', kind: 'activate_app', scope: { kind: 'app', app: textedit } },
+      step,
+    ],
+  });
+}
+
+const pressContinue = {
+  id: 'press', kind: 'click', scope: notesScope,
+  target: { kind: 'element', role: 'button', name: 'Continue' },
+};
+
+/**
+ * Rewrites the notes window each time a step reads it, so a test can model an
+ * app that paints its controls a few hundred milliseconds after its window was
+ * raised. `script(window, readIndex)` runs before the snapshot is returned.
+ */
+function paintOnRead(world, script) {
+  const reads = new Map();
+  const real = world.desktop.snapshotWindow.bind(world.desktop);
+  world.desktop.snapshotWindow = async windowId => {
+    const index = (reads.get(windowId) ?? 0) + 1;
+    reads.set(windowId, index);
+    const window = world.state.windows.find(candidate => candidate.id === windowId);
+    if (window) script(window, index);
+    return real(windowId);
+  };
+  return reads;
+}
+
+const notesWindowOf = world => world.state.windows.find(window => window.id === 'w-21');
+const continueButtonOf = world => notesWindowOf(world).data.tree.children
+  .find(child => child.role === 'button' && child.name === 'Continue');
+
+test('HAOC-207: a target that appears after the window was raised is waited for and pressed once', async t => {
+  const { world, run } = harness(t);
+  const button = continueButtonOf(world);
+  const reads = paintOnRead(world, (window, index) => {
+    const present = window.data.tree.children.includes(button);
+    // The first read of the freshly raised window cannot see the control yet.
+    if (index === 1 && present) {
+      window.data.tree.children = window.data.tree.children.filter(child => child !== button);
+    } else if (index > 1 && !present) {
+      window.data.tree.children = [...window.data.tree.children, button];
+    }
+  });
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w21:e9']], 'exactly one press was delivered');
+  assert.ok(reads.get('w-21') >= 3, `the gate read the window until the control settled (${reads.get('w-21')})`);
+  assert.ok(entry(report, 'press').durationMs >= 150,
+    `the press waited for the second agreeing read (${entry(report, 'press').durationMs} ms)`);
+});
+
+test('HAOC-207: a control whose bounds move twice is pressed only after they hold still', async t => {
+  const { world, run } = harness(t);
+  const button = continueButtonOf(world);
+  const original = { ...button.bounds };
+  const moves = [40, 80, 0];
+  paintOnRead(world, (_window, index) => {
+    const offset = moves[index - 1] ?? 0;
+    button.bounds = { ...original, x: original.x + offset };
+  });
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w21:e9']]);
+  assert.ok(entry(report, 'press').durationMs >= 400,
+    `two moving reads and one agreeing pair were waited for (${entry(report, 'press').durationMs} ms)`);
+});
+
+test('HAOC-207: a disabled control is pressed only once it becomes enabled', async t => {
+  const { world, run } = harness(t);
+  const button = continueButtonOf(world);
+  paintOnRead(world, (_window, index) => {
+    button.states = index <= 2 ? ['disabled'] : [];
+  });
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w21:e9']]);
+  assert.ok(entry(report, 'press').durationMs >= 350,
+    `two disabled reads were waited out (${entry(report, 'press').durationMs} ms)`);
+});
+
+test('HAOC-207: a control that never becomes enabled stops the step as TARGET_NOT_READY with zero input', async t => {
+  const { world, run } = harness(t);
+  const button = continueButtonOf(world);
+  paintOnRead(world, () => { button.states = ['disabled']; });
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'failed');
+  assert.equal(entry(report, 'press').code, 'TARGET_NOT_READY');
+  assert.match(entry(report, 'press').message, /button "Continue" is still disabled/);
+  assert.deepEqual(callsOf(world, 'click'), [], 'no press was ever sent');
+  assert.ok(entry(report, 'press').durationMs >= 1400,
+    `the wait was bounded, not endless (${entry(report, 'press').durationMs} ms)`);
+});
+
+test('HAOC-207: a control that never stops moving stops the step as TARGET_NOT_READY with zero input', async t => {
+  const { world, run } = harness(t);
+  const button = continueButtonOf(world);
+  const original = { ...button.bounds };
+  paintOnRead(world, (_window, index) => {
+    button.bounds = { ...original, x: original.x + index * 7 };
+  });
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'failed');
+  assert.equal(entry(report, 'press').code, 'TARGET_NOT_READY');
+  assert.match(entry(report, 'press').message, /still changing between reads/);
+  assert.deepEqual(callsOf(world, 'click'), []);
+});
+
+test('HAOC-207: a step with no switch before it reads the tree once and does not wait', async t => {
+  const { world, run } = harness(t);
+  const reads = paintOnRead(world, () => {});
+
+  const report = await run(parseFlowV2({
+    version: 2, id: 'no-switch', name: 'No switch',
+    appPaths: { [textedit]: appPaths[textedit] },
+    steps: [pressContinue],
+  }));
+
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w21:e9']]);
+  assert.equal(reads.get('w-21'), 1, 'the step read the window once: no readiness proof ran');
+  assert.ok(entry(report, 'press').durationMs < 100,
+    `the step did not wait (${entry(report, 'press').durationMs} ms)`);
+});
+
+test('HAOC-207: typing after a switch waits for its field, then types once', async t => {
+  const { world, run } = harness(t);
+  const fields = notesWindowOf(world).data.tree.children[0].children;
+  const field = fields.find(node => node.name === 'notes');
+  const reads = paintOnRead(world, (window, index) => {
+    const scrollarea = window.data.tree.children[0];
+    const present = scrollarea.children.includes(field);
+    if (index === 1 && present) {
+      scrollarea.children = scrollarea.children.filter(node => node !== field);
+    } else if (index > 1 && !present) {
+      scrollarea.children = [...scrollarea.children, field];
+    }
+  });
+
+  const report = await run(readinessFlow({
+    id: 'type', kind: 'type', scope: notesScope,
+    target: { kind: 'element', role: 'textfield', name: 'notes' }, input: 'note',
+  }));
+
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'type'), [['type', '@w21:e1', 'draft text']]);
+  assert.ok(reads.get('w-21') >= 3, 'the gate waited for the field to appear');
+});
+
+test('HAOC-207: a key after a switch waits for the window bounds to hold still', async t => {
+  const { world, run } = harness(t);
+  const window = notesWindowOf(world);
+  const original = { ...window.data.tree.bounds };
+  paintOnRead(world, (_window, index) => {
+    window.data.tree.bounds = index === 1
+      ? { ...original, width: original.width - 40 }
+      : { ...original };
+  });
+
+  const report = await run(readinessFlow({ id: 'key', kind: 'key', scope: notesScope, key: 'a' }));
+
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'press').map(call => call[1]), ['a']);
+  assert.ok(entry(report, 'key').durationMs >= 150, 'the key waited for a stable window');
+});
+
+test('HAOC-207: a ready target whose press still fails goes to the click recovery, not the gate', async t => {
+  const { world, run } = harness(t, {
+    hooks: {
+      click(state, ref) {
+        if (state.calls.filter(call => call[0] === 'click').length === 1) {
+          throw new DesktopFault('ACTION_FAILED', 'click', 'the control rejected AXPress');
+        }
+      },
+    },
+  });
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'click').map(call => call[1]), ['@w21:e9', '@w21:e9'],
+    'the gate delivered nothing extra: the recovery retried the recorded control once');
+  assert.match(entry(report, 'press').message, /retried once against a re-read snapshot/);
+});

@@ -69,6 +69,9 @@ export interface FlowV2RunOptions {
 
 type StepOutcome = Omit<StepResult, 'status'> & { status?: 'passed' | 'failed' };
 
+/** The steps whose first event after a window switch waits for a ready target. */
+type ReadinessGatedStep = Extract<StepV2, { kind: 'click' | 'type' | 'key' }>;
+
 const blockingCodes = new Set([
   'APP_PATH_INVALID', 'APP_AMBIGUOUS', 'APP_NOT_FOUND', 'APP_UNVERIFIED',
   'AMBIGUOUS_TARGET', 'WINDOW_NOT_FOUND', 'WINDOW_CHANGED', 'FOCUS_INTERRUPTED',
@@ -226,6 +229,61 @@ const clickRetryDelayMs = 300;
  * pointer to rest, and a next step that reads that state would otherwise race.
  */
 const hoverDwellFloorMs = 400;
+
+/**
+ * A window that was just raised answers the accessibility read before it
+ * accepts input: an Electron page in particular exposes a control's reference
+ * while its press still fails. The first input after a switch therefore reads
+ * the target twice, this far apart, and only delivers once both reads name the
+ * same enabled control in the same place.
+ */
+const readinessProbeIntervalMs = 200;
+
+/**
+ * The bound on that proof. It is short on purpose: an app that cannot expose an
+ * enabled, stable control for this long is not still loading, and the run says
+ * so instead of pressing into a half-drawn page.
+ */
+const readinessProofTimeoutMs = 1500;
+
+/** Steps whose first event after a window switch waits for a ready target. */
+const readinessGated = new Set<StepV2['kind']>(['click', 'type', 'key']);
+
+/** A read the proof cannot use because the window was not there yet. */
+const readinessTransientCodes = new Set([...transientWaitCodes, 'WINDOW_CHANGED']);
+
+/**
+ * True when a step leaves a window the run raised in front of the next step.
+ * A wait and a hover take no focus, so their declared hand-off is not one.
+ */
+function switchesWindow(step: StepV2): boolean {
+  if (step.kind === 'activate_app' || step.kind === 'focus_window') return true;
+  if (step.kind === 'wait' || step.kind === 'hover') return false;
+  return (step as { focusAfter?: Scope }).focusAfter !== undefined;
+}
+
+/** What must hold still for two reads to prove the same control. */
+function readinessSignature(node: Node): string {
+  const bounds = node.bounds;
+  return `${node.role}|${node.name ?? ''}|${node.identifier ?? ''}|` +
+    (bounds ? `${bounds.x},${bounds.y},${bounds.width},${bounds.height}` : 'no-bounds');
+}
+
+/** The same proof for a step that names no control: the bound window itself. */
+function windowReadinessSignature(snapshot: Snapshot): string {
+  const bounds = snapshot.tree.bounds;
+  return `${snapshot.windowId}|` +
+    (bounds ? `${bounds.x},${bounds.y},${bounds.width},${bounds.height}` : 'no-bounds');
+}
+
+/** A locator's identity in a readiness fault message. */
+function describeLocator(locator: ElementLocator): string {
+  const name = (locator.name ?? '').trim();
+  if (name) return `${locator.role ?? 'element'} "${name.slice(0, 80)}"`;
+  return locator.identifier
+    ? `${locator.role ?? 'element'} [${locator.identifier}]`
+    : (locator.role ?? 'the target');
+}
 
 /**
  * The screen point a hover rests on. A recorded point wins when it still lands
@@ -459,6 +517,8 @@ class StepRunner {
   private inlineRename = false;
   /** A point in the clicked row's name column, for focusing the inline editor. */
   private lastRowNamePoint?: Point;
+  /** True after this run raised a window; the next input proves its target first. */
+  private pendingWindowSwitch = false;
 
   /** Per-step file stability memory: size, mtime and when they last changed. */
   private readonly fileStability = new Map<string, { size: number; mtimeMs: number; since: number }>();
@@ -477,8 +537,91 @@ class StepRunner {
         throw new Fault('SYSTEM_DIALOG_VISIBLE', 'A macOS system dialog is already visible before automatic input');
       }
     }
+    // A window the run just raised may answer the tree before it can take
+    // input, so the first event into it waits for its target to be provable.
+    await this.gateFirstInput(step);
     const outcome = await this.dispatch(step);
+    if (switchesWindow(step)) this.pendingWindowSwitch = true;
     return { ...outcome, ...await this.handOff(step) };
+  }
+
+  /**
+   * The readiness gate for one step. Only the first input after a switch pays
+   * it: the step that follows a raise, not every later step in the same window.
+   * A context-menu item is pressed through the menu's own surface with its own
+   * open-and-retry path, so it consumes the switch without this proof.
+   */
+  private async gateFirstInput(step: StepV2): Promise<void> {
+    if (!this.pendingWindowSwitch || !readinessGated.has(step.kind)) return;
+    this.pendingWindowSwitch = false;
+    const menuItem = step.kind === 'click' &&
+      step.target.kind === 'element' && step.target.role === 'menuitem';
+    if (menuItem) return;
+    await this.awaitInputReady(step as ReadinessGatedStep);
+  }
+
+  /**
+   * Proves the target of the first input after a window switch before any event
+   * is posted. Two reads of the bound window, readinessProbeIntervalMs apart,
+   * must name the same enabled control with the same role, name and bounds — or,
+   * for a step that names no control, the same window bounds. The wait is
+   * bounded: a target that never becomes provable is `TARGET_NOT_READY` with
+   * zero input, not a shorter press. A control that proves ready but still
+   * rejects a press is the ordinary click recovery's case, not this one.
+   */
+  private async awaitInputReady(step: ReadinessGatedStep): Promise<void> {
+    const element: ElementLocator | undefined = step.kind === 'key'
+      ? undefined
+      : step.kind === 'click'
+        ? (step.target.kind === 'element' ? step.target : undefined)
+        : step.target as ElementLocator;
+    // A target with no name and no identifier cannot be told apart from its
+    // neighbours, and the step itself reports that. Readiness proves the window
+    // in that case rather than inventing a stricter rule here.
+    const proveElement = element !== undefined && (element.name !== '' || element.identifier !== undefined);
+    // The same same-title disambiguation the step itself will use: the gate must
+    // not turn a window the flow can prove into an ambiguity.
+    const pick = (candidates: WindowInfo[]) => this.pickSameTitled(candidates, step);
+    const deadline = Date.now() + readinessProofTimeoutMs;
+    let previous: string | undefined;
+    let problem = 'the window has not been read yet';
+    let reads = 0;
+    for (;;) {
+      this.signal.throwIfAborted();
+      let signature: string | undefined;
+      try {
+        const binding = await this.resolver.resolveWindow(step.scope, pick);
+        const snapshot = await this.resolver.snapshot(binding);
+        reads += 1;
+        if (!proveElement) {
+          signature = windowReadinessSignature(snapshot);
+          problem = 'the window bounds were still changing between reads';
+        } else {
+          const { node } = resolve(snapshot, element!);
+          if (node.secure) return; // the step reports UNSAFE_TARGET itself
+          if (node.states.includes('disabled')) {
+            problem = `${describeControl(node)} is still disabled`;
+          } else {
+            signature = readinessSignature(node);
+            problem = `${describeControl(node)} was still changing between reads (${signature})`;
+          }
+        }
+      } catch (error) {
+        const fault = toFault(error);
+        if (!readinessTransientCodes.has(fault.code)) throw error;
+        problem = `${fault.code}: ${fault.message}`;
+      }
+      if (signature !== undefined && signature === previous) return;
+      previous = signature;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        const what = element ? describeLocator(element) : 'the bound window';
+        throw new Fault('TARGET_NOT_READY',
+          `${what} was not ready ${readinessProofTimeoutMs} ms after the window was brought forward: ` +
+          `${problem} (${reads} read${reads === 1 ? '' : 's'}); no input was delivered`);
+      }
+      await sleep(Math.min(readinessProbeIntervalMs, remaining), undefined, { signal: this.signal });
+    }
   }
 
   /**

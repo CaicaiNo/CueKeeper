@@ -14,7 +14,7 @@
 
 | 操作 | 录制 | 回放 | 离线测试 | 真机状态 | 错误码 |
 | --- | --- | --- | --- | --- | --- |
-| 左键单击（元素定位器） | 支持。松开时入录；同点 120 ms / 3 px 内的重复按下合并，不产生新步骤；命中的控件没有 AX action 时给 `CLICK_TARGET_UNPRESSABLE` 警告 | 支持。驱动 `click <ref>`，元素路径无需 `--headed`；控件及其所有容器都没有 action ref 时，按最近可操作祖先 → 该控件中心物理点击（需 `--headed`）→ 都没有则报 `UNSAFE_TARGET`。语义按压返回 `ACTION_FAILED` 时：300 ms 后重读快照、目标仍唯一解析才重试一次 → 仍失败则按同一控件中心物理点击并注明 `CLICK_POINT_FALLBACK` → 无 bounds 或物理点击也失败则报 `ACTION_FAILED`（带控件与控制/物理尝试次数）。不做第二次重试；安全控件不进入该路径 | `test/pointer-input.test.mjs`、`test/cuekeeper.test.mjs`、`test/run-v2.test.mjs`（祖先 / 中心坐标 / 两者皆无 / ACTION_FAILED 重试与回退）、`test/record-v2.test.mjs` | 未验证 → HAOC-76/87 | `NOT_FOUND`、`AMBIGUOUS_TARGET`、`UNSAFE_TARGET`、`UNSAFE_POINT`、`HEADED_REQUIRED`、`ACTION_FAILED` |
+| 左键单击（元素定位器） | 支持。松开时入录；同点 120 ms / 3 px 内的重复按下合并，不产生新步骤；命中的控件没有 AX action 时给 `CLICK_TARGET_UNPRESSABLE` 警告 | 支持。驱动 `click <ref>`，元素路径无需 `--headed`；控件及其所有容器都没有 action ref 时，按最近可操作祖先 → 该控件中心物理点击（需 `--headed`）→ 都没有则报 `UNSAFE_TARGET`。语义按压返回 `ACTION_FAILED` 时：300 ms 后重读快照、目标仍唯一解析才重试一次 → 仍失败则按同一控件中心物理点击并注明 `CLICK_POINT_FALLBACK` → 无 bounds 或物理点击也失败则报 `ACTION_FAILED`（带控件与控制/物理尝试次数）。不做第二次重试；安全控件不进入该路径。窗口切换后的第一次点击先做就绪证明（连读两次，目标 enabled 且 role/name/bounds 一致），超时报 `TARGET_NOT_READY` 且零输入 | `test/pointer-input.test.mjs`、`test/cuekeeper.test.mjs`、`test/run-v2.test.mjs`（祖先 / 中心坐标 / 两者皆无 / ACTION_FAILED 重试与回退 / 切换后就绪屏障）、`test/record-v2.test.mjs` | 未验证 → HAOC-76/87 | `NOT_FOUND`、`AMBIGUOUS_TARGET`、`UNSAFE_TARGET`、`UNSAFE_POINT`、`HEADED_REQUIRED`、`ACTION_FAILED`、`TARGET_NOT_READY` |
 | 左键单击（坐标 `point`） | 支持。落点没有可绑定元素时记 `point`；固定应用路径的流程无法证明副本，跳过并报 `UNTARGETED_POINT` | 支持，必须 `--headed`。驱动 `mouse-click --xy`，先 `focus-window` 再核对窗口与落点 | `test/pointer-input.test.mjs`、`test/app-identity-replay.test.mjs` | 未验证 → HAOC-76/87 | `HEADED_REQUIRED`、`UNSAFE_POINT`、`WINDOW_CHANGED`、`OUTSIDE_WINDOW`（录制）、`UNTARGETED_POINT`（录制警告） |
 | 双击（元素） | 支持。原生按下事件带 `clickState = 2`，把上一步升级为 `count: 2`，不追加重复步骤；单击去重不作用于连击 | 支持，必须 `--headed`。驱动 `double-click <ref>` | `test/pointer-input.test.mjs`（录制升级、回放调用、驱动命令映射）、`test/recording-pointer-tests.swift`（double click） | 未验证 → HAOC-76/87 | `HEADED_REQUIRED`、`NOT_FOUND`、`AMBIGUOUS_TARGET`、`UNSAFE_TARGET`、`UNSUPPORTED_CLICK_COUNT` |
 | 双击（坐标） | 支持。连击落点没有可绑定元素时保留 `target.point` 与 `count: 2` | 支持，必须 `--headed`。驱动 `mouse-click --xy --count 2` | `test/pointer-input.test.mjs`（schema 接受、适配器参数） | 未验证 → HAOC-76/87 | `HEADED_REQUIRED`、`UNSAFE_POINT`、`WINDOW_CHANGED`、`UNSUPPORTED_CLICK_COUNT` |
@@ -63,9 +63,9 @@
 
 | 操作 | 录制 | 回放 | 离线测试 | 真机状态 | 错误码 |
 | --- | --- | --- | --- | --- | --- |
-| ASCII 文本输入 | 支持。按焦点可编辑控件与 1.5 s 时间间隔合并为 `type`；焦点标记迟滞时（Safari 常见）先延迟约 80 ms 重读一次快照，仍无焦点则回退到最近一次左键点击的可编辑控件，并要求该控件自身的 value/text 已包含本次输入的字符 | 支持。驱动 `type <ref> --stdin`，文本不进 argv；headed 回放带 `--headed`，无头回放不带。默认不碰输入法（不读 TIS、不切换、不恢复），需要自动切换时加 `--input-source-switch` | `test/cuekeeper.test.mjs`（录制 click/type/key）、`test/safari-text.test.mjs`（延迟重读、点击回退、值证据、保护/非可编辑拒绝）、`test/type-headed.test.mjs`（headed/无头参数、错误码保留）、`test/ime.test.mjs`（默认零 TIS 调用、开启后的切换/恢复） | 未验证 → HAOC-76/87 | `UNSAFE_TEXT_TARGET`（录制：无焦点且无可用点击回退、或控件值未显示输入）、`SECURE_INPUT`（录制）、`UNSAFE_TARGET`（回放：安全控件或无 ref）；开启守卫后另见 `IME_*` |
+| ASCII 文本输入 | 支持。按焦点可编辑控件与 1.5 s 时间间隔合并为 `type`；焦点标记迟滞时（Safari 常见）先延迟约 80 ms 重读一次快照，仍无焦点则回退到最近一次左键点击的可编辑控件，并要求该控件自身的 value/text 已包含本次输入的字符 | 支持。驱动 `type <ref> --stdin`，文本不进 argv；headed 回放带 `--headed`，无头回放不带。默认不碰输入法（不读 TIS、不切换、不恢复），需要自动切换时加 `--input-source-switch` | `test/cuekeeper.test.mjs`（录制 click/type/key）、`test/safari-text.test.mjs`（延迟重读、点击回退、值证据、保护/非可编辑拒绝）、`test/type-headed.test.mjs`（headed/无头参数、错误码保留）、`test/ime.test.mjs`（默认零 TIS 调用、开启后的切换/恢复） | 未验证 → HAOC-76/87 | `UNSAFE_TEXT_TARGET`（录制：无焦点且无可用点击回退、或控件值未显示输入）、`SECURE_INPUT`（录制）、`UNSAFE_TARGET`（回放：安全控件或无 ref）、`TARGET_NOT_READY`（窗口切换后首次输入，目标 1.5 s 内不可证明）；开启守卫后另见 `IME_*` |
 | Chrome / Chromium 页面文本输入 | 支持。与 ASCII 文本输入同一路径，目标为 web 可编辑控件 | 支持，走 headed 注入：`run --headed` 下驱动 `type <ref> --headed --stdin`，文本仍只走 stdin。无头路径对 web 内容会失败，不静默降级 | `test/type-headed.test.mjs`（headed 参数、stdin 文本、`ACTION_FAILED` 原样保留且不重试） | 修复前真机已复现 `ACTION_FAILED`；修复后的真机回放待 HAOC-87（需先获批时间窗） | `ACTION_FAILED`（web 内容走无头注入时）、`UNSAFE_TARGET` |
-| 快捷键 / 特殊键 | 支持。ANSI 可打印键与方向键、F1–F12、修饰键组合；按住重复只记一次并报 `KEY_REPEAT` | 支持。驱动 `press <combo> --window-id` | `test/cuekeeper.test.mjs`、`test/recording-hotkeys` | 未验证 → HAOC-76/87 | `UNSUPPORTED_KEY`（录制警告）、`UNSUPPORTED_EVENT`（录制警告）、`KEY_REPEAT`（录制警告） |
+| 快捷键 / 特殊键 | 支持。ANSI 可打印键与方向键、F1–F12、修饰键组合；按住重复只记一次并报 `KEY_REPEAT` | 支持。驱动 `press <combo> --window-id`；窗口切换后首次按键先证明窗口 `bounds` 稳定 | `test/cuekeeper.test.mjs`、`test/recording-hotkeys` | 未验证 → HAOC-76/87 | `UNSUPPORTED_KEY`（录制警告）、`UNSUPPORTED_EVENT`（录制警告）、`KEY_REPEAT`（录制警告）、`TARGET_NOT_READY`（切换后窗口 1.5 s 内不稳定） |
 | 复制 Cmd+C | 支持。录为 `key: meta+c`；即使开启 `--clipboard` 也不在按键瞬间读取复制结果，内容由后续 Cmd+V 固化 | 支持。驱动 `press meta+c` | `test/cuekeeper.test.mjs`（快捷键路径）、`test/input-ii.test.mjs`（Cmd+V 固化） | 未验证 → HAOC-76/87（真实复制选区） | `UNSUPPORTED_KEY`（录制警告，非 ANSI 键）、`UNSAFE_TEXT_TARGET`（仅文本输入路径） |
 | 粘贴（文本剪贴板） | 默认关闭，只记 `key: meta+v`。`record --clipboard` 显式开启后，在 Cmd+V 时读取 pasteboard：只有 ≤4000 字符的纯文本会固化为 `kind: "paste"`，目标取当时唯一聚焦的可编辑、非安全控件；图片 / 文件 URL / 超长 / 含 NUL / 读失败 / 无安全目标都保留快捷键并给警告 | 支持。先 `focus <ref>`，再 `clipboard-set --stdin` 写入记录文本，最后 `press meta+v --window-id`；不把文本放进 argv | `test/input-ii.test.mjs`（录制固化、默认关闭、各类回退、回放调用、适配器参数、内容不进报告 / viewer） | 未验证 → HAOC-76/87（真实 Cmd+V、富文本、图片/文件粘贴、剪贴板所有权） | `CLIPBOARD_UNSUPPORTED_TYPE`、`CLIPBOARD_TOO_LARGE`、`CLIPBOARD_INVALID_TEXT`、`CLIPBOARD_READ_FAILED`、`UNSAFE_CLIPBOARD_TARGET`（录制警告）、`UNSAFE_TARGET`（回放：非可编辑或安全控件） |
 | 中文 / 非 ASCII（IME 提交文本） | 部分。只记录提交后的 Unicode 文本，记为 `type` 并带 `ime: true`，同时报 `IME_COMPOSITION_UNSUPPORTED`；组合中间态、候选框与逐键物理输入不记录 | 支持文本插入：驱动 `type <ref> --stdin` 写入 Unicode；不重放拼音/候选框，需要物理按键的自绘输入框不支持 | `test/input-ii.test.mjs`（录制合并、IME 标记、回放 Unicode） | 未验证 → HAOC-76/87（中文输入法、候选选择、终端 / 自绘控件） | `IME_COMPOSITION_UNSUPPORTED`（录制警告）、`UNSUPPORTED_TEXT`（仍有不可打印字符时）、`UNSAFE_TEXT_TARGET`、`SECURE_INPUT` |
@@ -106,6 +106,16 @@ Shell 的完整约束见 [Shell 步骤设计](shell-steps.md) 与 [Root 步骤�
 | 多显示器 / 缩放 / 负坐标落点 | 记录当前屏幕逻辑点 | 只保证同一显示布局；布局变化可能失败 | HAOC-76/87 |
 | 游戏 / 远程桌面场景 | — | 不承诺 | 不在范围 |
 
+## 窗口切换后的就绪屏障
+
+窗口已经出现不等于页面可以接受输入：Electron 页面在重绘期间能被快照解析出控件，但 AXPress 会失败。回放因此在**切换后的第一次输入**前先做就绪证明，而不是事后兜底：
+
+- **触发**：上一步是 `activate_app` / `focus_window`，或上一步声明了 `focusAfter`（`wait` / `hover` 不接管焦点，不算切换）。
+- **生效步骤**：只有接下来的第一个 `click` / `type` / `key`。证明通过后，同一窗口的后续步骤不再等待；`paste`、`scroll`、`drag`、`hover` 不在本单范围内。
+- **证明**：相隔 200 ms 连读两次快照，目标必须唯一解析、没有 `disabled` 状态，且两次的 role / name / bounds 一致；没有元素目标的步骤（坐标点击、`key`）证明窗口 `bounds` 稳定。读取期间窗口暂时不可见（`WINDOW_NOT_FOUND`、`WINDOW_CHANGED`、`INCOMPLETE_TREE` 等）按「还没就绪」继续等。
+- **边界**：最多 1.5 s，超时报 `TARGET_NOT_READY` 且零输入。目标就绪但按压仍返回 `ACTION_FAILED` 时走上面的重试 / 中心点回退，不会被就绪证明掩盖。上下文菜单项按菜单自己的打开-重试路径执行；没有 `name` / `identifier` 的目标只证明窗口，具体拒绝仍由该步自己的 `AMBIGUOUS` / `UNSAFE_TARGET` 给出。
+- **录制侧**：不写固定等待。步骤里的 `atMs` 已经保留了「激活到下一步」的观测间隔，回放不把它当 sleep 使用。
+
 ## 拒绝码说明
 
 | 错误码 | 何时出现 | 是否静默降级 |
@@ -115,6 +125,7 @@ Shell 的完整约束见 [Shell 步骤设计](shell-steps.md) 与 [Root 步骤�
 | `UNSAFE_POINT` | 坐标落在目标窗口之外，或固定应用路径的流程使用坐标输入，或 v2 dry-run 的流程里仍有 `target.kind: "point"` 的点击 | 否，不会点/滚到前台窗口 |
 | `UNSAFE_TARGET` | 目标控件是安全控件；或控件及其所有容器都没有可执行 ref，且没有 bounds 可点（消息会点名控件，并提示编辑该步重新拾取目标） | 否 |
 | `ACTION_FAILED` | 元素单击的语义按压持续失败：300 ms 后重读快照重试一次仍失败，且没有 bounds 可做中心点击，或中心点击本身也失败。消息点名控件并写明语义/物理尝试次数；安全控件不走回退 | 否，直接失败，后续步骤 skipped |
+| `TARGET_NOT_READY` | 窗口切换后的第一次 `click` / `type` / `key` 在 1.5 s 内没能证明目标可用：目标一直解析不到、一直标记 `disabled`，或两次读到的 role/name/bounds 一直不一致（无元素目标的步骤比较窗口 `bounds`）。消息点名控件、最后一次读到的状态与读取次数 | 否，超时前零输入；证明通过后才派发，目标就绪但按压失败仍走 `ACTION_FAILED` 的恢复路径 |
 | `CLICK_POINT_FALLBACK` | 不是独立错误码：单击语义按压两次失败后改点同一控件中心的物理点击成功时，报告 message 里的标注 | 否，报告为 passed 并注明走了回退 |
 | `UNSUPPORTED_CLICK_COUNT` | 右键带 `count > 1`，或内部传入 2/3 以外的连击数 | 否；规划期或适配器直接拒绝 |
 | `UNSUPPORTED_SCROLL` | 适配器收到双轴为 0 的滚动（规划期已先拒绝） | 否 |
