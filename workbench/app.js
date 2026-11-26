@@ -3,7 +3,7 @@ import {
   KIND_LABELS, SURFACE_LABELS, actionKind, canUndo, changeTarget, compileDraft, confirmCondition, confirmedSetup,
   deleteCondition, id, makeBehavior, retargetCondition, sameTarget, scopeDescription, scrollLabel, setupDraft,
   shellDraft, shellSummary, dragSummary, undoCondition, visibleRows, locatorDetail, targetLabel, roleLabel,
-  V2_COPYABLE_KINDS, V2_INSERT_KINDS, V2_TARGET_KINDS, assertCheck, checkLabel, diffSummary,
+  V2_COPYABLE_KINDS, V2_INSERT_KINDS, V2_TARGET_KINDS, assertCheck, checkLabel, diffItems, diffSummary,
   filterStepsByScope, scopeKey, scopeOptions, statusMap, stepTemplate, stepTiming, v2StepLabel,
   checkpointWaitFacts, pickCandidateLabel, durationLabel, sessionDurationLabel, stateCheckLabel,
   defaultLibraryExpanded, libraryGroups, toggleLibraryGroup,
@@ -470,10 +470,14 @@ function renderTimeline() {
         render();
       },
     });
+    // One step can be read two ways: its own small button, or a click anywhere
+    // on the row. Both land on the same selection, and nothing else on the row
+    // (checkbox, thumbnail summary) is swallowed.
+    const focusRow = () => { state.focused = row.id; state.tab = 'actions'; render(); };
     const focus = el('button', {
       type: 'button', id: `inspect-${row.id}`, className: 'row-focus',
       'aria-pressed': String(state.focused === row.id),
-      onclick: () => { state.focused = row.id; state.tab = 'actions'; render(); },
+      onclick: () => focusRow(),
     },
     el('span', { className: 'time' },
       el('span', { className: 'time-value', title: gapTitle(timing.get(row.id)) }, timestamp(row.atMs)),
@@ -494,6 +498,10 @@ function renderTimeline() {
     }, el('summary', {}, '查看缩略图'), el('img', { src: row.thumbnail, alt: '动作截图', loading: 'lazy' }));
     nodes.push(el('article', {
       className: `card card-sm bg-base-300 row${state.focused === row.id ? ' active' : ''}${ignored ? ' ignored' : ''}`,
+      onclick: event => {
+        if (event.target?.closest?.('button, input, summary, a, label, details')) return;
+        focusRow();
+      },
     }, el('div', { className: 'card-body row-line' }, selector, focus), thumbnail || undefined));
   }
   $('timeline').replaceChildren(...nodes);
@@ -751,6 +759,9 @@ function renderDraft() {
 
 const v2Section = el('section', { className: 'v2 pane card', id: 'v2-editor', hidden: true });
 document.querySelector('main.workspace').after(v2Section);
+// The workflow the v2 list last showed, so a redraw keeps the scroll position
+// while opening another recording starts at the top.
+let v2RenderedFlow;
 
 const v2Flow = () => state.v2?.flow;
 const v2Steps = () => v2Flow()?.steps ?? [];
@@ -1121,6 +1132,7 @@ function renderV2() {
   const flow = editor.flow;
   const steps = flow.steps;
   const diff = diffSummary(editor.diff);
+  const differenceList = diffItems(editor.diff);
   const dirty = editor.dirty ?? diff.changed;
   const options = scopeOptions(flow, appLabel);
   const visible = filterStepsByScope(flow, state.v2Filter);
@@ -1208,6 +1220,12 @@ function renderV2() {
   });
 
   const validation = editor.validation ?? { ok: true, errors: [] };
+  // Every edit and every click on a row redraws this list. Keep the operator's
+  // place in the flow, unless a different workflow is now on screen: switching
+  // sessions starts at the first step again.
+  const flowKey = editor.flowPath ?? editor.flow?.id;
+  const previousRows = v2Section.querySelector('.v2-rows');
+  const scrollTop = previousRows && v2RenderedFlow === flowKey ? previousRows.scrollTop : 0;
   v2Section.replaceChildren(
     el('div', { className: 'v2-header' },
       el('h2', { className: 'card-title' }, el('span', { className: 'sec' }, '03'), ' 时间线'),
@@ -1252,7 +1270,14 @@ function renderV2() {
       ? el('div', { className: `v2-rows${state.templateMode ? ' marking' : ''}` }, ...rows)
       : empty('当前作用域筛选下没有步骤。'),
     el('div', { className: 'v2-footer' },
-      muted(diff.changed ? `与录制相比：${diff.lines.join('；')}` : '与录制一致，尚未修改。'),
+      // The operator already sees the edits on the steps themselves; a one-line
+      // recap of every moved step is noise. The comparison stays available as
+      // the actual difference list behind one disclosure.
+      diff.changed
+        ? el('details', { className: 'v2-diff' },
+          el('summary', {}, `查看与录制的差异 · ${differenceList.length} 项`),
+          el('ul', { className: 'v2-diff-list' }, ...differenceList.map(item => el('li', {}, item))))
+        : muted('与录制一致，尚未修改。'),
       saved ? muted(`最近保存的工作流：${saved.path}`) : muted('保存会在录制旁写一份工作流副本，原始录制保持不变。'),
       validation.ok ? undefined : el('ul', { className: 'v2-errors' }, ...validation.errors.map(error =>
         el('li', {}, `${error.stepId ? `${error.stepId} · ` : ''}${error.code} · ${error.message}`))),
@@ -1260,6 +1285,9 @@ function renderV2() {
         ? muted('模板标记模式：每行左侧的 {} 图标用来选中要变成变量的值；保存模板只生成副本，当前工作流不变。')
         : undefined,
       muted('拖拽行可排序；点击行后「插入步骤」接在其后。未保存的修改在离开页面前会提示。')));
+  v2RenderedFlow = flowKey;
+  const nextRows = v2Section.querySelector('.v2-rows');
+  if (nextRows) nextRows.scrollTop = scrollTop;
 }
 
 function v2DryRun() {
@@ -1290,7 +1318,7 @@ function v2LiveDialog() {
     muted(!live
       ? '当前有未保存的修改，请先保存工作流。'
       : live.revision
-        ? `将回放已保存的 revision：${live.path}`
+        ? `将回放已保存的工作流：${live.path}`
         : `将直接回放导入的录制文件：${live.path}`),
     muted('会占用前台并可能触发 macOS 权限提示；运行期间点「停止回放」会中断 CLI。'),
     ...(checkpoints.length ? [muted(
@@ -1304,7 +1332,7 @@ function v2LiveDialog() {
     ] : []),
   ], '开始回放', () => {
     if (!confirmed.checked) throw new Error('确认后才会开始实时回放。');
-    if (!state.v2?.live) throw new Error('当前有未保存的修改，请先保存 revision。');
+    if (!state.v2?.live) throw new Error('当前有未保存的修改，请先保存工作流。');
     const filled = [...values.entries()].map(([name, node]) => [name, node.value.trim()]);
     const missing = filled.filter(([, value]) => !value).map(([name]) => name);
     if (missing.length) throw new Error(`请先填写运行参数：${missing.join('、')}`);
@@ -2053,12 +2081,11 @@ function setMode(mode) {
 
 function render() {
   const focus = document.activeElement?.id;
-  // Selecting a row re-renders every pane; keep the scroll position of the two
-  // long lists so a click near the bottom does not jump back to the top.
+  // Selecting a row re-renders every pane; keep the scroll position of the
+  // action list so a click near the bottom does not jump back to the top. The
+  // v2 editor does the same for its own list, inside renderV2.
   const timeline = $('timeline');
   const timelineTop = timeline?.scrollTop ?? 0;
-  const v2Rows = document.querySelector('.v2-rows');
-  const v2Top = v2Rows?.scrollTop ?? 0;
   renderSummary();
   renderSetup();
   renderTimeline();
@@ -2066,8 +2093,6 @@ function render() {
   renderDraft();
   renderV2();
   if (timeline) timeline.scrollTop = timelineTop;
-  const nextV2 = document.querySelector('.v2-rows');
-  if (nextV2) nextV2.scrollTop = v2Top;
   if (focus && !dialog.open) $(focus)?.focus({ preventScroll: true });
 }
 

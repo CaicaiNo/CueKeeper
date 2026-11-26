@@ -237,8 +237,10 @@ test('saving writes a sibling revision, keeps the recording bytes and a live run
   assert.equal(done.flow.inputs, undefined);
   assert.equal(done.diff.changed, true);
 
-  // A live run before saving is refused; the revision is the unit of replay.
-  await post('run', { session: session.id, mode: 'live', confirm: true }, 400);
+  // A live run before saving is refused; the saved workflow is the unit of
+  // replay, and the refusal says so in the same words as the page.
+  const refused = await post('run', { session: session.id, mode: 'live', confirm: true }, 400);
+  assert.match(refused.error, /save the workflow before a live replay/);
 
   const saved = await post('save', { session: session.id }, 201);
   assert.match(saved.output, /flow\.edited-.+\.json$/);
@@ -325,13 +327,13 @@ test('a live replay follows the newest revision and refuses an unsaved edit', as
     session: session.id, mode: 'live', confirm: true, inputs: { address: 'ck.test', note: 'hello' },
   });
 
-  // One unsaved edit has no file to replay: ask for a revision instead of
-  // silently running a recording that no longer matches the timeline.
+  // One unsaved edit has no file to replay: ask for the workflow to be saved
+  // instead of silently running a recording that no longer matches the timeline.
   const edited = await edit(post, session, { kind: 'update', id: 'type-note', patch: { text: 'hello' } });
   assert.equal(edited.dirty, true);
   assert.equal(edited.live, undefined);
   const refused = await post('run', { session: session.id, mode: 'live', confirm: true }, 400);
-  assert.match(refused.error, /save a revision before a live replay/);
+  assert.match(refused.error, /save the workflow before a live replay/);
   await assert.rejects(readFile(argvFile), error => error.code === 'ENOENT');
 
   // Undoing the edit returns to the recording bytes, so the raw file replays.
@@ -353,7 +355,7 @@ test('a live replay follows the newest revision and refuses an unsaved edit', as
   // Editing after the save leaves the revision behind and blocks the run.
   await edit(post, session, { kind: 'update', id: 'type-note', patch: { text: 'changed' } });
   const refusedAgain = await post('run', { session: session.id, mode: 'live', confirm: true }, 400);
-  assert.match(refusedAgain.error, /save a revision before a live replay/);
+  assert.match(refusedAgain.error, /save the workflow before a live replay/);
 });
 
 test('a capture gap can be imported, blocks running and is replaced in place', async t => {
