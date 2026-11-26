@@ -13,6 +13,13 @@ import { createBatchView } from './batch.js';
 
 const $ = name => document.getElementById(name);
 const dialog = $('dialog');
+// The picker stacks over the step editor instead of replacing it, so the
+// editor's unsaved fields survive a cancelled or failed pick.
+const pickDialog = $('v2-pick-dialog');
+// A pick request belongs to the editor and picker it was started from: any
+// dialog that opens in between retires the pending response.
+let editDialogEpoch = 0;
+let pickDialogEpoch = 0;
 const state = {
   session: null, library: [], allowLive: false, allowShell: true, allowSudo: false, app: '', selected: new Set(), ignored: new Set(),
   expanded: new Set(), showIgnored: false, focused: null, draft: [], tab: 'actions', saving: false,
@@ -1387,9 +1394,9 @@ const withStepId = (title, step) => step?.id ? `${title} · ${step.id}` : title;
  * with the other target fields instead of on every timeline row. The capability
  * is unchanged: this still opens the same read-only window snapshot dialog.
  */
-function v2PickEntry(step) {
+function v2PickEntry(step, onPicked) {
   return V2_TARGET_KINDS.has(step.kind) && step.kind !== 'drag'
-    ? button('从窗口拾取', () => void v2PickDialog(step), {
+    ? button('从窗口拾取', () => void v2PickDialog(step, onPicked), {
       style: 'small', icon: 'crosshair', title: '从当前窗口拾取目标元素',
       disabled: state.v2Busy || state.v2Running,
     })
@@ -1482,7 +1489,7 @@ function v2TargetDialog(step) {
       ? muted(`这一步录的是屏幕坐标 (${recorded.point.join(', ')})：录制时那个位置没有可单独定位的控件（画布、空白或自绘区域）。` +
         '直接实时回放就行，它会在该坐标上点；只有干跑会拦下它，因为坐标没法证明还是同一个控件。')
       : muted('这一步用的是元素定位器：换成具体控件后干跑才能通过，实时回放对窗口内的坐标步骤照常执行。'),
-    v2PickEntry(step),
+    v2PickEntry(step, locator => picker.set(locator)),
     ...picker.controls,
   ], '应用', () => v2Edit({ kind: 'update', id: step.id, patch: { target: picker.value() } }));
 }
@@ -1511,7 +1518,7 @@ function v2TypeDialog(step) {
   mode.onchange = sync;
   sync();
   openDialog(withStepId('编辑输入步骤', step), [
-    v2PickEntry(step),
+    v2PickEntry(step, locator => picker.set(locator)),
     ...picker.controls, field('内容来源', mode), textBox, paramBox,
     muted('参数值保存在测试数据里，不写入 flow。'),
   ], '应用', () => {
@@ -2034,31 +2041,49 @@ async function v2StartLive(inputs) {
   }
 }
 
-/** Reads the live window snapshot behind one step's scope and applies a pick. */
-async function v2PickDialog(step) {
+/** The picker's own dialog options: it always stacks over the step editor. */
+const pickDialogOptions = { dialog: pickDialog, titleId: 'v2-pick-dialog-title' };
+
+/**
+ * Reads the live window snapshot behind one step's scope and applies a pick.
+ * The picker runs in its own dialog, so the editor behind it keeps every field
+ * the operator already filled in; a closed picker or a newer editor retires a
+ * snapshot that arrives late.
+ */
+async function v2PickDialog(step, onPicked) {
+  const editor = editDialogEpoch;
+  const show = (title, content, submitLabel, submit) =>
+    openDialog(withStepId(title, step), content, submitLabel, submit, pickDialogOptions);
   if (!step.scope || step.scope.kind !== 'window') {
-    openDialog(withStepId('从当前窗口拾取', step), [
+    show('从当前窗口拾取', [
       muted('这个步骤没有窗口作用域，读不到可拾取的控件快照。请先把作用域改成窗口。'),
       muted('仍可以在「编辑」里手动填写角色/名称/路径。'),
     ]);
     return;
   }
+  // The request belongs to this editor and this pick dialog: closing either one
+  // retires it, so a late snapshot never reopens a dialog the operator closed.
+  show('从当前窗口拾取', [muted(`正在读取${v2ScopeText(step.scope)}的控件快照…`)]);
+  const picker = pickDialogEpoch;
+  const live = () => editor === editDialogEpoch && picker === pickDialogEpoch && pickDialog.open;
   let picked;
   try {
     picked = await api('v2/pick', { session: state.session.id, stepId: step.id });
   } catch (error) {
-    openDialog(withStepId('从当前窗口拾取', step), [
+    if (!live()) return;
+    show('从当前窗口拾取', [
       muted(`无法从窗口读取控件：${error.message}`),
       muted(`${v2ScopeText(step.scope)}；确认应用正在运行并打开了该窗口，且已授予 CueKeeper 辅助功能权限。`),
       muted('仍可以在「编辑」里手动填写角色/名称/路径。'),
     ]);
     return;
   }
+  if (!live()) return;
   const candidates = picked.candidates ?? [];
   const chooser = select(candidates.map((candidate, index) => [String(index), pickCandidateLabel(candidate)]));
   const detail = el('p', { className: 'muted' }, pickCandidateLabel(candidates[0]));
   chooser.onchange = () => { detail.textContent = pickCandidateLabel(candidates[Number(chooser.value)]); };
-  openDialog(withStepId(`从当前窗口拾取 · ${picked.windowTitle}`, step), [
+  show(`从当前窗口拾取 · ${picked.windowTitle}`, [
     muted(`${v2ScopeText(step.scope)} · 窗口 ${picked.windowId} · ${candidates.length} 个控件`),
     field('控件', chooser),
     detail,
@@ -2066,8 +2091,13 @@ async function v2PickDialog(step) {
       ? '当前目标是坐标；确认后会替换成元素定位器（point → element）。'
       : '确认后会替换这一步的目标定位器。'),
     muted('只读快照：不会点击、聚焦或输入。'),
-  ], '使用此控件', () =>
-    v2Edit({ kind: 'update', id: step.id, patch: { target: candidates[Number(chooser.value)].locator } }));
+  ], '使用此控件', async () => {
+    const locator = candidates[Number(chooser.value)].locator;
+    await v2Edit({ kind: 'update', id: step.id, patch: { target: locator } });
+    // The step is already updated; mirror it into the editor still behind the
+    // picker so applying that form later cannot put the old target back.
+    onPicked?.(locator);
+  });
 }
 
 /** Switches the workbench between editing one flow and running a queue. */
@@ -2111,9 +2141,14 @@ function render() {
 }
 
 function openDialog(title, content, submitLabel, submit, options = {}) {
+  // A second dialog can stack over the page's own one (the picker over the step
+  // editor). Opening either retires the responses addressed to what was there.
+  const modal = options.dialog ?? dialog;
+  if (modal === dialog) editDialogEpoch += 1;
+  else pickDialogEpoch += 1;
   let busy = false;
   const error = el('p', { className: 'form-error alert alert-soft alert-error', role: 'alert' });
-  const dismiss = button('关闭', () => dialog.close(), { icon: 'x', iconOnly: true, title: '关闭' });
+  const dismiss = button('关闭', () => modal.close(), { icon: 'x', iconOnly: true, title: '关闭' });
   const confirm = submit && el('button', { className: 'btn btn-primary', type: 'submit' },
     icon('check'), el('span', {}, submitLabel));
   const form = el('form', {
@@ -2127,7 +2162,7 @@ function openDialog(title, content, submitLabel, submit, options = {}) {
       error.textContent = '';
       try {
         await submit();
-        dialog.close();
+        modal.close();
       } catch (failure) {
         error.textContent = failure.message;
       } finally {
@@ -2137,12 +2172,15 @@ function openDialog(title, content, submitLabel, submit, options = {}) {
       }
     },
   },
-  el('div', { className: 'dialog-head' }, el('h2', { id: 'dialog-title' }, title), dismiss),
+  el('div', { className: 'dialog-head' },
+    el('h2', { id: options.titleId ?? 'dialog-title' }, title), dismiss),
   ...content, error, confirm ? el('div', { className: 'actions' }, confirm) : undefined);
-  dialog.oncancel = event => { if (busy) event.preventDefault(); };
-  dialog.replaceChildren(form);
-  dialog.showModal();
-  requestAnimationFrame(() => dialog.querySelector('input:not([type="checkbox"]), select, textarea')?.focus({ preventScroll: true }));
+  modal.oncancel = event => { if (busy) event.preventDefault(); };
+  modal.replaceChildren(form);
+  // A second answer for the same dialog (the picker's loading state, then its
+  // candidates) replaces the content in place; only a closed dialog is opened.
+  if (!modal.open) modal.showModal();
+  requestAnimationFrame(() => modal.querySelector('input:not([type="checkbox"]), select, textarea')?.focus({ preventScroll: true }));
 }
 
 function importDialog() {
@@ -2413,14 +2451,19 @@ function locatorFields(original, emptyPickHint) {
         return;
       }
       const candidate = candidates[Number(event.target.value)];
-      const target = candidate.locator;
-      role.value = target.role;
-      name.value = target.name ?? '';
-      exactName.checked = target.name !== undefined;
-      path.value = target.path?.join(' / ') ?? '';
-      index.value = target.index ?? '';
+      set(candidate.locator);
       detail.textContent = `${candidate.ref} · ${frameLabel(candidate)}`;
     });
+  // A window pick replaces the fields instead of the form around them, so the
+  // operator keeps everything else they already typed.
+  const set = target => {
+    role.value = target.role ?? '';
+    name.value = target.name ?? '';
+    exactName.checked = target.name !== undefined;
+    path.value = target.path?.join(' / ') ?? '';
+    index.value = target.index ?? '';
+    refresh();
+  };
   const locator = () => {
     const segments = path.value.split('/').map(part => part.trim()).filter(Boolean);
     return {
@@ -2444,6 +2487,7 @@ function locatorFields(original, emptyPickHint) {
   exactName.onchange = refresh;
   refresh();
   return {
+    set,
     controls: [
       muted('这些值来自 macOS 辅助功能（Accessibility），用来在窗口里认出同一个控件，一般不用手改。'),
       candidates.length

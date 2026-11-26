@@ -426,7 +426,7 @@ dialog .modal-box.modal-wide {
   max-width: min(720px, calc(100vw - 32px));
 }
 .dialog-head { display: flex; align-items: center; gap: 10px; justify-content: space-between; }
-#dialog .actions { justify-content: flex-end; }
+#dialog .actions, #v2-pick-dialog .actions { justify-content: flex-end; }
 .dialog-head h2 { font-size: 17px; font-weight: 600; }
 .field { display: grid; gap: 5px; color: var(--muted); font-size: 11.5px; }
 .field > .input, .field > .select, .field > .textarea { width: 100%; }
