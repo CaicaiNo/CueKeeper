@@ -1470,7 +1470,44 @@ test('a click inside a control that carries no action reference is named by its 
   const flow = recording.finish();
   assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'group', name: '接入地址' });
   assert.equal(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_ELEMENT_CLICK'), false);
+  // The recorded control and every container above it carry no action
+  // reference, so replay can only click its centre as physical input. The
+  // recording says that up front instead of promising a semantic press.
+  const unpressable = recording.captureWarnings.find(warning => warning.code === 'CLICK_TARGET_UNPRESSABLE');
+  assert.ok(unpressable, JSON.stringify(recording.captureWarnings));
+  assert.match(unpressable.message, /group "接入地址"/);
+  assert.match(unpressable.message, /click its centre as physical input/);
   assert.equal(flowV2Check.Check(flow), true);
+});
+
+// The same Electron shape, but the named container is pressable: the step stays
+// a semantic press and the recording must not warn about a physical fallback.
+test('a click named by a container that is itself pressable needs no unpressable warning', async () => {
+  const tree = {
+    role: 'window', name: 'aTrust', ref: '@atrust:e1', bounds: { x: 400, y: 100, width: 900, height: 600 },
+    states: [], secure: false, children: [{
+      role: 'group', name: '接入地址', ref: '@atrust:e2',
+      bounds: { x: 600, y: 200, width: 400, height: 200 }, states: [], secure: false,
+      actions: ['Press'],
+      children: [{
+        role: 'group', bounds: { x: 610, y: 210, width: 380, height: 40 },
+        states: [], secure: false, children: [],
+      }],
+    }],
+  };
+  const recording = new GlobalRecording(
+    async () => ({ windowId: 'w-44', tree: structuredClone(tree) }),
+    { now: () => NOW },
+  );
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 400, seen: NOW, focusGeneration: 1, secure: false,
+    point: [700, 225], decision: 'record',
+    owner: { ...ATRUST_OWNER, windowNumber: 44, windowTitle: 'aTrust', role: 'AXGroup' },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'group', name: '接入地址' });
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'CLICK_TARGET_UNPRESSABLE'), false);
 });
 
 // An app that hides its window when it loses focus hands it a new number each
