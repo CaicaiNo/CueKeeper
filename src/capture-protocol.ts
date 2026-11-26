@@ -116,7 +116,12 @@ export type CaptureEvent =
   | (CaptureEventBase & { kind: 'key'; key: string; modifiers: CaptureModifier[] })
   | (CaptureEventBase & { kind: 'focus' })
   | (CaptureEventBase & { kind: 'system_dialog'; visible: boolean })
-  | (CaptureEventBase & { kind: 'gap'; gapCode: CaptureGapCode });
+  /**
+   * `detail` is the helper's own bounded reason for a gap (`tap_interrupted`,
+   * `event_lag`, ...). It is optional so helpers that predate it still parse,
+   * and it never changes what a gap blocks.
+   */
+  | (CaptureEventBase & { kind: 'gap'; gapCode: CaptureGapCode; detail?: string });
 
 export type CaptureEventKind = CaptureEvent['kind'];
 
@@ -327,7 +332,8 @@ export function parseCaptureEvent(value: unknown): CaptureEvent {
       return { ...base, kind: 'focus' };
     case 'gap': {
       const code = gapCode(input.gapCode);
-      return { ...base, kind: 'gap', gapCode: code };
+      const detail = gapDetail(input.detail);
+      return { ...base, kind: 'gap', gapCode: code, ...(detail === undefined ? {} : { detail }) };
     }
   }
 }
@@ -335,6 +341,17 @@ export function parseCaptureEvent(value: unknown): CaptureEvent {
 function gapCode(value: unknown): CaptureGapCode {
   if (typeof value !== 'string' || !gapCodeSet.has(value)) fail('unknown gap code');
   return value as CaptureGapCode;
+}
+
+/**
+ * The helper's reason for a gap. It is diagnostic only: a short identifier is
+ * accepted so a newer helper can explain itself without breaking this parser,
+ * and no reason ever changes how many gaps a flow has.
+ */
+function gapDetail(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !/^[a-z][a-z0-9_]{0,31}$/.test(value)) fail('gap detail must be a short reason');
+  return value;
 }
 
 function decision(value: unknown): 'record' | 'navigate' | 'gap' {

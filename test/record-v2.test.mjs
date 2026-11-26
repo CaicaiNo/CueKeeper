@@ -314,6 +314,216 @@ test('a Dock click with no new focus is dropped with a warning', async () => {
   assert.ok(recording.captureWarnings.some(warning => warning.code === 'DOCK_CLICK_UNPROVEN'));
 });
 
+// A click can reach a window that was already frontmost before the helper could
+// bind it: its focus probe lost the window number, so the flow still stands in
+// the previous app. The click's own `record` evidence proves it was delivered,
+// so replay gets the navigation and the click — not a capture gap.
+test('a click proven in the destination app is kept once after activate_app', async () => {
+  const recording = await recordFixture('cross-app-click-before-focus');
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'activate_app', 'click', 'click']);
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  // Cross-app: one activation, carrying the destination window for focusAfter.
+  assert.equal(flow.steps.filter(step => step.kind === 'activate_app').length, 1);
+  assert.equal(flow.steps[1].scope.app, 'com.electron.atrust');
+  assert.equal(flow.steps[1].focusAfter.windowKey, 'atrust-1');
+  // The recovered click is recorded exactly once, named from its own evidence.
+  assert.equal(flow.steps[2].scope.windowKey, 'atrust-1');
+  assert.deepEqual(flow.steps[2].target, { kind: 'element', role: 'button', name: '设置' });
+  assert.equal(flow.steps.filter(step => step.kind === 'click' && step.target.name === '设置').length, 1);
+  // The focus notification that followed added no second navigation.
+  assert.equal(flow.steps.length, 4);
+  assert.equal(flowV2Check.Check(flow), true);
+  assert.equal(parseFlowV2(flow).steps.length, 4);
+});
+
+test('a click proven in another window of the same app is focus_window, once', async () => {
+  const flow = (await recordFixture('same-app-window-click-before-focus')).finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'focus_window', 'click', 'click']);
+  assert.equal(flow.steps.some(step => step.kind === 'gap' || step.kind === 'activate_app'), false);
+  assert.equal(flow.steps.filter(step => step.kind === 'focus_window').length, 1);
+  assert.equal(flow.steps[1].scope.windowKey, 'finder-2');
+  assert.equal(flow.steps[1].scope.windowTitle, 'Images');
+  assert.deepEqual(flow.steps[2].target, { kind: 'element', role: 'button', name: '排序' });
+  // The click that proved the window appears once; the following focus did not
+  // navigate again.
+  assert.equal(flow.steps.filter(step => step.kind === 'click' && step.target.name === '排序').length, 1);
+  assert.equal(flow.steps.length, 4);
+});
+
+const beforeFocus = (data, events) => {
+  const recording = new GlobalRecording(readerFor(data), { now: () => NOW });
+  return events.reduce((chain, event) => chain.then(() => recording.add(parseCaptureEvent(event))),
+    Promise.resolve()).then(() => recording);
+};
+
+test('a click that names no window keeps the existing warning, with or without later focus', async () => {
+  const data = fixture('cross-app-click-before-focus');
+  const unbound = {
+    kind: 'click', t: 611, seen: NOW, point: [1400, 300], count: 1,
+    focusGeneration: 2, secure: false, decision: 'record',
+    owner: { role: 'AXButton', name: 'install', pressable: true },
+  };
+  const focus = {
+    kind: 'focus', t: 665, seen: NOW, focusGeneration: 3, secure: false,
+    owner: { app: 'com.electron.atrust', pid: 200, processInstance: NOW, windowNumber: 21, windowTitle: 'aTrust' },
+  };
+  const withFocus = await beforeFocus(data, [...data.events.slice(0, 2), unbound, focus]);
+  const flowWithFocus = withFocus.finish();
+  // The click cannot be replayed, so it is dropped with the existing warning;
+  // it must not become a gap, and the focus still navigates once.
+  assert.deepEqual(flowWithFocus.steps.map(step => step.kind), ['click', 'activate_app']);
+  assert.equal(flowWithFocus.steps.some(step => step.kind === 'gap'), false);
+  assert.ok(withFocus.captureWarnings.some(warning => warning.code === 'CLICK_OUTSIDE_WINDOW'));
+
+  const withoutFocus = await beforeFocus(data, [...data.events.slice(0, 2), unbound]);
+  assert.deepEqual(withoutFocus.finish().steps.map(step => step.kind), ['click']);
+  assert.ok(withoutFocus.captureWarnings.some(warning => warning.code === 'CLICK_OUTSIDE_WINDOW'));
+});
+
+test('a late or conflicting focus generation is never recovered', async () => {
+  const data = fixture('cross-app-click-before-focus');
+  const [focus, click, unboundFocus, recovered, laterFocus] = data.events;
+  const late = { ...recovered, t: 700, focusGeneration: 1 };
+  const lateRun = await beforeFocus(data, [focus, click, unboundFocus, recovered, laterFocus, late]);
+  const lateFlow = lateRun.finish();
+  // The recovered click moved the recording to generation 2; an event from
+  // generation 1 must not navigate or be kept as a click.
+  assert.deepEqual(lateFlow.steps.map(step => step.kind), ['click', 'activate_app', 'click', 'gap']);
+  assert.equal(lateFlow.steps[3].code, 'CAPTURE_SCOPE_UNVERIFIED');
+  assert.equal(lateFlow.steps.filter(step => step.kind === 'activate_app').length, 1);
+
+  const inWindow = {
+    kind: 'click', t: 300, seen: NOW, point: [340, 320], count: 1,
+    focusGeneration: 2, secure: false, decision: 'record', owner: data.events[1].owner,
+  };
+  const conflicting = { ...recovered, t: 400, focusGeneration: 2 };
+  const conflictRun = await beforeFocus(data, [focus, click, inWindow, conflicting]);
+  const conflictFlow = conflictRun.finish();
+  // Generation 2 already named the Finder window; the same generation naming
+  // the aTrust window is conflicting evidence, so it stays a gap with no nav.
+  assert.deepEqual(conflictFlow.steps.map(step => step.kind), ['click', 'click', 'gap']);
+  assert.equal(conflictFlow.steps[2].code, 'CAPTURE_SCOPE_UNVERIFIED');
+  assert.equal(conflictFlow.steps.some(step => step.kind === 'activate_app'), false);
+});
+
+test('a window the event did not name itself never proves the click', async () => {
+  const data = fixture('cross-app-click-before-focus');
+  const [focus, click, unboundFocus] = data.events;
+  const rename = {
+    kind: 'click', t: 611, seen: NOW, point: [1400, 300], count: 1,
+    focusGeneration: 2, secure: false, decision: 'record',
+    owner: { app: 'com.electron.atrust', pid: 200, processInstance: NOW, role: 'AXButton', name: '设置' },
+  };
+  // The focus probe lost the window number and the click named none either: the
+  // inheritance branch cannot stand in for the missing identity.
+  const unnamed = await beforeFocus(data, [focus, click, unboundFocus, rename]);
+  assert.deepEqual(unnamed.finish().steps.map(step => step.kind), ['click']);
+  assert.ok(unnamed.captureWarnings.some(warning => warning.code === 'CLICK_OUTSIDE_WINDOW'));
+
+  // The same inheritance still records a click in the window the flow already
+  // stands in, which is the behaviour this change must not disturb.
+  const inherited = {
+    ...rename, t: 400, point: [340, 320], focusGeneration: 2,
+    owner: { app: 'com.apple.finder', pid: 100, processInstance: NOW, role: 'AXButton', name: '设置' },
+  };
+  const inheritedRun = await beforeFocus(data, [focus, click, inherited]);
+  const inheritedFlow = inheritedRun.finish();
+  assert.deepEqual(inheritedFlow.steps.map(step => step.kind), ['click', 'click']);
+  assert.equal(inheritedFlow.steps[1].scope.windowKey, 'finder-1');
+});
+
+test('a menu item click keeps the gap instead of navigating', async () => {
+  const data = fixture('cross-app-click-before-focus');
+  const [focus, click, unboundFocus, recovered, laterFocus] = data.events;
+  const menuItem = {
+    ...recovered, t: 620,
+    owner: { ...recovered.owner, role: 'AXMenuItem', name: '打开' },
+  };
+  const run = await beforeFocus(data, [focus, click, unboundFocus, menuItem, laterFocus]);
+  const flow = run.finish();
+  // The native menu branch also reports `record`, but its window belongs to the
+  // app that opened the menu; the item is not replayed from there.
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'gap', 'activate_app']);
+  assert.equal(flow.steps[1].code, 'CAPTURE_SCOPE_UNVERIFIED');
+  assert.equal(flow.steps.some(step => step.kind === 'click' && step.target.name === '打开'), false);
+});
+
+test('unowned scrolls and keys still block', async () => {
+  const data = fixture('cross-app-click-before-focus');
+  const [focus, click, unboundFocus, recovered, laterFocus] = data.events;
+  const scroll = {
+    kind: 'scroll', t: 620, seen: NOW, point: [990, 112], deltaX: 0, deltaY: -3,
+    focusGeneration: 2, secure: false, decision: 'gap', gapCode: 'CAPTURE_SCOPE_UNVERIFIED',
+    owner: recovered.owner,
+  };
+  const scrollFlow = (await beforeFocus(data, [focus, click, unboundFocus, scroll, laterFocus])).finish();
+  assert.deepEqual(scrollFlow.steps.map(step => step.kind), ['click', 'gap', 'activate_app']);
+  assert.equal(scrollFlow.steps[1].code, 'CAPTURE_SCOPE_UNVERIFIED');
+
+  const key = {
+    kind: 'key', t: 620, seen: NOW, key: 'return', focusGeneration: 2, secure: false,
+    decision: 'record', owner: { app: 'com.electron.atrust', pid: 200, processInstance: NOW },
+  };
+  const keyFlow = (await beforeFocus(data, [focus, click, unboundFocus, key, laterFocus])).finish();
+  assert.deepEqual(keyFlow.steps.map(step => step.kind), ['click', 'gap', 'activate_app']);
+  assert.equal(keyFlow.steps[1].code, 'CAPTURE_SCOPE_UNVERIFIED');
+});
+
+test('a recovered click that ends in a secure control leaves the gap', async () => {
+  const source = fixture('cross-app-click-before-focus');
+  const data = structuredClone(source);
+  const secureButton = data.snapshots['21'].tree.children[0];
+  secureButton.secure = true;
+  const [focus, click, unboundFocus, recovered, laterFocus] = data.events;
+  // Nameless evidence forces the tree read that proves the control is secure.
+  const nameless = {
+    ...recovered, t: 620, point: [990, 112],
+    owner: { ...recovered.owner, role: undefined, name: undefined },
+  };
+  const run = await beforeFocus(data, [focus, click, unboundFocus, nameless, laterFocus]);
+  const flow = run.finish();
+  // Navigation stays, but the press could not become a step, so the gap stays
+  // behind it rather than leaving a navigation that silently swallowed a click.
+  assert.equal(flow.steps.filter(step => step.kind === 'activate_app').length, 1);
+  assert.ok(flow.steps.some(step => step.kind === 'gap' && step.code === 'CAPTURE_SCOPE_UNVERIFIED'));
+  assert.equal(flow.steps.some(step => step.kind === 'click' && step.scope.app === 'com.electron.atrust'), false);
+  assert.throws(() => parseFlowV2(flow), { code: 'CAPTURE_GAP' });
+});
+
+test('a stale capture keeps its helper reason as a diagnostic and still blocks', async () => {
+  const data = fixture('two-apps-three-windows');
+  const stale = detail => ({
+    kind: 'gap', gapCode: 'STALE_CAPTURE', t: 300, seen: NOW, focusGeneration: 1, secure: false,
+    ...(detail === undefined ? {} : { detail }),
+  });
+  const run = async detail => {
+    const recording = new GlobalRecording(readerFor(data), { now: () => NOW });
+    await recording.add(parseCaptureEvent(data.events[0]));
+    await recording.add(parseCaptureEvent(stale(detail)));
+    return recording;
+  };
+  const cases = [
+    ['tap_interrupted', 'STALE_CAPTURE_TAP_INTERRUPTED'],
+    ['event_lag', 'STALE_CAPTURE_EVENT_LAG'],
+  ];
+  for (const [detail, code] of cases) {
+    const recording = await run(detail);
+    const flow = recording.finish();
+    // The reason is carried for diagnosis only: the gap is still a gap.
+    assert.deepEqual(flow.steps.map(step => [step.kind, step.code]),
+      [['click', undefined], ['gap', 'STALE_CAPTURE']]);
+    assert.ok(recording.captureWarnings.some(warning => warning.code === code), `missing ${code}`);
+    assert.throws(() => parseFlowV2(flow), { code: 'CAPTURE_GAP' });
+  }
+  // An older helper sends no detail; the gap still blocks and invents no reason.
+  const old = await run(undefined);
+  const oldFlow = old.finish();
+  assert.equal(oldFlow.steps[1].code, 'STALE_CAPTURE');
+  assert.equal(old.captureWarnings.some(warning => warning.code.startsWith('STALE_CAPTURE_')), false);
+  assert.throws(() => parseFlowV2(oldFlow), { code: 'CAPTURE_GAP' });
+});
+
 test('a drag that crosses a window boundary leaves CROSS_SCOPE_GESTURE', async () => {
   const flow = (await recordFixture('cross-window-drag')).finish();
   assert.deepEqual(flow.steps.map(step => step.kind), ['gap']);
@@ -2500,6 +2710,20 @@ test('capture protocol rejects a malformed global event', () => {
   }), { code: 'CAPTURE_PROTOCOL' });
   assert.throws(() => parseCaptureEvent({
     kind: 'gap', t: 1, seen: 1, focusGeneration: 0, secure: false, gapCode: 'NOPE',
+  }), { code: 'CAPTURE_PROTOCOL' });
+  // A helper may name why a gap happened; the field is optional so an older
+  // helper that never sends it still parses, and the value stays a bounded
+  // identifier.
+  assert.equal(parseCaptureEvent({
+    kind: 'gap', t: 1, seen: 1, focusGeneration: 0, secure: false, gapCode: 'STALE_CAPTURE',
+  }).detail, undefined);
+  assert.equal(parseCaptureEvent({
+    kind: 'gap', t: 1, seen: 1, focusGeneration: 0, secure: false,
+    gapCode: 'STALE_CAPTURE', detail: 'tap_interrupted',
+  }).detail, 'tap_interrupted');
+  assert.throws(() => parseCaptureEvent({
+    kind: 'gap', t: 1, seen: 1, focusGeneration: 0, secure: false,
+    gapCode: 'STALE_CAPTURE', detail: 'Tap interrupted!',
   }), { code: 'CAPTURE_PROTOCOL' });
   const valid = parseCaptureEvent({
     kind: 'click', t: 1, seen: 1, focusGeneration: 2, secure: false,
