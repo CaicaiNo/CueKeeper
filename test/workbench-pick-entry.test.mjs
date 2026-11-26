@@ -173,27 +173,25 @@ test('the click editor picks a control and replaces a coordinate target', async 
   chooser.value = '1';
   await submitPicker(document);
 
-  // The coordinate target became the picked element, on the server and on the row.
-  const session = await state();
-  const step = session.v2.flow.steps.find(item => item.id === 'click-canvas');
-  assert.deepEqual(step.target, { kind: 'element', role: 'textfield', name: '画布输入' });
-  assert.match(rowOf(document, 'click-canvas').textContent, /画布输入/);
-  assert.equal(pickerDialog(document).open, false, 'the picker closed after applying');
-
-  // The editor is still the one that was open, now naming the picked control, so
-  // applying it later cannot restore the old coordinate target.
+  // The pick lands in the editor; the step itself changes only on 应用.
+  assert.equal(pickerDialog(document).open, false, 'the picker closed after the pick');
   assert.equal(dialog(document).open, true, 'the step editor stays open behind the picker');
-  const roleField = dialog(document).querySelectorAll('input')
-    .find(node => node.getAttribute('placeholder') === '例如 textfield');
-  assert.equal(roleField.value, 'textfield');
-  assert.match(dialog(document).textContent, /当前目标已替换成元素定位器/);
-  assert.doesNotMatch(dialog(document).textContent, /它会在该坐标上点/);
+  assert.match(dialog(document).textContent, /textfield（画布输入）· Cuekeeper 画布/);
+  assert.equal((await state()).v2.flow.steps.find(item => item.id === 'click-canvas').target.kind, 'point',
+    'a confirmed pick does not write the step');
+
+  // Re-opening the picker from this editor still shows what it would replace.
   buttonByText(dialog(document), '从窗口拾取').click();
   await tick();
-  assert.match(pickerDialog(document).textContent, /确认后会替换这一步的目标定位器/);
+  assert.match(pickerDialog(document).textContent, /回到编辑框点「应用」才保存/);
   closeModal(pickerDialog(document));
-  closeModal(dialog(document));
-  assert.equal((await state()).v2.flow.steps.find(item => item.id === 'click-canvas').target.kind, 'element');
+
+  await submitDialog(document);
+  const session = await state();
+  const step = session.v2.flow.steps.find(item => item.id === 'click-canvas');
+  assert.deepEqual(step.target, { kind: 'element', role: 'textfield', name: '画布输入' },
+    'the coordinate target became the picked element');
+  assert.match(rowOf(document, 'click-canvas').textContent, /画布输入/);
 });
 
 test('the type editor and the read-only facts panel keep their own pick entry', async t => {
@@ -263,21 +261,20 @@ test('cancelling the picker keeps the step editor and its unsaved values', async
   assert.equal(step.text, '草稿文本', 'applying the editor writes the preserved draft');
 });
 
-test('editing the picked locator uses the manually entered target', async t => {
+test('a scroll target pick is discarded when the editor is closed', async t => {
   const { document, state } = await bootPage(t);
-  const editor = dialog(document);
   buttonByText(rowOf(document, 'scroll-canvas'), '编辑').click();
+  const editor = dialog(document);
   buttonByText(editor, '从窗口拾取').click();
   await tick();
   pickerDialog(document).querySelector('select').value = '1';
   await submitPicker(document);
+  assert.match(editor.textContent, /textfield（画布输入）· Cuekeeper 画布/,
+    'the summary shows the control that would replace the target');
 
-  const name = editor.querySelectorAll('input')
-    .find(node => node.getAttribute('placeholder') === '例如 保存');
-  name.value = '继续';
-  await submitDialog(document);
+  closeModal(editor);
   const step = (await state()).v2.flow.steps.find(item => item.id === 'scroll-canvas');
-  assert.deepEqual(step.target, { kind: 'element', role: 'textfield', name: '继续' });
+  assert.deepEqual(step.target, { kind: 'element', role: 'group' }, 'closing the editor writes nothing');
 });
 
 test('a snapshot that arrives after the picker closed never reopens it', async t => {
@@ -316,13 +313,15 @@ test('a scroll editor shows what the entry would replace before applying', async
   assert.match(dialog(document).textContent, /编辑滚动目标 · scroll-canvas/);
   buttonByText(dialog(document), '从窗口拾取').click();
   await tick();
-  assert.match(pickerDialog(document).textContent, /确认后会替换这一步的目标定位器/);
+  assert.match(pickerDialog(document).textContent, /回到编辑框点「应用」才保存/);
 
   const chooser = pickerDialog(document).querySelectorAll('select')[0];
   chooser.value = '0';
   await submitPicker(document);
-  closeModal(dialog(document));
+  assert.deepEqual((await state()).v2.flow.steps.find(item => item.id === 'scroll-canvas').target,
+    { kind: 'element', role: 'group' }, 'the picker alone writes nothing');
 
+  await submitDialog(document);
   const session = await state();
   const step = session.v2.flow.steps.find(item => item.id === 'scroll-canvas');
   assert.deepEqual(step.target, candidates[0].locator);

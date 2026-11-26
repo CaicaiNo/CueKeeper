@@ -448,8 +448,8 @@ dialog .modal-box.modal-wide {
 .locator-advanced[open] > summary { color: var(--color-base-content); }
 .locator-advanced > .field, .locator-advanced > .check-row { margin-top: 8px; }
 .locator-advanced > .muted { margin: 4px 0 0; font-size: 11px; }
-/* 悬停弹窗：一行目标摘要（角色/名称/应用/尺寸），没有定位器字段 */
-.hover-target-summary {
+/* 目标编辑弹窗：一行目标摘要（角色/名称/窗口/尺寸），没有定位器字段 */
+.target-summary {
   margin: 0; padding: 10px 12px; border-radius: 12px;
   background: var(--color-base-100); border: 1px solid var(--line);
   font-size: 12.5px; overflow-wrap: anywhere;
