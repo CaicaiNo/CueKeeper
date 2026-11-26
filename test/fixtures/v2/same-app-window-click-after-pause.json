@@ -1,5 +1,5 @@
 {
-  "description": "The shape of global-6fad6ee0: a click lands in the aTrust window the helper proved frontmost before that window could be bound (its focus probe lost the window number). The click must be kept after activate_app instead of becoming a CAPTURE_SCOPE_UNVERIFIED gap, the click must appear exactly once, and the focus notification that follows must not navigate a second time.",
+  "description": "The same pause-resume shape inside one app: while paused the user moved from Finder's Downloads window to its Images window, and the helper advanced focusWindowNumber without emitting a focus line. The first click after resume is `record` in the new window, so replay needs focus_window (not activate_app) and the click exactly once; the second click of the same generation adds no navigation.",
   "snapshots": {
     "11": {
       "windowId": "w-11",
@@ -9,27 +9,27 @@
         "states": [], "secure": false,
         "children": [
           {
-            "role": "image", "name": "aTrustInstaller.pkg", "ref": "@w11:e2",
+            "role": "image", "name": "图片", "ref": "@w11:e2",
             "bounds": { "x": 300, "y": 280, "width": 80, "height": 70 },
             "states": [], "secure": false, "children": []
           }
         ]
       }
     },
-    "21": {
-      "windowId": "w-21",
+    "12": {
+      "windowId": "w-12",
       "tree": {
-        "role": "window", "name": "aTrust", "ref": "@w21:e1",
+        "role": "window", "name": "Images", "ref": "@w12:e1",
         "bounds": { "x": 900, "y": 0, "width": 800, "height": 600 },
         "states": [], "secure": false,
         "children": [
           {
-            "role": "button", "name": "设置", "ref": "@w21:e2",
+            "role": "button", "name": "排序", "ref": "@w12:e2",
             "bounds": { "x": 950, "y": 100, "width": 80, "height": 24 },
             "states": [], "secure": false, "children": []
           },
           {
-            "role": "button", "name": "工作台", "ref": "@w21:e3",
+            "role": "button", "name": "新建", "ref": "@w12:e3",
             "bounds": { "x": 1050, "y": 100, "width": 90, "height": 24 },
             "states": [], "secure": false, "children": []
           }
@@ -51,38 +51,25 @@
       "owner": {
         "app": "com.apple.finder", "pid": 100, "processInstance": 1700000000000,
         "windowNumber": 11, "windowTitle": "Downloads",
-        "role": "AXImage", "name": "aTrustInstaller.pkg", "pressable": true
-      }
-    },
-    {
-      "kind": "focus", "t": 600, "seen": 1700000000000, "focusGeneration": 2, "secure": false,
-      "owner": {
-        "app": "com.electron.atrust", "pid": 200, "processInstance": 1700000000000
+        "role": "AXImage", "name": "图片", "pressable": true
       }
     },
     {
       "kind": "click", "t": 611, "seen": 1700000000000, "point": [990, 112],
       "count": 1, "focusGeneration": 2, "secure": false, "decision": "record",
       "owner": {
-        "app": "com.electron.atrust", "pid": 200, "processInstance": 1700000000000,
-        "windowNumber": 21, "windowTitle": "aTrust",
-        "role": "AXButton", "name": "设置", "pressable": true
-      }
-    },
-    {
-      "kind": "focus", "t": 665, "seen": 1700000000000, "focusGeneration": 3, "secure": false,
-      "owner": {
-        "app": "com.electron.atrust", "pid": 200, "processInstance": 1700000000000,
-        "windowNumber": 21, "windowTitle": "aTrust"
+        "app": "com.apple.finder", "pid": 100, "processInstance": 1700000000000,
+        "windowNumber": 12, "windowTitle": "Images",
+        "role": "AXButton", "name": "排序", "pressable": true
       }
     },
     {
       "kind": "click", "t": 700, "seen": 1700000000000, "point": [1090, 112],
-      "count": 1, "focusGeneration": 3, "secure": false, "decision": "record",
+      "count": 1, "focusGeneration": 2, "secure": false, "decision": "record",
       "owner": {
-        "app": "com.electron.atrust", "pid": 200, "processInstance": 1700000000000,
-        "windowNumber": 21, "windowTitle": "aTrust",
-        "role": "AXButton", "name": "工作台", "pressable": true
+        "app": "com.apple.finder", "pid": 100, "processInstance": 1700000000000,
+        "windowNumber": 12, "windowTitle": "Images",
+        "role": "AXButton", "name": "新建", "pressable": true
       }
     }
   ]

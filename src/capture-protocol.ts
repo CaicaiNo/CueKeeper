@@ -344,14 +344,13 @@ function gapCode(value: unknown): CaptureGapCode {
 }
 
 /**
- * The helper's reason for a gap. It is diagnostic only: a short identifier is
- * accepted so a newer helper can explain itself without breaking this parser,
- * and no reason ever changes how many gaps a flow has.
+ * The helper's reason for a gap. It is diagnostic only, so only the two known
+ * values are carried: an unknown, malformed or missing reason is treated as
+ * "no reason". Rejecting the line here would drop the gap it explains and could
+ * leave a flow that no longer blocks replay.
  */
 function gapDetail(value: unknown): string | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== 'string' || !/^[a-z][a-z0-9_]{0,31}$/.test(value)) fail('gap detail must be a short reason');
-  return value;
+  return value === 'tap_interrupted' || value === 'event_lag' ? value : undefined;
 }
 
 function decision(value: unknown): 'record' | 'navigate' | 'gap' {

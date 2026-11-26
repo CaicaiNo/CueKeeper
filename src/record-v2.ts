@@ -676,11 +676,18 @@ export class GlobalRecording {
       this.pushGap('CAPTURE_SCOPE_UNVERIFIED');
       return;
     }
+    // A recovery spends two slots: the navigation and the click. Reserving only
+    // one would push the navigation and drop the click, leaving a flow that
+    // looks complete but silently lost the press.
+    if (recovering && this.steps.length + 2 > this.stepLimit) {
+      this.pushGap('CAPTURE_SCOPE_UNVERIFIED');
+      return;
+    }
     if (!this.claim(event, binding)) return;
     this.ensureScope(binding);
     // A recovered click that still cannot become a step leaves the gap behind
     // the navigation: navigation alone would hide the press it was holding.
-    if (!(await this.recordClick(binding, event)) && recovering) {
+    if (!(await this.recordClick(binding, event, { requireElement: recovering })) && recovering) {
       this.pushGap('CAPTURE_SCOPE_UNVERIFIED');
     }
   }
@@ -719,11 +726,16 @@ export class GlobalRecording {
 
   /**
    * Records one click in a window the recording has already made current.
-   * Returns whether a click step was kept; a secure interval or a point both
-   * trees missed records nothing and says so.
+   * Returns whether a click step was kept; a secure interval, a step the limit
+   * dropped, or a point both trees missed records nothing and says so.
+   *
+   * `requireElement` is the recovery gate: a click that can only be placed at
+   * its screen point is not worth clearing a blocking gap for, because replay
+   * would click a bare coordinate.
    */
   private async recordClick(
     binding: WindowBinding, event: Extract<CaptureEvent, { kind: 'click' }>,
+    { requireElement = false } = {},
   ): Promise<boolean> {
     const scope = this.windowScope(binding);
     const scopeId = scopeKey(scope);
@@ -833,6 +845,12 @@ export class GlobalRecording {
         if (!nativeLabel(event.owner?.role)) {
           const captured = await this.snapshot(binding, { gapOnFailure: false });
           const hit = captured ? this.hit(captured.snapshot, event.point) : undefined;
+          // The second read has to honour the same secure rule as the first;
+          // naming a protected control from here would replay a click on it.
+          if (hit?.node.secure) {
+            this.enterSecure();
+            return false;
+          }
           target = hit && hit.node.ref ? toLocator(captured!.snapshot, hit) : this.nativeTarget(binding, event);
         } else {
           target = this.nativeTarget(binding, event);
@@ -844,6 +862,11 @@ export class GlobalRecording {
     // was made against for the next one.
     this.startSettledTree(binding);
     if (!target) return false;
+    if (requireElement && target.kind !== 'element') {
+      this.warn('CLICK_RECOVERY_UNNAMED',
+        'A click was proven in another window but could not be named as an element; the capture gap stays so replay never clicks a bare point');
+      return false;
+    }
     if (button === 'left' && target.kind === 'element' && editableRole(target.role)) {
       this.textAnchor = { at: event.t, scope: scopeId, locator: { ...target, role: bareRole(target.role) } };
     }
@@ -863,11 +886,15 @@ export class GlobalRecording {
         return true;
       }
     }
+    const before = this.steps.length;
     this.push({
       kind: 'click', scope, target,
       ...(count > 1 ? { count } : {}),
       ...(button === 'right' ? { button } : {}),
     });
+    // The step limit drops a click without throwing; reporting success here
+    // would let the caller believe the press survived.
+    if (this.steps.length === before) return false;
     if (this.steps.length && this.steps[this.steps.length - 1].kind === 'click') {
       this.lastClick = {
         at: event.t, point: event.point, index: this.steps.length - 1,
