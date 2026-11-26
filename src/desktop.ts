@@ -628,9 +628,15 @@ export async function withDesktop<T>(
         }
         const path = travel ? hoverPath(point, bounds) : [point];
         for (const step of path) {
-          if (!contains(bounds, step)) {
+          // agent-desktop 1.3.1 posts mouse-move as (x - 1, y) and then the
+          // requested point, so both moves must land inside the window. The
+          // resting point is the first that can sit on the left edge; refusing
+          // it is the only way to keep the driver's own pre-move from landing
+          // in whatever window is beside it.
+          if (!contains(bounds, step) || !contains(bounds, [step[0] - 1, step[1]])) {
             throw new Fault('UNSAFE_POINT',
-              `The hover point ${step.join(',')} is outside the bound window; nothing was moved`);
+              `The hover move to ${step.join(',')} cannot be delivered inside the bound window ` +
+              `(the driver first posts ${step[0] - 1},${step[1]}); nothing was moved`);
           }
         }
         // A pointer that arrives in one jump produces no motion for apps that

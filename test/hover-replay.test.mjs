@@ -265,6 +265,59 @@ test('CLI: a path is built from the window the driver answers at delivery time',
   assert.deepEqual(points.at(-1), [180, 160]);
 });
 
+test('CLI: a left-edge resting point is refused before the driver pre-moves outside', t => {
+  // agent-desktop 1.3.1 posts (x - 1, y) before the requested point. On the
+  // window's left edge that pre-move lands in the neighbouring window, so the
+  // hover must stop before its first command even though x itself is inside.
+  const edge = {
+    complete: true,
+    window: { id: 'w-31', title: 'CLI Notes' },
+    tree: {
+      role: 'window', name: 'CLI Notes', bounds: { x: 100, y: 100, width: 800, height: 600 },
+      children: [{
+        role: 'group', name: 'canvas', ref_id: '@hover:e1',
+        bounds: { x: 100, y: 150, width: 600, height: 40 }, states: [],
+      }],
+    },
+  };
+  const cli = hoverFixture(t, {
+    app: notesApp, appPath: notesPath, windows: notesWindows(), focusId: 'w-31',
+    snapshots: [edge],
+  });
+  const result = cli.run(hoverFlow({ app: notesApp, appPath: notesPath, title: 'CLI Notes', point: [100, 160] }));
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.data.entries[0].code, 'UNSAFE_POINT');
+  assert.match(output.data.entries[0].message, /first posts 99,160/);
+  assert.deepEqual(cli.calls().filter(call => call.command === 'mouse-move'), []);
+});
+
+test('CLI: a resting point one pixel inside the left edge is delivered in full', t => {
+  const edge = {
+    complete: true,
+    window: { id: 'w-31', title: 'CLI Notes' },
+    tree: {
+      role: 'window', name: 'CLI Notes', bounds: { x: 100, y: 100, width: 800, height: 600 },
+      children: [{
+        role: 'group', name: 'canvas', ref_id: '@hover:e1',
+        bounds: { x: 100, y: 150, width: 600, height: 40 }, states: [],
+      }],
+    },
+  };
+  const cli = hoverFixture(t, {
+    app: notesApp, appPath: notesPath, windows: notesWindows(), focusId: 'w-31',
+    snapshots: [edge],
+  });
+  const result = cli.run(hoverFlow({ app: notesApp, appPath: notesPath, title: 'CLI Notes', point: [101, 160] }));
+  assert.equal(result.status, 0, result.stderr);
+  const points = cli.calls()
+    .filter(call => call.command === 'mouse-move')
+    .map(call => call.args.at(-1).replace('--xy=', '').split(',').map(Number));
+  assert.equal(points.length, 4);
+  assert.deepEqual(points.at(-1), [101, 160]);
+  // Every pre-move the driver posts before those points stays inside.
+  assert.ok(points.every(([x, y]) => x - 1 >= 100 && y >= 100 && y < 700), JSON.stringify(points));
+});
+
 test('CLI: a resting point the fresh read cannot prove stops before the first move', t => {
   const cli = hoverFixture(t, {
     app: notesApp, appPath: notesPath, windows: notesWindows(), focusId: 'w-31',
