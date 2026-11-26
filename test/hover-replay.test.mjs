@@ -33,8 +33,10 @@ function hoverFixture(t, spec) {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const log = join(dir, 'driver.jsonl');
   const reads = join(dir, 'snapshot-reads');
+  const focusPath = join(dir, 'focus.json');
   const statePath = join(dir, 'identity-state.json');
   writeFileSync(statePath, JSON.stringify({ opened: true, pid: 901, startedAt: '901.1' }));
+  writeFileSync(focusPath, JSON.stringify({ id: spec.focusId ?? spec.windows[0].id, reads: 0 }));
   const windows = spec.windows;
 
   const driver = join(dir, 'agent-desktop');
@@ -44,18 +46,26 @@ const [command, ...args] = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ command, args, at: Date.now() }) + '\\n');
 const value = flag => { const at = args.indexOf(flag); return at < 0 ? undefined : args[at + 1]; };
 const windows = ${JSON.stringify(windows)};
+const focusFile = ${JSON.stringify(focusPath)};
+const readFocus = () => JSON.parse(fs.readFileSync(focusFile, 'utf8'));
+const writeFocus = state => fs.writeFileSync(focusFile, JSON.stringify(state));
 let data;
 if (command === 'version') data = { version: '1.3.1' };
 else if (command === 'list-windows') {
   const only = value('--app');
+  const focus = readFocus();
   data = windows.filter(window => !only || window.app === only).map(window => ({
     id: window.id, title: window.title, process_instance: 901, pid: 901,
-    is_focused: window.focused === true,
+    ...(${JSON.stringify(spec.omitFocus === true)} ? {} : { is_focused: window.id === focus.id }),
   }));
 } else if (command === 'snapshot') {
   const reads = ${JSON.stringify(reads)};
   const seen = fs.existsSync(reads) ? Number(fs.readFileSync(reads, 'utf8')) : 0;
   fs.writeFileSync(reads, String(seen + 1));
+  const focus = readFocus();
+  focus.reads += 1;
+  ${spec.switchFocusAfter === undefined ? '' : `if (focus.reads >= ${Number(spec.switchFocusAfter)}) focus.id = ${JSON.stringify(spec.switchFocusTo)};`}
+  writeFocus(focus);
   const frames = ${JSON.stringify(spec.snapshots ?? [windowTree({ x: 100, y: 100, width: 800, height: 600 }, 'CLI Notes')])};
   data = frames[Math.min(seen, frames.length - 1)];
 } else if (command === 'focus-window') data = { focused: { id: value('--window-id') } };
@@ -116,13 +126,13 @@ function hoverFlow(spec) {
   };
 }
 
-const notesWindows = (focused = true) => [
-  { id: 'w-31', app: notesApp, title: 'CLI Notes', focused },
-  { id: 'w-32', app: notesApp, title: 'Draft', focused: !focused },
+const notesWindows = () => [
+  { id: 'w-31', app: notesApp, title: 'CLI Notes' },
+  { id: 'w-32', app: notesApp, title: 'Draft' },
 ];
 
 test('CLI: a hover in the front window moves only the pointer, never focus or click', t => {
-  const cli = hoverFixture(t, { app: notesApp, appPath: notesPath, windows: notesWindows(true) });
+  const cli = hoverFixture(t, { app: notesApp, appPath: notesPath, windows: notesWindows(), focusId: 'w-31' });
   const result = cli.run(hoverFlow({ app: notesApp, appPath: notesPath, title: 'CLI Notes', point: [180, 160] }));
   assert.equal(result.status, 0, result.stderr);
 
@@ -139,13 +149,61 @@ test('CLI: a hover in the front window moves only the pointer, never focus or cl
 });
 
 test('CLI: a hover in a background window stops instead of bringing it forward', t => {
-  const cli = hoverFixture(t, { app: notesApp, appPath: notesPath, windows: notesWindows(false) });
+  const cli = hoverFixture(t, { app: notesApp, appPath: notesPath, windows: notesWindows(), focusId: 'w-32' });
   const result = cli.run(hoverFlow({ app: notesApp, appPath: notesPath, title: 'CLI Notes', point: [180, 160] }));
   const output = JSON.parse(result.stdout);
   assert.equal(output.data.status, 'failed');
   assert.equal(output.data.entries[0].code, 'HOVER_NOT_FOREGROUND');
   const calls = cli.calls();
   assert.deepEqual(calls.filter(call => /focus|activate|click|mouse-move/.test(call.command)), []);
+});
+
+test('CLI: a driver that never reports which window is in front sends no move', t => {
+  const cli = hoverFixture(t, {
+    app: notesApp, appPath: notesPath, windows: notesWindows(), focusId: 'w-31', omitFocus: true,
+  });
+  const result = cli.run(hoverFlow({ app: notesApp, appPath: notesPath, title: 'CLI Notes', point: [180, 160] }));
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.data.entries[0].code, 'HOVER_NOT_FOREGROUND');
+  assert.match(output.data.entries[0].message, /Cannot prove the hover window/);
+  const calls = cli.calls();
+  assert.deepEqual(calls.filter(call => /focus|activate|click|mouse-move/.test(call.command)), []);
+});
+
+test('CLI: focus that moves away before delivery stops the hover even after resolution', t => {
+  // Resolution reads the window while w-31 is in front; the hover's own re-read
+  // is the moment focus moves to w-32. The window frame is unchanged, so only
+  // the fresh foreground check can catch it.
+  const cli = hoverFixture(t, {
+    app: notesApp, appPath: notesPath, windows: notesWindows(), focusId: 'w-31',
+    switchFocusAfter: 2, switchFocusTo: 'w-32',
+  });
+  const result = cli.run(hoverFlow({ app: notesApp, appPath: notesPath, title: 'CLI Notes', point: [180, 160] }));
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.data.entries[0].code, 'HOVER_NOT_FOREGROUND');
+  assert.match(output.data.entries[0].message, /is not in front \(w-32 is\)/);
+  const calls = cli.calls();
+  assert.deepEqual(calls.filter(call => /focus|activate|click|mouse-move/.test(call.command)), []);
+});
+
+test('CLI: a target missing from the first tree is retried read-only and dispatched once', t => {
+  const big = windowTree({ x: 100, y: 100, width: 800, height: 600 }, 'CLI Notes');
+  const withoutTarget = structuredClone(big);
+  withoutTarget.tree.children = [];
+  const cli = hoverFixture(t, {
+    app: notesApp, appPath: notesPath, windows: notesWindows(), focusId: 'w-31',
+    snapshots: [withoutTarget, big, big],
+  });
+  const result = cli.run(hoverFlow({ app: notesApp, appPath: notesPath, title: 'CLI Notes', point: [180, 160] }));
+  assert.equal(result.status, 0, result.stderr);
+  const calls = cli.calls();
+  const moves = calls.filter(call => call.command === 'mouse-move');
+  // One attempt resolved; the retry dispatched one complete path.
+  assert.equal(moves.length, 4);
+  assert.deepEqual(calls.filter(call => /focus|activate|click/.test(call.command)), []);
+  // Two resolution reads (first without the target, second with it) plus the
+  // hover's own fresh read.
+  assert.equal(calls.filter(call => call.command === 'snapshot').length, 3);
 });
 
 test('CLI: a Finder title the run could reopen by clicking is not repaired for a hover', t => {
@@ -168,7 +226,7 @@ test('CLI: a Finder title the run could reopen by clicking is not repaired for a
 });
 
 test('CLI: a hover ignores a declared focusAfter and stays read-only', t => {
-  const cli = hoverFixture(t, { app: notesApp, appPath: notesPath, windows: notesWindows(true) });
+  const cli = hoverFixture(t, { app: notesApp, appPath: notesPath, windows: notesWindows(), focusId: 'w-31' });
   const result = cli.run(hoverFlow({
     app: notesApp, appPath: notesPath, title: 'CLI Notes', point: [180, 160],
     focusAfter: { kind: 'window', app: notesApp, windowKey: 'draft', windowTitle: 'Draft' },
@@ -184,7 +242,7 @@ test('CLI: a path is built from the window the driver answers at delivery time',
   // hover re-reads it. The resting point is inside both; a path computed from
   // the old frame would send points outside the new one.
   const cli = hoverFixture(t, {
-    app: notesApp, appPath: notesPath, windows: notesWindows(true),
+    app: notesApp, appPath: notesPath, windows: notesWindows(), focusId: 'w-31',
     snapshots: [
       windowTree({ x: 100, y: 100, width: 800, height: 600 }, 'CLI Notes'),
       {
@@ -209,7 +267,7 @@ test('CLI: a path is built from the window the driver answers at delivery time',
 
 test('CLI: a resting point the fresh read cannot prove stops before the first move', t => {
   const cli = hoverFixture(t, {
-    app: notesApp, appPath: notesPath, windows: notesWindows(true),
+    app: notesApp, appPath: notesPath, windows: notesWindows(), focusId: 'w-31',
     snapshots: [
       windowTree({ x: 100, y: 100, width: 800, height: 600 }, 'CLI Notes'),
       {

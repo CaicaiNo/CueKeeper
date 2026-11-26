@@ -301,15 +301,19 @@ export class ScopeResolver {
 
   /**
    * Read-only foreground proof for a step that must not move focus (a hover).
-   * An observable foreground that names another window stops the step instead
-   * of raising the bound one; an inventory that cannot report focus at all stays
-   * permissive, because the step still only moves the pointer inside a window it
-   * proved and a driver without `is_focused` gives no evidence either way.
+   * A window frame does not prove a window receives pointer events, so the
+   * foreground must be observable and must be the bound window: an inventory
+   * without `is_focused`, or one that names another window, stops the step
+   * instead of raising it.
    */
   async requireForeground(binding: WindowBinding): Promise<void> {
     this.signal.throwIfAborted();
     const focused = await this.observedForeground();
-    if (focused === undefined) return;
+    if (focused === undefined) {
+      throw new Fault('HOVER_NOT_FOREGROUND',
+        `Cannot prove the hover window "${binding.title}" is in front; ` +
+        'a hover is read-only and never takes focus');
+    }
     if (focused.id !== binding.windowId) {
       throw new Fault('HOVER_NOT_FOREGROUND',
         `The hover window "${binding.title}" is not in front (${focused.id} is); ` +

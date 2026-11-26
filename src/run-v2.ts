@@ -704,7 +704,7 @@ class StepRunner {
           if (node.secure) throw new Fault('UNSAFE_TARGET', 'Hover target is secure');
           const point = hoverPoint(node, step.point, snapshot);
           const delivery = await this.desktop.hoverAt(
-            snapshot, this.targetOf(binding), point, { travel: true },
+            snapshot, this.targetOf(binding), point, { readOnly: true, travel: true },
           );
           // A tooltip or submenu closes the moment the pointer leaves, so the
           // dwell is what the next step sees. A recording's own dwell can be
@@ -790,26 +790,43 @@ class StepRunner {
     work: (binding: WindowBinding, snapshot: Snapshot) => Promise<StepOutcome>,
     step: StepV2,
   ): Promise<StepOutcome> {
-    const binding = await this.resolver.resolveWindow(
-      scope,
-      candidates => this.pickSameTitled(candidates, step),
-      { repair: false },
-    );
-    await this.resolver.requireForeground(binding);
-    const snapshot = await this.resolver.snapshot(binding);
-    const outcome = await work(binding, snapshot);
-    const notes: string[] = [];
-    if (binding.rebound) {
-      binding.rebound = false;
-      notes.push('window rebound after the recorded window was recreated');
+    // A hover can land while its window is still repainting (a tooltip that
+    // appears late, a list that virtualises). The focusable path retries a
+    // missing target against a fresh tree, and a read-only step keeps the same
+    // patience without ever taking a side effect: every attempt binds, proves
+    // the foreground and reads the tree again, and the pointer is only moved by
+    // the attempt whose target resolved.
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const binding = await this.resolver.resolveWindow(
+        scope,
+        candidates => this.pickSameTitled(candidates, step),
+        { repair: false },
+      );
+      await this.resolver.requireForeground(binding);
+      const snapshot = await this.resolver.snapshot(binding);
+      try {
+        const outcome = await work(binding, snapshot);
+        const notes: string[] = [];
+        if (binding.rebound) {
+          binding.rebound = false;
+          notes.push('window rebound after the recorded window was recreated');
+        }
+        if (binding.sharedTitle) {
+          const which = binding.sharedTitle === 'target' ? 'the one that held its target' : 'the focused one';
+          notes.push(`more than one window was titled "${scope.windowTitle}", so the step ran in ${which}`);
+        }
+        if (!notes.length) return outcome;
+        const note = notes.join('; ');
+        return { ...outcome, message: outcome.message ? `${outcome.message}; ${note}` : note };
+      } catch (error) {
+        const retryable = error instanceof Fault && error.code === 'NOT_FOUND';
+        if (!retryable || attempt === 3) throw error;
+        lastError = error;
+        await sleep(200);
+      }
     }
-    if (binding.sharedTitle) {
-      const which = binding.sharedTitle === 'target' ? 'the one that held its target' : 'the focused one';
-      notes.push(`more than one window was titled "${scope.windowTitle}", so the step ran in ${which}`);
-    }
-    if (!notes.length) return outcome;
-    const note = notes.join('; ');
-    return { ...outcome, message: outcome.message ? `${outcome.message}; ${note}` : note };
+    throw lastError;
   }
 
   /** A declared focusAfter scope, or the launched app's own front window. */
