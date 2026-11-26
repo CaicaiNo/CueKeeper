@@ -1577,15 +1577,11 @@ test('a press before its window is focused becomes activate_app with no gap, and
   assert.doesNotThrow(() => parseFlowV2(flow));
 });
 
-// A hover can carry the very proof the held press waits for: the helper emits a
-// hover only for the window that is focused right now, stamped with that focus
-// generation. A newer generation naming the press's own window therefore says
-// the window has just come forward — the press activated it. That must drop the
-// press, not settle it into a click named from an older screen.
-// The literal sequence: a press on a window that is not focused yet, a hover
-// while the press is still held, then the focus that proves the press only
-// activated the window. The hover must not settle the press — settling it here
-// records a click the user never made — and the focus must still navigate once.
+// The literal sequence in the native order: a press on a window that is not
+// focused yet, a hover 365 ms later (the helper needs a 300 ms dwell and resets
+// it on the button event), then the focus that proves the press only brought the
+// window forward. The hover must not settle the press — settling it here records
+// a click the user never made — and the focus must still navigate exactly once.
 test('a press, a hover, then the focus: one navigation, no invented click', async () => {
   const windows = {
     11: {
@@ -1643,30 +1639,31 @@ test('a press, a hover, then the focus: one navigation, no invented click', asyn
     focusGeneration: 2, secure: false, decision: 'record',
     owner: owner('com.apple.finder', 100, 11, '图片', { role: 'AXCell', name: '下载', pressable: true }),
   }));
-  // Back to aTrust: the first press is swallowed by the window activation, so
-  // it arrives as a gap decision and is held.
+  // Back to aTrust: the first press is swallowed by the window activation. The
+  // helper proves the window but not the control under the pointer, so the press
+  // arrives with Quartz window identity only and a gap decision.
   await recording.add(parseCaptureEvent({
     kind: 'click', t: 5435, seen: NOW, point: [990, 112], count: 1,
     focusGeneration: 2, secure: false, decision: 'gap',
     gapCode: 'CAPTURE_SCOPE_UNVERIFIED',
-    owner: owner('com.electron.atrust', 200, 21, 'aTrust', { role: 'AXGroup', pressable: false }),
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
   }));
   // The press is held, and the pointer passes back over the still-focused
   // Finder window before aTrust is proved frontmost: the hover arrives between
-  // the press and the focus that settles it.
+  // the press and the focus that settles it, after a full dwell.
   await recording.add(parseCaptureEvent({
-    kind: 'hover', t: 5470, seen: NOW, point: [340, 290], dwellMs: 320,
+    kind: 'hover', t: 5800, seen: NOW, point: [340, 290], dwellMs: 365,
     focusGeneration: 2, secure: false, decision: 'record',
     owner: owner('com.apple.finder', 100, 11, '图片', { role: 'AXCell', name: '下载', pressable: true }),
   }));
   // The focus that proves the press only brought aTrust forward.
   await recording.add(parseCaptureEvent({
-    kind: 'focus', t: 5544, seen: NOW, focusGeneration: 3, secure: false,
+    kind: 'focus', t: 5900, seen: NOW, focusGeneration: 3, secure: false,
     owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
   }));
-  // The hover the pointer settles on once aTrust is frontmost.
+  // The hover the pointer settles on once aTrust is frontmost, a dwell later.
   await recording.add(parseCaptureEvent({
-    kind: 'hover', t: 5600, seen: NOW, point: [990, 112], dwellMs: 320,
+    kind: 'hover', t: 6300, seen: NOW, point: [990, 112], dwellMs: 400,
     focusGeneration: 3, secure: false, decision: 'record',
     owner: owner('com.electron.atrust', 200, 21, 'aTrust', { role: 'AXGroup', name: '设置' }),
   }));
@@ -1689,6 +1686,119 @@ test('a press, a hover, then the focus: one navigation, no invented click', asyn
   assert.ok(recording.captureWarnings.some(warning => warning.code === 'HOVER_WHILE_CLICK_UNPROVEN'));
   assert.equal(flowV2Check.Check(flow), true);
   assert.doesNotThrow(() => parseFlowV2(flow));
+});
+
+// A press inside the window the flow already stands in cannot be the press that
+// activated it, and a focus the press did not cause cannot erase it. Three native
+// shapes: Cmd+Tab (a boundary plus two focus lines), an excursion the helper
+// reported as two focus lines, and a late focus on the same window whose earlier
+// excursion was never reported (a silent switch while paused). In all three the
+// press stays, before the first navigation the excursion caused.
+test('an unrelated focus never erases the press it did not cause', async () => {
+  const windows = {
+    11: {
+      windowId: 'w-11',
+      tree: {
+        role: 'window', name: '图片', ref: '@w11:e1',
+        bounds: { x: 0, y: 0, width: 800, height: 600 }, states: [], secure: false,
+        children: [{
+          role: 'cell', name: '下载', ref: '@w11:e2',
+          bounds: { x: 300, y: 280, width: 80, height: 24 }, states: [], secure: false, children: [],
+        }],
+      },
+    },
+    21: {
+      windowId: 'w-21',
+      tree: {
+        role: 'window', name: 'aTrust', ref: '@w21:e1',
+        bounds: { x: 900, y: 0, width: 800, height: 600 }, states: [], secure: false,
+        children: [{
+          role: 'group', name: '工作台', ref: '@w21:e2',
+          bounds: { x: 990, y: 100, width: 120, height: 24 }, states: [], secure: false, children: [],
+        }],
+      },
+    },
+  };
+  const owner = (app, pid, windowNumber, title, extra = {}) => ({
+    app, pid, processInstance: 1700000000000, windowNumber, windowTitle: title, ...extra,
+  });
+  const press = (t) => ({
+    kind: 'click', t, seen: NOW, point: [1000, 112], count: 1,
+    focusGeneration: 1, secure: false, decision: 'gap',
+    gapCode: 'CAPTURE_SCOPE_UNVERIFIED',
+    // The helper knew the window and the generation, but its AX read of the
+    // element contradicted the Quartz window, so no role or name is reported.
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
+  });
+  const hoverInTrust = (t) => ({
+    kind: 'hover', t, seen: NOW, point: [1000, 112], dwellMs: 400,
+    focusGeneration: 1, secure: false, decision: 'record',
+    owner: owner('com.electron.atrust', 200, 21, 'aTrust', { role: 'AXGroup', name: '工作台' }),
+  });
+  const record = async (extra, { boundary = false } = {}) => {
+    const settles = [];
+    const recording = new GlobalRecording(
+      async window => structuredClone(windows[window.windowNumber]),
+      { now: () => NOW, scheduleSettle: task => { settles.push(task); } },
+    );
+    // The recording stands in aTrust with one recorded press, so the flow is
+    // already in the window the next press lands in.
+    await recording.add(parseCaptureEvent({
+      kind: 'focus', t: 50, seen: NOW, focusGeneration: 1, secure: false,
+      owner: owner('com.electron.atrust', 200, 21, 'aTrust'),
+    }));
+    await recording.add(parseCaptureEvent({
+      kind: 'click', t: 100, seen: NOW, point: [1000, 112], count: 1,
+      focusGeneration: 1, secure: false, decision: 'record',
+      owner: owner('com.electron.atrust', 200, 21, 'aTrust', { role: 'AXGroup', name: '工作台', pressable: false }),
+    }));
+    while (settles.length) await settles.shift()();
+    await recording.add(parseCaptureEvent(press(1200)));
+    await recording.add(parseCaptureEvent(hoverInTrust(1600)));
+    if (boundary) recording.noteBoundary();
+    for (const event of extra) await recording.add(parseCaptureEvent(event));
+    return { flow: recording.finish(), recording };
+  };
+
+  const kindsOf = flow => flow.steps.map(step => step.kind);
+  const firstNavigation = flow => flow.steps.findIndex(step => step.kind === 'activate_app');
+
+  // 1. Cmd+Tab: the helper emits a boundary for the switcher and then two focus
+  //    notifications. The press must be recorded before the first navigation.
+  const viaSwitcher = await record([
+    { kind: 'focus', t: 1700, seen: NOW, focusGeneration: 2, secure: false,
+      owner: owner('com.apple.finder', 100, 11, '图片') },
+    { kind: 'focus', t: 1800, seen: NOW, focusGeneration: 3, secure: false,
+      owner: owner('com.electron.atrust', 200, 21, 'aTrust') },
+  ], { boundary: true });
+  assert.deepEqual(kindsOf(viaSwitcher.flow), ['click', 'click', 'activate_app', 'activate_app']);
+  assert.equal(firstNavigation(viaSwitcher.flow), 2);
+  assert.equal(viaSwitcher.flow.steps[1].scope.app, 'com.electron.atrust');
+  assert.equal(viaSwitcher.recording.captureWarnings.some(warning => warning.code === 'CLICK_ONLY_ACTIVATED_WINDOW'), false);
+  assert.equal(viaSwitcher.flow.steps.some(step => step.kind === 'gap'), false);
+  assert.doesNotThrow(() => parseFlowV2(viaSwitcher.flow));
+
+  // 2. The same excursion without a boundary: the helper reported both focus
+  //    changes, so the press is settled by the first one that left its window.
+  const viaFocus = await record([
+    { kind: 'focus', t: 1700, seen: NOW, focusGeneration: 2, secure: false,
+      owner: owner('com.apple.finder', 100, 11, '图片') },
+    { kind: 'focus', t: 1800, seen: NOW, focusGeneration: 3, secure: false,
+      owner: owner('com.electron.atrust', 200, 21, 'aTrust') },
+  ]);
+  assert.deepEqual(kindsOf(viaFocus.flow), ['click', 'click', 'activate_app', 'activate_app']);
+  assert.equal(firstNavigation(viaFocus.flow), 2);
+
+  // 3. A silent excursion (a switch while paused): only the late focus on the
+  //    press's own window arrives, so nothing can be concluded about the press.
+  const lateFocus = await record([
+    { kind: 'focus', t: 1700, seen: NOW, focusGeneration: 3, secure: false,
+      owner: owner('com.electron.atrust', 200, 21, 'aTrust') },
+  ]);
+  assert.deepEqual(kindsOf(lateFocus.flow), ['click', 'click']);
+  assert.equal(lateFocus.recording.captureWarnings.some(warning => warning.code === 'CLICK_ONLY_ACTIVATED_WINDOW'), false);
+  assert.equal(lateFocus.flow.steps.some(step => step.kind === 'gap'), false);
+  assert.doesNotThrow(() => parseFlowV2(lateFocus.flow));
 });
 
 // The hover exemption is not a way to drop presses. A hover inside the press's

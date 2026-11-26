@@ -163,6 +163,27 @@ type WindowTreeCache = {
 type StepDraft = Record<string, unknown> & { kind: StepV2['kind'] };
 /** A recorded click target: the element under the pointer, or its raw point. */
 type ClickTarget = ElementLocator | { kind: 'point'; point: Point };
+/**
+ * A press that landed in a known window whose control it could not prove. It is
+ * held only while the focus that would prove it "only brought the window
+ * forward" can still be the next thing that happens.
+ */
+type HeldClick = {
+  key: string;
+  at: number;
+  seen: number;
+  /** The focus generation the press was made in. */
+  generation: number;
+  /**
+   * Whether this press can be the swallowed press that brought its window
+   * forward at all: only a press outside the window the flow already stands in
+   * can be that, because a window the flow is already in needs no activation.
+   */
+  activation: boolean;
+  where: string;
+  point: Point;
+  binding: WindowBinding;
+};
 
 function nearPoint(a: Point, b: Point) {
   return Math.abs(a[0] - b[0]) <= multiClickDistance && Math.abs(a[1] - b[1]) <= multiClickDistance;
@@ -374,10 +395,7 @@ export class GlobalRecording {
   /** The tree read each window has under way, so a click can wait for it. */
   private readonly settling = new Map<string, Promise<undefined>>();
 
-  private pendingGapClick?: {
-    key: string; at: number; seen: number;
-    where: string; point: Point; binding: WindowBinding;
-  };
+  private pendingGapClick?: HeldClick;
   /** The event being consumed, kept so a gap can name the handler that raised it. */
   private consuming?: CaptureEvent;
   /** The handler the consuming event is going through; gap diagnostics only. */
@@ -485,6 +503,18 @@ export class GlobalRecording {
   endBursts() {
     this.textBurst = undefined;
     this.scrollBurst = undefined;
+  }
+
+  /**
+   * Input left the recorded scope: the system app switcher, a key or scroll
+   * outside the window, the overlay, or a pause boundary. A held press can no
+   * longer be proven to be the press that brought its window forward, and a
+   * focus on that window after the boundary must not erase it, so the press is
+   * recorded where it landed before the flow moves on.
+   */
+  noteBoundary() {
+    this.endBursts();
+    if (this.pendingGapClick) this.flushPendingGap();
   }
 
   /**
@@ -616,9 +646,24 @@ export class GlobalRecording {
     // The focus a Dock click was waiting for has arrived; the scope step below
     // (or the first-window branch) replaces the held gap.
     this.pendingDockGap = undefined;
-    // A held unprovable click whose own window this focus confirms only brought
-    // that window forward; macOS swallowed the press, so it is not a step.
-    if (this.pendingGapClick?.key === binding.key) this.dropHeldClick();
+    const pending = this.pendingGapClick;
+    if (pending) {
+      if (pending.key !== binding.key) {
+        // The focus left the window the press belongs to, so the press cannot be
+        // the press that brought it forward. It is recorded now, before this
+        // navigation, so the timeline keeps the order the user worked in.
+        this.flushPendingGap();
+      } else if (this.provesHeldActivation(pending, event)) {
+        // This focus is the one the press caused: macOS swallowed the press to
+        // bring the window forward, so it is not a step.
+        this.dropHeldClick();
+      } else {
+        // A focus on the press's own window that the press did not cause (the
+        // user left and came back, possibly across a capture boundary). It
+        // proves nothing about the press, which is kept where it landed.
+        this.flushPendingGap();
+      }
+    }
     if (!this.current) {
       this.current = { app: binding.app, key: binding.key };
       return;
@@ -664,6 +709,10 @@ export class GlobalRecording {
         key: binding.key,
         at: event.t,
         seen: event.seen,
+        generation: event.focusGeneration,
+        // A window the flow is already standing in needs no activation, so this
+        // press cannot have been the swallowed press that brought it forward.
+        activation: this.current === undefined || this.current.key !== binding.key,
         where: where || 'an unnamed control',
         point: event.point,
         binding,
@@ -2163,6 +2212,17 @@ export class GlobalRecording {
     this.notes.set('CAPTURE_GAP_ORIGIN', lines.join('; ').slice(0, gapOriginChars));
   }
 
+  /**
+   * Whether this focus is the one the held press caused. Only the first focus
+   * after the press (the next generation) can be it: a later focus on the same
+   * window means the user left and came back — across another app, or across a
+   * capture boundary — and proves nothing about the press. A press into the
+   * window the flow already stood in can never be an activation press.
+   */
+  private provesHeldActivation(pending: HeldClick, event: Extract<CaptureEvent, { kind: 'focus' }>) {
+    return pending.activation && event.focusGeneration === pending.generation + 1;
+  }
+
   /** A press the window activation swallowed is not a step. */
   private dropHeldClick() {
     if (!this.pendingGapClick) return;
@@ -2492,7 +2552,7 @@ export async function recordGlobal(
         continue;
       }
       if (data.kind === 'boundary') {
-        recording.endBursts();
+        recording.noteBoundary();
         continue;
       }
       // The helper announces a pickup so v1 can read the tree the gesture starts
