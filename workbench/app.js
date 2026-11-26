@@ -1151,11 +1151,6 @@ function renderV2() {
       : step.kind === 'manual_checkpoint'
         ? button('查看', () => v2CheckpointDialog(step), { style: 'small', icon: 'eye', disabled: busy })
         : button('编辑', () => v2EditDialog(step), { style: 'small', icon: 'sliders', disabled: busy }),
-    V2_TARGET_KINDS.has(step.kind) && step.kind !== 'drag'
-      ? button('从窗口拾取', () => void v2PickDialog(step), {
-        style: 'small', icon: 'crosshair', title: '从当前窗口拾取目标元素', disabled: busy,
-      })
-      : undefined,
     button('上移', () => v2Move(step.id, steps.findIndex(entry => entry.id === step.id) - 1), {
       style: 'small', icon: 'up', iconOnly: true, title: '上移',
       disabled: busy || steps.findIndex(entry => entry.id === step.id) === 0,
@@ -1387,6 +1382,20 @@ function showV2Result(report) {
 /** Every v2 detail panel names the flow step it edits, so the id matches the row. */
 const withStepId = (title, step) => step?.id ? `${title} · ${step.id}` : title;
 
+/**
+ * Picking a live control is an edit of the step's target, so the entry lives
+ * with the other target fields instead of on every timeline row. The capability
+ * is unchanged: this still opens the same read-only window snapshot dialog.
+ */
+function v2PickEntry(step) {
+  return V2_TARGET_KINDS.has(step.kind) && step.kind !== 'drag'
+    ? button('从窗口拾取', () => void v2PickDialog(step), {
+      style: 'small', icon: 'crosshair', title: '从当前窗口拾取目标元素',
+      disabled: state.v2Busy || state.v2Running,
+    })
+    : undefined;
+}
+
 /** The row's 编辑 button opens the editor that fits the step's kind. */
 function v2EditDialog(step) {
   switch (step.kind) {
@@ -1414,6 +1423,7 @@ function v2StepFactsDialog(step) {
       ['动作', v2StepLabel(step, appLabel)],
       ['作用域', step.kind === 'gap' ? '缺口' : v2ScopeText(step.scope)],
     ], 'meta-grid'),
+    v2PickEntry(step),
     muted('这一步目前没有可视化编辑器；可在 flow 文件里修改后重新导入。'),
   ]);
 }
@@ -1463,7 +1473,8 @@ function v2ScopeDialog(step) {
 
 function v2TargetDialog(step) {
   const recorded = step.target ?? step.to;
-  const picker = locatorFields(recorded?.kind === 'element' ? recorded : undefined);
+  const picker = locatorFields(recorded?.kind === 'element' ? recorded : undefined,
+    '要换控件，点上面的「从窗口拾取」，直接选中真实控件；下面只用于手动修正。');
   const title = step.kind === 'scroll' ? '编辑滚动目标'
     : step.kind === 'hover' ? '编辑悬停目标' : '编辑点击目标';
   openDialog(withStepId(title, step), [
@@ -1471,6 +1482,7 @@ function v2TargetDialog(step) {
       ? muted(`这一步录的是屏幕坐标 (${recorded.point.join(', ')})：录制时那个位置没有可单独定位的控件（画布、空白或自绘区域）。` +
         '直接实时回放就行，它会在该坐标上点；只有干跑会拦下它，因为坐标没法证明还是同一个控件。')
       : muted('这一步用的是元素定位器：换成具体控件后干跑才能通过，实时回放对窗口内的坐标步骤照常执行。'),
+    v2PickEntry(step),
     ...picker.controls,
   ], '应用', () => v2Edit({ kind: 'update', id: step.id, patch: { target: picker.value() } }));
 }
@@ -1483,7 +1495,8 @@ function v2DragDialog(step) {
 }
 
 function v2TypeDialog(step) {
-  const picker = locatorFields(step.target);
+  const picker = locatorFields(step.target,
+    '要换控件，点上面的「从窗口拾取」，直接选中真实控件；下面只用于手动修正。');
   const mode = select([['text', '文本'], ['input', '参数名']]);
   mode.value = 'input' in step ? 'input' : 'text';
   const text = el('textarea', { className: 'textarea', rows: 3, maxLength: 4000 });
@@ -1498,6 +1511,7 @@ function v2TypeDialog(step) {
   mode.onchange = sync;
   sync();
   openDialog(withStepId('编辑输入步骤', step), [
+    v2PickEntry(step),
     ...picker.controls, field('内容来源', mode), textBox, paramBox,
     muted('参数值保存在测试数据里，不写入 flow。'),
   ], '应用', () => {
@@ -2383,7 +2397,7 @@ function candidateLabel(candidate) {
  * Picking the control from the window is the reliable path; the fields below
  * are macOS's description of that control, so each one says what it means.
  */
-function locatorFields(original) {
+function locatorFields(original, emptyPickHint) {
   const initial = original?.kind === 'element' ? original : undefined;
   const role = input({ required: true, maxLength: 256, value: initial?.role ?? '', placeholder: '例如 textfield' });
   const name = input({ maxLength: 256, value: initial?.name ?? '', placeholder: '例如 保存' });
@@ -2434,7 +2448,8 @@ function locatorFields(original) {
       muted('这些值来自 macOS 辅助功能（Accessibility），用来在窗口里认出同一个控件，一般不用手改。'),
       candidates.length
         ? field('从快照拾取控件', picker)
-        : muted('要换控件，请关掉对话框，在时间线点「从窗口拾取」，直接选中真实控件；下面只用于手动修正。'),
+        : muted(emptyPickHint ??
+          '要换控件，请关掉对话框，在时间线点「重新拾取」，直接选中真实控件；下面只用于手动修正。'),
       candidates.length ? detail : undefined,
       field('控件类型（role）', role, '控件的类别：button 按钮、textfield 输入框、menuitem 菜单项……'),
       field('控件名称（name）', name, '界面上显示的文字，例如按钮「保存」、输入框标签「地址栏」'),
