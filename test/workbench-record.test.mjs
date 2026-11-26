@@ -79,6 +79,11 @@ if (mode === 'crash') {
 } else if (mode === 'countdown') {
   // The CLI's own countdown end, which replaces the start-up estimate.
   report({ stage: 'countdown', endsAt: Date.now() + 4000 });
+} else if (mode === 'slow-countdown') {
+  // Preflight and the input-source switch take a moment before the CLI's real
+  // countdown starts; nothing may count down during that gap.
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  report({ stage: 'countdown', endsAt: Date.now() + 3000 });
 } else {
   if (argvLog) await appendFile(argvLog, JSON.stringify(args) + '\\n');
   if (envLog) await appendFile(envLog, JSON.stringify({
@@ -235,11 +240,11 @@ test('a slow recorder start dates the clock from the helper ready moment, not fr
   assert.equal(start.recording, true);
   // The process exists, but nothing is captured yet: no clock and no
   // "recording" stage, while the stop route stays reachable.
-  assert.equal(start.phase, 'preparing');
+  assert.equal(start.phase, 'starting');
   assert.equal(start.startedAt, undefined);
   assert.equal(start.elapsedMs, 0);
   const before = await status();
-  assert.equal(before.phase, 'preparing');
+  assert.equal(before.phase, 'starting');
   assert.equal(before.startedAt, undefined);
   assert.equal(before.elapsedMs, 0);
 
@@ -277,6 +282,34 @@ test('the CLI countdown end replaces the spawn-time estimate', async t => {
   assert.equal(Date.parse(live.countdownEndsAt), reported.endsAt);
   assert.equal(live.startedAt, undefined);
   assert.equal(live.elapsedMs, 0);
+  await post('record/stop');
+});
+
+test('a slow CLI start does not run the countdown before the recorder does', async t => {
+  process.env.CUEKEEPER_RECORD_STUB = 'slow-countdown';
+  const { post, status, stages } = await fixture(t);
+  const requestedAt = Date.now();
+  const start = await post('record/start', { mode: 'global', countdown: 3 });
+  // Preflight and the input-source switch run before the CLI's countdown. Until
+  // it reports that countdown, there is no end to show and nothing counts down.
+  assert.equal(start.phase, 'starting');
+  assert.equal(start.countdownEndsAt, undefined);
+  assert.equal(start.countdownMs, 3000);
+  const early = await status();
+  assert.equal(early.phase, 'starting');
+  assert.equal(early.countdownEndsAt, undefined);
+
+  assert.ok(await waitFor(async () => (await stages()).some(entry => entry.stage === 'countdown'), 8000),
+    'the stub never reported its countdown');
+  const reported = (await stages()).find(entry => entry.stage === 'countdown');
+  assert.ok(await waitFor(async () => (await status()).phase === 'countdown'));
+  const live = await status();
+  assert.equal(live.phase, 'countdown');
+  assert.equal(Date.parse(live.countdownEndsAt), reported.endsAt);
+  // The countdown the page shows ends where the CLI really ends it, later than
+  // spawn+countdown would have been — so the digits never run ahead and jump back.
+  assert.ok(reported.endsAt - requestedAt > 3900,
+    `the reported end is ${reported.endsAt - requestedAt} ms after the request; the test needs the start to be slow`);
   await post('record/stop');
 });
 

@@ -7,6 +7,18 @@
 const COUNTDOWN_CHOICES = [0, 3, 5, 10];
 const POLL_MS = 1000;
 const TICK_MS = 250;
+/**
+ * The CLI's own preflight runs before its countdown, so the first stage can last
+ * a while; reading it every second would still catch a countdown start promptly.
+ */
+const STARTING_POLL_MS = 400;
+/**
+ * Between the countdown and the first captured event the recorder only needs to
+ * open its taps, so "preparing" can be shorter than one poll interval. It is
+ * read this often while it lasts, or the page would jump from a countdown
+ * straight to recording time.
+ */
+const PREPARING_POLL_MS = 200;
 const requestHeader = 'x-cuekeeper-workbench';
 
 const bar = document.createElement('div');
@@ -75,7 +87,7 @@ const state = {
   startedAt: undefined,
 };
 let healthShown = false;
-let pollId;
+let pollTimer;
 let tickId;
 
 function clock(ms) {
@@ -90,6 +102,12 @@ function renderTimer() {
     timer.textContent = state.steps === undefined ? '未录制' : `已保存 ${state.steps} 步`;
     return;
   }
+  if (state.phase === 'starting') {
+    // The recorder process exists, but its preflight and input-source switch run
+    // before the countdown starts. Showing digits here would count down twice.
+    timer.textContent = '准备启动…';
+    return;
+  }
   if (state.phase === 'preparing') {
     // Started, but the recorder has not begun capturing: the countdown is over
     // and this gap is not recording time.
@@ -97,10 +115,11 @@ function renderTimer() {
     return;
   }
   if (state.phase === 'countdown') {
-    const endsAt = Number.isFinite(state.countdownEndsAt) ? state.countdownEndsAt
-      : Date.now() + Math.max(0, state.countdownMs - state.elapsedMs);
-    const left = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
-    timer.textContent = `${left} 秒后开始录制`;
+    // The end comes from the CLI, so the digits are the countdown it really runs.
+    const left = state.countdownEndsAt === undefined ? 0 : state.countdownEndsAt - Date.now();
+    // At the countdown's end capture has not begun yet, and the next stage is
+    // exactly that wait; "0 秒后开始录制" would be a lie for however long it lasts.
+    timer.textContent = left > 0 ? `${Math.ceil(left / 1000)} 秒后开始录制` : '准备中…';
     return;
   }
   if (state.phase === 'recording') {
@@ -199,7 +218,7 @@ function adopt(status) {
   state.recording = status.recording === true;
   state.elapsedMs = Number.isFinite(status.elapsedMs) ? status.elapsedMs : 0;
   state.countdownMs = Number.isFinite(status.countdownMs) ? status.countdownMs : 0;
-  state.phase = ['countdown', 'preparing', 'recording'].includes(status.phase)
+  state.phase = ['starting', 'countdown', 'preparing', 'recording'].includes(status.phase)
     ? status.phase : undefined;
   const countdownEndsAt = Date.parse(status.countdownEndsAt ?? '');
   state.countdownEndsAt = Number.isFinite(countdownEndsAt) ? countdownEndsAt : undefined;
@@ -216,15 +235,37 @@ function adopt(status) {
   render();
 }
 
+/** How soon the status has to be read again, from the stage it just reported. */
+function pollDelay() {
+  if (state.phase === 'preparing') return PREPARING_POLL_MS;
+  if (state.phase === 'countdown' && state.countdownEndsAt !== undefined) {
+    // Read the countdown's end as it lands: capture starts right after it, and
+    // that window is shorter than a one-second poll would tolerate.
+    return Math.min(POLL_MS, Math.max(40, state.countdownEndsAt - Date.now() + 30));
+  }
+  if (state.phase === 'starting') return STARTING_POLL_MS;
+  return POLL_MS;
+}
+
+function schedulePoll() {
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = undefined;
+  if (!state.recording) return;
+  pollTimer = setTimeout(() => {
+    pollTimer = undefined;
+    void poll();
+  }, pollDelay());
+}
+
 function startLoops() {
-  if (!pollId) pollId = setInterval(() => { void poll(); }, POLL_MS);
   if (!tickId) tickId = setInterval(tick, TICK_MS);
+  schedulePoll();
 }
 
 function stopLoops() {
-  if (pollId) clearInterval(pollId);
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = undefined;
   if (tickId) clearInterval(tickId);
-  pollId = undefined;
   tickId = undefined;
 }
 
@@ -250,6 +291,7 @@ async function poll() {
   } catch (error) {
     // A transient read failure must not mask a recording that is still going.
     setMessage(`无法读取录制状态：${error.message}`, true);
+    schedulePoll();
     return;
   }
   const wasRecording = state.recording;

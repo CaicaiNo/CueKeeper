@@ -29,14 +29,14 @@ export interface RecordFault {
   message: string;
 }
 
-/** Where a running recording is: before capture, or capturing. */
-export type RecordPhase = 'countdown' | 'preparing' | 'recording';
+/** Where a running recording is: before the CLI starts its countdown, and after. */
+export type RecordPhase = 'starting' | 'countdown' | 'preparing' | 'recording';
 
 export interface RecordStatus {
   recording: boolean;
   /**
-   * Stage of a running recording. `countdown` and `preparing` have not captured
-   * anything yet, so `startedAt`/`elapsedMs` say nothing about them.
+   * Stage of a running recording. `starting`, `countdown` and `preparing` have
+   * not captured anything yet, so `startedAt`/`elapsedMs` say nothing about them.
    */
   phase?: RecordPhase;
   /** Absolute path of the flow the CLI writes when it stops. */
@@ -47,7 +47,11 @@ export interface RecordStatus {
   elapsedMs: number;
   /** Countdown before the first captured event, in milliseconds. */
   countdownMs?: number;
-  /** While the countdown runs: epoch ms it ends at, as the CLI reports it. */
+  /**
+   * While the countdown runs: epoch ms it ends at, as the CLI reports it. It is
+   * absent until the CLI says its countdown started, so the page never counts
+   * down before the recorder does.
+   */
   countdownEndsAt?: string;
   /** Steps the CLI reported for the saved flow. */
   steps?: number;
@@ -63,8 +67,8 @@ export interface RecordStatus {
 interface Recording {
   child: ChildProcess;
   flowPath: string;
-  /** Countdown end in epoch ms; the CLI replaces the start-up estimate. */
-  countdownEndsAt: number;
+  /** Countdown end in epoch ms; only the CLI's report sets it. */
+  countdownEndsAt?: number;
   countdownMs: number;
   phase: RecordPhase;
   /** Epoch ms the helper reported it was ready; absent until then. */
@@ -191,12 +195,14 @@ function applyStage(recording: Recording, line: string) {
     return;
   }
   if (data?.stage === 'countdown') {
-    // Only while the countdown is still the current stage; a late report must
-    // not pull a running capture back to the countdown.
-    if (recording.phase !== 'countdown') return;
+    // The CLI starts its own countdown only after its preflight and input-source
+    // preparation, so this is the first moment a countdown may be shown. A late
+    // report must not pull a running capture back to the countdown.
+    if (recording.phase !== 'starting' && recording.phase !== 'countdown') return;
     const endsAt = data.endsAt;
     if (typeof endsAt === 'number' && Number.isFinite(endsAt) && endsAt > 0) {
       recording.countdownEndsAt = endsAt;
+      recording.phase = 'countdown';
     }
     return;
   }
@@ -285,7 +291,7 @@ export function createRecordController(options: RecordControllerOptions) {
         elapsedMs: active.captureStartedAt === undefined ? 0
           : Math.max(0, Date.now() - active.captureStartedAt),
         countdownMs: active.countdownMs,
-        ...(active.phase === 'countdown'
+        ...(active.phase === 'countdown' && active.countdownEndsAt !== undefined
           ? { countdownEndsAt: new Date(active.countdownEndsAt).toISOString() } : {}),
         warnings: [],
       };
@@ -318,14 +324,13 @@ export function createRecordController(options: RecordControllerOptions) {
     // result envelope, so nothing that already reads it has to change.
     args.push('--progress-fd', '3');
     const child = spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe', 'pipe'], env });
-    const spawnedAt = Date.now();
     const recording: Recording = {
       child, flowPath,
-      countdownEndsAt: spawnedAt + countdown * 1000,
       countdownMs: countdown * 1000,
-      // Nothing is captured before the CLI's countdown ends and the helper is
-      // ready; until the CLI says otherwise, the countdown is the honest stage.
-      phase: countdown > 0 ? 'countdown' : 'preparing',
+      // The CLI has its own preflight and input-source work before its countdown
+      // starts. Nothing is shown counting down until it reports that moment, so
+      // a slow start cannot make the page count down twice or jump back.
+      phase: 'starting',
       output: '', stageBuffer: '', stopping: false,
       done: new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal }))),
     };

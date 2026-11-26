@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-// The record bar's timer must say what is true: a countdown, a "preparing" gap
-// after the countdown and before capture, and only then recording time. Those
-// three stages come from the server; this file drives `record.js` through them
-// with the real module and a DOM stand-in, so the rendered text is what a
-// person would read.
+// The record bar's timer must say what is true: preparing to start, then a
+// countdown, then a "preparing" gap after the countdown and before capture, and
+// only then recording time. This file runs the real `record.js` on a virtual
+// clock with its real polling schedule, so the stages are the ones an operator
+// actually sees — the earlier version of this test fired `visibilitychange`,
+// which skipped the polling path and hid a 350 ms window the page used to miss.
 
 class Element {
   constructor(tag, document) {
@@ -79,90 +80,123 @@ class Document {
   getElementById(id) { return this.byId.get(id) ?? null; }
   querySelector(selector) { return selector === '.topbar' ? this.topbar : null; }
   addEventListener(type, handler) { this.listeners.set(type, handler); }
-  fire(type) { this.listeners.get(type)?.(); }
 }
 
-async function waitFor(predicate, timeoutMs = 2000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return true;
-    await new Promise(resolve => setTimeout(resolve, 20));
-  }
-  return false;
-}
+const realSetImmediate = setImmediate;
+const realSetTimeout = setTimeout;
+const realSetInterval = setInterval;
+const realClearTimeout = clearTimeout;
+const realClearInterval = clearInterval;
+const realNow = Date.now;
 
-test('the timer shows countdown, then preparing, and only then recorded time', async () => {
+const epoch = 1_700_000_000_000;
+const countdownEnd = epoch + 3000;
+const readyAt = epoch + 3350;
+
+test('the record bar follows its real poll schedule through every stage', async t => {
+  let now = epoch;
+  const timers = new Map();
+  let nextTimerId = 1;
+  globalThis.setTimeout = (fn, ms = 0) => {
+    const id = nextTimerId++;
+    timers.set(id, { fn, at: now + Math.max(0, ms), every: 0 });
+    return id;
+  };
+  globalThis.setInterval = (fn, ms = 0) => {
+    const id = nextTimerId++;
+    timers.set(id, { fn, at: now + Math.max(1, ms), every: Math.max(1, ms) });
+    return id;
+  };
+  globalThis.clearTimeout = id => { timers.delete(id); };
+  globalThis.clearInterval = id => { timers.delete(id); };
+  Date.now = () => now;
+  t.after(() => {
+    globalThis.setTimeout = realSetTimeout;
+    globalThis.setInterval = realSetInterval;
+    globalThis.clearTimeout = realClearTimeout;
+    globalThis.clearInterval = realClearInterval;
+    Date.now = realNow;
+  });
+
+  // The server's answer for the virtual moment: a 300 ms start-up, a 3 s
+  // countdown, 350 ms of preparing, then capture.
+  const statusAt = () => {
+    const elapsed = now - epoch;
+    const base = { recording: true, countdownMs: 3000, flowPath: '/tmp/recording-1.flow.json', warnings: [] };
+    if (elapsed < 300) return { ...base, phase: 'starting', elapsedMs: 0 };
+    if (elapsed < 3000) {
+      return { ...base, phase: 'countdown', countdownEndsAt: new Date(countdownEnd).toISOString(), elapsedMs: 0 };
+    }
+    if (elapsed < 3350) return { ...base, phase: 'preparing', elapsedMs: 0 };
+    return { ...base, phase: 'recording', startedAt: new Date(readyAt).toISOString(), elapsedMs: elapsed - 3350 };
+  };
+
   const document = new Document();
   globalThis.document = document;
   globalThis.window = { location: { reload: () => {} } };
-  let current = { recording: false, elapsedMs: 0, warnings: [] };
   globalThis.fetch = async url => {
-    if (url === '/api/record/status') return { ok: true, status: 200, json: async () => current };
+    if (url === '/api/record/status') return { ok: true, status: 200, json: async () => statusAt() };
     if (url === '/api/record/health') {
       return { ok: true, status: 200, json: async () => ({ ok: true, blocking: [], nextSteps: [] }) };
     }
     return { ok: false, status: 404, json: async () => ({}) };
   };
 
+  const flush = async () => {
+    for (let round = 0; round < 8; round++) await new Promise(resolve => realSetImmediate(resolve));
+  };
+  const advance = async ms => {
+    const target = now + ms;
+    for (let guard = 0; guard < 20_000; guard++) {
+      let chosen;
+      for (const entry of timers) {
+        if (entry[1].at > target) continue;
+        if (!chosen || entry[1].at < chosen[1].at) chosen = entry;
+      }
+      if (!chosen) break;
+      const [id, timer] = chosen;
+      now = Math.max(now, timer.at);
+      if (timer.every) timer.at = now + timer.every;
+      else timers.delete(id);
+      timer.fn();
+      await flush();
+    }
+    now = target;
+    await flush();
+  };
+
   await import('../workbench/record.js');
+  await flush();
   const timer = document.getElementById('record-timer');
   const stopButton = document.getElementById('record-stop');
-  const startButton = document.getElementById('record-start');
-  assert.ok(await waitFor(() => timer.textContent === '未录制'), 'the idle page must settle first');
 
-  // Countdown: the remaining seconds come from the CLI's real end, not from a
-  // spawn-time estimate (countdownMs here is deliberately far away from it).
-  current = {
-    recording: true, phase: 'countdown', countdownMs: 30000,
-    countdownEndsAt: new Date(Date.now() + 2000).toISOString(),
-    elapsedMs: 0, flowPath: '/tmp/recording-1.flow.json', warnings: [],
-  };
-  document.fire('visibilitychange');
-  assert.ok(await waitFor(() => timer.textContent === '2 秒后开始录制'),
-    `countdown timer was "${timer.textContent}"`);
-  assert.equal(stopButton.hidden, false);
-  assert.equal(stopButton.disabled, false);
-  assert.equal(startButton.disabled, true);
+  // Before the CLI reports its countdown the page says it is starting up; no
+  // digits run here, so a slow preflight cannot count down twice.
+  await advance(250);
+  assert.equal(timer.textContent, '准备启动…');
 
-  // After the countdown, before capture: an honest "preparing" state with no
-  // recording clock, and the stop button still usable.
-  current = {
-    recording: true, phase: 'preparing', countdownMs: 30000,
-    elapsedMs: 0, flowPath: '/tmp/recording-1.flow.json', warnings: [],
-  };
-  document.fire('visibilitychange');
-  assert.ok(await waitFor(() => timer.textContent === '准备中…'),
-    `preparing timer was "${timer.textContent}"`);
-  assert.doesNotMatch(timer.textContent, /录制中/);
-  assert.doesNotMatch(timer.textContent, /秒后开始录制/);
+  // The CLI's countdown arrives and the digits follow its own end.
+  await advance(300);
+  assert.equal(timer.textContent, '3 秒后开始录制');
+
+  await advance(1900);
+  assert.equal(timer.textContent, '1 秒后开始录制');
+
+  // The regression the review found: 5 ms after the countdown ends the page must
+  // already be in the preparing stage, not stuck on a countdown digit.
+  await advance(555);
+  assert.equal(timer.textContent, '准备中…');
+
+  // ... and 150 ms later — inside the 350 ms window — it is still preparing
+  // and the stop button is still usable.
+  await advance(150);
+  assert.equal(timer.textContent, '准备中…');
   assert.equal(stopButton.hidden, false);
   assert.equal(stopButton.disabled, false);
 
-  // Capture began: the clock is the recorder's own elapsed time, and the
-  // countdown length is not subtracted from it a second time.
-  current = {
-    recording: true, phase: 'recording', countdownMs: 30000,
-    startedAt: new Date(Date.now() - 1500).toISOString(),
-    elapsedMs: 0, flowPath: '/tmp/recording-1.flow.json', warnings: [],
-  };
-  document.fire('visibilitychange');
-  assert.ok(await waitFor(() => timer.textContent === '录制中 00:01'),
-    `recording timer was "${timer.textContent}"`);
-
-  // The page's own tick keeps the clock moving from the ready moment, so a
-  // throttled tab does not freeze it.
-  current = {
-    recording: true, phase: 'recording', countdownMs: 30000,
-    startedAt: new Date(Date.now() - 5000).toISOString(),
-    elapsedMs: 0, flowPath: '/tmp/recording-1.flow.json', warnings: [],
-  };
-  document.fire('visibilitychange');
-  assert.ok(await waitFor(() => /^录制中 00:0[45]$/.test(timer.textContent)),
-    `ticking timer was "${timer.textContent}"`);
-
-  // Leave the page idle so the module's polling timers stop with the test.
-  current = { recording: false, elapsedMs: 0, steps: 2, warnings: [] };
-  document.fire('visibilitychange');
-  assert.ok(await waitFor(() => timer.textContent === '已保存 2 步'),
-    `finished timer was "${timer.textContent}"`);
+  // Then the capture clock starts from the ready moment.
+  await advance(300);
+  assert.equal(timer.textContent, '录制中 00:00');
+  await advance(2600);
+  assert.equal(timer.textContent, '录制中 00:02');
 });
