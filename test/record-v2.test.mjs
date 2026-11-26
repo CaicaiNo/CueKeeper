@@ -646,6 +646,60 @@ test('a drag that crosses a window boundary leaves CROSS_SCOPE_GESTURE', async (
   assert.equal(flow.steps[0].code, 'CROSS_SCOPE_GESTURE');
 });
 
+// The user clicked the address bar, dragged across the text to select it, then
+// typed. Both drag endpoints hit the same editable control and neither was its
+// center, so the drag used to become CAPTURE_SCOPE_UNVERIFIED and blocked every
+// run. It selects text, which no v2 step replays, so it is dropped with a
+// warning and the typing that follows must stay.
+test('a drag that selects text inside one editable control is not a blocking gap', async () => {
+  const recording = await recordFixture('drag-select-in-field');
+  const flow = recording.finish();
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'type']);
+  // The text that followed the selection is kept, addressed to the field that
+  // received it.
+  assert.equal(flow.steps[1].input, 'text_1');
+  assert.deepEqual(flow.steps[1].target, { kind: 'element', role: 'textfield', name: '地址' });
+  assert.equal(flowV2Check.Check(flow), true);
+  assert.doesNotThrow(() => parseFlowV2(flow));
+  // The drop is never silent: the capture report names it.
+  const warning = recording.captureWarnings.find(entry => entry.code === 'DRAG_SELECTS_TEXT');
+  assert.ok(warning, 'the dropped selection must be reported');
+  // A drag that selects text is not a business drag, so no drag step appears.
+  assert.equal(flow.steps.some(step => step.kind === 'drag'), false);
+});
+
+// The same shape, but the drag ends on another control: that is a real gesture
+// whose effect this recording cannot prove, so it keeps its gap — and the gap
+// report still says the handler was `drag`.
+test('a drag between two controls keeps its gap and its drag origin', async () => {
+  const recording = await recordFixture('drag-across-controls');
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'gap']);
+  assert.equal(flow.steps[1].code, 'CAPTURE_SCOPE_UNVERIFIED');
+  assert.throws(() => parseFlowV2(flow), { code: 'CAPTURE_GAP' });
+  const origin = recording.captureWarnings.find(entry => entry.code === 'CAPTURE_GAP_ORIGIN');
+  assert.ok(origin);
+  assert.match(origin.message, /^s2 from=drag app=com\.electron\.atrust window=3868 gen=1 decision=record$/);
+  assert.equal(recording.captureWarnings.some(entry => entry.code === 'DRAG_SELECTS_TEXT'), false);
+
+  // Two different text fields are two controls too: the drag keeps its gap.
+  const data = fixture('drag-across-controls');
+  const acrossFields = {
+    ...data.events[1],
+    to: [900, 374],
+    path: [[700, 340], [850, 374]],
+    toWindowNumber: 3868,
+  };
+  const second = new GlobalRecording(readerFor(data), { now: () => NOW });
+  await second.add(parseCaptureEvent(data.events[0]));
+  await second.add(parseCaptureEvent(acrossFields));
+  const secondFlow = second.finish();
+  assert.deepEqual(secondFlow.steps.map(step => step.kind), ['click', 'gap']);
+  assert.equal(secondFlow.steps[1].code, 'CAPTURE_SCOPE_UNVERIFIED');
+  assert.equal(second.captureWarnings.some(entry => entry.code === 'DRAG_SELECTS_TEXT'), false);
+});
+
 test('a failed fallback tree read drops the text without adding a gap', async () => {
   const data = fixture('queue-overflow');
   const recording = new GlobalRecording(readerFor(data, { failWindow: 11 }), { now: () => NOW });
@@ -4088,14 +4142,15 @@ test('record --global dates ready from the report when the helper omits it', { s
     `readyAt ${ready.readyAt} must fall within ${before}..${after}`);
 });
 
-test('record --global consumes a drag pickup and saves the drag step', { skip: process.platform !== 'darwin' }, t => {  const data = fixture('cross-window-drag');
-  // The helper announces every pickup before the drop. A same-window drag from
-  // the note body back to itself must yield one drag step, not a protocol error
-  // for the announcement the helper sends first.
-  const drag = { ...data.events[0], to: [1300, 112], path: [], toWindowNumber: 21 };
+test('record --global consumes a drag pickup and saves the drag step', { skip: process.platform !== 'darwin' }, t => {  const data = fixture('drag-across-controls');
+  // The helper announces every pickup before the drop. A drag from one control
+  // to another is a business drag and must yield one drag step, not a protocol
+  // error for the announcement the helper sends first. A drag inside one text
+  // field is a selection instead and is dropped (see the recorder test above).
+  const drag = { ...data.events[1], from: [820, 314], to: [1190, 314], path: [] };
   const run = globalCliFixture(t, {
     events: [{ kind: 'drag_start' }, drag],
-    snapshots: { 21: data.snapshots['21'] },
+    snapshots: { 3868: data.snapshots['3868'] },
   });
   assert.equal(run.code, 0, (run.stderr || '') + JSON.stringify(run.response));
   assert.ok(run.written, 'the CLI must write the flow');

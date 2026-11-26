@@ -1,0 +1,61 @@
+{
+  "description": "A click into an Electron address bar, a drag that selects text inside that same field, then typing: the drag is a text selection, not a business drag.",
+  "snapshots": {
+    "3868": {
+      "windowId": "w-3868",
+      "tree": {
+        "role": "window", "name": "aTrust", "ref": "@w3868:e1",
+        "bounds": { "x": 400, "y": 200, "width": 900, "height": 600 },
+        "states": [], "secure": false, "children": [
+          {
+            "role": "textfield", "name": "地址", "ref": "@w3868:e2",
+            "bounds": { "x": 500, "y": 300, "width": 640, "height": 28 },
+            "states": ["focused"], "secure": false, "children": []
+          },
+          {
+            "role": "button", "name": "打开", "ref": "@w3868:e3",
+            "bounds": { "x": 1150, "y": 300, "width": 80, "height": 28 },
+            "states": [], "secure": false, "children": []
+          },
+          {
+            "role": "textfield", "name": "用户名", "ref": "@w3868:e4",
+            "bounds": { "x": 500, "y": 360, "width": 640, "height": 28 },
+            "states": [], "secure": false, "children": []
+          }
+        ]
+      }
+    }
+  },
+  "events": [
+    {
+      "kind": "click", "t": 100, "seen": 1700000000000, "point": [560, 314], "count": 1,
+      "focusGeneration": 1, "secure": false, "decision": "record",
+      "owner": {
+        "app": "com.electron.atrust", "pid": 300, "processInstance": 1700000000000,
+        "windowNumber": 3868, "windowTitle": "aTrust", "role": "AXTextField",
+        "name": "地址", "pressable": true
+      },
+      "focus": { "role": "AXTextField", "name": "地址", "bounds": [500, 300, 640, 28], "editable": true }
+    },
+    {
+      "kind": "drag", "t": 1400, "seen": 1700000000000,
+      "from": [560, 314], "to": [1050, 314], "path": [[700, 314], [900, 314]],
+      "durationMs": 380, "button": "left", "modifiers": [],
+      "fromWindowNumber": 3868, "toWindowNumber": 3868,
+      "focusGeneration": 1, "secure": false, "decision": "record",
+      "owner": {
+        "app": "com.electron.atrust", "pid": 300, "processInstance": 1700000000000,
+        "windowNumber": 3868, "windowTitle": "aTrust"
+      }
+    },
+    {
+      "kind": "text", "t": 1700, "seen": 1700000000000, "chars": "Qz",
+      "focusGeneration": 1, "secure": false, "decision": "record",
+      "owner": {
+        "app": "com.electron.atrust", "pid": 300, "processInstance": 1700000000000,
+        "windowNumber": 3868, "windowTitle": "aTrust"
+      },
+      "focus": { "role": "AXTextField", "name": "地址", "bounds": [500, 300, 640, 28], "editable": true }
+    }
+  ]
+}
