@@ -1652,11 +1652,18 @@ function pickedTargetPatch(locator) {
  * replay preview are not offered, because an everyday repair never needs them.
  *
  * The pick lands in this form and is written on 应用, so closing the editor
- * never leaves a half-edited target behind. Applying without touching anything
- * keeps the recorded target as it is (a coordinate stays a coordinate, a
- * recorded path survives), while an edited field rebuilds the target from
- * exactly role/name/index: a path the form cannot show is cleared instead of
- * narrowing the replay invisibly.
+ * never leaves a half-edited target behind. The fields are compared against
+ * what the form shows after backfilling, not against the raw locator: a
+ * single-line input cannot hold a line break from a recorded name, and reading
+ * the values back keeps an untouched form from looking edited.
+ *
+ * Applying an untouched form keeps the recorded target as it is (a coordinate
+ * stays a coordinate, a recorded path and identifier survive). An edited target
+ * keeps the recorded path while the role is unchanged — the index is positional
+ * inside the role/name/path filter, so it only keeps its meaning in the same
+ * range — and drops the path when the role changes. A recorded index that was
+ * never re-entered is refused after the range changes instead of silently
+ * addressing a different control.
  */
 function v2TargetDialog(step) {
   const windowTitle = targetWindowLabel(step);
@@ -1664,12 +1671,6 @@ function v2TargetDialog(step) {
   let target = step.target;
   let picked;
   let frame;
-  const fieldValues = value => ({
-    role: String(value?.role ?? ''),
-    name: typeof value?.name === 'string' ? value.name : '',
-    index: value?.index === undefined ? '' : String(value.index),
-  });
-  const recordedFields = JSON.stringify(fieldValues(recorded));
   const summary = el('p', { className: 'target-summary' });
   const renderSummary = () => {
     summary.textContent = targetSummaryText(target, { window: windowTitle, frame });
@@ -1686,19 +1687,13 @@ function v2TargetDialog(step) {
     name.value = typeof locator?.name === 'string' ? locator.name : '';
     index.value = locator?.index === undefined ? '' : String(locator.index);
   };
-  // The locator these three fields describe. An empty name or index means "not
-  // restricted", so the field is left out instead of matching an empty string.
-  const fields = () => {
-    const rawIndex = String(index.value ?? '').trim();
-    if (rawIndex !== '' && (!Number.isSafeInteger(Number(rawIndex)) || Number(rawIndex) < 0)) {
-      throw new Error('同名控件序号（index）填 0 或更大的整数，或留空。');
-    }
-    const nameValue = String(name.value ?? '');
-    return {
-      role: String(role.value ?? '').trim(),
-      ...(nameValue ? { name: nameValue } : {}),
-      ...(rawIndex === '' ? {} : { index: Number(rawIndex) }),
-    };
+  // What the operator actually has on screen. The browser sanitizes a text
+  // input on assignment, so this is the only honest baseline for "not edited".
+  const shown = () => ({ role: role.value, name: name.value, index: index.value });
+  let baseline = shown();
+  const untouched = () => {
+    const now = shown();
+    return now.role === baseline.role && now.name === baseline.name && now.index === baseline.index;
   };
   openDialog(withStepId(step.kind === 'scroll' ? '编辑滚动目标' : '编辑点击目标', step), [
     summary,
@@ -1707,33 +1702,59 @@ function v2TargetDialog(step) {
       picked = true;
       frame = candidate?.bounds;
       fill(locator);
+      baseline = shown();
       renderSummary();
     }, { commit: false }),
     field('控件类型（role）', role, '控件的类别：button 按钮、textfield 输入框、menuitem 菜单项……'),
     field('控件名称（name）', name, '界面上显示的文字，例如按钮「保存」；留空表示不限定名称'),
     field('同名控件序号（index，可选）', index, '类型与名称相同的控件有多个时取第几个，从 0 开始；留空表示不限定'),
   ], '应用', () => {
-    const current = fields();
-    // Applying the untouched form preserves the recorded target byte for byte,
-    // including a path this editor does not show.
-    if (!picked && JSON.stringify(fieldValues(current)) === recordedFields) return;
-    if (picked && JSON.stringify(fieldValues(current)) === JSON.stringify(fieldValues(target))) {
-      return v2Edit({ kind: 'update', id: step.id, patch: { target: pickedTargetPatch(target) } });
+    if (untouched()) {
+      // A pick the operator accepted without further edits: its locator exactly.
+      // Otherwise the recorded target stays as it is, including a path this
+      // editor does not show.
+      return picked
+        ? v2Edit({ kind: 'update', id: step.id, patch: { target: pickedTargetPatch(target) } })
+        : undefined;
     }
-    if (!current.role) {
-      throw new Error('填写控件类型（role），或点「从窗口拾取」选一个控件。');
+    const now = shown();
+    const roleValue = String(now.role ?? '').trim();
+    if (!roleValue) throw new Error('填写控件类型（role），或点「从窗口拾取」选一个控件。');
+    const rawIndex = String(now.index ?? '').trim();
+    if (rawIndex !== '' && (!Number.isSafeInteger(Number(rawIndex)) || Number(rawIndex) < 0)) {
+      throw new Error('同名控件序号（index）填 0 或更大的整数，或留空。');
     }
-    // An edited locator is exactly these three fields. The merge inherits any
-    // field the patch omits from the recorded target, so a hidden path and a
-    // now-empty name/index are cleared explicitly.
+    // The locator the fields were filled from: the picked control, or the
+    // recorded target a coordinate step does not have.
+    const source = picked ? target : recorded;
+    const roleChanged = roleValue !== String(baseline.role ?? '').trim();
+    const nameChanged = String(now.name ?? '') !== baseline.name;
+    const indexChanged = rawIndex !== baseline.index.trim();
+    // An untouched name keeps the recorded value, so a line break a single-line
+    // input could not display is not silently squeezed out of the flow.
+    const nextName = nameChanged || typeof source?.name !== 'string' ? String(now.name ?? '') : source.name;
+    // The index is positional in the role/name/path range. Reusing an
+    // unedited one after that range changed would address another control.
+    if (!indexChanged && rawIndex !== '' && (roleChanged || nameChanged)) {
+      throw new Error('改了控件类型或名称后，原来的同名序号不再指向同一个控件；请重新填写序号，或留空。');
+    }
+    const nextIndex = rawIndex === '' ? undefined : Number(rawIndex);
+    // A path is the role chain down to the control, so it survives only while
+    // the role does; a new role would leave a stale chain narrowing the match.
+    const nextPath = roleChanged ? undefined : source?.path;
     return v2Edit({
       kind: 'update', id: step.id,
       patch: {
         target: {
-          kind: 'element', ...current,
-          ...(current.name === undefined ? { name: null } : {}),
-          ...(current.index === undefined ? { index: null } : {}),
-          path: null,
+          kind: 'element', role: roleValue,
+          ...(nextName ? { name: nextName } : {}),
+          ...(nextPath ? { path: nextPath } : {}),
+          ...(nextIndex === undefined ? {} : { index: nextIndex }),
+          // The merge inherits any field the patch omits from the recorded
+          // target; the edited locator keeps nothing the form could not show.
+          ...(nextName ? {} : { name: null }),
+          ...(nextPath ? {} : { path: null }),
+          ...(nextIndex === undefined ? { index: null } : {}),
         },
       },
     });

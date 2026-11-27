@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { flowV2Check } from '../dist/contracts-v2.js';
+import { parseSnapshot, resolve } from '../dist/locator.js';
 import { startWorkbench } from '../dist/workbench.js';
 import { installWorkbenchPage } from './support/workbench-dom.mjs';
 
@@ -20,6 +21,34 @@ const hoverTarget = {
   kind: 'element', role: 'group', name: '',
   path: ['window', 'webarea', 'group', 'group', 'group', 'group', 'group', 'group'], index: 3,
 };
+// A name macOS can report with a line break; a single-line input cannot show
+// it, but the flow must keep it as long as the operator does not edit it.
+const multilineTarget = {
+  kind: 'element', role: 'button', name: '保存\n副标题',
+  path: ['window', 'toolbar', 'button'], identifier: 'save-button',
+};
+// Two toolbar "保存" controls next to a sidebar one: the recorded index 1 only
+// means the toolbar second while the recorded path still narrows the match.
+const dupTarget = {
+  kind: 'element', role: 'button', name: '保存', path: ['window', 'toolbar', 'button'], index: 1,
+};
+const dupSnapshot = parseSnapshot({
+  complete: true,
+  window: { id: 'w-dup', title: 'Cuekeeper 画布' },
+  tree: {
+    role: 'window', name: 'Cuekeeper 画布',
+    children: [
+      { role: 'group', children: [{ role: 'button', name: '保存', ref_id: '@fake:e1' }] },
+      {
+        role: 'toolbar',
+        children: [
+          { role: 'button', name: '保存', ref_id: '@fake:e2' },
+          { role: 'button', name: '保存', ref_id: '@fake:e3' },
+        ],
+      },
+    ],
+  },
+}, { app: 'com.apple.Safari', window: 'Cuekeeper 画布' });
 
 /** A picked control with a rectangle, and one the snapshot could not place. */
 const candidates = [
@@ -39,6 +68,13 @@ const candidates = [
     locator: { kind: 'element', role: 'group', name: '', path: ['window', 'webarea', 'group'] },
     path: ['window', 'webarea', 'group'],
   },
+  {
+    // A repeated control: the picker's locator carries a non-empty index.
+    ref: '@fake:e4', interactive: true, role: 'button',
+    locator: { kind: 'element', role: 'button', name: '保存', path: ['window', 'toolbar', 'button'], index: 1 },
+    path: ['window', 'toolbar', 'button'],
+    bounds: { x: 470, y: 40, width: 60, height: 30 }, point: [500, 55],
+  },
 ];
 
 async function recording(root) {
@@ -53,6 +89,8 @@ async function recording(root) {
       id: 'click-element', kind: 'click', scope: canvasScope,
       target: { kind: 'element', role: 'button', name: '保存', path: ['window', 'toolbar', 'button'], index: 1 },
     },
+    { id: 'click-multiline', kind: 'click', scope: canvasScope, target: multilineTarget },
+    { id: 'click-dup', kind: 'click', scope: canvasScope, target: dupTarget },
     {
       id: 'scroll-group', kind: 'scroll', scope: canvasScope,
       target: { kind: 'element', role: 'group' }, deltaX: 0, deltaY: 300, durationMs: 120,
@@ -223,6 +261,14 @@ test('拾取候选后 role / name / index 同步更新', async t => {
   assert.equal(textfield.index.value, '');
   assert.ok(editor.textContent.includes('textfield（画布输入）· Cuekeeper 画布'));
 
+  // A repeated control's picker locator carries a non-empty index; all three
+  // fields follow it.
+  await pickCandidate(document, editor, 3);
+  const repeated = locatorInputs(editor);
+  assert.equal(repeated.role.value, 'button');
+  assert.equal(repeated.name.value, '保存');
+  assert.equal(repeated.index.value, '1');
+
   // A control the snapshot reports without a name clears the field again.
   await pickCandidate(document, editor, 2);
   const group = locatorInputs(editor);
@@ -243,11 +289,11 @@ test('改 role / name / index 后应用，写回的定位器与输入一致', as
 
   assert.equal(dialog(document).open, false);
   assert.deepEqual((await stepOf('click-element')).target,
-    { kind: 'element', role: 'button', name: '关闭', index: 2 },
-    'the edited target is exactly the three fields; the invisible path is gone');
+    { kind: 'element', role: 'button', name: '关闭', path: ['window', 'toolbar', 'button'], index: 2 },
+    'the edited target is exactly the three fields; the unchanged role keeps the recorded range');
 });
 
-test('清空 name 与 index 后应用，只保留控件类型', async t => {
+test('清空 name 与 index 后应用，名称与序号不再收窄匹配', async t => {
   const { document, stepOf } = await bootPage(t);
   const editor = await openEditor(document, 'click-element');
 
@@ -256,7 +302,8 @@ test('清空 name 与 index 后应用，只保留控件类型', async t => {
   fields.index.value = '';
   await submitDialog(document);
 
-  assert.deepEqual((await stepOf('click-element')).target, { kind: 'element', role: 'button' },
+  assert.deepEqual((await stepOf('click-element')).target,
+    { kind: 'element', role: 'button', path: ['window', 'toolbar', 'button'] },
     'an empty name or index means "not restricted", not an empty string');
 });
 
@@ -268,6 +315,75 @@ test('原样应用不丢掉 target 里隐藏的 path', async t => {
   assert.deepEqual((await stepOf('click-element')).target,
     { kind: 'element', role: 'button', name: '保存', path: ['window', 'toolbar', 'button'], index: 1 },
     'opening and applying the untouched form changes nothing');
+});
+
+test('名称含换行时打开即应用不改写原名称、path 与 identifier', async t => {
+  const { document, stepOf } = await bootPage(t);
+  const editor = await openEditor(document, 'click-multiline');
+  // The browser stores a single-line input without the line break.
+  assert.equal(locatorInputs(editor).name.value, '保存副标题');
+
+  await submitDialog(document);
+  assert.deepEqual((await stepOf('click-multiline')).target, multilineTarget,
+    'the location the operator never edited is kept verbatim');
+});
+
+test('拾取后直接应用写回完整拾取定位器，不掺入旧目标的字段', async t => {
+  const { document, stepOf } = await bootPage(t);
+  const editor = await openEditor(document, 'click-multiline');
+
+  await pickCandidate(document, editor, 3);
+  const fields = locatorInputs(editor);
+  assert.equal(fields.name.value, '保存');
+  assert.equal(fields.index.value, '1');
+
+  await submitDialog(document);
+  assert.deepEqual((await stepOf('click-multiline')).target, candidates[3].locator,
+    'the picked locator replaces the old name/path/identifier wholesale');
+});
+
+test('只改序号时保留原匹配范围，序号仍落在同一个控件上', async t => {
+  const { document, stepOf } = await bootPage(t);
+  // Without the recorded path the same index 0 addresses the sidebar control.
+  assert.equal(resolve(dupSnapshot, { kind: 'element', role: 'button', name: '保存', index: 0 }).node.ref,
+    '@fake:e1');
+
+  const editor = await openEditor(document, 'click-dup');
+  const fields = locatorInputs(editor);
+  assert.equal(fields.index.value, '1');
+  fields.index.value = '0';
+  await submitDialog(document);
+
+  const target = (await stepOf('click-dup')).target;
+  assert.deepEqual(target, {
+    kind: 'element', role: 'button', name: '保存', path: ['window', 'toolbar', 'button'], index: 0,
+  });
+  assert.equal(resolve(dupSnapshot, target).node.ref, '@fake:e2',
+    'the toolbar control, not the sidebar one the path-less locator would take');
+});
+
+test('换了控件类型或名称但序号没重填时拒绝应用', async t => {
+  const { document, stepOf } = await bootPage(t);
+  const editor = await openEditor(document, 'click-dup');
+  const fields = locatorInputs(editor);
+
+  fields.name.value = '关闭';
+  await submitDialog(document);
+  assert.equal(editor.open, true, 'a new name and the old index is refused');
+  assert.match(editor.textContent, /原来的同名序号不再指向同一个控件/);
+  assert.deepEqual((await stepOf('click-dup')).target, dupTarget, 'nothing was saved');
+
+  fields.name.value = '保存';
+  fields.role.value = 'menuitem';
+  await submitDialog(document);
+  assert.equal(editor.open, true, 'a new role and the old index is refused too');
+  assert.deepEqual((await stepOf('click-dup')).target, dupTarget, 'still nothing saved');
+
+  // Clearing the index is the explicit "no position" answer; the new role also
+  // drops the recorded path, which was tied to the old role chain.
+  fields.index.value = '';
+  await submitDialog(document);
+  assert.deepEqual((await stepOf('click-dup')).target, { kind: 'element', role: 'menuitem', name: '保存' });
 });
 
 test('坐标目标不填字段时保持坐标，填 role 后变元素定位器', async t => {
