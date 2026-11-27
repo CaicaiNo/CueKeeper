@@ -1735,12 +1735,14 @@ function v2TargetDialog(step) {
     const nameChanged = String(now.name ?? '') !== baseline.name;
     const indexChanged = rawIndex !== baseline.index.trim();
     // An untouched name keeps the recorded value: a line break a single-line
-    // input could not display, and the empty string that means "this control
-    // has no name". Clearing the field is the operator asking for no name
-    // restriction at all, which is a different locator.
+    // input could not display, and — while the recorded range is still the one
+    // being edited — the empty string that means "this control has no name".
+    // A new role rebuilds the range, so a blank field is then simply "not
+    // filled" (no name restriction), like any hand-written locator.
+    const sameRange = !roleChanged && !nameChanged;
     const nextName = nameChanged
       ? (String(now.name ?? '') || undefined)
-      : (typeof source?.name === 'string' ? source.name : undefined);
+      : (typeof source?.name === 'string' && (source.name !== '' || sameRange) ? source.name : undefined);
     // The index is positional in the role/name/path range. Reusing an
     // unedited one after that range changed would address another control.
     if (!indexChanged && !indexRespecified && rawIndex !== '' && (roleChanged || nameChanged)) {

@@ -49,6 +49,8 @@ const dupSnapshot = parseSnapshot({
           { role: 'button', name: '保存', ref_id: '@fake:e1' },
           { role: 'button', name: '关闭', ref_id: '@fake:e4' },
           { role: 'button', name: '取消', ref_id: '@fake:e6' },
+          { role: 'textfield', name: '查询', ref_id: '@fake:e9' },
+          { role: 'textfield', ref_id: '@fake:e10' },
         ],
       },
       {
@@ -432,6 +434,28 @@ test('手填新名称时丢掉旧路径，按新名称解析到侧栏控件', as
   // The recorded toolbar path could never match that sidebar control.
   assert.throws(() => resolve(dupSnapshot, { ...target, path: ['window', 'toolbar', 'button'] }),
     /did not match/);
+});
+
+test('改角色重建范围时，空名称不再表示「只匹配无名控件」', async t => {
+  const { document, stepOf } = await bootPage(t);
+  const editor = await openEditor(document, 'click-unnamed');
+  const fields = locatorInputs(editor);
+
+  fields.role.value = 'textfield';
+  // Retyping the recorded position is the operator pointing inside the new
+  // range; keeping the old number would be refused.
+  fields.index.value = '';
+  fields.index.oninput?.({});
+  fields.index.value = '0';
+  fields.index.oninput?.({});
+  await submitDialog(document);
+
+  const target = (await stepOf('click-unnamed')).target;
+  assert.deepEqual(target, { kind: 'element', role: 'textfield', index: 0 },
+    'a blank name on a rebuilt range means "no name restriction"');
+  assert.equal(resolve(dupSnapshot, target).node.ref, '@fake:e9', 'the named 查询 textfield, first in order');
+  // Keeping the recorded empty-name constraint would land on the unnamed field.
+  assert.equal(resolve(dupSnapshot, { ...target, name: '' }).node.ref, '@fake:e10');
 });
 
 test('换了控件类型或名称但序号没重填时拒绝应用', async t => {
