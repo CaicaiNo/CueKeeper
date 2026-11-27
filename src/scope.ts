@@ -284,9 +284,12 @@ export class ScopeResolver {
    * window the run did not leave in front is a user switch, not a hand-off, so
    * the step stops instead of stealing focus back.
    */
-  async confirmForeground(binding: WindowBinding): Promise<void> {
+  async confirmForeground(binding: WindowBinding, signal?: AbortSignal): Promise<void> {
     this.signal.throwIfAborted();
     const focused = await this.observedForeground();
+    // A caller that gave the observation a deadline must not have the focus
+    // command it was waiting for issued by a read that landed afterwards.
+    signal?.throwIfAborted();
     if (this.expectedForeground !== undefined && focused !== undefined &&
         focused.id !== this.expectedForeground && focused.id !== binding.windowId) {
       throw new Fault('FOCUS_INTERRUPTED',
@@ -296,7 +299,7 @@ export class ScopeResolver {
       this.expectedForeground = binding.windowId;
       return;
     }
-    await this.focus(binding);
+    await this.focus(binding, signal);
   }
 
   /**
@@ -332,7 +335,11 @@ export class ScopeResolver {
   }
 
   /** Focuses a bound window and proves its owner after the driver call. */
-  private async focus(binding: WindowBinding): Promise<void> {
+  private async focus(binding: WindowBinding, signal?: AbortSignal): Promise<void> {
+    // Checked immediately before the driver command: the command is the side
+    // effect, and a deadline that passed while waiting for the foreground must
+    // not start it.
+    signal?.throwIfAborted();
     const identity = this.identityFor(binding.app);
     try {
       await identity.focusOwnedWindow(this.desktop, binding.windowId, this.focusTimeoutMs);

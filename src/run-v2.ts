@@ -69,6 +69,9 @@ export interface FlowV2RunOptions {
 
 type StepOutcome = Omit<StepResult, 'status'> & { status?: 'passed' | 'failed' };
 
+/** The steps whose first event after a window switch waits for a ready target. */
+type ReadinessGatedStep = Extract<StepV2, { kind: 'click' | 'type' | 'key' }>;
+
 const blockingCodes = new Set([
   'APP_PATH_INVALID', 'APP_AMBIGUOUS', 'APP_NOT_FOUND', 'APP_UNVERIFIED',
   'AMBIGUOUS_TARGET', 'WINDOW_NOT_FOUND', 'WINDOW_CHANGED', 'FOCUS_INTERRUPTED',
@@ -226,6 +229,97 @@ const clickRetryDelayMs = 300;
  * pointer to rest, and a next step that reads that state would otherwise race.
  */
 const hoverDwellFloorMs = 400;
+
+/**
+ * A window that was just raised answers the accessibility read before it
+ * accepts input: an Electron page in particular exposes a control's reference
+ * while its press still fails. The first input after a switch therefore reads
+ * the target twice, this far apart, and only delivers once both reads name the
+ * same enabled control in the same place.
+ */
+const readinessProbeIntervalMs = 200;
+
+/**
+ * The bound on that proof. It is short on purpose: an app that cannot expose an
+ * enabled, stable control for this long is not still loading, and the run says
+ * so instead of pressing into a half-drawn page.
+ */
+const readinessProofTimeoutMs = 1500;
+
+/** Steps whose first event after a window switch waits for a ready target. */
+const readinessGated = new Set<StepV2['kind']>(['click', 'type', 'key']);
+
+/** A read the proof cannot use because the window was not there yet. */
+const readinessTransientCodes = new Set([...transientWaitCodes, 'WINDOW_CHANGED']);
+
+/**
+ * True when a step leaves a window the run raised in front of the next step.
+ * A wait and a hover take no focus, so their declared hand-off is not one.
+ */
+function switchesWindow(step: StepV2): boolean {
+  if (step.kind === 'activate_app' || step.kind === 'focus_window') return true;
+  if (step.kind === 'wait' || step.kind === 'hover') return false;
+  return (step as { focusAfter?: Scope }).focusAfter !== undefined;
+}
+
+/** What must hold still for two reads to prove the same control. */
+function readinessSignature(node: Node): string {
+  const bounds = node.bounds;
+  return `${node.role}|${node.name ?? ''}|${node.identifier ?? ''}|` +
+    (bounds ? `${bounds.x},${bounds.y},${bounds.width},${bounds.height}` : 'no-bounds');
+}
+
+/** The same proof for a step that names no control: the bound window itself. */
+function windowReadinessSignature(snapshot: Snapshot): string {
+  const bounds = snapshot.tree.bounds;
+  return `${snapshot.windowId}|` +
+    (bounds ? `${bounds.x},${bounds.y},${bounds.width},${bounds.height}` : 'no-bounds');
+}
+
+/** One read of the bound window, reduced to what the proof compares. */
+interface ReadinessRead {
+  /** Empty when this read proves nothing yet; two equal non-empty values pass. */
+  signature?: string;
+  /** Why this read did not prove the target, for the timeout message. */
+  problem: string;
+  /** The step's own refusal applies (secure or unpressable target); it reports it. */
+  refuse?: boolean;
+}
+
+/**
+ * What a type step's characters are typed into, decided once and shared by the
+ * readiness proof and the dispatch, so the field that is proved is the field
+ * that is typed into.
+ */
+type TypeDispatch =
+  /** `type <ref> --stdin`, optionally after clicking the field for focus. */
+  | { via: 'reference'; node: Node; clickFirst: boolean }
+  /** Click the rename field, then type into the first responder it becomes. */
+  | { via: 'rename-field'; node: Node }
+  /** Finder's inline rename editor: click the row's name column, then type. */
+  | { via: 'inline-rename' }
+  /** The focused cell/row hosts the editor: type into the first responder. */
+  | { via: 'focused-host'; node: Node }
+  /** More than one control claims the characters; dispatch does not guess. */
+  | { via: 'ambiguous'; reason: string }
+  /** The step's own dispatch refuses this target. */
+  | { via: 'refused'; reason: string };
+
+/** A locator's identity in a readiness fault message. */
+function describeLocator(locator: ElementLocator): string {
+  const name = (locator.name ?? '').trim();
+  if (name) return `${locator.role ?? 'element'} "${name.slice(0, 80)}"`;
+  return locator.identifier
+    ? `${locator.role ?? 'element'} [${locator.identifier}]`
+    : (locator.role ?? 'the target');
+}
+
+/** What a gated step acts on, for a readiness fault message. */
+function describeTarget(step: ReadinessGatedStep): string {
+  if (step.kind === 'key') return 'the bound window';
+  if (step.kind === 'click' && step.target.kind === 'point') return 'the bound window';
+  return describeLocator(step.target as ElementLocator);
+}
 
 /**
  * The screen point a hover rests on. A recorded point wins when it still lands
@@ -459,6 +553,8 @@ class StepRunner {
   private inlineRename = false;
   /** A point in the clicked row's name column, for focusing the inline editor. */
   private lastRowNamePoint?: Point;
+  /** True after this run raised a window; the next input proves its target first. */
+  private pendingWindowSwitch = false;
 
   /** Per-step file stability memory: size, mtime and when they last changed. */
   private readonly fileStability = new Map<string, { size: number; mtimeMs: number; since: number }>();
@@ -477,8 +573,349 @@ class StepRunner {
         throw new Fault('SYSTEM_DIALOG_VISIBLE', 'A macOS system dialog is already visible before automatic input');
       }
     }
+    // A context-menu item is pressed through the menu's own surface, whose
+    // open-and-retry path already outlasts a repaint; it consumes the switch
+    // without the readiness proof (which reads a window, not a menu).
+    if (step.kind === 'click' && step.target.kind === 'element' && step.target.role === 'menuitem') {
+      this.pendingWindowSwitch = false;
+    }
     const outcome = await this.dispatch(step);
+    if (switchesWindow(step)) this.pendingWindowSwitch = true;
     return { ...outcome, ...await this.handOff(step) };
+  }
+
+  /**
+   * The readiness proof for the first input after a window switch. It resolves
+   * the bound window, brings it forward and reads it twice, readinessProbeIntervalMs
+   * apart, and hands back the window and the exact snapshot the step will
+   * dispatch from. Each read proves the target the step itself will act on, with
+   * the step's own selection rules: the same enabled control in the same place,
+   * on the same window of the same process instance. Only a read-only resolve is
+   * used — preparing a window is the step's own business — and one monotonic
+   * deadline ends window selection, focus, identity checks and snapshot reads,
+   * including a driver call that never answers: a result that lands after it is
+   * refused instead of used, and nothing is dispatched.
+   */
+  private async awaitReadyWindow(step: ReadinessGatedStep): Promise<{ binding: WindowBinding; snapshot: Snapshot }> {
+    // The same same-title disambiguation the step itself will use: the gate must
+    // not turn a window the flow can prove into an ambiguity, and a window that
+    // does not hold the target yet is "not ready", not ambiguous.
+    const pick = (candidates: WindowInfo[]) => this.pickSameTitled(candidates, step, { prove: true });
+    const deadline = performance.now() + readinessProofTimeoutMs;
+    const remaining = () => deadline - performance.now();
+    // One signal for the whole proof. It is cancelled at the deadline so a read
+    // that finishes late cannot start the focus command it was waiting for.
+    const cancel = new AbortController();
+    const cutoff = setTimeout(() => cancel.abort(
+      new Fault('TARGET_NOT_READY', 'The readiness deadline passed before the window could be focused')),
+      readinessProofTimeoutMs);
+    const fail = (problem: string, reads: number): Fault => new Fault('TARGET_NOT_READY',
+      `${describeTarget(step)} was not ready ${readinessProofTimeoutMs} ms after the window was brought forward: ` +
+      `${problem} (${reads} read${reads === 1 ? '' : 's'}); no input was delivered`);
+    let previous: string | undefined;
+    let problem = 'the window has not been read yet';
+    let reads = 0;
+    // The window is resolved and brought forward once; every later read reuses
+    // that binding and only the read itself re-proves the owner. A read that
+    // says the window moved, closed or was recreated resolves it again.
+    let binding: WindowBinding | undefined;
+    try {
+      for (;;) {
+        this.signal.throwIfAborted();
+        let snapshot: Snapshot | undefined;
+        let read: ReadinessRead | undefined;
+        try {
+          if (binding === undefined) {
+            binding = await this.withinDeadline(
+              this.resolver.resolveWindow(step.scope, pick, { repair: false }), deadline, () => fail(problem, reads));
+            await this.withinDeadline(
+              this.resolver.confirmForeground(binding, cancel.signal), deadline, () => fail(problem, reads));
+          }
+          snapshot = await this.withinDeadline(
+            this.resolver.snapshot(binding!), deadline, () => fail(problem, reads));
+          reads += 1;
+          read = this.readinessOf(snapshot, binding!, step);
+        } catch (error) {
+          const fault = toFault(error);
+          // The cancellation that ended the proof says nothing about the target;
+          // the last read's own state is the message the operator needs.
+          if (fault.code === 'TARGET_NOT_READY' && cancel.signal.aborted) throw fail(problem, reads);
+          if (!readinessTransientCodes.has(fault.code)) throw error;
+          problem = `${fault.code}: ${fault.message}`;
+          binding = undefined;
+        }
+        // A read or a selection that outlived the deadline is not evidence.
+        if (remaining() <= 0) throw fail(read?.problem ?? problem, reads);
+        if (read?.refuse) return { binding: binding!, snapshot: snapshot! };
+        if (read?.signature !== undefined && read.signature === previous) {
+          // The windows were read over a moment in which the operator can take
+          // the foreground away. Dispatch only happens while the run still
+          // owns it; a switch since the first read stops the step with zero
+          // input, and the check itself stays inside the proof's budget.
+          await this.withinDeadline(
+            this.resolver.confirmForeground(binding!, cancel.signal), deadline, () => fail(problem, reads));
+          return { binding: binding!, snapshot: snapshot! };
+        }
+        previous = read?.signature;
+        if (read !== undefined) problem = read.problem;
+        await sleep(Math.max(0, Math.min(readinessProbeIntervalMs, remaining())), undefined, { signal: this.signal });
+      }
+    } finally {
+      clearTimeout(cutoff);
+      // Whatever ended the proof, a read that lands afterwards must not start
+      // the focus command it was waiting for.
+      if (!cancel.signal.aborted) {
+        cancel.abort(new Fault('TARGET_NOT_READY', 'The readiness proof ended before the window could be focused'));
+      }
+    }
+  }
+
+  /**
+   * Runs one desktop operation under the readiness deadline. A driver call that
+   * never answers cannot be cancelled, but nothing waits for it past the
+   * deadline and its late result is dropped, so it can neither be acted on nor
+   * turn into input.
+   */
+  private async withinDeadline<T>(work: Promise<T>, deadline: number, fail: () => Fault): Promise<T> {
+    // A late result or rejection belongs to this call, not to the process.
+    void work.catch(() => undefined);
+    const left = deadline - performance.now();
+    if (left <= 0) throw fail();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        work,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(fail()), Math.max(1, left));
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * What one read says about the target, using the step's own dispatch rules:
+   * the right click's selected row, or the control a type step would type into.
+   * A secure or unpressable target is the step's own refusal; a target that is
+   * missing, moving or disabled is not ready yet.
+   */
+  private readinessOf(snapshot: Snapshot, binding: WindowBinding, step: ReadinessGatedStep): ReadinessRead {
+    const window = `${binding.windowId}|${binding.pid}|${binding.processInstance ?? ''}`;
+    const settledWindow = (): ReadinessRead => snapshot.tree.bounds === undefined
+      ? { problem: 'the window has no bounds to prove it has settled' }
+      : {
+        signature: `${window}|${windowReadinessSignature(snapshot)}`,
+        problem: 'the window bounds were still changing between reads',
+      };
+    if (step.kind === 'key' || (step.kind === 'click' && step.target.kind === 'point')) return settledWindow();
+    if (step.kind === 'type') {
+      let plan: TypeDispatch;
+      try {
+        plan = this.typeDispatch(snapshot, step);
+      } catch (error) {
+        const fault = toFault(error);
+        if (fault.code === 'NOT_FOUND' || fault.code === 'AMBIGUOUS') {
+          return { problem: `${describeTarget(step)} is still not provable (${fault.code})` };
+        }
+        if (fault.code === 'UNSAFE_TARGET') return { problem: fault.message, refuse: true };
+        throw error;
+      }
+      if (plan.via === 'refused') return { problem: plan.reason, refuse: true };
+      // A target that still names two controls is not proved yet; the next read
+      // may settle it, and one that never does ends as a readiness fault.
+      if (plan.via === 'ambiguous') return { problem: plan.reason };
+      // The inline rename editor is not an addressable control; the window it
+      // appears in is what can be proved. The focused host is a real node and
+      // is proved like any other target (a secure one is refused).
+      if (plan.via === 'inline-rename') return settledWindow();
+      return this.proveNode(window, plan.node);
+    }
+    let resolved: Actionable;
+    try {
+      resolved = this.clickTargetOf(step, snapshot).resolved;
+    } catch (error) {
+      const fault = toFault(error);
+      if (fault.code === 'UNSAFE_TARGET') return { problem: fault.message, refuse: true };
+      if (fault.code === 'NOT_FOUND' || fault.code === 'AMBIGUOUS') {
+        return { problem: `${describeTarget(step)} is still not provable (${fault.code})` };
+      }
+      throw error;
+    }
+    if (resolved.press && resolved.press !== resolved.node) {
+      const press = this.proveNode(window, resolved.press);
+      if (press.signature === undefined) return press;
+      const node = this.proveNode(window, resolved.node);
+      if (node.signature === undefined) return node;
+      return { signature: `${node.signature}|${press.signature}`, problem: node.problem };
+    }
+    return this.proveNode(window, resolved.node);
+  }
+
+  /** One control's part of the readiness signature, with the window it lives in. */
+  private proveNode(window: string, node: Node): ReadinessRead {
+    if (node.secure) return { problem: `${describeControl(node)} is a secure control`, refuse: true };
+    if (node.states.includes('disabled')) return { problem: `${describeControl(node)} is still disabled` };
+    return {
+      signature: `${window}|${readinessSignature(node)}`,
+      problem: `${describeControl(node)} was still changing between reads`,
+    };
+  }
+
+  /**
+   * The control a click step presses, chosen exactly as its own dispatch chooses
+   * it: a container right click targets the row selected inside it, and the
+   * previous click names it when the tree does not.
+   */
+  private clickTargetOf(
+    step: Extract<StepV2, { kind: 'click' }>,
+    snapshot: Snapshot,
+  ): { locator: ElementLocator; resolved: Actionable } {
+    const target = step.target as ElementLocator;
+    const locator = step.button === 'right' && target.identifier === undefined
+      ? (this.lastClickTarget ?? rightClickTarget(snapshot, step.button, target))
+      : target;
+    return { locator, resolved: actionable(snapshot, addressable(locator)) };
+  }
+
+  /**
+   * The control a type step's characters land in, decided exactly as the step
+   * dispatches them. One decision, read by both the proof and the dispatch.
+   */
+  private typeDispatch(snapshot: Snapshot, step: Extract<StepV2, { kind: 'type' }>): TypeDispatch {
+    const locator = step.target as ElementLocator;
+    // An identifier is an explicit identity: address that control directly.
+    // The heuristics below find an unnamed inline rename editor that the tree
+    // cannot address; they must never redirect a recorded identifier's text
+    // into whichever editable control happens to be focused.
+    if (locator.identifier !== undefined) {
+      const { node } = resolve(snapshot, locator);
+      if (!node.ref || node.secure) {
+        return { via: 'refused', reason: 'Type target is secure or has no action reference' };
+      }
+      return { via: 'reference', node, clickFirst: false };
+    }
+    // Finder's inline rename editor is not in the accessibility tree. The
+    // Rename menu item opened it, but a semantic menu press leaves keyboard
+    // focus on the list. Clicking the name column makes the field editor the
+    // first responder; Cmd+A then replaces the whole name, so a recorded
+    // full file name is not appended to the old base name.
+    if (this.inlineRename && !locator.name) return { via: 'inline-rename' };
+    // A recorded rename field has no name of its own: the editor appears in
+    // place and several textfields may exist. The focused editable control is
+    // the one that received the characters, and it has to be the only one: two
+    // controls claiming focus cannot say which one the characters belong to.
+    const focusedFields = locator.name ? [] : flatten(snapshot.tree).filter(({ node }) =>
+      node.ref && node.states.includes('focused') &&
+      /^(textfield|textbox|textarea|searchfield|combobox)$/.test(node.role));
+    if (focusedFields.length > 1) {
+      const names = focusedFields.map(({ node }) => describeControl(node)).join(', ');
+      return { via: 'ambiguous', reason: `${focusedFields.length} editable controls reported focus (${names})` };
+    }
+    const focused = focusedFields[0];
+    // A rename editor opens exactly where the file was clicked. When AX does
+    // not flag the focused field, the editable control nearest that point is
+    // the one the recorded characters landed in.
+    // The rename editor is the text field of the file that was clicked: its
+    // value still holds the old file name. That is stronger evidence than a
+    // distance guess.
+    const clickName = this.lastClickTarget?.name;
+    const byNameMatches = focused || locator.name || !clickName ? [] : flatten(snapshot.tree).filter(({ node }) =>
+      /^(textfield|textbox|textarea|searchfield|combobox)$/.test(node.role) &&
+      (node.value === clickName || node.name === clickName));
+    if (byNameMatches.length > 1) {
+      return {
+        via: 'ambiguous',
+        reason: `${byNameMatches.length} editable controls carry the clicked name "${clickName}"`,
+      };
+    }
+    const byName = byNameMatches[0];
+    /** The closest candidate, or a tie when two sit at the same distance. */
+    const closest = (candidates: { entry: Located; distance: number }[]): Located | 'tied' | undefined => {
+      if (!candidates.length) return undefined;
+      if (candidates.length > 1 && candidates[1].distance - candidates[0].distance < 0.5) return 'tied';
+      return candidates[0].entry;
+    };
+    const nearPick = focused || byName || locator.name || !this.lastClickPoint ? undefined : closest(
+      flatten(snapshot.tree).filter(({ node }) =>
+        node.ref && /^(textfield|textbox|textarea|searchfield|combobox)$/.test(node.role) && node.bounds)
+        .map(entry => {
+          const b = entry.node.bounds!;
+          const dx = b.x + b.width / 2 - this.lastClickPoint![0];
+          const dy = b.y + b.height / 2 - this.lastClickPoint![1];
+          return { entry, distance: Math.hypot(dx, dy) };
+        })
+        .filter(candidate => candidate.distance <= 120)
+        .sort((a, b) => a.distance - b.distance));
+    if (nearPick === 'tied') {
+      return { via: 'ambiguous', reason: 'two editable controls sat equally close to the last click' };
+    }
+    const near = nearPick;
+    // Finder's rename editor is not exposed as an editable element: AX shows
+    // only the focused cell. A focused editable control elsewhere in the
+    // window means the recorded characters belong there instead.
+    const hosts = focused || locator.name ? [] : flatten(snapshot.tree).filter(({ node }) =>
+      node.ref && node.states.includes('focused') && /^(cell|row|treeitem)$/.test(node.role));
+    if (hosts.length > 1) {
+      return { via: 'ambiguous', reason: `${hosts.length} rows or cells reported focus` };
+    }
+    const host = hosts[0];
+    // The editor is usually a nameless textfield where the file name was.
+    // Click it first: it has no AX focus of its own.
+    const renamePick = !this.lastClickPoint || locator.name ? undefined : closest(
+      flatten(snapshot.tree)
+        .filter(({ node }) => node.role === 'textfield' && node.ref && node.bounds)
+        .map(entry => {
+          const b = entry.node.bounds!;
+          const dx = b.x + b.width / 2 - this.lastClickPoint![0];
+          const dy = b.y + b.height / 2 - this.lastClickPoint![1];
+          return { entry, distance: Math.hypot(dx, dy) };
+        })
+        .filter(candidate => candidate.distance <= 120)
+        .sort((a, b) => a.distance - b.distance));
+    if (renamePick === 'tied') {
+      return { via: 'ambiguous', reason: 'two rename fields sat equally close to the last click' };
+    }
+    if (renamePick) {
+      return renamePick.node.secure
+        ? { via: 'refused', reason: `${describeControl(renamePick.node)} is a secure control; the run does not type into it` }
+        : { via: 'rename-field', node: renamePick.node };
+    }
+    if (host) {
+      return host.node.secure
+        ? { via: 'refused', reason: `${describeControl(host.node)} is a secure control; the run does not type into it` }
+        : { via: 'focused-host', node: host.node };
+    }
+    const direct = focused ?? byName ?? near;
+    if (direct) {
+      return direct.node.secure
+        ? { via: 'refused', reason: `${describeControl(direct.node)} is a secure control; the run does not type into it` }
+        : { via: 'reference', node: direct.node, clickFirst: Boolean(byName || near) };
+    }
+    const resolved = actionable(snapshot, addressable(locator));
+    if (!resolved.press) {
+      return {
+        via: 'refused',
+        reason: `${describeControl(resolved.node)} has no action reference to type into; ` +
+          'edit the step and pick the target again',
+      };
+    }
+    if (resolved.press.secure) {
+      return { via: 'refused', reason: `${describeControl(resolved.press)} is a secure control; the run does not type into it` };
+    }
+    return { via: 'reference', node: resolved.press, clickFirst: false };
+  }
+
+  /**
+   * The readiness wait can span a password prompt or a system dialog, so the
+   * gate that ran before it is re-checked before the first event is posted.
+   */
+  private async recheckInputGates(): Promise<void> {
+    await this.guardSecureInput();
+    if (await this.ctx.systemDialogVisible?.()) {
+      throw new Fault('SYSTEM_DIALOG_VISIBLE',
+        'A macOS system dialog appeared while the window was becoming ready; the run stops instead of typing into it');
+    }
   }
 
   /**
@@ -631,11 +1068,7 @@ class StepRunner {
           // menu belongs to the selected file row. The click that selected the
           // file is stronger evidence than the AX "selected" state, which the
           // list view does not always expose.
-          const target = step.target as ElementLocator;
-          const locator = step.button === 'right' && target.identifier === undefined
-            ? (this.lastClickTarget ?? rightClickTarget(snapshot!, step.button, target))
-            : target;
-          const resolved = actionable(snapshot!, addressable(locator));
+          const { locator, resolved } = this.clickTargetOf(step, snapshot!);
           const node = resolved.press ?? resolved.node;
           const options = {
             ...(step.count === undefined ? {} : { count: step.count as 1 | 2 | 3 }),
@@ -845,13 +1278,27 @@ class StepRunner {
     // the fault is raised before any input is delivered, so a retry cannot
     // double-click.
     let lastError: unknown;
+    // Only the first input after a window switch pays the readiness proof, and
+    // only on its first attempt: a NOT_FOUND retry is already acting on a
+    // proven window.
+    const gate = step !== undefined && readinessGated.has(step.kind) && this.pendingWindowSwitch;
+    if (gate) this.pendingWindowSwitch = false;
     for (let attempt = 0; attempt < 4; attempt += 1) {
-      const binding = await this.resolver.resolveWindow(
-        scope,
-        step ? candidates => this.pickSameTitled(candidates, step) : undefined,
-      );
-      await this.resolver.confirmForeground(binding);
-      const snapshot = await this.resolver.snapshot(binding);
+      let binding: WindowBinding;
+      let snapshot: Snapshot;
+      if (gate && attempt === 0) {
+        // The proof hands back the very snapshot the step dispatches from, so
+        // the target it accepted is the target that is pressed.
+        ({ binding, snapshot } = await this.awaitReadyWindow(step as ReadinessGatedStep));
+        await this.recheckInputGates();
+      } else {
+        binding = await this.resolver.resolveWindow(
+          scope,
+          step ? candidates => this.pickSameTitled(candidates, step) : undefined,
+        );
+        await this.resolver.confirmForeground(binding);
+        snapshot = await this.resolver.snapshot(binding);
+      }
       try {
         const outcome = await work(binding, snapshot);
         const notes: string[] = [];
@@ -987,6 +1434,7 @@ class StepRunner {
   private async pickSameTitled(
     candidates: WindowInfo[],
     step: StepV2,
+    { prove = false }: { prove?: boolean } = {},
   ): Promise<{ window: WindowInfo; reason: 'target' | 'focused' } | undefined> {
     const test = windowTest(step);
     if (!test) {
@@ -997,19 +1445,39 @@ class StepRunner {
     }
     const holders: WindowInfo[] = [];
     for (const candidate of candidates) {
-      const snapshot = await this.desktop.snapshotWindow(candidate.id).catch(() => undefined);
-      const result = snapshot && test(snapshot);
-      // A failed read or an ambiguous element keeps this window in contention.
+      let snapshot: Snapshot;
+      try {
+        snapshot = await this.desktop.snapshotWindow(candidate.id);
+      } catch (error) {
+        // A tree that cannot be read right now leaves the window in contention.
+        // A caller under its own deadline retries a transient read; anything
+        // else is the driver's own failure and keeps its code.
+        if (!prove) return undefined;
+        const fault = toFault(error);
+        if (!readinessTransientCodes.has(fault.code)) throw error;
+        throw fault;
+      }
+      const result = test(snapshot);
+      // An ambiguous element keeps this window in contention.
       if (result === undefined) return undefined;
       if (result) holders.push(candidate);
     }
-    if (holders.length === 1) return { window: holders[0], reason: 'target' };
-    if (holders.length > 1) {
-      // Several windows hold the target — the same folder open twice looks the
-      // same in both — so the operator's own window decides between them.
-      const focused = holders.filter(window => window.isFocused === true);
-      if (focused.length === 1) return { window: focused[0], reason: 'focused' };
+    if (holders.length === 0) {
+      // No candidate holds the target yet. A caller under its own deadline
+      // treats that as "not ready" and reads the windows again; a plain step
+      // keeps the ambiguity it would otherwise report.
+      if (!prove) return undefined;
+      throw new Fault('WINDOW_NOT_FOUND',
+        `None of the ${candidates.length} windows titled "${candidates[0]?.title ?? ''}" ` +
+        'holds the recorded target yet');
     }
+    if (holders.length === 1) return { window: holders[0], reason: 'target' };
+    // Several windows hold the target — the same folder open twice looks the
+    // same in both — so the operator's own window decides between them.
+    const focused = holders.filter(window => window.isFocused === true);
+    if (focused.length === 1) return { window: focused[0], reason: 'focused' };
+    // Genuinely ambiguous: more than one window holds the target and none is
+    // the operator's. Retrying cannot settle this, so it stays a refusal.
     return undefined;
   }
 
@@ -1094,114 +1562,47 @@ class StepRunner {
     if (text === undefined) {
       throw new Fault('INPUT_MISSING', `Input parameter ${String(input)} has no value for this run`);
     }
+    const outcome: StepOutcome = {
+      textMode: literal ? 'literal' : 'input',
+      ...(input === undefined ? {} : { input }),
+    };
     return this.windowStep(step.scope, async (_binding, snapshot) => {
-      const locator = step.target as ElementLocator;
-      // An identifier is an explicit identity: address that control directly.
-      // The heuristics below find an unnamed inline rename editor that the tree
-      // cannot address; they must never redirect a recorded identifier's text
-      // into whichever editable control happens to be focused.
-      if (locator.identifier !== undefined) {
-        const { node } = resolve(snapshot!, locator);
-        if (!node.ref || node.secure) throw new Fault('UNSAFE_TARGET', 'Type target is secure or has no action reference');
-        const delivery = await this.desktop.type(node.ref, text);
-        return {
-          ...(delivery === undefined ? {} : { delivery }),
-          textMode: literal ? 'literal' : 'input',
-          ...(input === undefined ? {} : { input }),
-        };
-      }
-      // Finder's inline rename editor is not in the accessibility tree. The
-      // Rename menu item opened it, but a semantic menu press leaves keyboard
-      // focus on the list. Clicking the name column makes the field editor the
-      // first responder; Cmd+A then replaces the whole name, so a recorded
-      // full file name is not appended to the old base name.
-      if (this.inlineRename && !locator.name) {
-        if (this.lastRowNamePoint) {
-          await this.desktop.clickScreen(this.lastRowNamePoint).catch(() => undefined);
+      const plan = this.typeDispatch(snapshot!, step);
+      switch (plan.via) {
+        case 'refused':
+          throw new Fault('UNSAFE_TARGET', plan.reason);
+        case 'ambiguous':
+          throw new Fault('AMBIGUOUS', plan.reason);
+        case 'inline-rename':
+          // The rename editor is the first responder; clicking the row's name
+          // column makes it so, and Cmd+A replaces the whole name.
+          if (this.lastRowNamePoint) {
+            await this.desktop.clickScreen(this.lastRowNamePoint).catch(() => undefined);
+            await sleep(150);
+          }
+          await this.desktop.typeFocused(text, step.scope.app, { selectAll: true });
+          this.inlineRename = false;
+          await sleep(250);
+          return outcome;
+        case 'focused-host':
+          await this.desktop.typeFocused(text, step.scope.app);
+          await sleep(250);
+          return outcome;
+        case 'rename-field':
+          // The editor has no AX focus of its own: click it first.
+          await this.desktop.click(plan.node.ref!).catch(() => undefined);
           await sleep(150);
+          await this.desktop.typeFocused(text, step.scope.app);
+          await sleep(250);
+          return outcome;
+        case 'reference': {
+          // A rename field that AX does not flag as focused still needs a click
+          // to take keyboard focus before the characters are typed into it.
+          if (plan.clickFirst) await this.desktop.click(plan.node.ref!).catch(() => undefined);
+          const delivery = await this.desktop.type(plan.node.ref!, text);
+          return delivery === undefined ? outcome : { ...outcome, delivery };
         }
-        await this.desktop.typeFocused(text, step.scope.app, { selectAll: true });
-        this.inlineRename = false;
-        await sleep(250);
-        return { textMode: literal ? 'literal' : 'input', ...(input === undefined ? {} : { input }) };
       }
-      // A recorded rename field has no name of its own: the editor appears in
-      // place and several textfields may exist. The focused editable control is
-      // the one that received the characters.
-      const focused = locator.name ? undefined : flatten(snapshot!.tree).find(({ node }) =>
-        node.ref && node.states.includes('focused') &&
-        /^(textfield|textbox|textarea|searchfield|combobox)$/.test(node.role));
-      // A rename editor opens exactly where the file was clicked. When AX does
-      // not flag the focused field, the editable control nearest that point is
-      // the one the recorded characters landed in.
-      // The rename editor is the text field of the file that was clicked: its
-      // value still holds the old file name. That is stronger evidence than a
-      // distance guess.
-      const clickName = this.lastClickTarget?.name;
-      const byName = focused || locator.name || !clickName ? undefined : flatten(snapshot!.tree).find(({ node }) =>
-        /^(textfield|textbox|textarea|searchfield|combobox)$/.test(node.role) &&
-        (node.value === clickName || node.name === clickName));
-      const near = focused || byName || locator.name || !this.lastClickPoint ? undefined : (() => {
-        const candidates = flatten(snapshot!.tree).filter(({ node }) =>
-          node.ref && /^(textfield|textbox|textarea|searchfield|combobox)$/.test(node.role) && node.bounds)
-          .map(entry => {
-            const b = entry.node.bounds!;
-            const dx = b.x + b.width / 2 - this.lastClickPoint![0];
-            const dy = b.y + b.height / 2 - this.lastClickPoint![1];
-            return { entry, distance: Math.hypot(dx, dy) };
-          })
-          .sort((a, b) => a.distance - b.distance);
-        return candidates[0] && candidates[0].distance <= 120 ? candidates[0].entry : undefined;
-      })();
-      // Finder's rename editor is not exposed as an editable element: AX shows
-      // only the focused cell. A focused editable control elsewhere in the
-      // window means the recorded characters belong there instead.
-      const host = focused || locator.name ? undefined : flatten(snapshot!.tree).find(({ node }) =>
-        node.ref && node.states.includes('focused') && /^(cell|row|treeitem)$/.test(node.role));
-      // The editor is usually a nameless textfield where the file name was.
-      // Click it first: it has no AX focus of its own.
-      const renameField = !this.lastClickPoint || locator.name ? undefined : flatten(snapshot!.tree)
-        .filter(({ node }) => node.role === 'textfield' && node.ref && node.bounds)
-        .map(entry => {
-          const b = entry.node.bounds!;
-          const dx = b.x + b.width / 2 - this.lastClickPoint![0];
-          const dy = b.y + b.height / 2 - this.lastClickPoint![1];
-          return { entry, distance: Math.hypot(dx, dy) };
-        })
-        .filter(candidate => candidate.distance <= 120)
-        .sort((a, b) => a.distance - b.distance)[0]?.entry;
-      if (renameField) {
-        await this.desktop.click(renameField.node.ref!).catch(() => undefined);
-        await sleep(150);
-        await this.desktop.typeFocused(text, step.scope.app);
-        await sleep(250);
-        return { textMode: literal ? 'literal' : 'input', ...(input === undefined ? {} : { input }) };
-      }
-      if (host) {
-        await this.desktop.typeFocused(text, step.scope.app);
-        await sleep(250);
-        return { textMode: literal ? 'literal' : 'input', ...(input === undefined ? {} : { input }) };
-      }
-      const direct = focused ?? byName ?? near;
-      let node = direct?.node;
-      if (!node) {
-        const resolved = actionable(snapshot!, addressable(locator));
-        if (!resolved.press) {
-          throw new Fault('UNSAFE_TARGET',
-            `${describeControl(resolved.node)} has no action reference to type into; ` +
-            'edit the step and pick the target again');
-        }
-        node = resolved.press;
-      }
-      // A rename field that AX does not flag as focused still needs a click to
-      // take keyboard focus before the characters are typed into it.
-      if (byName || near) await this.desktop.click(node.ref!).catch(() => undefined);
-      const delivery = await this.desktop.type(node.ref!, text);
-      return {
-        ...(delivery === undefined ? {} : { delivery }),
-        textMode: literal ? 'literal' : 'input',
-        ...(input === undefined ? {} : { input }),
-      };
     }, step);
   }
 
