@@ -120,7 +120,16 @@ export interface Desktop {
     windowId: string,
     title?: string,
     timeoutMs?: number,
-    options?: { forceElectronA11y?: boolean },
+    options?: {
+      forceElectronA11y?: boolean;
+      /**
+       * Ceiling for the driver process itself, when it differs from the
+       * observation budget plus the usual startup margin. A recorder that
+       * retries a slow read keeps the two attempts inside one bounded window
+       * this way.
+       */
+      commandTimeoutMs?: number;
+    },
   ): Promise<Snapshot>;
   /** Menu/menubar surfaces, which have no window of their own. */
   snapshotSurface(surface: 'menu' | 'menubar', timeoutMs?: number): Promise<Snapshot>;
@@ -470,7 +479,7 @@ export async function withDesktop<T>(
           // The recorder's helper holds Chromium's accessibility mode on for the
           // whole session, so the driver can skip its own activation guidance.
           ...(options.forceElectronA11y ? ['--force-electron-a11y'] : []),
-        ], undefined, timeoutMs + 3000);
+        ], undefined, options.commandTimeoutMs ?? timeoutMs + 3000);
         // A v2 scope follows its window by number, so a recorded title is only a
         // hint: an editor drops its unsaved dot and a Finder window follows its
         // folder, and neither changes which window this is. Identity is the
@@ -489,7 +498,7 @@ export async function withDesktop<T>(
           // recording can only report the code again.
           throw new Fault(error.code,
             `${error.message} (${describeWindow({ ...observed, id: observed.id || windowId }, title)})`,
-            error.dependency);
+            error.dependency, error.reason);
         }
       },
       clickSemantic(ref) {

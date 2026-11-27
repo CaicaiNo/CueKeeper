@@ -47,6 +47,11 @@ const captureBacklogMs = 8000;
  * event stream past it. The read a click schedules for the window it changed
  * is the one deliberate exception: it is the screen the next click in that
  * window is made against, and it runs off the event stream.
+ *
+ * `complete: false` inside this budget is the driver saying it ran out of
+ * observation time, which is not proof the tree is unusable (a window that is
+ * retitling or loading a folder rebuilds it), so `readWindow` retries such a
+ * read once, after the rebuild, before the step becomes a gap.
  */
 const snapshotTimeoutMs = 3000;
 /**
@@ -76,6 +81,33 @@ const gapOriginChars = 480;
 const defaultSnapshotTtlMs = 30_000;
 /** How many window trees may stay cached at once; the least recently used goes. */
 const defaultCachedWindows = 8;
+/**
+ * The driver's observation budget for one fallback tree read. A pointer event
+ * that carries no element of its own waits for this; it is deliberately short
+ * because the read blocks the event stream it serves.
+ */
+const defaultSnapshotBudgetMs = 2500;
+/**
+ * The budget one budget-exhausted read is retried with. `complete: false` means
+ * the driver ran out of its observation window, not that the tree is unusable: a
+ * window that is retitling, loading a folder or drawing a new page rebuilds its
+ * tree, and by the time the failed read returns that rebuild has usually
+ * finished, so the read usually succeeds immediately.
+ */
+const snapshotRetryBudgetMs = 2500;
+/**
+ * Both attempts together, from the first one's start, including the driver
+ * process margin. A fallback read must not hold the event stream past the 8 s
+ * text-backlog window, so the retry only gets what is left of this deadline and
+ * is skipped entirely when that is too little to be useful.
+ */
+const snapshotStepDeadlineMs = 4000;
+/**
+ * The driver process is given this much beyond its observation budget to start
+ * up and answer. Without a bound of its own, one read could occupy
+ * `budget + 3 s`, and a retried read nearly twice that — past the backlog line.
+ */
+const snapshotCommandMarginMs = 1200;
 /**
  * How long after a click the window is read again. A click that opens a sheet
  * or switches a page changes the screen before its own tree read can run, so
@@ -116,8 +148,12 @@ export interface WindowEvidence {
   windowTitle: string;
 }
 
-/** Reads one window's accessibility tree; a failure becomes a capture gap. */
-export type WindowReader = (window: WindowEvidence) => Promise<Snapshot>;
+/**
+ * Reads one window's accessibility tree; a failure becomes a capture gap. The
+ * second argument is the driver's observation budget, so a read that ran out of
+ * a short budget can be retried with a larger one before it becomes a gap.
+ */
+export type WindowReader = (window: WindowEvidence, budgetMs?: number) => Promise<Snapshot>;
 
 export interface GlobalRecordingOptions {
   /** Bundle IDs whose events are dropped before any content is read. */
@@ -129,6 +165,11 @@ export interface GlobalRecordingOptions {
   snapshotTtlMs?: number;
   /** How many window trees may be cached at once; defaults to 8. */
   maxCachedWindows?: number;
+  /**
+   * The driver's observation budget for one fallback window read; defaults to
+   * 2.5 s. Only a read whose answer was cut short by that budget is retried.
+   */
+  snapshotBudgetMs?: number;
   /**
    * Runs the tree read a click schedules for the window it changed. Tests
    * inject a queue so the read happens when they say; the default is a timer
@@ -474,6 +515,7 @@ export class GlobalRecording {
   private stepLimit: number;
   private snapshotTtlMs: number;
   private maxCachedWindows: number;
+  private snapshotBudgetMs: number;
   private scheduleSettle: (task: () => Promise<void>) => void;
   private ended = false;
   /** Window ids in least-recently-used order, so the cache stays bounded. */
@@ -499,6 +541,7 @@ export class GlobalRecording {
     this.stepLimit = options.stepLimit ?? defaultStepLimit;
     this.snapshotTtlMs = options.snapshotTtlMs ?? defaultSnapshotTtlMs;
     this.maxCachedWindows = options.maxCachedWindows ?? defaultCachedWindows;
+    this.snapshotBudgetMs = options.snapshotBudgetMs ?? defaultSnapshotBudgetMs;
     this.scheduleSettle = options.scheduleSettle ?? ((task) => {
       const timer = setTimeout(() => { void task(); }, settledTreeDelayMs);
       timer.unref?.();
@@ -1255,7 +1298,7 @@ export class GlobalRecording {
       // pages can make a walk take most of a second — while a read that began
       // after the click still describes what the click produced and is rejected.
       const at = this.now();
-      const reading = this.read(this.windowFor(binding)).catch(() => undefined);
+      const reading = this.read(this.windowFor(binding), this.snapshotBudgetMs).catch(() => undefined);
       const settledRead = reading.then(() => undefined, () => undefined);
       this.settling.set(binding.key, settledRead);
       const snapshot = await Promise.race([reading, abandoned]);
@@ -1523,6 +1566,10 @@ export class GlobalRecording {
     this.ensureScope(binding);
     const read = await this.snapshot(binding, {
       event, validate: tree => this.hit(tree, event.point) !== undefined,
+      // A hover changes nothing on screen, so a read that only ran out of budget
+      // may be retried: the point the pointer dwelled on is still the evidence
+      // this step needs, and the retry must still cover it.
+      retryIncomplete: tree => this.hit(tree, event.point) !== undefined,
     });
     if (!read) return;
     const snapshot = read.snapshot;
@@ -1890,6 +1937,9 @@ export class GlobalRecording {
     const read = await this.snapshot(binding, {
       gapOnFailure: false,
       validate: tree => this.uniqueFocused(tree) !== undefined,
+      // Reading focus does not change the screen, so a budget-exhausted read may
+      // be retried as long as it still proves one focused editable control.
+      retryIncomplete: tree => this.uniqueFocused(tree) !== undefined,
     });
     const snapshot = read?.snapshot;
     const pending = this.pendingText;
@@ -2273,12 +2323,21 @@ export class GlobalRecording {
    */
   private async snapshot(
     binding: WindowBinding,
-    { gapOnFailure = true, event, keep = true, validate }: {
+    { gapOnFailure = true, event, keep = true, retryIncomplete, validate }: {
       gapOnFailure?: boolean;
       /** The event whose points and title a cached tree must still cover. */
       event?: CaptureEvent;
       /** Whether a fresh read may be stored for later events. */
       keep?: boolean;
+      /**
+       * Accepts a retried read, and only for read-only evidence: the retry runs
+       * after the gesture, so a click, scroll or drag read at that point can
+       * already describe what the gesture produced. The caller must prove the
+       * retried tree still describes this gesture (the point it acted on is
+       * still covered by the same window). Without it a failed read stays a
+       * failed read.
+       */
+      retryIncomplete?: (snapshot: Snapshot) => boolean;
       validate?: (snapshot: Snapshot) => boolean;
     } = {},
   ): Promise<{ snapshot: Snapshot; reused: boolean } | undefined> {
@@ -2289,11 +2348,12 @@ export class GlobalRecording {
       return { snapshot: cached, reused: true };
     }
     if (cached) this.dropTree(binding);
-    let snapshot: Snapshot;
-    this.snapshotReads += 1;
-    try {
-      snapshot = await this.read(this.windowFor(binding));
-    } catch (error) {
+    const read = await this.readWindow(binding, retryIncomplete);
+    // The retried read may have found the window gone even though the first
+    // attempt only ran out of budget: nothing may reuse a replaced window's tree.
+    if (read.replaced) this.dropTree(binding);
+    if (!read.snapshot) {
+      const error = read.error;
       const code = error instanceof Fault ? error.code : undefined;
       // A window that is gone or was replaced cannot be the window the running
       // flow acts on: apps that hide a window when they lose focus hand it a new
@@ -2315,9 +2375,58 @@ export class GlobalRecording {
       }
       return undefined;
     }
+    const snapshot = read.snapshot;
     if (keep) this.cacheTree(binding, snapshot);
     else this.dropTree(binding);
     return { snapshot, reused: false };
+  }
+
+  /**
+   * One fresh read of the bound window, with the retry a slow tree needs.
+   *
+   * `complete: false` from a by-ID read (a `budget` reason) means the driver
+   * spent its observation window before it finished walking the tree: the window
+   * is retitling, loading a folder or drawing a new page, and the tree it is
+   * rebuilding is exactly the one this event needs. By the time that answer
+   * arrives the rebuild has usually finished, so a read-only caller may ask for
+   * one retry — and only accepts it when its own predicate proves the tree still
+   * describes the gesture.
+   *
+   * A failure is never downgraded by the retry: when the second read fails too,
+   * the *first* error is reported, so a step that deserved a gap keeps it (a
+   * window that turns out to be gone does not turn the unreadable read into a
+   * silent skip). `truncated` and `identity_unproven` are about the tree itself
+   * and are never retried.
+   */
+  private async readWindow(
+    binding: WindowBinding, acceptRetry?: (snapshot: Snapshot) => boolean,
+  ): Promise<{ snapshot?: Snapshot; error?: unknown; replaced?: boolean }> {
+    const window = this.windowFor(binding);
+    const startedAt = this.now();
+    this.snapshotReads += 1;
+    try {
+      return { snapshot: await this.read(window, this.snapshotBudgetMs) };
+    } catch (error) {
+      if (!acceptRetry || !(error instanceof Fault) || error.code !== 'INCOMPLETE_TREE' ||
+          error.reason !== 'budget') {
+        return { error };
+      }
+      // Both attempts share one deadline, so a slow driver cannot hold the event
+      // stream past the backlog window; too little time left means no retry.
+      const budget = Math.min(snapshotRetryBudgetMs, snapshotStepDeadlineMs - (this.now() - startedAt));
+      if (budget < 500) return { error };
+      this.snapshotReads += 1;
+      try {
+        const snapshot = await this.read(window, budget);
+        if (!acceptRetry(snapshot)) return { error };
+        this.warn('SNAPSHOT_SLOW_READ',
+          `An accessibility read ran out of its ${this.snapshotBudgetMs} ms budget; the retry read the tree again and the step kept its evidence`);
+        return { snapshot };
+      } catch (retryError) {
+        const code = retryError instanceof Fault ? retryError.code : undefined;
+        return { error, replaced: code === 'WINDOW_NOT_FOUND' || code === 'WINDOW_CHANGED' };
+      }
+    }
   }
 
   /**
@@ -2430,6 +2539,9 @@ export class GlobalRecording {
     } else if (event.detail === 'event_lag') {
       this.warn('STALE_CAPTURE_EVENT_LAG',
         'The helper fell behind the event stream; the capture gap stays because a late event cannot be tied to the focus it was typed into');
+    } else if (event.detail === 'text_unverifiable') {
+      this.warn('STALE_CAPTURE_TEXT_UNVERIFIABLE',
+        'The focused control could not be read, so the keystrokes were not recorded: text whose control cannot be proven non-secure never leaves the helper, and the gap stays');
     }
   }
 
@@ -2754,9 +2866,16 @@ export async function recordGlobal(
   let sessionTimeout: NodeJS.Timeout | undefined;
 
   const recording = new GlobalRecording(
-    window => desktop.snapshotWindow(
-      `w-${window.windowNumber}`, window.windowTitle, snapshotTimeoutMs, { forceElectronA11y: true },
-    ),
+    (window, budgetMs) => {
+      const budget = Math.max(1, Math.round(budgetMs ?? snapshotTimeoutMs));
+      // The driver process gets a bounded margin over the observation budget, so
+      // a fallback read (and its one retry) stays inside one short window instead
+      // of the driver's own generous startup allowance.
+      return desktop.snapshotWindow(`w-${window.windowNumber}`, window.windowTitle, budget, {
+        forceElectronA11y: true,
+        commandTimeoutMs: budget + snapshotCommandMarginMs,
+      });
+    },
     { exclude },
   );
   // Every Electron app/window is classified once, when the recording first
@@ -2859,7 +2978,14 @@ export async function recordGlobal(
         continue;
       }
       if (data.kind === 'warning') {
-        recording.warn(captureCode(data.code), `Some input may have been skipped: ${captureCode(data.code)}`);
+        const code = captureCode(data.code);
+        // A warning that carries the helper's own bounded reason says what it
+        // was about (`TAP_INTERRUPTED: timeout: previous callback 640 ms in
+        // pointer`); one without keeps the message it always had.
+        const detail = typeof data.detail === 'string' && /^[ -~]{1,240}$/.test(data.detail)
+          ? `${code}: ${data.detail}`
+          : `Some input may have been skipped: ${code}`;
+        recording.warn(code, detail);
         continue;
       }
       if (data.kind === 'boundary') {

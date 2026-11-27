@@ -36,7 +36,14 @@ export interface Located {
 }
 
 export class Fault extends Error {
-  constructor(public code: string, message: string, public dependency = false) {
+  /**
+   * A bounded qualification of `code` when one code covers several causes.
+   * `INCOMPLETE_TREE` carries the one that matters to callers: `budget` means
+   * the driver ran out of its observation window (a slow read), while
+   * `truncated`, `identity_unproven` and `subtree` mean the answer really does
+   * not describe the whole tree. Only `budget` may be retried.
+   */
+  constructor(public code: string, message: string, public dependency = false, public reason?: string) {
     super(message);
   }
 }
@@ -76,7 +83,7 @@ function parseNode(input: unknown, depth: number): Node {
   if (node.subtree_truncated === true || node.identity_unproven === true || depth > 50 ||
       (typeof node.children_count === 'number' && node.children_count >
         (Array.isArray(node.children) ? node.children.length : 0))) {
-    throw new Fault('INCOMPLETE_TREE', 'Window snapshot contains an incomplete subtree');
+    throw new Fault('INCOMPLETE_TREE', 'Window snapshot contains an incomplete subtree', false, 'subtree');
   }
   if (typeof node.role !== 'string' || !node.role ||
       (node.children !== undefined && !Array.isArray(node.children))) {
@@ -103,8 +110,18 @@ function parseNode(input: unknown, depth: number): Node {
 }
 
 export function parseSnapshot(data: unknown, target: Target): Snapshot {  const input = object(data);
-  if (input.complete !== true || input.truncated === true || Boolean(input.identity_unproven)) {
-    throw new Fault('INCOMPLETE_TREE', 'Window snapshot is incomplete');
+  // Three different facts answer `false` here, and only the first is about the
+  // read rather than the tree: `complete` is false when the driver's observation
+  // window ended before the walk did, `truncated` when the answer itself was cut,
+  // and `identity_unproven` when the driver could not prove its refs unique.
+  if (input.complete !== true) {
+    throw new Fault('INCOMPLETE_TREE', 'Window snapshot is incomplete', false, 'budget');
+  }
+  if (input.truncated === true) {
+    throw new Fault('INCOMPLETE_TREE', 'Window snapshot is incomplete', false, 'truncated');
+  }
+  if (Boolean(input.identity_unproven)) {
+    throw new Fault('INCOMPLETE_TREE', 'Window snapshot is incomplete', false, 'identity_unproven');
   }
   const window = object(input.window);
   if (window.title !== target.window) {
