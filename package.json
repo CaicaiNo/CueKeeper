@@ -22,6 +22,7 @@
     "test:clock": "sh scripts/test-recording-clock.sh",
     "test:focus": "sh scripts/test-recording-focus.sh",
     "test:label": "sh scripts/test-recording-label.sh",
+    "test:layout": "sh scripts/test-recording-layout.sh",
     "build:recorder": "sh scripts/build-recorder.sh",
     "package": "node scripts/package.mjs",
     "quickstart": "sh scripts/quickstart.sh"
