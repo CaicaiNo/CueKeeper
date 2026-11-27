@@ -3030,8 +3030,8 @@ test('HAOC-219: when no same-title window holds the target the error names each 
   const failed = entry(report, 'press');
   assert.equal(failed.code, 'TARGET_NOT_READY');
   assert.match(failed.message, /2 same-title windows read/);
-  assert.match(failed.message, /w-21 "QA Notes" no button "Continue"/);
-  assert.match(failed.message, /w-22 "QA Notes" no button "Continue"/);
+  assert.match(failed.message, /w-21 "QA Notes" \(\d+ reads?\): no button "Continue"/);
+  assert.match(failed.message, /w-22 "QA Notes" \(\d+ reads?\): no button "Continue"/);
   assert.match(failed.message, /0 reads of the bound window/);
   assert.doesNotMatch(failed.message, /the window has not been read yet/,
     'the proof says which windows it read instead of reporting that nothing was read');
@@ -3057,9 +3057,9 @@ test('HAOC-219: an unreadable same-title candidate is named in the diagnostic', 
   assert.equal(report.status, 'failed');
   const failed = entry(report, 'press');
   assert.equal(failed.code, 'TARGET_NOT_READY');
-  assert.match(failed.message, /w-22 "QA Notes" read failed \(INCOMPLETE_TREE\)/,
+  assert.match(failed.message, /w-22 "QA Notes" \(\d+ reads?\): read failed \(INCOMPLETE_TREE\)/,
     'the window that could not be read is reported with its own code');
-  assert.match(failed.message, /w-21 "QA Notes" no button "Continue"/);
+  assert.match(failed.message, /w-21 "QA Notes" \(\d+ reads?\): no button "Continue"/);
   assert.deepEqual(callsOf(world, 'click'), [], 'an unreadable window is never guessed at');
 });
 
@@ -3081,8 +3081,112 @@ test('HAOC-219: two same-title windows that both hold the target are refused, na
   const failed = entry(report, 'press');
   assert.equal(failed.code, 'AMBIGUOUS_TARGET');
   assert.match(failed.message, /3 same-title windows read/);
-  assert.match(failed.message, /w-21 "QA Notes" held button "Continue"/);
-  assert.match(failed.message, /w-22 "QA Notes" held button "Continue"/);
-  assert.match(failed.message, /w-23 "QA Notes" no button "Continue"/);
+  assert.match(failed.message, /w-21 "QA Notes" \(\d+ reads?\): held button "Continue"/);
+  assert.match(failed.message, /w-22 "QA Notes" \(\d+ reads?\): held button "Continue"/);
+  assert.match(failed.message, /w-23 "QA Notes" \(\d+ reads?\): no button "Continue"/);
   assert.deepEqual(callsOf(world, 'click'), [], 'neither identical window is guessed at');
+});
+
+// HAOC-222 review: the two phases must hold their own monotonic deadline even
+// when a driver call blocks the event loop so its timer cannot run, in-flight
+// reads must be named, and the two ambiguity reasons must not be confused.
+
+test('HAOC-222 review: a candidate that answers after the selection deadline is refused before any focus', async t => {
+  // The twin is read slowly and does not hold the target; w-22 blocks the whole
+  // event loop for 3100 ms and then answers that it holds the control. The
+  // proof's own timer cannot run inside the block, so only a deadline check on
+  // the evidence itself can keep the late answer out.
+  const twin = withoutContinue(
+    windowRecord({ id: 'w-21', app: textedit, pid: 601, title: 'QA Notes', fields: [['notes', '@w21:e1']] }),
+  );
+  const holder = windowRecord({ id: 'w-22', app: textedit, pid: 601, title: 'QA Notes', fields: [['draft', '@w22:e1']] });
+  const { world, run } = harness(t, { windows: [holder, twin], focused: 'w-22' });
+  const real = world.desktop.snapshotWindow.bind(world.desktop);
+  let blocked = false;
+  world.desktop.snapshotWindow = async id => {
+    if (id === 'w-22' && !blocked) {
+      blocked = true;
+      const until = performance.now() + 3100;
+      while (performance.now() < until) { /* hold the loop so the proof's timer cannot fire */ }
+    }
+    return real(id);
+  };
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'failed');
+  const failed = entry(report, 'press');
+  assert.equal(failed.code, 'TARGET_NOT_READY');
+  assert.match(failed.message, /while its window was being chosen/);
+  assert.deepEqual(callsOf(world, 'focusWindow'), [],
+    'a window choice that landed after its deadline is not brought forward');
+  assert.deepEqual(callsOf(world, 'click'), [], 'no late evidence becomes input');
+});
+
+test('HAOC-222 review: a candidate read that never answers is named and stops further reads', async t => {
+  const hanging = withoutContinue(
+    windowRecord({ id: 'w-21', app: textedit, pid: 601, title: 'QA Notes', fields: [['notes', '@w21:e1']] }),
+  );
+  const twin = windowRecord({ id: 'w-22', app: textedit, pid: 601, title: 'QA Notes', fields: [['draft', '@w22:e1']] });
+  const { world, run } = harness(t, { windows: [hanging, twin], focused: 'w-22' });
+  const real = world.desktop.snapshotWindow.bind(world.desktop);
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  world.desktop.snapshotWindow = async id => {
+    if (id === 'w-21') {
+      await held;
+    }
+    return real(id);
+  };
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'failed');
+  const failed = entry(report, 'press');
+  assert.equal(failed.code, 'TARGET_NOT_READY');
+  assert.match(failed.message, /w-21 "QA Notes" \(1 read\): the read had not answered/,
+    'the window whose read never answered is named, with its attempt count');
+  assert.doesNotMatch(failed.message, /the window has not been read yet/);
+  assert.deepEqual(callsOf(world, 'click'), []);
+  assert.deepEqual(callsOf(world, 'focusWindow'), []);
+
+  // The released read must not become the reason to start the next candidate.
+  const readsOf = () => callsOf(world, 'snapshotWindow').map(call => call[1]);
+  assert.deepEqual(readsOf(), [], 'the hanging read is not even recorded as an answered read');
+  release();
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.ok(!readsOf().includes('w-22'),
+    'after the deadline no further candidate read is started');
+});
+
+test('HAOC-222 review: one holder plus one ambiguous window is reported as ambiguity, not as several holders', async t => {
+  // w-21 addresses the control exactly once; w-22 has two controls under the
+  // recorded name; w-23 lacks it. The recorded window could be the ambiguous one,
+  // so the choice is refused — and the message must say why, not claim two
+  // windows hold the control.
+  const holder = windowRecord({ id: 'w-21', app: textedit, pid: 601, title: 'QA Notes', fields: [['notes', '@w21:e1']] });
+  const ambiguous = windowRecord({ id: 'w-22', app: textedit, pid: 601, title: 'QA Notes', fields: [['draft', '@w22:e1']] });
+  ambiguous.data.tree.children = [
+    ...ambiguous.data.tree.children.filter(child => child.role !== 'button'),
+    { role: 'button', name: 'Continue', ref_id: '@w22:e8', states: [], bounds: { x: 120, y: 480, width: 120, height: 32 } },
+    { role: 'button', name: 'Continue', ref_id: '@w22:e9', states: [], bounds: { x: 260, y: 480, width: 120, height: 32 } },
+  ];
+  const bare = withoutContinue(
+    windowRecord({ id: 'w-23', app: textedit, pid: 601, title: 'QA Notes', fields: [['scratch', '@w23:e1']] }),
+  );
+  const { world, run } = harness(t, { windows: [holder, ambiguous, bare], focused: 'w-21' });
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'blocked');
+  const failed = entry(report, 'press');
+  assert.equal(failed.code, 'AMBIGUOUS_TARGET');
+  assert.match(failed.message, /w-22 "QA Notes" cannot prove button "Continue"/,
+    'the window whose own tree is ambiguous is named as such');
+  assert.doesNotMatch(failed.message, /More than one window titled "QA Notes" holds/,
+    'a single holder plus an ambiguous sibling is not "several windows hold it"');
+  assert.match(failed.message, /w-21 "QA Notes" \(\d+ reads?\): held button "Continue"/);
+  assert.match(failed.message, /w-23 "QA Notes" \(\d+ reads?\): no button "Continue"/,
+    'the window after the ambiguous one is still read, so the message is complete');
+  assert.deepEqual(callsOf(world, 'click'), [], 'an ambiguous choice sends no input');
 });

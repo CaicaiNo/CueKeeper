@@ -301,16 +301,62 @@ interface ReadinessRead {
 interface SameTitleRead {
   windowId: string;
   title: string;
-  /** Whether this window held the step's target, lacked it, or could not be read. */
-  outcome: 'holds' | 'missing' | 'ambiguous' | 'error';
+  /** Reads started for this window, including a read that never answered. */
+  attempts: number;
+  /** Latest state; `reading` means the last read had not answered when it ended. */
+  outcome: 'reading' | 'holds' | 'missing' | 'ambiguous' | 'error';
   /** The target description, or the driver error code for an unreadable window. */
   detail: string;
 }
 
+/** One candidate read starting or finishing, reported as it happens. */
+type SameTitleReadEvent =
+  | { phase: 'start'; windowId: string; title: string }
+  | {
+    phase: 'done';
+    windowId: string;
+    title: string;
+    outcome: 'holds' | 'missing' | 'ambiguous' | 'error';
+    detail: string;
+  };
+
+/**
+ * Folds a read event into the per-window list a proof reports from. A start is
+ * recorded before the driver is asked, so a read that never answers is still
+ * named, with the number of attempts made.
+ */
+function noteSameTitleRead(reads: SameTitleRead[], event: SameTitleReadEvent): void {
+  let read = reads.find(candidate => candidate.windowId === event.windowId);
+  if (read === undefined) {
+    read = {
+      windowId: event.windowId,
+      title: event.title,
+      attempts: 0,
+      outcome: 'reading',
+      detail: 'the read has not answered',
+    };
+    reads.push(read);
+  }
+  if (event.phase === 'start') {
+    read.attempts += 1;
+    read.outcome = 'reading';
+    read.detail = 'the read has not answered';
+    return;
+  }
+  read.outcome = event.outcome;
+  read.detail = event.detail;
+}
+
+/** `w-22 "下载"`, the way a fault message names one candidate. */
+function windowLabel(read: { windowId: string; title: string }): string {
+  return `${read.windowId} "${read.title}"`;
+}
+
 /**
  * What the gate learned from the same-titled windows it read. A proof that ran
- * out says which windows were tried and what each of them lacked, so a target
- * that is really there is never reported as a bare "0 reads".
+ * out says which windows were tried, how many reads each took, and what each of
+ * them lacked, so a target that is really there is never reported as a bare
+ * "0 reads".
  */
 function describeSameTitleReads(reads: SameTitleRead[]): string {
   if (!reads.length) return '';
@@ -318,8 +364,9 @@ function describeSameTitleReads(reads: SameTitleRead[]): string {
     const what = read.outcome === 'holds' ? `held ${read.detail}` :
       read.outcome === 'missing' ? `no ${read.detail}` :
       read.outcome === 'ambiguous' ? `${read.detail} was ambiguous in it` :
+      read.outcome === 'reading' ? 'the read had not answered' :
       `read failed (${read.detail})`;
-    return `${read.windowId} "${read.title}" ${what}`;
+    return `${windowLabel(read)} (${read.attempts} read${read.attempts === 1 ? '' : 's'}): ${what}`;
   });
   return `${reads.length} same-title window${reads.length === 1 ? '' : 's'} read ` +
     `(${parts.join('; ')})`;
@@ -649,37 +696,60 @@ class StepRunner {
    * dispatch from. Each read proves the target the step itself will act on, with
    * the step's own selection rules: the same enabled control in the same place,
    * on the same window of the same process instance. Only a read-only resolve is
-   * used — preparing a window is the step's own business — and one monotonic
-   * deadline ends window selection, focus, identity checks and snapshot reads,
-   * including a driver call that never answers: a result that lands after it is
-   * refused instead of used, and nothing is dispatched.
+   * used — preparing a window is the step's own business.
+   *
+   * The proof runs in two bounded phases: choosing the window (which may read
+   * every same-titled candidate's tree) and proving the chosen target stable.
+   * Each phase has its own monotonic deadline and cancellation, and evidence
+   * that lands at or past a phase's deadline is refused before it is adopted,
+   * before the budget switches, and before any focus or delivery — including a
+   * driver call that never answers or that blocks the event loop past the
+   * deadline. Nothing is dispatched on late evidence.
    */
   private async awaitReadyWindow(step: ReadinessGatedStep): Promise<{ binding: WindowBinding; snapshot: Snapshot }> {
     // The same same-title disambiguation the step itself will use: the gate must
     // not turn a window the flow can prove into an ambiguity, and a window that
     // does not hold the target yet is "not ready", not ambiguous. Choosing reads
     // each candidate's tree before the bound window is known; those reads are
-    // kept so a proof that runs out can name every window it tried and what each
-    // one lacked.
+    // kept so a proof that runs out can name every window it tried, how many
+    // reads it took, and what each one lacked.
     const candidates: SameTitleRead[] = [];
+    /** Cancelled when the current phase ends; a read that starts after it is refused. */
+    const cancel = new AbortController();
     const pick = async (windows: WindowInfo[]) => {
+      // This round's own evidence decides why nothing was chosen. Folding every
+      // round into one accumulator would let a stale "holds" from an earlier
+      // round be mistaken for a second window holding the target now.
+      const round: SameTitleRead[] = [];
       const chosen = await this.pickSameTitled(windows, step, {
         prove: true,
-        onRead: read => {
-          const seen = candidates.findIndex(candidate => candidate.windowId === read.windowId);
-          if (seen === -1) candidates.push(read);
-          else candidates[seen] = read;
+        signal: cancel.signal,
+        onRead: event => {
+          noteSameTitleRead(round, event);
+          noteSameTitleRead(candidates, event);
         },
       });
-      // Several windows can hold the same target (one folder open twice) while
-      // none of them is the operator's. Nothing tells them apart, so the proof
-      // refuses; the message names what each window had rather than a count.
-      if (chosen === undefined && candidates.some(read => read.outcome === 'holds')) {
+      if (chosen !== undefined) return chosen;
+      const ambiguous = round.filter(read => read.outcome === 'ambiguous');
+      if (ambiguous.length) {
+        // A tree full of matching controls cannot say whether this is the
+        // recorded window, so neither it nor a twin that holds the target can be
+        // chosen. The message keeps the two reasons apart.
+        throw new Fault('AMBIGUOUS_TARGET',
+          `${ambiguous.length === 1 ? windowLabel(ambiguous[0]) : `${ambiguous.length} windows`} ` +
+          `cannot prove ${describeTargetOf(step)}; ` +
+          `${describeSameTitleReads(round)}; no window was focused and no input was delivered`);
+      }
+      const holders = round.filter(read => read.outcome === 'holds');
+      if (holders.length > 1) {
+        // One folder open twice: several windows hold the same target and none
+        // of them is the operator's. Nothing tells them apart, so the proof
+        // refuses with zero input.
         throw new Fault('AMBIGUOUS_TARGET',
           `More than one window titled "${windows[0]?.title ?? ''}" holds ${describeTargetOf(step)}: ` +
-          `${describeSameTitleReads(candidates)}; no window was focused and no input was delivered`);
+          `${describeSameTitleReads(round)}; no window was focused and no input was delivered`);
       }
-      return chosen;
+      return undefined;
     };
     // One monotonic deadline per phase. Selecting the window reads candidate
     // trees and gets its own, longer bound; the stability proof keeps the short
@@ -689,13 +759,14 @@ class StepRunner {
     let selecting = true;
     let deadline = performance.now() + readinessSelectionTimeoutMs;
     const remaining = () => deadline - performance.now();
+    const unreadProblem = 'the window has not been read yet';
     const fail = (problem: string, reads: number): Fault => new Fault('TARGET_NOT_READY',
       `${describeTarget(step)} was not ready ` +
       `${selecting ? readinessSelectionTimeoutMs : readinessProofTimeoutMs} ms ` +
       `${selecting ? 'while its window was being chosen' : 'after the window was brought forward'}: ` +
-      `${problem} (${reads} read${reads === 1 ? '' : 's'} of the bound window` +
+      `${problem === unreadProblem && candidates.length ? 'the window choice did not settle before its deadline' : problem} ` +
+      `(${reads} read${reads === 1 ? '' : 's'} of the bound window` +
       `${candidates.length ? `; ${describeSameTitleReads(candidates)}` : ''}); no input was delivered`);
-    const cancel = new AbortController();
     let cutoff: ReturnType<typeof setTimeout> | undefined;
     const arm = () => {
       if (cutoff !== undefined) clearTimeout(cutoff);
@@ -705,8 +776,18 @@ class StepRunner {
     };
     arm();
     let previous: string | undefined;
-    let problem = 'the window has not been read yet';
+    let problem = unreadProblem;
     let reads = 0;
+    /**
+     * Evidence that landed at or past its phase's deadline, or after the proof
+     * was cancelled, is not evidence. Checked before a result is adopted, before
+     * the budget switches to the next phase, and before any focus or delivery:
+     * a driver call that blocks the event loop past the deadline must not buy a
+     * fresh budget just because its own timer could not run.
+     */
+    const live = (why: string) => {
+      if (cancel.signal.aborted || remaining() <= 0) throw fail(why, reads);
+    };
     // The window is resolved and brought forward once; every later read reuses
     // that binding and only the read itself re-proves the owner. A read that
     // says the window moved, closed or was recreated resolves it again.
@@ -714,12 +795,16 @@ class StepRunner {
     try {
       for (;;) {
         this.signal.throwIfAborted();
+        live(problem);
         let snapshot: Snapshot | undefined;
         let read: ReadinessRead | undefined;
         try {
           if (binding === undefined) {
             binding = await this.withinDeadline(
               this.resolver.resolveWindow(step.scope, pick, { repair: false }), deadline, () => fail(problem, reads));
+            // A choice that only landed after its deadline is refused here,
+            // before the stability budget starts and before focus is asked for.
+            live(problem);
             if (selecting) {
               // The window is chosen; the target's stability is what the short
               // proof now judges, so its budget starts here rather than having
@@ -728,8 +813,10 @@ class StepRunner {
               deadline = performance.now() + readinessProofTimeoutMs;
               arm();
             }
+            live(problem);
             await this.withinDeadline(
               this.resolver.confirmForeground(binding, cancel.signal), deadline, () => fail(problem, reads));
+            live(problem);
           }
           snapshot = await this.withinDeadline(
             this.resolver.snapshot(binding!), deadline, () => fail(problem, reads));
@@ -744,8 +831,8 @@ class StepRunner {
           problem = `${fault.code}: ${fault.message}`;
           binding = undefined;
         }
-        // A read or a selection that outlived the deadline is not evidence.
-        if (remaining() <= 0) throw fail(read?.problem ?? problem, reads);
+        // A read that outlived the deadline is not evidence.
+        live(read?.problem ?? problem);
         if (read?.refuse) return { binding: binding!, snapshot: snapshot! };
         if (read?.signature !== undefined && read.signature === previous) {
           // The windows were read over a moment in which the operator can take
@@ -754,6 +841,7 @@ class StepRunner {
           // input, and the check itself stays inside the proof's budget.
           await this.withinDeadline(
             this.resolver.confirmForeground(binding!, cancel.signal), deadline, () => fail(problem, reads));
+          live(read.problem);
           return { binding: binding!, snapshot: snapshot! };
         }
         previous = read?.signature;
@@ -763,7 +851,7 @@ class StepRunner {
     } finally {
       if (cutoff !== undefined) clearTimeout(cutoff);
       // Whatever ended the proof, a read that lands afterwards must not start
-      // the focus command it was waiting for.
+      // the focus command it was waiting for, nor another candidate read.
       if (!cancel.signal.aborted) {
         cancel.abort(new Fault('TARGET_NOT_READY', 'The readiness proof ended before the window could be focused'));
       }
@@ -1534,7 +1622,12 @@ class StepRunner {
   private async pickSameTitled(
     candidates: WindowInfo[],
     step: StepV2,
-    { prove = false, onRead }: { prove?: boolean; onRead?: (read: SameTitleRead) => void } = {},
+    { prove = false, signal, onRead }: {
+      prove?: boolean;
+      /** Cancelled when the proof's phase ends; no further read starts after it. */
+      signal?: AbortSignal;
+      onRead?: (event: SameTitleReadEvent) => void;
+    } = {},
   ): Promise<{ window: WindowInfo; reason: 'target' | 'focused' } | undefined> {
     const test = windowTest(step);
     const target = describeTargetOf(step);
@@ -1545,7 +1638,14 @@ class StepRunner {
       return focused.length === 1 ? { window: focused[0], reason: 'focused' } : undefined;
     }
     const holders: WindowInfo[] = [];
+    const ambiguous: WindowInfo[] = [];
     for (const candidate of candidates) {
+      // A proof whose phase ended starts no further read: that driver call would
+      // be exactly the late evidence the phase deadline exists to refuse.
+      signal?.throwIfAborted();
+      // Registered before the driver is asked, so a read that never answers is
+      // still named in the timeout report, with its attempt count.
+      onRead?.({ phase: 'start', windowId: candidate.id, title: candidate.title });
       let snapshot: Snapshot;
       try {
         snapshot = await this.desktop.snapshotWindow(candidate.id);
@@ -1555,24 +1655,37 @@ class StepRunner {
         // else is the driver's own failure and keeps its code.
         if (!prove) return undefined;
         const fault = toFault(error);
-        onRead?.({ windowId: candidate.id, title: candidate.title, outcome: 'error', detail: fault.code });
+        onRead?.({
+          phase: 'done', windowId: candidate.id, title: candidate.title,
+          outcome: 'error', detail: fault.code,
+        });
         if (!readinessTransientCodes.has(fault.code)) throw error;
         throw fault;
       }
       const result = test(snapshot);
-      // An ambiguous element keeps this window in contention.
       if (result === undefined) {
-        onRead?.({ windowId: candidate.id, title: candidate.title, outcome: 'ambiguous', detail: target });
-        return undefined;
+        // This window's tree cannot rule the recorded target in or out, so the
+        // window stays in contention. A plain step keeps that ambiguity; the
+        // readiness gate reads the rest of the candidates and reports which
+        // window was ambiguous, instead of calling the choice ambiguous because
+        // a twin held the target.
+        onRead?.({
+          phase: 'done', windowId: candidate.id, title: candidate.title,
+          outcome: 'ambiguous', detail: target,
+        });
+        if (!prove) return undefined;
+        ambiguous.push(candidate);
+        continue;
       }
       onRead?.({
-        windowId: candidate.id,
-        title: candidate.title,
-        outcome: result ? 'holds' : 'missing',
-        detail: target,
+        phase: 'done', windowId: candidate.id, title: candidate.title,
+        outcome: result ? 'holds' : 'missing', detail: target,
       });
       if (result) holders.push(candidate);
     }
+    // A window the tree could not rule out may be the recorded one, so no
+    // candidate is chosen while one of them is ambiguous.
+    if (ambiguous.length) return undefined;
     if (holders.length === 0) {
       // No candidate holds the target yet. A caller under its own deadline
       // treats that as "not ready" and reads the windows again; a plain step
