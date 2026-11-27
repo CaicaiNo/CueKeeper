@@ -29,8 +29,13 @@ const multilineTarget = {
 };
 // Two toolbar "保存" controls next to a sidebar one: the recorded index 1 only
 // means the toolbar second while the recorded path still narrows the match.
+// The same window holds a named + two unnamed toolbar buttons (the empty name
+// is itself a constraint), and sibling 关闭/取消 controls for name edits.
 const dupTarget = {
   kind: 'element', role: 'button', name: '保存', path: ['window', 'toolbar', 'button'], index: 1,
+};
+const unnamedTarget = {
+  kind: 'element', role: 'button', name: '', path: ['window', 'toolbar', 'button'], index: 1,
 };
 const dupSnapshot = parseSnapshot({
   complete: true,
@@ -38,12 +43,22 @@ const dupSnapshot = parseSnapshot({
   tree: {
     role: 'window', name: 'Cuekeeper 画布',
     children: [
-      { role: 'group', children: [{ role: 'button', name: '保存', ref_id: '@fake:e1' }] },
+      {
+        role: 'group',
+        children: [
+          { role: 'button', name: '保存', ref_id: '@fake:e1' },
+          { role: 'button', name: '关闭', ref_id: '@fake:e4' },
+          { role: 'button', name: '取消', ref_id: '@fake:e6' },
+        ],
+      },
       {
         role: 'toolbar',
         children: [
           { role: 'button', name: '保存', ref_id: '@fake:e2' },
           { role: 'button', name: '保存', ref_id: '@fake:e3' },
+          { role: 'button', name: '关闭', ref_id: '@fake:e5' },
+          { role: 'button', ref_id: '@fake:e7' },
+          { role: 'button', ref_id: '@fake:e8' },
         ],
       },
     ],
@@ -91,6 +106,7 @@ async function recording(root) {
     },
     { id: 'click-multiline', kind: 'click', scope: canvasScope, target: multilineTarget },
     { id: 'click-dup', kind: 'click', scope: canvasScope, target: dupTarget },
+    { id: 'click-unnamed', kind: 'click', scope: canvasScope, target: unnamedTarget },
     {
       id: 'scroll-group', kind: 'scroll', scope: canvasScope,
       target: { kind: 'element', role: 'group' }, deltaX: 0, deltaY: 300, durationMs: 120,
@@ -289,8 +305,8 @@ test('改 role / name / index 后应用，写回的定位器与输入一致', as
 
   assert.equal(dialog(document).open, false);
   assert.deepEqual((await stepOf('click-element')).target,
-    { kind: 'element', role: 'button', name: '关闭', path: ['window', 'toolbar', 'button'], index: 2 },
-    'the edited target is exactly the three fields; the unchanged role keeps the recorded range');
+    { kind: 'element', role: 'button', name: '关闭', index: 2 },
+    'the edited name names a new control, so the old toolbar path is gone');
 });
 
 test('清空 name 与 index 后应用，名称与序号不再收窄匹配', async t => {
@@ -302,8 +318,7 @@ test('清空 name 与 index 后应用，名称与序号不再收窄匹配', asyn
   fields.index.value = '';
   await submitDialog(document);
 
-  assert.deepEqual((await stepOf('click-element')).target,
-    { kind: 'element', role: 'button', path: ['window', 'toolbar', 'button'] },
+  assert.deepEqual((await stepOf('click-element')).target, { kind: 'element', role: 'button' },
     'an empty name or index means "not restricted", not an empty string');
 });
 
@@ -360,6 +375,63 @@ test('只改序号时保留原匹配范围，序号仍落在同一个控件上',
   });
   assert.equal(resolve(dupSnapshot, target).node.ref, '@fake:e2',
     'the toolbar control, not the sidebar one the path-less locator would take');
+});
+
+test('无名控件只改序号时保留「没有名称」这一约束', async t => {
+  const { document, stepOf } = await bootPage(t);
+  // An empty name matches unnamed controls only; dropping it would make the
+  // same index select the named button that happens to come first.
+  assert.equal(resolve(dupSnapshot, unnamedTarget).node.ref, '@fake:e8');
+  assert.equal(resolve(dupSnapshot,
+    { kind: 'element', role: 'button', path: ['window', 'toolbar', 'button'], index: 0 }).node.ref,
+  '@fake:e2');
+
+  const editor = await openEditor(document, 'click-unnamed');
+  assert.equal(locatorInputs(editor).name.value, '');
+  locatorInputs(editor).index.value = '0';
+  await submitDialog(document);
+
+  const target = (await stepOf('click-unnamed')).target;
+  assert.equal(target.name, '', 'the untouched empty name stays an exact constraint');
+  assert.deepEqual(target.path, ['window', 'toolbar', 'button'], 'an index-only edit keeps the range');
+  assert.equal(target.index, 0);
+  assert.equal(resolve(dupSnapshot, target).node.ref, '@fake:e7',
+    'the first unnamed toolbar button, not the named one');
+});
+
+test('范围改变后删掉再输入同一个序号可以提交', async t => {
+  const { document, stepOf } = await bootPage(t);
+  const editor = await openEditor(document, 'click-dup');
+  const fields = locatorInputs(editor);
+
+  fields.name.value = '关闭';
+  fields.index.value = '';
+  fields.index.oninput?.({});
+  fields.index.value = '1';
+  fields.index.oninput?.({});
+  await submitDialog(document);
+
+  assert.equal(dialog(document).open, false, 'retyping the same number counts as re-specifying it');
+  const target = (await stepOf('click-dup')).target;
+  assert.deepEqual(target, { kind: 'element', role: 'button', name: '关闭', index: 1 });
+  assert.equal(resolve(dupSnapshot, target).node.ref, '@fake:e5', 'the toolbar 关闭, second of two');
+});
+
+test('手填新名称时丢掉旧路径，按新名称解析到侧栏控件', async t => {
+  const { document, stepOf } = await bootPage(t);
+  const editor = await openEditor(document, 'click-dup');
+  const fields = locatorInputs(editor);
+
+  fields.name.value = '取消';
+  fields.index.value = '';
+  await submitDialog(document);
+
+  const target = (await stepOf('click-dup')).target;
+  assert.deepEqual(target, { kind: 'element', role: 'button', name: '取消' });
+  assert.equal(resolve(dupSnapshot, target).node.ref, '@fake:e6', 'the sidebar 取消 control');
+  // The recorded toolbar path could never match that sidebar control.
+  assert.throws(() => resolve(dupSnapshot, { ...target, path: ['window', 'toolbar', 'button'] }),
+    /did not match/);
 });
 
 test('换了控件类型或名称但序号没重填时拒绝应用', async t => {

@@ -1658,12 +1658,11 @@ function pickedTargetPatch(locator) {
  * the values back keeps an untouched form from looking edited.
  *
  * Applying an untouched form keeps the recorded target as it is (a coordinate
- * stays a coordinate, a recorded path and identifier survive). An edited target
- * keeps the recorded path while the role is unchanged — the index is positional
- * inside the role/name/path filter, so it only keeps its meaning in the same
- * range — and drops the path when the role changes. A recorded index that was
- * never re-entered is refused after the range changes instead of silently
- * addressing a different control.
+ * stays a coordinate, a recorded path and identifier survive). An edit that
+ * only changes the index stays inside the recorded role/name/path range, so
+ * its path is kept; a new role or name names a different control, so the old
+ * path is dropped. A recorded index that was never re-entered is refused after
+ * the range changes instead of silently addressing a different control.
  */
 function v2TargetDialog(step) {
   const windowTitle = targetWindowLabel(step);
@@ -1691,6 +1690,10 @@ function v2TargetDialog(step) {
   // input on assignment, so this is the only honest baseline for "not edited".
   const shown = () => ({ role: role.value, name: name.value, index: index.value });
   let baseline = shown();
+  // Retyping the same digit is still a choice: an input event on the index
+  // field re-specifies it even when the resulting number is unchanged.
+  let indexRespecified = false;
+  index.oninput = () => { indexRespecified = true; };
   const untouched = () => {
     const now = shown();
     return now.role === baseline.role && now.name === baseline.name && now.index === baseline.index;
@@ -1703,10 +1706,11 @@ function v2TargetDialog(step) {
       frame = candidate?.bounds;
       fill(locator);
       baseline = shown();
+      indexRespecified = false;
       renderSummary();
     }, { commit: false }),
     field('控件类型（role）', role, '控件的类别：button 按钮、textfield 输入框、menuitem 菜单项……'),
-    field('控件名称（name）', name, '界面上显示的文字，例如按钮「保存」；留空表示不限定名称'),
+    field('控件名称（name）', name, '界面上显示的文字，例如按钮「保存」；不改沿用录制值，改成空表示不限定名称'),
     field('同名控件序号（index，可选）', index, '类型与名称相同的控件有多个时取第几个，从 0 开始；留空表示不限定'),
   ], '应用', () => {
     if (untouched()) {
@@ -1730,29 +1734,35 @@ function v2TargetDialog(step) {
     const roleChanged = roleValue !== String(baseline.role ?? '').trim();
     const nameChanged = String(now.name ?? '') !== baseline.name;
     const indexChanged = rawIndex !== baseline.index.trim();
-    // An untouched name keeps the recorded value, so a line break a single-line
-    // input could not display is not silently squeezed out of the flow.
-    const nextName = nameChanged || typeof source?.name !== 'string' ? String(now.name ?? '') : source.name;
+    // An untouched name keeps the recorded value: a line break a single-line
+    // input could not display, and the empty string that means "this control
+    // has no name". Clearing the field is the operator asking for no name
+    // restriction at all, which is a different locator.
+    const nextName = nameChanged
+      ? (String(now.name ?? '') || undefined)
+      : (typeof source?.name === 'string' ? source.name : undefined);
     // The index is positional in the role/name/path range. Reusing an
     // unedited one after that range changed would address another control.
-    if (!indexChanged && rawIndex !== '' && (roleChanged || nameChanged)) {
+    if (!indexChanged && !indexRespecified && rawIndex !== '' && (roleChanged || nameChanged)) {
       throw new Error('改了控件类型或名称后，原来的同名序号不再指向同一个控件；请重新填写序号，或留空。');
     }
     const nextIndex = rawIndex === '' ? undefined : Number(rawIndex);
-    // A path is the role chain down to the control, so it survives only while
-    // the role does; a new role would leave a stale chain narrowing the match.
-    const nextPath = roleChanged ? undefined : source?.path;
+    // The recorded path is the role chain down to the old control and the range
+    // the old index was taken from. Only an index-only edit stays inside that
+    // range; a new role or name names a different control, so the old chain is
+    // dropped instead of narrowing the new one out.
+    const nextPath = roleChanged || nameChanged ? undefined : source?.path;
     return v2Edit({
       kind: 'update', id: step.id,
       patch: {
         target: {
           kind: 'element', role: roleValue,
-          ...(nextName ? { name: nextName } : {}),
+          ...(nextName === undefined ? {} : { name: nextName }),
           ...(nextPath ? { path: nextPath } : {}),
           ...(nextIndex === undefined ? {} : { index: nextIndex }),
           // The merge inherits any field the patch omits from the recorded
           // target; the edited locator keeps nothing the form could not show.
-          ...(nextName ? {} : { name: null }),
+          ...(nextName === undefined ? { name: null } : {}),
           ...(nextPath ? {} : { path: null }),
           ...(nextIndex === undefined ? { index: null } : {}),
         },
