@@ -43,7 +43,71 @@ struct RecordingPointerTests {
         }
         let count = cases.count + (try testSequences(emitTrace: emitTrace)) + testHover() + testHoverEmission()
             + testGlobalClickEvidence() + testPointerIdentity() + testFileItemIdentity()
+            + testTapWatchdog()
         if !emitTrace { print("Recording pointer: \(count)/\(count) passed") }
+    }
+
+    /// A slow callback warns; a disabled tap is always a gap; the diagnostic
+    /// keeps the operation and duration of the callback that blocked; a normal
+    /// callback after recovery adds nothing.
+    private static func testTapWatchdog() -> Int {
+        let ms: (UInt64) -> UInt64 = { $0 * 1_000_000 }
+        var watchdog = TapWatchdog()
+
+        // A normal callback: measured, never an interruption.
+        watchdog.begin("hover", now: ms(1_000))
+        precondition(watchdog.end(now: ms(1_012)) == 12)
+        precondition(watchdog.callbackMs < TapWatchdog.slowCallbackMs)
+        precondition(watchdog.interruptions == 0)
+        precondition(watchdog.operation == "hover")
+
+        // A slow callback: diagnosis only, still no interruption and no gap.
+        watchdog.begin("pointer", now: ms(2_000))
+        let slow = watchdog.end(now: ms(2_640))
+        precondition(slow == 640)
+        precondition(slow >= TapWatchdog.slowCallbackMs)
+        precondition(watchdog.noteSlowCallback() == 1)
+        precondition(watchdog.interruptions == 0)
+
+        // The system disabled the tap. The notification is itself a callback, so
+        // the diagnostic has to name the callback before it, not the notification.
+        watchdog.begin("event", now: ms(3_000))
+        let first = watchdog.interrupted(reason: "timeout")
+        precondition(first.count == 1)
+        precondition(first.lastCallbackMs == 640)
+        precondition(first.lastOperation == "pointer")
+        precondition(first.reason == "timeout")
+        _ = watchdog.end(now: ms(3_001))
+
+        // Recovering and then doing normal work adds neither an interruption nor
+        // a callback the recorder would report as slow.
+        watchdog.begin("hover", now: ms(4_000))
+        precondition(watchdog.end(now: ms(4_020)) == 20)
+        precondition(watchdog.callbackMs < TapWatchdog.slowCallbackMs)
+        precondition(watchdog.interruptions == 1)
+
+        // A second interruption counts on its own and names its own predecessor.
+        watchdog.begin("event", now: ms(4_030))
+        let second = watchdog.interrupted(reason: "user_input")
+        precondition(second.count == 2)
+        precondition(second.lastCallbackMs == 20)
+        precondition(second.lastOperation == "hover")
+        precondition(second.reason == "user_input")
+        _ = watchdog.end(now: ms(4_031))
+        precondition(watchdog.interruptions == 2)
+
+        // A clock that does not advance reads as zero, never as a negative time.
+        watchdog.begin("key", now: ms(5_000))
+        precondition(watchdog.end(now: ms(5_000)) == 0)
+
+        // The running callback's elapsed time is what the AX budget is spent
+        // against; work outside a callback reports zero, so it is never cut off.
+        watchdog.begin("pointer", now: ms(6_000))
+        precondition(watchdog.elapsedMs(now: ms(6_180)) == 180)
+        precondition(watchdog.elapsedMs(now: ms(5_000)) == 0)
+        _ = watchdog.end(now: ms(6_180))
+        precondition(watchdog.elapsedMs(now: ms(7_000)) == 0)
+        return 8
     }
 
     private static func testSequences(emitTrace: Bool) throws -> Int {

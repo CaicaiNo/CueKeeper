@@ -79,6 +79,7 @@ final class Capture {
     // The pointer evidence frozen on mouse-down; release uses it unchanged.
     private var pendingPointEvidence: GlobalPointerEvidence?
     private var captureLag = GlobalCaptureLag()
+    private var tapWatchdog = TapWatchdog()
     private var systemDialogVisible = false
 
     private var eventLimit: Int { global ? 20_000 : 1000 }
@@ -110,7 +111,32 @@ final class Capture {
         let title: String
     }
 
+    /// One accessibility read must never block long enough for the system to
+    /// disable the tap (about a second). A single attribute or a hit test answers
+    /// in milliseconds; when the app is busy the AX server cannot answer in time,
+    /// the read fails, and the evidence falls back to what Quartz already proved
+    /// instead of stalling every event queued behind it.
+    private static let axReadTimeout: Float = 0.1
+
+    /// How much of one tap callback AX enrichment may use in total. Past it the
+    /// evidence keeps the Quartz facts it already has (window, focus, decision)
+    /// and every further attribute read returns nothing, so a hung app costs one
+    /// callback instead of the whole event queue.
+    private static let axCallbackBudgetMs = 300
+
+    /// Whether this callback already spent its AX time. Work outside the tap
+    /// callback reports no elapsed time and is never cut short.
+    private var axBudgetSpent: Bool {
+        tapWatchdog.elapsedMs(now: DispatchTime.now().uptimeNanoseconds) >= Self.axCallbackBudgetMs
+    }
+
+    private func boundAXRead(_ element: AXUIElement) {
+        AXUIElementSetMessagingTimeout(element, Self.axReadTimeout)
+    }
+
     private func axAttribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+        guard !axBudgetSpent else { return nil }
+        boundAXRead(element)
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
         return value
@@ -146,6 +172,8 @@ final class Capture {
     }
 
     private func axActions(_ element: AXUIElement) -> [String] {
+        guard !axBudgetSpent else { return [] }
+        boundAXRead(element)
         var names: CFArray?
         guard AXUIElementCopyActionNames(element, &names) == .success,
               let names = names as? [String] else { return [] }
@@ -176,6 +204,7 @@ final class Capture {
      * controls is provable only by screen point, which replays fragilely.
      */
     static func enableEnhancedAccessibility(_ app: AXUIElement) {
+        AXUIElementSetMessagingTimeout(app, axReadTimeout)
         AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
         AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
     }
@@ -397,15 +426,18 @@ final class Capture {
         var ownerWindow = stackWindow
         // A queued event can still prove its window after the live hit changed.
         // Only enrich it with AX while the same window is under the pointer.
-        if targetMatches, target.canReadAX {
+        if targetMatches, target.canReadAX, !axBudgetSpent {
             if let stackPid {
                 // Open the app's full tree before hit-testing so an Electron
                 // control under the pointer can be named, not merely pointed at.
                 Self.enableEnhancedAccessibility(AXUIElementCreateApplication(stackPid))
             }
             let system = AXUIElementCreateSystemWide()
+            boundAXRead(system)
             var hit: AXUIElement?
-            if AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &hit) == .success, let hit {
+            if !axBudgetSpent,
+               AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &hit) == .success, let hit {
+                boundAXRead(hit)
                 var elementPid: pid_t = 0
                 if AXUIElementGetPid(hit, &elementPid) == .success, elementPid > 0 {
                     axOwnerMatches = elementPid == stackPid
@@ -963,13 +995,10 @@ final class Capture {
             return
         }
         guard CFMachPortIsValid(tap) else { stop("TAP_UNAVAILABLE"); return }
-        if !CGEvent.tapIsEnabled(tap: tap) {
-            pointer = RecordingPointer()
-            pendingPointEvidence = nil
-            traceMouseLifecycle("tap_interrupted")
-            if global { emitGap("STALE_CAPTURE", detail: "tap_interrupted") } else { warn("TAP_INTERRUPTED") }
-            CGEvent.tapEnable(tap: tap, enable: true)
-        }
+        // A tap the callback notification could not repair (it never arrived, or
+        // the system disabled it again at once) is still repaired here; the gap
+        // and the diagnostic go through the same path as the notification.
+        if !CGEvent.tapIsEnabled(tap: tap) { recoverTap("session_timer") }
         flushPauseBoundary()
         refreshSystemDialog()
         refreshFocus()
@@ -986,8 +1015,10 @@ final class Capture {
         return enabled
     }
 
-    private func warn(_ code: String) {
-        emit(["kind": "warning", "code": code])
+    private func warn(_ code: String, detail: String? = nil) {
+        var row: [String: Any] = ["kind": "warning", "code": code]
+        if let detail { row["detail"] = detail }
+        emit(row)
     }
 
     private func togglePause() {
@@ -1032,7 +1063,77 @@ final class Capture {
         return action.consumesEvent
     }
 
+    /// Times one tap callback. macOS disables a tap whose callback overruns its
+    /// budget, and the disable arrives as another callback of this same tap, so
+    /// the two facts are reported here rather than in the session timer: a slow
+    /// callback is a warning (nothing was lost yet), a disabled tap is a gap.
+    func handleTapEvent(_ type: CGEventType, _ event: CGEvent) {
+        tapWatchdog.begin(Self.operationName(type), now: DispatchTime.now().uptimeNanoseconds)
+        receive(type, event)
+        let ms = tapWatchdog.end(now: DispatchTime.now().uptimeNanoseconds)
+        if ms >= TapWatchdog.slowCallbackMs { noteSlowCallback(ms) }
+    }
+
+    /// What the callback is doing, in the words the diagnostic uses.
+    private static func operationName(_ type: CGEventType) -> String {
+        switch type {
+        case .mouseMoved: return "hover"
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown,
+             .leftMouseUp, .rightMouseUp, .otherMouseUp,
+             .leftMouseDragged, .rightMouseDragged: return "pointer"
+        case .scrollWheel: return "scroll"
+        case .keyDown, .keyUp: return "key"
+        default: return "event"
+        }
+    }
+
+    /// A callback that finished close to the system's disable threshold. This is
+    /// diagnosis only: the tap was still delivering, so nothing became a gap.
+    /// Nothing is reported before capture begins: there is no recording to
+    /// explain, and the stream is not readable yet.
+    private func noteSlowCallback(_ ms: Int) {
+        guard started != nil, !stopped else { return }
+        let seen = tapWatchdog.noteSlowCallback()
+        guard seen <= 3 else { return }
+        warn("TAP_SLOW_CALLBACK",
+             detail: "\(tapWatchdog.operation) held the tap callback for \(ms) ms; the system disables the tap near 1000 ms")
+    }
+
+    /// A tap the system disabled. Re-enabling from the notification itself keeps
+    /// the unobservable interval to the moment of the disable instead of leaving
+    /// the stream off until the one-second session timer notices. The gap stays
+    /// in either case: re-enabling proves later input is observable, not that the
+    /// interval the tap was off lost nothing.
+    private func recoverTap(_ reason: String) {
+        guard let tap else { return }
+        let notice = tapWatchdog.interrupted(reason: reason)
+        if !CGEvent.tapIsEnabled(tap: tap) {
+            CGEvent.tapEnable(tap: tap, enable: true)
+            traceMouseLifecycle("tap_re_enable_requested")
+        }
+        // A press held across the interruption can no longer be paired with its
+        // release, so the pointer state starts clean rather than guessing.
+        pointer = RecordingPointer()
+        pendingPointEvidence = nil
+        // Before capture begins there is no recording to explain a gap to; the
+        // tap is simply brought back so the session can start.
+        guard started != nil, !stopped else { return }
+        warn("TAP_INTERRUPTED",
+             detail: "\(reason): previous callback \(notice.lastCallbackMs) ms in \(notice.lastOperation); interruption \(notice.count) this recording")
+        if global { emitGap("STALE_CAPTURE", detail: "tap_interrupted") }
+    }
+
     func receive(_ type: CGEventType, _ event: CGEvent) {
+        // The system disables a tap whose callback blocked too long and reports
+        // it on this same callback. Recover here, at the moment it happened.
+        if type == .tapDisabledByTimeout {
+            recoverTap("timeout")
+            return
+        }
+        if type == .tapDisabledByUserInput {
+            recoverTap("user_input")
+            return
+        }
         switch type {
         case .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel:
             refreshSystemDialog()
@@ -1069,8 +1170,6 @@ final class Capture {
             break
         }
         guard started != nil, !stopped, stopReleaseDeadline == nil else { return }
-        // The session timer repairs a disabled tap while permission is still valid.
-        guard type != .tapDisabledByTimeout && type != .tapDisabledByUserInput else { return }
         flushPauseBoundary()
         let hotkeyFlags = event.flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift])
         let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
@@ -1730,7 +1829,7 @@ struct RecorderCommand {
             eventsOfInterest: mask, callback: { _, type, event, context in
                 if let context {
                     MainActor.assumeIsolated {
-                        Unmanaged<Capture>.fromOpaque(context).takeUnretainedValue().receive(type, event)
+                        Unmanaged<Capture>.fromOpaque(context).takeUnretainedValue().handleTapEvent(type, event)
                     }
                 }
                 return Unmanaged.passUnretained(event)

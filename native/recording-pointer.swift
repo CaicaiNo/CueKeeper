@@ -15,6 +15,80 @@ struct PointerSample {
     }
 }
 
+/// What the tap callback was doing and what it cost, plus every time the system
+/// disabled the tap because a callback blocked too long.
+///
+/// macOS disables an event tap whose callback overruns its budget, and every
+/// event until the tap is re-enabled is lost. Two facts therefore have to be
+/// told apart: a *slow callback* that finished (diagnosis only — nothing was
+/// lost yet, so no gap), and a *disabled tap* (always a gap, because nothing
+/// about the interval it covered can be proven to have been observed). The
+/// diagnostic keeps the operation that was running and its duration, so the
+/// next recording names the work that blocked instead of only the symptom.
+struct TapWatchdog {
+    /// A callback above this is reported. The system's own disable threshold is
+    /// about a second, so this is where the recorder says it is getting close.
+    static let slowCallbackMs = 250
+
+    /// The diagnostic of one disable: how often it happened, the callback that
+    /// preceded it, and what that callback was processing.
+    struct Interruption {
+        let count: Int
+        let lastCallbackMs: Int
+        let lastOperation: String
+        let reason: String
+    }
+
+    private var startedAt: UInt64 = 0
+    private var running = false
+    private(set) var operation = "idle"
+    private(set) var callbackMs = 0
+    private(set) var lastCallbackMs = 0
+    private(set) var lastOperation = "idle"
+    private(set) var slowCallbacks = 0
+    private(set) var interruptions = 0
+
+    mutating func begin(_ operation: String, now: UInt64) {
+        self.operation = operation
+        startedAt = now
+        running = true
+    }
+
+    /// Ends the callback and returns its duration. A clock that did not advance
+    /// reads as zero, never as a negative duration.
+    @discardableResult
+    mutating func end(now: UInt64) -> Int {
+        let elapsed = running && now > startedAt ? now - startedAt : 0
+        running = false
+        callbackMs = Int(elapsed / 1_000_000)
+        lastCallbackMs = callbackMs
+        if !operation.isEmpty { lastOperation = operation }
+        return callbackMs
+    }
+
+    /// How long the running callback has taken so far; zero when no callback is
+    /// being timed, which is what work outside the tap reports.
+    func elapsedMs(now: UInt64) -> Int {
+        guard running, now > startedAt else { return 0 }
+        return Int((now - startedAt) / 1_000_000)
+    }
+
+    /// Whether this callback should be reported as slow. Counting it keeps the
+    /// caller's warning bounded without losing the number.
+    mutating func noteSlowCallback() -> Int {
+        slowCallbacks += 1
+        return slowCallbacks
+    }
+
+    /// The system disabled the tap. Always an interruption: the diagnostic names
+    /// the callback that was running before the disable notification.
+    mutating func interrupted(reason: String) -> Interruption {
+        interruptions += 1
+        return Interruption(count: interruptions, lastCallbackMs: lastCallbackMs,
+                            lastOperation: lastOperation, reason: reason)
+    }
+}
+
 struct GlobalCaptureLag {
     private var lastGapAt: UInt64 = 0
     private var firstEventAt: UInt64 = 0
