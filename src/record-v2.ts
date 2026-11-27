@@ -1573,6 +1573,15 @@ export class GlobalRecording {
     });
     if (!read) return;
     const snapshot = read.snapshot;
+    // A coordinate hover is only replayable while the recorded point is inside
+    // the window its evidence named. A tree whose shapes extend past the window
+    // (or one read without a frame) must not turn an outside point into a
+    // screen hover: nothing proves it belongs to this recording.
+    if (!contains(snapshot.tree.bounds, event.point)) {
+      this.warn('UNTARGETED_HOVER',
+        'A hover landed outside the window its evidence named; it was skipped because no replay can place that point');
+      return;
+    }
     const hit = this.hit(snapshot, event.point);
     // A hover is replayed by resting the pointer. When the tree names the control
     // under the pointer, the step can address it as an element; when it only

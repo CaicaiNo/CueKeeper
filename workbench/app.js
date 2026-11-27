@@ -1429,6 +1429,7 @@ async function v2LiveDialog() {
     return [name, record];
   }));
   const checkpoints = flow.steps.filter(step => step.kind === 'manual_checkpoint');
+  const screenHovers = flow.steps.filter(step => step.kind === 'hover' && step.scope?.kind === 'screen');
   openDialog('实时回放全局录制流程', [
     muted(!live
       ? '当前有未保存的修改，请先保存工作流。'
@@ -1440,6 +1441,9 @@ async function v2LiveDialog() {
     ...(checkpoints.length ? [muted(
       `含 ${checkpoints.length} 个人工检查点：回放会暂停在检查点，由你在真实界面完成授权，` +
       '再回到工作台点「已完成授权，继续」。工作台不接收密码；超时或取消就停在检查点。')] : []),
+    ...(screenHovers.length ? [muted(
+      `含 ${screenHovers.length} 条屏幕坐标悬停：只移动指针并停留，不点击、不聚焦；` +
+      '坐标与录制时的屏幕布局绑定，窗口改名或版面变化后可能不再落在同一处。')] : []),
     el('label', { className: 'check-row' }, confirmed, '我确认回放会操作当前桌面的应用窗口'),
     ...(controls.size ? [
       el('h3', {}, '运行参数值'),

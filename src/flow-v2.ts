@@ -378,6 +378,16 @@ export function pointTargetSteps(flow: FlowV2): StepV2[] {
 }
 
 /**
+ * The hovers that only move the pointer to a recorded screen point. They are
+ * passive (no click, no focus) but their coordinates are bound to the screen
+ * layout of the recording, so a run announces how many it will deliver before
+ * it takes the foreground.
+ */
+export function screenHoverSteps(flow: FlowV2): StepV2[] {
+  return flow.steps.filter(step => step.kind === 'hover' && step.scope.kind === 'screen');
+}
+
+/**
  * Structural dry run. It reports each step with its declared scope as
  * `resolved` and performs no launch, focus, clipboard or input operation. A
  * scope is only proven against a live window by the cross-app runner; until

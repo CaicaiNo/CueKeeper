@@ -47,7 +47,7 @@
 
 - **停留阈值固定 300 ms、半径 3 pt**：更短的掠过不产生步骤；到达后不再移动也会由会话定时器补发一次，不会每个 mouseMoved 都记。
 - **元素型回放用录制的实际停留点**：元素型悬停优先落在录制时指针停下的点，只有旧 flow 或录制点不在目标内时才退回 bounds 中心。坐标型悬停按录制的屏幕坐标回放，与录制时的屏幕布局绑定，版面/分辨率变化后可能落到别处，需要重新录制。
-- **两种悬停都不看 UI 结果**：`durationMs` 是停留等待，不保证 tooltip / 菜单在其它机器上同样出现；回放失败只覆盖移动本身（`HEADED_REQUIRED`、`UNSAFE_POINT`、`HOVER_UNRESOLVED`、`HOVER_NOT_FOREGROUND`），瞬时消失需用后续 `assert` 判断。坐标型回放一律视为不可自动验证。
+- **两种悬停都不看 UI 结果**：`durationMs` 是停留等待，不保证 tooltip / 菜单在其它机器上同样出现；回放失败只覆盖移动本身（`HEADED_REQUIRED`、`UNSAFE_POINT`、`HOVER_UNRESOLVED`、`HOVER_NOT_FOREGROUND`），瞬时消失需用后续 `assert` 判断。坐标型回放一律视为不可自动验证，报告 `delivery: "delivered_unverified"`（不采用驱动自报的 `delivered_verified`），`deliveredVia: "screen_point"` 标明路径。
 - **元素型降级只在四种解析失败时发生**：`WINDOW_NOT_FOUND` / `WINDOW_CHANGED` / `AMBIGUOUS_TARGET` / `NOT_FOUND` 且本步有 `point` 时改为坐标回放，报告带 `HOVER_SCREEN_FALLBACK` 和原始错误码；secure、坐标在已证明窗口外、后台窗口、驱动故障/超时/`HEADED_REQUIRED` 都不降级。
 - **真机 tooltip 延时、菜单展开、副屏与窗口改名后的坐标回放**归 HAOC-87。
 

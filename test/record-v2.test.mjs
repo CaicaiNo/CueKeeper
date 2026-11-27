@@ -1665,6 +1665,37 @@ test('a hover on empty window space is a screen point with only a window hint', 
   assert.equal('element' in step.hint, false, 'no control was under the pointer');
 });
 
+test('a hover outside its window is skipped even when a tree node covers the point', async () => {
+  // The driver's shapes can extend past the window frame. A point outside the
+  // window is not evidence this recording can place on screen, so it must not
+  // become a screen hover or a gap.
+  const snapshot = {
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@atrust:e1',
+      bounds: { x: 400, y: 200, width: 800, height: 640 }, states: [], secure: false,
+      children: [{
+        role: 'group', name: '', ref: '@atrust:e2',
+        bounds: { x: 400, y: 200, width: 1000, height: 640 }, states: [], secure: false, children: [],
+      }],
+    },
+  };
+  const recording = new GlobalRecording(async () => structuredClone(snapshot), { now: () => NOW });
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 500, seen: NOW, focusGeneration: 1, secure: false,
+    point: [600, 520], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXGroup' },
+  }));
+  await recording.add(parseCaptureEvent({
+    kind: 'hover', t: 1000, seen: NOW, focusGeneration: 1, secure: false,
+    point: [1300, 520], dwellMs: 405, decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXGroup' },
+  }));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_HOVER'));
+});
+
 test('a hover without window evidence still records nothing', async () => {
   const snapshot = hoverTree(undefined);
   const detached = {

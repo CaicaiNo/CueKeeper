@@ -188,6 +188,8 @@ function fakeWorld(options = {}) {
     },
     async hoverAt(_snapshot, _target, point, options = {}) {
       state.calls.push(['hoverAt', point, options.travel === true, performance.now()]);
+      const fail = state.hooks.hoverAt?.(state, point);
+      if (fail) throw fail;
       return delivered('hover');
     },
     async hoverScreen(point, options = {}) {
@@ -1292,6 +1294,7 @@ test('a screen hover binds no window and only moves the pointer', async t => {
   const hover = entry(report, 'screen-hover');
   assert.equal(hover.deliveredVia, 'screen_point');
   assert.deepEqual(hover.scope, { kind: 'screen' });
+  assert.equal(hover.delivery, 'delivered_unverified');
   assert.match(hover.message, /recorded screen point \(238,397\)/);
   const moves = callsOf(world, 'hoverScreen');
   assert.equal(moves.length, 1);
@@ -1313,6 +1316,7 @@ test('an element hover whose window is gone degrades to its recorded point', asy
   assert.equal(report.status, 'passed', JSON.stringify(report.entries));
   const hover = entry(report, 'hover-notes');
   assert.equal(hover.deliveredVia, 'screen_point');
+  assert.equal(hover.delivery, 'delivered_unverified');
   assert.match(hover.message, /HOVER_SCREEN_FALLBACK \(WINDOW_NOT_FOUND/);
   assert.deepEqual(callsOf(world, 'hoverScreen').map(call => call[1]), [[360, 170]]);
   assert.deepEqual(callsOf(world, 'hoverAt'), []);
@@ -1385,6 +1389,58 @@ test('a point outside the bound window and a lost foreground never fall back', a
   assert.equal(entry(report, 'hover-notes').code, 'HOVER_NOT_FOREGROUND');
   assert.equal(entry(report, 'hover-notes').deliveredVia, undefined);
   assert.deepEqual(callsOf(background.world, 'hoverScreen'), []);
+});
+
+test('a point outside a proved window is refused before the element is resolved', async t => {
+  // The window moved; the recorded control is not in its tree at all. The stale
+  // point must not turn "element not found" into a successful screen hover.
+  const { world, run } = harness(t, {
+    headed: true,
+    windows: [{
+      id: 'w-21', app: textedit, pid: 601, title: 'QA Notes',
+      data: {
+        complete: true, window: { id: 'w-21', title: 'QA Notes' },
+        tree: {
+          role: 'window', name: 'QA Notes', bounds: { x: 100, y: 100, width: 800, height: 600 },
+          children: [{
+            role: 'button', name: 'Continue', ref_id: '@w21:e9',
+            bounds: { x: 120, y: 500, width: 120, height: 32 }, states: [],
+          }],
+        },
+      },
+    }],
+  });
+  const report = await run(hoverFlow([notesHover('hover-notes', { point: [950, 170] })]));
+  const hover = entry(report, 'hover-notes');
+  assert.equal(hover.code, 'UNSAFE_POINT');
+  assert.match(hover.message, /recorded hover point 950,170 is outside the bound window/);
+  assert.equal(hover.deliveredVia, undefined);
+  assert.deepEqual(callsOf(world, 'hoverScreen'), []);
+  assert.deepEqual(callsOf(world, 'hoverAt'), []);
+});
+
+test('a driver fault after the move starts is reported once, never retried or degraded', async t => {
+  // The pointer move itself failed after the window and element were proved.
+  // Retrying it could move the pointer twice, and degrading it would call a
+  // broken desktop a successful screen hover.
+  const lost = harness(t, {
+    headed: true,
+    hooks: { hoverAt: () => new Fault('NOT_FOUND', 'the window vanished during the move') },
+  });
+  const lostReport = await lost.run(hoverFlow([notesHover('hover-notes', { point: [360, 170] })]));
+  assert.equal(entry(lostReport, 'hover-notes').code, 'NOT_FOUND');
+  assert.equal(callsOf(lost.world, 'hoverAt').length, 1);
+  assert.deepEqual(callsOf(lost.world, 'hoverScreen'), []);
+
+  const uncertain = harness(t, {
+    headed: true,
+    delivery: command => command === 'hover' ? 'delivery_uncertain' : 'delivered_verified',
+  });
+  const uncertainReport = await uncertain.run(
+    hoverFlow([notesHover('hover-notes', { point: [360, 170] })]));
+  assert.equal(entry(uncertainReport, 'hover-notes').code, 'DELIVERY_UNCERTAIN');
+  assert.equal(callsOf(uncertain.world, 'hoverAt').length, 1);
+  assert.deepEqual(callsOf(uncertain.world, 'hoverScreen'), []);
 });
 
 

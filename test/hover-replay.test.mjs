@@ -182,6 +182,7 @@ test('CLI: screen hovers move to their recorded points without reading any windo
   assert.equal(result.status, 0, result.stderr);
 
   const calls = cli.calls();
+  assert.match(result.stderr, /屏幕坐标悬停 2 条/);
   const windowCalls = calls.filter(call =>
     ['list-windows', 'snapshot', 'focus-window', 'focus', 'click', 'right-click', 'double-click'].includes(call.command));
   assert.deepEqual(windowCalls, [], 'a screen hover never proves a window or presses anything');
@@ -197,6 +198,9 @@ test('CLI: screen hovers move to their recorded points without reading any windo
     assert.equal(entry.status, 'passed');
     assert.deepEqual(entry.scope, { kind: 'screen' });
     assert.equal(entry.deliveredVia, 'screen_point');
+    // A recorded coordinate cannot be verified against a control, so even a
+    // driver that reported the move as delivered is reported as unverified.
+    assert.equal(entry.delivery, 'delivered_unverified');
     assert.match(entry.message, /recorded screen point/);
     assert.ok(entry.durationMs >= 400, `the dwell was only ${entry.durationMs} ms`);
   }
@@ -234,6 +238,7 @@ test('CLI: an element hover whose window is gone falls back to its recorded poin
   const entry = JSON.parse(result.stdout).data.entries[0];
   assert.equal(entry.status, 'passed');
   assert.equal(entry.deliveredVia, 'screen_point');
+  assert.equal(entry.delivery, 'delivered_unverified');
   assert.match(entry.message, /HOVER_SCREEN_FALLBACK \(WINDOW_NOT_FOUND/);
   const calls = cli.calls();
   assert.deepEqual(calls.filter(call => /click|focus|activate/.test(call.command)), []);

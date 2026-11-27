@@ -21,6 +21,11 @@ async function workspace(t, { values, corrupt = false } = {}) {
   const flow = JSON.parse(await readFile(examplePath, 'utf8'));
   flow.id = 'global-input-values';
   flow.name = '输入值夹具';
+  flow.steps.push({
+    id: 'hover-screen', kind: 'hover', scope: { kind: 'screen' },
+    point: [238, 397], durationMs: 339,
+    hint: { app: 'com.apple.finder', windowTitle: 'multica-v1-https' },
+  });
   await writeFile(join(directory, 'flow.json'), JSON.stringify(flow, null, 2));
   const sidecar = join(directory, 'flow.values.json');
   if (corrupt) await writeFile(sidecar, '{ broken');
@@ -163,6 +168,19 @@ test('the replay dialog prefills the recorded text and sends it verbatim to the 
   assert.equal(sent.inputs.address, '  https://example.com/pkg  ');
   assert.equal(sent.inputs.note, 'hello note');
   assert.ok(sent.argv.includes('--inputs'));
+});
+
+test('the replay dialog announces coordinate hovers before taking the desktop', async t => {
+  const { root, directory } = await workspace(t, {});
+  const cliPath = await stubCli(root, join(root, 'stub-unused.json'));
+  const { document } = await bootPage(t, { root, directory, cliPath });
+
+  buttonByText(document.body, '实时回放').click();
+  await tick(120);
+  assert.equal(dialog(document).open, true);
+  assert.match(dialog(document).textContent, /含 1 条屏幕坐标悬停/);
+  assert.match(dialog(document).textContent, /只移动指针并停留，不点击、不聚焦/);
+  assert.match(dialog(document).textContent, /坐标与录制时的屏幕布局绑定/);
 });
 
 test('a parameter without a value is still required, and a sensitive one never shows text', async t => {
