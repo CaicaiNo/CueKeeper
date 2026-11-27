@@ -37,7 +37,7 @@ final class RecordingIndicator {
         // frame already reads as a running capture rather than a warm-up.
         panel.update(text: IndicatorLabel.text(mode: indicatorLabelMode, elapsed: 0,
                                                paused: false, starting: false),
-                     paused: false, starting: false)
+                     paused: false)
         panel.orderFrontRegardless()
         panel.displayIfNeeded()
         CATransaction.flush()
@@ -72,10 +72,13 @@ final class RecordingIndicator {
         return .confirmed(["window": panel.windowNumber, "display": displayID, "level": level, "bounds": frame])
     }
 
+    /// `starting` is still accepted from the recorder but no longer changes the
+    /// plate: a capture looks the same at 00:00 and at 00:05. Only the wording
+    /// carries the state, and a pause dims the dot.
     func update(elapsed: Int, paused: Bool, starting: Bool) {
         panel?.update(text: IndicatorLabel.text(mode: indicatorLabelMode, elapsed: elapsed,
                                                 paused: paused, starting: starting),
-                      paused: paused, starting: starting)
+                      paused: paused)
     }
 
     private var indicatorLabelMode: IndicatorLabel.Mode {
@@ -96,6 +99,9 @@ final class RecordingIndicator {
 private final class IndicatorPanel: NSPanel {
     private static let recordingAccent = NSColor(srgbRed: 1, green: 0.24, blue: 0.34, alpha: 1)
     private static let replayAccent = NSColor(srgbRed: 0.24, green: 0.62, blue: 1, alpha: 1)
+    /// The one plate both modes use. Recording and replay differ only in the
+    /// accent colour, never in the plate, so nothing changes mid-recording.
+    private static let plateColor = NSColor(white: 0.08, alpha: 0.98)
     private let accent: NSColor
     private let mode: RecordingIndicator.Mode
     /// The glow reaches this far inside the screen edge. Static, gradient-only.
@@ -149,13 +155,12 @@ private final class IndicatorPanel: NSPanel {
         badge.cornerRadius = 14
         badge.borderWidth = 1
         badge.borderColor = accent.cgColor
-        dot.frame = CGRect(x: 16, y: 18, width: 10, height: 10)
-        dot.cornerRadius = 5
+        badge.backgroundColor = Self.plateColor.cgColor
+        dot.cornerRadius = IndicatorLayout.dotSize / 2
         dot.backgroundColor = accent.cgColor
         badge.addSublayer(dot)
         backing.addSublayer(badge)
 
-        label.frame = NSRect(x: hud.minX + 32, y: hud.midY - 9, width: hud.width - 48, height: 20)
         label.font = .monospacedDigitSystemFont(ofSize: 14, weight: .semibold)
         label.textColor = mode == .replay ? accent : .white
         let shadow = NSShadow()
@@ -163,8 +168,13 @@ private final class IndicatorPanel: NSPanel {
         shadow.shadowBlurRadius = 3
         shadow.shadowOffset = NSSize(width: 0, height: -1)
         label.shadow = shadow
-        label.alignment = .center
+        // The label is sized to its text and placed as half of one dot+text
+        // group: the group is centred on the plate, not the text on what is
+        // left of the plate after the dot.
+        label.alignment = .left
+        label.lineBreakMode = .byClipping
         view.addSubview(label)
+        applyLayout(text: "")
     }
 
     private static func edgeGlow(accent: NSColor, size: CGSize, width: CGFloat) -> [CAGradientLayer] {
@@ -192,23 +202,34 @@ private final class IndicatorPanel: NSPanel {
         ]
     }
 
-    func update(text: String, paused: Bool, starting: Bool) {
-        if label.stringValue != text { label.stringValue = text }
+    /// Sizes the label to its text and places the dot+text group in the plate.
+    /// Only a wording change (running → paused) can move the group; the clock
+    /// uses monospaced digits, so tick by tick the frames stay identical.
+    private func applyLayout(text: String) {
+        let font = label.font ?? .systemFont(ofSize: 14)
+        let measured = (text as NSString).size(withAttributes: [.font: font])
+        let local = CGRect(origin: .zero, size: hud.size)
+        let frames = IndicatorLayout.frames(
+            hud: local,
+            text: CGSize(width: ceil(measured.width), height: ceil(measured.height)))
+        dot.frame = frames.dot
+        dot.cornerRadius = frames.dot.width / 2
+        label.frame = frames.label.offsetBy(dx: hud.minX, dy: hud.minY)
+    }
+
+    func update(text: String, paused: Bool) {
+        if label.stringValue != text {
+            label.stringValue = text
+            applyLayout(text: text)
+        }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        if mode == .replay {
-            // Replay stays ambient but keeps a legible translucent plate.
-            badge.backgroundColor = NSColor(white: 0.05, alpha: 0.38).cgColor
-            badge.borderWidth = 0.5
-            badge.borderColor = accent.withAlphaComponent(0.45).cgColor
-        } else {
-            badge.backgroundColor = starting
-                ? accent.withAlphaComponent(0.22).cgColor
-                : NSColor(white: 0.08, alpha: 0.98).cgColor
-            badge.borderWidth = starting ? 2 : 1
-        }
+        // The plate is fixed for the whole session in both modes. A pause
+        // dims the dot and the edge glow; it never repaints the plate.
+        badge.backgroundColor = Self.plateColor.cgColor
+        badge.borderWidth = 1
+        badge.borderColor = accent.cgColor
         dot.opacity = paused ? 0.4 : 1
-        // A paused recording keeps a faint edge; a replay always shows the glow.
         for layer in glow { layer.opacity = mode == .replay ? 1 : (paused ? 0.35 : 1) }
         CATransaction.commit()
     }
