@@ -156,9 +156,10 @@ Shell 的完整约束见 [Shell 步骤设计](shell-steps.md) 与 [Root 步骤�
 | `UNTARGETED_TEXT` | 文本事件没有焦点元素证据，兜底读树也没有证明唯一聚焦可编辑控件，这些字符被丢弃 | 是（录制警告，不产生缺口） |
 | `CAPTURE_BACKLOG` | 队列落后 helper 超过 8 秒，积压的文本事件被丢弃 | 是（录制警告，不产生一串缺口） |
 | `CAPTURE_STARTUP` | 录制开头（第一个可重放步骤之前）没有窗口证据的事件——500 ms 内无窗口的事件，以及任何时刻开头的 `CAPTURE_SCOPE_UNVERIFIED` 缺口——被当作启动噪音丢弃 | 是（录制警告） |
-| `SNAPSHOT_UNAVAILABLE` | 指针手势的兜底读树失败（重试一次更大的预算后仍不完整），该手势记缺口 | 是（录制警告 + 缺口） |
-| `SNAPSHOT_SLOW_READ` | 按窗口 ID 读树第一次用尽驱动观测预算（`complete:false`，窗口在改标题/加载目录/重绘），第二次读成功；步骤保留，不产生缺口 | 是（录制警告） |
-| `TAP_SLOW_CALLBACK` | 事件 tap 回调耗时接近系统禁用阈值（≥250 ms），已由每次 AX 读取 0.25 s 上限约束；只是诊断，不产生缺口 | 是（录制警告，前 3 次） |
+| `SNAPSHOT_UNAVAILABLE` | 指针手势的兜底读树失败，该手势记缺口。只有「预算用尽」（驱动 `complete:false`）且是只读手势（悬停 / 文本兜底）才会重试一次，两次合计受 4 s 截止时间约束；`truncated` / `identity_unproven` 不重试，第二次读失败时保留第一次失败应有的缺口 | 是（录制警告 + 缺口） |
+| `SNAPSHOT_SLOW_READ` | 第一次读用尽驱动观测预算（`complete:false`，窗口在改标题/加载目录/重绘），重试读到完整树且仍覆盖该手势的点位；步骤保留，不产生缺口 | 是（录制警告） |
+| `TAP_SLOW_CALLBACK` | 事件 tap 回调耗时接近系统禁用阈值（≥250 ms）。回调的全部 AX 工作受同一条 300 ms 截止时间约束，单次读取上限 0.1 s，输出写入移到后台队列；只是诊断，不产生缺口 | 是（录制警告，前 3 次） |
+| `TEXT_UNVERIFIABLE` | 聚焦控件读不出来（AX 超时/预算用尽），无法证明它不是安全输入：字符不输出，整段只报一次 `STALE_CAPTURE`（`detail: text_unverifiable`） | 是（录制警告 + 缺口） |
 | `TAP_INTERRUPTED` | 系统禁用了 tap（回调过慢或用户态禁用）：立刻重新启用，间隔内输入无法证明未丢，因此保留 `STALE_CAPTURE` 缺口；detail 带原因、上一次回调耗时与在处理什么 | 是（录制警告 + 缺口） |
 | `IME_COMPOSITION_UNSUPPORTED` | 录到 IME 提交的 Unicode 文本；组合过程不重放 | 是（录制警告），文本本身会入 flow |
 | `OUTSIDE_WINDOW` | 点击或滚动落在录制开始时的目标窗口之外 | 否，录制失败 |

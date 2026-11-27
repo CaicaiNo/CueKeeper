@@ -79,7 +79,9 @@ final class Capture {
     // The pointer evidence frozen on mouse-down; release uses it unchanged.
     private var pendingPointEvidence: GlobalPointerEvidence?
     private var captureLag = GlobalCaptureLag()
-    private var tapWatchdog = TapWatchdog()
+    private var tapGuard = TapGuard()
+    private var unverifiableText = UnverifiableText()
+    private let writer = LineWriter()
     private var systemDialogVisible = false
 
     private var eventLimit: Int { global ? 20_000 : 1000 }
@@ -111,35 +113,44 @@ final class Capture {
         let title: String
     }
 
-    /// One accessibility read must never block long enough for the system to
-    /// disable the tap (about a second). A single attribute or a hit test answers
-    /// in milliseconds; when the app is busy the AX server cannot answer in time,
-    /// the read fails, and the evidence falls back to what Quartz already proved
-    /// instead of stalling every event queued behind it.
-    private static let axReadTimeout: Float = 0.1
-
-    /// How much of one tap callback AX enrichment may use in total. Past it the
-    /// evidence keeps the Quartz facts it already has (window, focus, decision)
-    /// and every further attribute read returns nothing, so a hung app costs one
-    /// callback instead of the whole event queue.
-    private static let axCallbackBudgetMs = 300
-
-    /// Whether this callback already spent its AX time. Work outside the tap
-    /// callback reports no elapsed time and is never cut short.
-    private var axBudgetSpent: Bool {
-        tapWatchdog.elapsedMs(now: DispatchTime.now().uptimeNanoseconds) >= Self.axCallbackBudgetMs
+    /// The timeout one accessibility read may use right now, or nil when the
+    /// tap callback has already spent its time. The guard hands out the
+    /// remainder of one deadline, so the *work* is bounded and not only the
+    /// check before it: a read that starts at the last millisecond blocks for a
+    /// millisecond instead of the whole ceiling. Work outside a callback gets
+    /// the ceiling and is never cut short.
+    private func axTimeoutNow() -> Float? {
+        tapGuard.readTimeout(now: DispatchTime.now().uptimeNanoseconds)
     }
 
-    private func boundAXRead(_ element: AXUIElement) {
-        AXUIElementSetMessagingTimeout(element, Self.axReadTimeout)
-    }
+    /// Whether the callback has no time left for accessibility work.
+    private var axBudgetSpent: Bool { axTimeoutNow() == nil }
 
     private func axAttribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
-        guard !axBudgetSpent else { return nil }
-        boundAXRead(element)
+        guard let timeout = axTimeoutNow() else { return nil }
+        AXUIElementSetMessagingTimeout(element, timeout)
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
         return value
+    }
+
+    /// A string attribute read that also says whether the accessibility call
+    /// itself failed. "The element has no such attribute" and "the read did not
+    /// answer" are different facts: only the first may be treated as a value a
+    /// decision can rest on (a control without a secure role is still a control
+    /// whose role was read).
+    private func axStringRead(_ element: AXUIElement, _ name: String) -> (value: String?, failed: Bool) {
+        guard let timeout = axTimeoutNow() else { return (nil, true) }
+        AXUIElementSetMessagingTimeout(element, timeout)
+        var value: CFTypeRef?
+        switch AXUIElementCopyAttributeValue(element, name as CFString, &value) {
+        case .success:
+            return (value as? String, false)
+        case .noValue, .attributeUnsupported:
+            return (nil, false)
+        default:
+            return (nil, true)
+        }
     }
 
     private func axString(_ element: AXUIElement, _ name: String) -> String? {
@@ -172,8 +183,8 @@ final class Capture {
     }
 
     private func axActions(_ element: AXUIElement) -> [String] {
-        guard !axBudgetSpent else { return [] }
-        boundAXRead(element)
+        guard let timeout = axTimeoutNow() else { return [] }
+        AXUIElementSetMessagingTimeout(element, timeout)
         var names: CFArray?
         guard AXUIElementCopyActionNames(element, &names) == .success,
               let names = names as? [String] else { return [] }
@@ -203,20 +214,30 @@ final class Capture {
      * asks for the enhanced interface. Without it a click on one of their
      * controls is provable only by screen point, which replays fragilely.
      */
-    static func enableEnhancedAccessibility(_ app: AXUIElement) {
-        AXUIElementSetMessagingTimeout(app, axReadTimeout)
-        AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
-        AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+    static func enableEnhancedAccessibility(_ app: AXUIElement, timeout: () -> Float?) {
+        // Two synchronous writes, so the deadline is asked again before each: the
+        // first may already have spent what the callback had left.
+        if let first = timeout() {
+            AXUIElementSetMessagingTimeout(app, first)
+            AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+        }
+        if let second = timeout() {
+            AXUIElementSetMessagingTimeout(app, second)
+            AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        }
     }
 
-    static func axApplication(pid: Int32) -> AXUIElement {
+    /// The app element, with the enhanced interface requested when there is time
+    /// for it.
+    static func axApplication(pid: Int32, timeout: () -> Float?) -> AXUIElement {
         let app = AXUIElementCreateApplication(pid)
-        enableEnhancedAccessibility(app)
+        enableEnhancedAccessibility(app, timeout: timeout)
         return app
     }
 
     private func focusedWindowInfo(_ application: NSRunningApplication) -> FocusedWindow? {
-        let axApp = Self.axApplication(pid: application.processIdentifier)
+        let axApp = Self.axApplication(pid: application.processIdentifier,
+                                       timeout: { [unowned self] in self.axTimeoutNow() })
         guard let reported = axElement(axApp, kAXFocusedWindowAttribute as String) ??
                 axElement(axApp, kAXMainWindowAttribute as String) else { return nil }
         let transient = isTransientSurface(reported, axApp: axApp)
@@ -426,18 +447,20 @@ final class Capture {
         var ownerWindow = stackWindow
         // A queued event can still prove its window after the live hit changed.
         // Only enrich it with AX while the same window is under the pointer.
-        if targetMatches, target.canReadAX, !axBudgetSpent {
+        if targetMatches, target.canReadAX, let timeout = axTimeoutNow() {
             if let stackPid {
                 // Open the app's full tree before hit-testing so an Electron
                 // control under the pointer can be named, not merely pointed at.
-                Self.enableEnhancedAccessibility(AXUIElementCreateApplication(stackPid))
+                Self.enableEnhancedAccessibility(AXUIElementCreateApplication(stackPid),
+                                                 timeout: { [unowned self] in self.axTimeoutNow() })
             }
             let system = AXUIElementCreateSystemWide()
-            boundAXRead(system)
+            AXUIElementSetMessagingTimeout(system, timeout)
             var hit: AXUIElement?
-            if !axBudgetSpent,
-               AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &hit) == .success, let hit {
-                boundAXRead(hit)
+            if axTimeoutNow() != nil,
+               AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &hit) == .success, let hit,
+               let hitTimeout = axTimeoutNow() {
+                AXUIElementSetMessagingTimeout(hit, hitTimeout)
                 var elementPid: pid_t = 0
                 if AXUIElementGetPid(hit, &elementPid) == .success, elementPid > 0 {
                     axOwnerMatches = elementPid == stackPid
@@ -522,7 +545,7 @@ final class Capture {
             if let focusTitle, !focusTitle.isEmpty { title = focusTitle }
             return number
         }
-        let axApp = Self.axApplication(pid: pid)
+        let axApp = Self.axApplication(pid: pid, timeout: { [unowned self] in self.axTimeoutNow() })
         guard let main = axElement(axApp, kAXMainWindowAttribute as String),
               let number = windowNumber(for: main, pid: pid) else { return nil }
         if let label = axString(main, kAXTitleAttribute as String), !label.isEmpty { title = label }
@@ -731,22 +754,49 @@ final class Capture {
     ]
 
     /**
+     * What reading the focused control proved, and whether it could be read at
+     * all.
+     *
+     * "Could not read" is not "not protected": a secure field whose role read
+     * timed out looks exactly like an ordinary control, and text that cannot be
+     * proven non-secure must not leave the helper. Callers therefore have to
+     * check `classified` before treating the absence of `secure` as safety.
+     */
+    private struct FocusRead {
+        let fields: [String: Any]?
+        let verdict: FocusVerdict
+
+        static let unread = FocusRead(fields: nil, verdict: FocusVerdict(classified: false, secure: false))
+
+        var classified: Bool { verdict.classified }
+        var secure: Bool { verdict.secure }
+    }
+
+    /**
      * Constant-time evidence about the accessibility focused element: role,
      * label, screen frame and whether it accepts text. Only single attributes
      * are read — never kAXValueAttribute — so a secure field's content never
      * enters the stream, and no window tree is walked.
+     *
+     * The role and subrole are the attributes a security decision rests on, so
+     * a read that does not answer them reports `unread` instead of a control
+     * that merely looks unprotected. The label and bounds are enrichment: a
+     * failed read of those only omits them.
      */
-    private func focusElementEvidence(_ application: NSRunningApplication? = nil) -> [String: Any]? {
-        guard let targetPid = focusPid ?? application?.processIdentifier else { return nil }
-        let axApp = Self.axApplication(pid: targetPid)
-        guard let element = axElement(axApp, kAXFocusedUIElementAttribute as String) else { return nil }
-        let role = axString(element, kAXRoleAttribute as String)
-        let subrole = axString(element, kAXSubroleAttribute as String)
-        var evidence: [String: Any] = [:]
-        if let role, !role.isEmpty { evidence["role"] = role }
-        evidence["editable"] = Self.editableRoles.contains(role ?? "")
-        let secure = secureControl(role: role, subrole: subrole)
-        if secure {
+    private func focusElementEvidence(_ application: NSRunningApplication? = nil) -> FocusRead {
+        guard let targetPid = focusPid ?? application?.processIdentifier else { return .unread }
+        let axApp = Self.axApplication(pid: targetPid, timeout: { [unowned self] in self.axTimeoutNow() })
+        guard let element = axElement(axApp, kAXFocusedUIElementAttribute as String) else { return .unread }
+        let roleRead = axStringRead(element, kAXRoleAttribute as String)
+        let subroleRead = axStringRead(element, kAXSubroleAttribute as String)
+        // The decision itself is a pure function of what was read, so the helper
+        // and the offline test agree on what "could not classify" means.
+        let verdict = FocusVerdict.read(role: roleRead.value, roleFailed: roleRead.failed,
+                                       subrole: subroleRead.value, subroleFailed: subroleRead.failed)
+        guard verdict.classified, let role = roleRead.value else { return .unread }
+        var evidence: [String: Any] = ["role": role]
+        evidence["editable"] = Self.editableRoles.contains(role)
+        if verdict.secure {
             // A protected control keeps its role but never a label.
             evidence["secure"] = true
         } else {
@@ -760,7 +810,7 @@ final class Capture {
             evidence["bounds"] = [Int(position.x.rounded()), Int(position.y.rounded()),
                                   Int(size.width.rounded()), Int(size.height.rounded())]
         }
-        return evidence.isEmpty ? nil : evidence
+        return FocusRead(fields: evidence, verdict: verdict)
     }
 
     /** The bound instance, or nil when no path identity was requested. */
@@ -769,15 +819,22 @@ final class Capture {
         return NSRunningApplication(processIdentifier: pid)
     }
 
+    /// Queues one line for the engine. The callback never waits on the reader:
+    /// a blocked `write` inside a tap callback is a tap the system disables.
     func emit(_ object: [String: Any]) {
         do {
             var line = try JSONSerialization.data(withJSONObject: object)
             line.append(0x0A)
-            try FileHandle.standardOutput.write(contentsOf: line)
+            writer.append(line)
         } catch {
             failed = true
             stop()
         }
+    }
+
+    /// Writes anything still queued. Only a session that is ending calls this.
+    func flushOutput() {
+        writer.flush()
     }
 
     func stop(_ code: String? = nil, detail: String? = nil) {
@@ -795,6 +852,9 @@ final class Capture {
         // The session summary closes the stream: the engine needs the paused time
         // to tell the recording's net length from its wall-clock length.
         if started != nil { emit(["kind": "stopped", "pausedMs": pausedTotalMs()]) }
+        // The session is over; the last lines must reach the engine before the
+        // process exits, so this is the one place that waits for the pipe.
+        writer.flush()
         guard let application = NSApp else { return }
         application.stop(nil)
         // Wake only the helper's own AppKit event queue.
@@ -1068,10 +1128,10 @@ final class Capture {
     /// the two facts are reported here rather than in the session timer: a slow
     /// callback is a warning (nothing was lost yet), a disabled tap is a gap.
     func handleTapEvent(_ type: CGEventType, _ event: CGEvent) {
-        tapWatchdog.begin(Self.operationName(type), now: DispatchTime.now().uptimeNanoseconds)
+        tapGuard.begin(Self.operationName(type), now: DispatchTime.now().uptimeNanoseconds)
         receive(type, event)
-        let ms = tapWatchdog.end(now: DispatchTime.now().uptimeNanoseconds)
-        if ms >= TapWatchdog.slowCallbackMs { noteSlowCallback(ms) }
+        let ms = tapGuard.end(now: DispatchTime.now().uptimeNanoseconds)
+        if ms >= TapGuard.slowCallbackMs { noteSlowCallback(ms) }
     }
 
     /// What the callback is doing, in the words the diagnostic uses.
@@ -1093,10 +1153,10 @@ final class Capture {
     /// explain, and the stream is not readable yet.
     private func noteSlowCallback(_ ms: Int) {
         guard started != nil, !stopped else { return }
-        let seen = tapWatchdog.noteSlowCallback()
+        let seen = tapGuard.noteSlowCallback()
         guard seen <= 3 else { return }
         warn("TAP_SLOW_CALLBACK",
-             detail: "\(tapWatchdog.operation) held the tap callback for \(ms) ms; the system disables the tap near 1000 ms")
+             detail: "\(tapGuard.operation) held the tap callback for \(ms) ms; the system disables the tap near 1000 ms")
     }
 
     /// A tap the system disabled. Re-enabling from the notification itself keeps
@@ -1106,7 +1166,7 @@ final class Capture {
     /// interval the tap was off lost nothing.
     private func recoverTap(_ reason: String) {
         guard let tap else { return }
-        let notice = tapWatchdog.interrupted(reason: reason)
+        let notice = tapGuard.interrupted(reason: reason)
         if !CGEvent.tapIsEnabled(tap: tap) {
             CGEvent.tapEnable(tap: tap, enable: true)
             traceMouseLifecycle("tap_re_enable_requested")
@@ -1231,7 +1291,7 @@ final class Capture {
         // helper reports why it was secure and the TypeScript engine folds the
         // interval into one manual checkpoint without keeping any content.
         if global {
-            let secureControl = keyFocus?["secure"] as? Bool ?? false
+            let secureControl = keyFocus?.secure ?? false
             if secureInput || secureControl {
                 var evidence: [String] = []
                 if secureInput { evidence.append("system_secure_input") }
@@ -1264,6 +1324,16 @@ final class Capture {
                             !(scalar.value >= 0x80 && scalar.value <= 0x9f)
                     }
                     if printable {
+                        // Text that cannot be proven non-secure never leaves the
+                        // helper. A secure field whose role read timed out is
+                        // indistinguishable from an ordinary control, so an
+                        // unread control means no characters — the run is
+                        // reported once as a gap instead of typed into the flow.
+                        guard !global || keyFocus?.classified == true else {
+                            dropUnverifiableText()
+                            return
+                        }
+                        unverifiableText.verified()
                         let ime = chars.unicodeScalars.contains { $0.value > 126 }
                         var payload: [String: Any] = [
                             "kind": "text", "chars": chars,
@@ -1280,13 +1350,28 @@ final class Capture {
             }
         }
         guard let key = special ?? ansiKeys[code] else { warn("UNSUPPORTED_KEY"); return }
+        // A paste is content too: the engine reads the clipboard when it sees
+        // this key. An unclassified control must not turn into a paste step.
+        if global, modifiers.contains("meta"), key == "v", keyFocus?.classified != true {
+            dropUnverifiableText()
+            return
+        }
+        unverifiableText.verified()
         var payload: [String: Any] = ["kind": "key", "key": key, "modifiers": modifiers, "t": t, "seen": seen]
         if global { addFocusEvidence(&payload, focus: keyFocus) }
         emit(payload)
     }
 
+    /// Drops one press whose control could not be classified and reports the run
+    /// once. The gap blocks replay because the recording cannot say what was
+    /// typed or which control received it; a warning alone would not.
+    private func dropUnverifiableText() {
+        warn("TEXT_UNVERIFIABLE")
+        if unverifiableText.dropped() { emitGap("STALE_CAPTURE", detail: "text_unverifiable") }
+    }
+
     /** Adds the front window's evidence to a key/text payload. */
-    private func addFocusEvidence(_ payload: inout [String: Any], focus: [String: Any]? = nil) {
+    private func addFocusEvidence(_ payload: inout [String: Any], focus: FocusRead? = nil) {
         payload["focusGeneration"] = focusGeneration
         payload["secure"] = secureInput
         let owner = focusOwner()
@@ -1294,7 +1379,7 @@ final class Capture {
         // The focused element is read here, once per event, with attribute
         // calls only: the TypeScript side can then name the typing target
         // without reading the window tree.
-        if let focus = focus ?? focusElementEvidence() { payload["focus"] = focus }
+        if let fields = (focus ?? focusElementEvidence()).fields { payload["focus"] = fields }
     }
 
     private func focusOwner() -> [String: Any] {
@@ -1440,7 +1525,7 @@ final class Capture {
             // The click's focus evidence names the control that will receive
             // typing next, so the TypeScript side can bind text without a tree
             // read and can retarget a container click to that control.
-            if global, let focus = focusElementEvidence() { emitted["focus"] = focus }
+            if global, let fields = focusElementEvidence().fields { emitted["focus"] = fields }
             if traceClicks { emitted["traceId"] = click.down.traceId }
             emit(emitted)
         case .dragStarted:
@@ -1879,6 +1964,7 @@ struct RecorderCommand {
         CFMachPortInvalidate(tap)
         CFMachPortInvalidate(hotkeyTap)
         capture.closeIndicator()
+        capture.flushOutput()
         exit(capture.failed ? 1 : 0)
     }
 }

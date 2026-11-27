@@ -15,20 +15,26 @@ struct PointerSample {
     }
 }
 
-/// What the tap callback was doing and what it cost, plus every time the system
-/// disabled the tap because a callback blocked too long.
+/// One tap callback's single deadline, and the two facts the recorder reports
+/// about it.
 ///
 /// macOS disables an event tap whose callback overruns its budget, and every
-/// event until the tap is re-enabled is lost. Two facts therefore have to be
-/// told apart: a *slow callback* that finished (diagnosis only — nothing was
-/// lost yet, so no gap), and a *disabled tap* (always a gap, because nothing
-/// about the interval it covered can be proven to have been observed). The
-/// diagnostic keeps the operation that was running and its duration, so the
-/// next recording names the work that blocked instead of only the symptom.
-struct TapWatchdog {
+/// event until the tap is enabled again is lost. A per-read limit is not enough:
+/// a read can start just before the budget ends and still block in full. The
+/// guard therefore owns one deadline and hands out the remainder before each
+/// read, so the work itself — not just the check before it — is bounded. Two
+/// outcomes are told apart: a *slow callback* that finished (diagnosis only —
+/// nothing was lost yet, so no gap) and a *disabled tap* (always a gap, because
+/// nothing about the interval it covered can be proven observed).
+struct TapGuard {
     /// A callback above this is reported. The system's own disable threshold is
     /// about a second, so this is where the recorder says it is getting close.
     static let slowCallbackMs = 250
+    /// How much of one callback accessibility reads may use in total.
+    static let workBudgetMs = 300
+    /// The ceiling for one accessibility read, in seconds. A read normally
+    /// answers in milliseconds; this is where a wedged app gives up.
+    static let readCeilingSeconds: Float = 0.1
 
     /// The diagnostic of one disable: how often it happened, the callback that
     /// preceded it, and what that callback was processing.
@@ -73,6 +79,17 @@ struct TapWatchdog {
         return Int((now - startedAt) / 1_000_000)
     }
 
+    /// The timeout one accessibility read may use right now, or nil when the
+    /// callback has no time left for another read. Handing out the remainder is
+    /// what makes the deadline real: a read that starts at the last millisecond
+    /// blocks for a millisecond, not for the whole ceiling.
+    func readTimeout(now: UInt64) -> Float? {
+        guard running else { return Self.readCeilingSeconds }
+        let leftMs = Self.workBudgetMs - elapsedMs(now: now)
+        guard leftMs > 0 else { return nil }
+        return min(Self.readCeilingSeconds, Float(leftMs) / 1000)
+    }
+
     /// Whether this callback should be reported as slow. Counting it keeps the
     /// caller's warning bounded without losing the number.
     mutating func noteSlowCallback() -> Int {
@@ -87,6 +104,68 @@ struct TapWatchdog {
         return Interruption(count: interruptions, lastCallbackMs: lastCallbackMs,
                             lastOperation: lastOperation, reason: reason)
     }
+}
+
+/// What the focused control's accessibility read proved about content safety.
+///
+/// There are three outcomes, not two. A control that was read and is not
+/// protected may receive text; a control that names a protected input opens a
+/// manual checkpoint with no content; and a control whose role could not be read
+/// is *unknown*. Unknown is not "safe": a secure field whose read timed out looks
+/// exactly like an ordinary control, so content that cannot be proven
+/// non-secure must not leave the helper at all.
+struct FocusVerdict: Equatable {
+    enum Text: Equatable {
+        /// Content may be recorded as a normal text step.
+        case record
+        /// The control is protected: one checkpoint, never the content.
+        case secure
+        /// The read did not answer the attributes the decision rests on.
+        case unknown
+    }
+
+    /// Every attribute the decision rests on was answered.
+    let classified: Bool
+    /// The control names a protected input.
+    let secure: Bool
+
+    static func read(role: String?, roleFailed: Bool,
+                     subrole: String?, subroleFailed: Bool) -> FocusVerdict {
+        guard !roleFailed, let role, !role.isEmpty else {
+            return FocusVerdict(classified: false, secure: false)
+        }
+        let secure = role.contains("Secure") || (subrole ?? "").contains("Secure")
+        // A role that does not name a secure input says nothing about a subrole
+        // that could not be read, so that is still unknown.
+        guard secure || !subroleFailed else { return FocusVerdict(classified: false, secure: false) }
+        return FocusVerdict(classified: true, secure: secure)
+    }
+
+    var text: Text {
+        if secure { return .secure }
+        return classified ? .record : .unknown
+    }
+}
+
+/// A run of keystrokes whose control could not be classified, folded into one
+/// gap instead of one per key. The run — not the individual press — is the
+/// interval whose input the recording could not describe.
+struct UnverifiableText {
+    private var open = false
+
+    /// Whether this dropped press needs the gap. Only the first does.
+    mutating func dropped() -> Bool {
+        guard !open else { return false }
+        open = true
+        return true
+    }
+
+    /// The next press was classified, so the run ended.
+    mutating func verified() {
+        open = false
+    }
+
+    var isOpen: Bool { open }
 }
 
 struct GlobalCaptureLag {

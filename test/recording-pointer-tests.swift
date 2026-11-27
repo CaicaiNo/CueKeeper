@@ -43,71 +43,194 @@ struct RecordingPointerTests {
         }
         let count = cases.count + (try testSequences(emitTrace: emitTrace)) + testHover() + testHoverEmission()
             + testGlobalClickEvidence() + testPointerIdentity() + testFileItemIdentity()
-            + testTapWatchdog()
+            + testTapGuard() + testTapCallbackPath() + testFocusVerdict()
         if !emitTrace { print("Recording pointer: \(count)/\(count) passed") }
     }
 
-    /// A slow callback warns; a disabled tap is always a gap; the diagnostic
-    /// keeps the operation and duration of the callback that blocked; a normal
-    /// callback after recovery adds nothing.
-    private static func testTapWatchdog() -> Int {
+    /// One deadline bounds the callback's work; the two facts it reports are
+    /// told apart; a run of unclassifiable input becomes one gap; and the output
+    /// writer keeps the order the callback produced.
+    private static func testTapGuard() -> Int {
         let ms: (UInt64) -> UInt64 = { $0 * 1_000_000 }
-        var watchdog = TapWatchdog()
+        var guardRail = TapGuard()
 
-        // A normal callback: measured, never an interruption.
-        watchdog.begin("hover", now: ms(1_000))
-        precondition(watchdog.end(now: ms(1_012)) == 12)
-        precondition(watchdog.callbackMs < TapWatchdog.slowCallbackMs)
-        precondition(watchdog.interruptions == 0)
-        precondition(watchdog.operation == "hover")
+        // Work outside a callback gets the ceiling and is never cut short.
+        precondition(guardRail.readTimeout(now: ms(0)) == TapGuard.readCeilingSeconds)
 
-        // A slow callback: diagnosis only, still no interruption and no gap.
-        watchdog.begin("pointer", now: ms(2_000))
-        let slow = watchdog.end(now: ms(2_640))
+        // A normal callback: measured, never an interruption, never refused.
+        guardRail.begin("hover", now: ms(1_000))
+        precondition(guardRail.readTimeout(now: ms(1_012)) == TapGuard.readCeilingSeconds)
+        precondition(guardRail.end(now: ms(1_012)) == 12)
+        precondition(guardRail.callbackMs < TapGuard.slowCallbackMs)
+        precondition(guardRail.interruptions == 0)
+
+        // The deadline is handed out as the remainder: a read that starts near it
+        // blocks for what is left, not for the whole ceiling.
+        guardRail.begin("pointer", now: ms(2_000))
+        if let timeout = guardRail.readTimeout(now: ms(2_250)) {
+            precondition(abs(timeout - 0.05) < 0.0001)
+        } else {
+            preconditionFailure("Half the budget was left")
+        }
+        if let timeout = guardRail.readTimeout(now: ms(2_299)) {
+            precondition(timeout <= 0.0011 && timeout > 0)
+        } else {
+            preconditionFailure("One millisecond was left")
+        }
+        // No read may start once the budget is gone.
+        precondition(guardRail.readTimeout(now: ms(2_300)) == nil)
+        precondition(guardRail.readTimeout(now: ms(2_900)) == nil)
+        let slow = guardRail.end(now: ms(2_640))
         precondition(slow == 640)
-        precondition(slow >= TapWatchdog.slowCallbackMs)
-        precondition(watchdog.noteSlowCallback() == 1)
-        precondition(watchdog.interruptions == 0)
+        precondition(slow >= TapGuard.slowCallbackMs)
+        precondition(guardRail.noteSlowCallback() == 1)
+        precondition(guardRail.interruptions == 0)
 
-        // The system disabled the tap. The notification is itself a callback, so
-        // the diagnostic has to name the callback before it, not the notification.
-        watchdog.begin("event", now: ms(3_000))
-        let first = watchdog.interrupted(reason: "timeout")
+        // The disable notification is itself a callback, so the diagnostic has to
+        // name the callback before it, not the notification.
+        guardRail.begin("event", now: ms(3_000))
+        let first = guardRail.interrupted(reason: "timeout")
         precondition(first.count == 1)
         precondition(first.lastCallbackMs == 640)
         precondition(first.lastOperation == "pointer")
         precondition(first.reason == "timeout")
-        _ = watchdog.end(now: ms(3_001))
+        _ = guardRail.end(now: ms(3_001))
 
-        // Recovering and then doing normal work adds neither an interruption nor
-        // a callback the recorder would report as slow.
-        watchdog.begin("hover", now: ms(4_000))
-        precondition(watchdog.end(now: ms(4_020)) == 20)
-        precondition(watchdog.callbackMs < TapWatchdog.slowCallbackMs)
-        precondition(watchdog.interruptions == 1)
+        // Recovering and then doing normal work adds no interruption.
+        guardRail.begin("hover", now: ms(4_000))
+        precondition(guardRail.readTimeout(now: ms(4_020)) == TapGuard.readCeilingSeconds)
+        precondition(guardRail.end(now: ms(4_020)) == 20)
+        precondition(guardRail.callbackMs < TapGuard.slowCallbackMs)
+        precondition(guardRail.interruptions == 1)
 
-        // A second interruption counts on its own and names its own predecessor.
-        watchdog.begin("event", now: ms(4_030))
-        let second = watchdog.interrupted(reason: "user_input")
-        precondition(second.count == 2)
-        precondition(second.lastCallbackMs == 20)
-        precondition(second.lastOperation == "hover")
-        precondition(second.reason == "user_input")
-        _ = watchdog.end(now: ms(4_031))
-        precondition(watchdog.interruptions == 2)
+        // A run of unclassifiable presses reports one gap, not one per press.
+        var unverifiable = UnverifiableText()
+        precondition(unverifiable.dropped())
+        precondition(!unverifiable.dropped())
+        precondition(!unverifiable.dropped())
+        precondition(unverifiable.isOpen)
+        unverifiable.verified()
+        precondition(unverifiable.dropped())
+        return 19
+    }
 
-        // A clock that does not advance reads as zero, never as a negative time.
-        watchdog.begin("key", now: ms(5_000))
-        precondition(watchdog.end(now: ms(5_000)) == 0)
+    /// Content is only recorded when the control was read and is not protected;
+    /// a timed-out role is "unknown", never "safe".
+    private static func testFocusVerdict() -> Int {
+        // The read that timed out (the budget was spent) cannot vouch for safety.
+        let timedOut = FocusVerdict.read(role: nil, roleFailed: true,
+                                         subrole: nil, subroleFailed: true)
+        precondition(!timedOut.classified)
+        precondition(timedOut.text == .unknown)
+        // A role that was read but names no secure input, with the subrole read
+        // still missing, is also unknown: the subrole could be the secure one.
+        let halfRead = FocusVerdict.read(role: "AXTextField", roleFailed: false,
+                                         subrole: nil, subroleFailed: true)
+        precondition(!halfRead.classified)
+        precondition(halfRead.text == .unknown)
+        // An element without a role at all is not something to type into.
+        precondition(FocusVerdict.read(role: nil, roleFailed: false,
+                                       subrole: nil, subroleFailed: false).text == .unknown)
+        precondition(FocusVerdict.read(role: "", roleFailed: false,
+                                       subrole: nil, subroleFailed: false).text == .unknown)
+        // Both attributes answered: the ordinary field may receive text.
+        let field = FocusVerdict.read(role: "AXTextField", roleFailed: false,
+                                      subrole: nil, subroleFailed: false)
+        precondition(field.classified && !field.secure)
+        precondition(field.text == .record)
+        // A protected control is a checkpoint even before the system-wide flag is
+        // set, by role or by subrole.
+        let secureRole = FocusVerdict.read(role: "AXSecureTextField", roleFailed: false,
+                                           subrole: nil, subroleFailed: false)
+        precondition(secureRole.text == .secure)
+        let secureSubrole = FocusVerdict.read(role: "AXTextField", roleFailed: false,
+                                              subrole: "AXSecureTextField", subroleFailed: false)
+        precondition(secureSubrole.text == .secure)
+        // A secure role decides even when the subrole read failed.
+        let secureOnly = FocusVerdict.read(role: "AXSecureTextField", roleFailed: false,
+                                           subrole: nil, subroleFailed: true)
+        precondition(secureOnly.text == .secure)
+        return 12
+    }
 
-        // The running callback's elapsed time is what the AX budget is spent
-        // against; work outside a callback reports zero, so it is never cut off.
-        watchdog.begin("pointer", now: ms(6_000))
-        precondition(watchdog.elapsedMs(now: ms(6_180)) == 180)
-        precondition(watchdog.elapsedMs(now: ms(5_000)) == 0)
-        _ = watchdog.end(now: ms(6_180))
-        precondition(watchdog.elapsedMs(now: ms(7_000)) == 0)
-        return 8
+    /// The callback and recovery path end to end, with a clock the slow work
+    /// advances: reads stop at the deadline, the events keep their order, and a
+    /// real disable still produces a blocking gap.
+    private static func testTapCallbackPath() -> Int {
+        final class Box { var now: UInt64 = 0; var lines: [String] = []; let lock = NSLock() }
+        let box = Box()
+        let writer = LineWriter { data in
+            box.lock.lock()
+            box.lines.append(String(decoding: data, as: UTF8.self).trimmingCharacters(in: .newlines))
+            box.lock.unlock()
+        }
+        var guardRail = TapGuard()
+        let clock: () -> UInt64 = { box.now }
+        let advance: (UInt64) -> Void = { box.now += $0 * 1_000_000 }
+
+        // A whole callback, the way the recorder runs it: work asks the guard for
+        // time, and the guard hands out what is left.
+        func callback(_ operation: String, _ work: () -> Void) -> Int {
+            guardRail.begin(operation, now: clock())
+            work()
+            let spent = guardRail.end(now: clock())
+            if spent >= TapGuard.slowCallbackMs {
+                writer.append(Data("TAP_SLOW_CALLBACK:\(operation):\(spent)\n".utf8))
+            }
+            return spent
+        }
+
+        // 1. A normal event.
+        _ = callback("hover") {
+            precondition(guardRail.readTimeout(now: clock()) != nil)
+            advance(12)
+            writer.append(Data("event:hover1\n".utf8))
+        }
+
+        // 2. A slow accessibility read: it keeps starting reads until the guard
+        //    refuses, so the work — not just the check — is bounded.
+        var reads = 0
+        _ = callback("pointer") {
+            while guardRail.readTimeout(now: clock()) != nil {
+                reads += 1
+                advance(40)
+            }
+            writer.append(Data("event:click2\n".utf8))
+        }
+        // Eight reads of 40 ms fit the 300 ms budget; the ninth would start past
+        // it, and the guard refuses it while the callback is still running.
+        precondition(reads == 8, "reads must stop at the 300 ms deadline, saw \(reads)")
+
+        // 3. The system disabled the tap: the gap is what blocks replay, and the
+        //    callback after it keeps delivering.
+        guardRail.begin("event", now: clock())
+        let notice = guardRail.interrupted(reason: "timeout")
+        precondition(notice.count == 1)
+        precondition(notice.lastOperation == "pointer")
+        writer.append(Data("gap:tap_interrupted\n".utf8))
+        _ = guardRail.end(now: clock())
+
+        // 4. Recovered: two more events, in order.
+        for index in 3...4 {
+            _ = callback("key") {
+                precondition(guardRail.readTimeout(now: clock()) != nil)
+                advance(8)
+                writer.append(Data("event:key\(index)\n".utf8))
+            }
+        }
+
+        writer.flush()
+        box.lock.lock()
+        let lines = box.lines
+        box.lock.unlock()
+        // The slow callback's warning follows the line its work produced, exactly
+        // as the recorder emits it, and nothing after the interruption is lost or
+        // reordered.
+        precondition(lines == [
+            "event:hover1", "event:click2", "TAP_SLOW_CALLBACK:pointer:320",
+            "gap:tap_interrupted", "event:key3", "event:key4",
+        ], "unexpected output order: \(lines)")
+        return 6
     }
 
     private static func testSequences(emitTrace: Bool) throws -> Int {

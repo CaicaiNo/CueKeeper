@@ -118,7 +118,7 @@ export type CaptureEvent =
   | (CaptureEventBase & { kind: 'system_dialog'; visible: boolean })
   /**
    * `detail` is the helper's own bounded reason for a gap (`tap_interrupted`,
-   * `event_lag`, ...). It is optional so helpers that predate it still parse,
+   * `event_lag`, `text_unverifiable`). It is optional so helpers that predate it still parse,
    * and it never changes what a gap blocks.
    */
   | (CaptureEventBase & { kind: 'gap'; gapCode: CaptureGapCode; detail?: string });
@@ -350,7 +350,9 @@ function gapCode(value: unknown): CaptureGapCode {
  * leave a flow that no longer blocks replay.
  */
 function gapDetail(value: unknown): string | undefined {
-  return value === 'tap_interrupted' || value === 'event_lag' ? value : undefined;
+  return value === 'tap_interrupted' || value === 'event_lag' || value === 'text_unverifiable'
+    ? value
+    : undefined;
 }
 
 function decision(value: unknown): 'record' | 'navigate' | 'gap' {
