@@ -2954,3 +2954,135 @@ test('HAOC-207 review 4: two rename fields the same distance away are never type
   assert.deepEqual(callsOf(world, 'type'), [], 'neither field receives characters');
   assert.deepEqual(callsOf(world, 'typeFocused'), []);
 });
+
+// HAOC-219: two windows can carry one recorded title ("下载"), and the target
+// may live in only one of them. Choosing between them reads both trees before
+// any window is focused — work that is not the stability proof, which stays
+// short — and a proof that runs out names every window it read and what each
+// one lacked instead of reporting a bare "0 reads".
+
+/** One window record, with the `Continue` control removed from its tree. */
+function withoutContinue(window) {
+  window.data.tree.children = window.data.tree.children.filter(child => child.name !== 'Continue');
+  return window;
+}
+
+/** Makes the first read of each window slow, as a folder full of files answers. */
+function slowFirstRead(world, delayMs) {
+  const seen = new Set();
+  const real = world.desktop.snapshotWindow.bind(world.desktop);
+  world.desktop.snapshotWindow = async id => {
+    if (!seen.has(id)) {
+      seen.add(id);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+    return real(id);
+  };
+}
+
+test('HAOC-219: a slow same-title choice still finds the window holding the target and presses once', async t => {
+  // The operator's foreground is the twin; the recorded control is only in w-21.
+  const holder = windowRecord({ id: 'w-21', app: textedit, pid: 601, title: 'QA Notes', fields: [['notes', '@w21:e1']] });
+  const twin = withoutContinue(
+    windowRecord({ id: 'w-22', app: textedit, pid: 601, title: 'QA Notes', fields: [['draft', '@w22:e1']] }),
+  );
+  // The app's first window is the twin, so activating it leaves the twin in
+  // front — the window that does not hold the recorded control.
+  const { world, run } = harness(t, { windows: [twin, holder], focused: 'w-22' });
+  // Reading the two candidates and focusing the proved one together outlast the
+  // 1500 ms stability proof; on its own that is not a reason to stop.
+  slowFirstRead(world, 700);
+  const realFocus = world.desktop.focusWindow.bind(world.desktop);
+  world.desktop.focusWindow = async windowId => {
+    await new Promise(resolve => setTimeout(resolve, 200));
+    return realFocus(windowId);
+  };
+
+  const started = performance.now();
+  const report = await run(readinessFlow(pressContinue));
+  const elapsed = performance.now() - started;
+
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w21:e9']],
+    'one press, delivered to the window that held the target');
+  assert.deepEqual(callsOf(world, 'focusWindow').map(call => call[1]), ['w-21'],
+    'the proved window is the one brought forward, not the one that happened to be in front');
+  assert.ok(callsOf(world, 'snapshotWindow').some(call => call[1] === 'w-22'),
+    'the twin was read while choosing the window');
+  assert.match(entry(report, 'press').message, /the one that held its target/);
+  assert.ok(elapsed >= 1500,
+    `choosing and focusing took longer than the old proof (${Math.round(elapsed)} ms), so the old deadline is the regression`);
+});
+
+test('HAOC-219: when no same-title window holds the target the error names each window and sends nothing', async t => {
+  // Neither window holds the recorded control (a nosy sibling opened beside it).
+  const first = withoutContinue(
+    windowRecord({ id: 'w-21', app: textedit, pid: 601, title: 'QA Notes', fields: [['notes', '@w21:e1']] }),
+  );
+  const twin = withoutContinue(
+    windowRecord({ id: 'w-22', app: textedit, pid: 601, title: 'QA Notes', fields: [['draft', '@w22:e1']] }),
+  );
+  const { world, run } = harness(t, { windows: [first, twin], focused: 'w-21' });
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'failed');
+  const failed = entry(report, 'press');
+  assert.equal(failed.code, 'TARGET_NOT_READY');
+  assert.match(failed.message, /2 same-title windows read/);
+  assert.match(failed.message, /w-21 "QA Notes" no button "Continue"/);
+  assert.match(failed.message, /w-22 "QA Notes" no button "Continue"/);
+  assert.match(failed.message, /0 reads of the bound window/);
+  assert.doesNotMatch(failed.message, /the window has not been read yet/,
+    'the proof says which windows it read instead of reporting that nothing was read');
+  assert.deepEqual(callsOf(world, 'click'), [], 'no window is guessed: zero input');
+  assert.deepEqual(callsOf(world, 'focusWindow'), [],
+    'no window is brought forward for a target none of them holds');
+});
+
+test('HAOC-219: an unreadable same-title candidate is named in the diagnostic', async t => {
+  const first = withoutContinue(
+    windowRecord({ id: 'w-21', app: textedit, pid: 601, title: 'QA Notes', fields: [['notes', '@w21:e1']] }),
+  );
+  const unreadable = windowRecord({ id: 'w-22', app: textedit, pid: 601, title: 'QA Notes', fields: [['draft', '@w22:e1']] });
+  const { world, run } = harness(t, { windows: [first, unreadable], focused: 'w-22' });
+  const real = world.desktop.snapshotWindow.bind(world.desktop);
+  world.desktop.snapshotWindow = async id => {
+    if (id === 'w-22') throw new Fault('INCOMPLETE_TREE', 'the accessibility tree was still being built');
+    return real(id);
+  };
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'failed');
+  const failed = entry(report, 'press');
+  assert.equal(failed.code, 'TARGET_NOT_READY');
+  assert.match(failed.message, /w-22 "QA Notes" read failed \(INCOMPLETE_TREE\)/,
+    'the window that could not be read is reported with its own code');
+  assert.match(failed.message, /w-21 "QA Notes" no button "Continue"/);
+  assert.deepEqual(callsOf(world, 'click'), [], 'an unreadable window is never guessed at');
+});
+
+test('HAOC-219: two same-title windows that both hold the target are refused, naming both', async t => {
+  // One folder open twice: the target is in both, and the operator's front
+  // window is a third same-titled window that has it in neither. Nothing tells
+  // the two holders apart, so the gate must refuse instead of picking one.
+  const front = withoutContinue(
+    windowRecord({ id: 'w-23', app: textedit, pid: 601, title: 'QA Notes', fields: [['scratch', '@w23:e1']] }),
+  );
+  const first = windowRecord({ id: 'w-21', app: textedit, pid: 601, title: 'QA Notes', fields: [['notes', '@w21:e1']] });
+  const second = windowRecord({ id: 'w-22', app: textedit, pid: 601, title: 'QA Notes', fields: [['draft', '@w22:e1']] });
+  // Activation raises the app's first window, which is the one without the target.
+  const { world, run } = harness(t, { windows: [front, first, second], focused: 'w-23' });
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'blocked', 'an ambiguity is a refusal of the run, not a failed delivery');
+  const failed = entry(report, 'press');
+  assert.equal(failed.code, 'AMBIGUOUS_TARGET');
+  assert.match(failed.message, /3 same-title windows read/);
+  assert.match(failed.message, /w-21 "QA Notes" held button "Continue"/);
+  assert.match(failed.message, /w-22 "QA Notes" held button "Continue"/);
+  assert.match(failed.message, /w-23 "QA Notes" no button "Continue"/);
+  assert.deepEqual(callsOf(world, 'click'), [], 'neither identical window is guessed at');
+});

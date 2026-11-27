@@ -246,6 +246,17 @@ const readinessProbeIntervalMs = 200;
  */
 const readinessProofTimeoutMs = 1500;
 
+/**
+ * Choosing between same-titled windows is not a stability judgment: the proof
+ * reads every candidate's whole tree (one driver read budget each, which a
+ * Finder folder full of files can use up) before the bound window is even
+ * known, and only then can it focus that window and start the two stability
+ * reads. It therefore gets its own bound: the short proof above must not be
+ * spent on window selection, or a target that is really there is reported as
+ * never read.
+ */
+const readinessSelectionTimeoutMs = 3000;
+
 /** Steps whose first event after a window switch waits for a ready target. */
 const readinessGated = new Set<StepV2['kind']>(['click', 'type', 'key']);
 
@@ -286,6 +297,34 @@ interface ReadinessRead {
   refuse?: boolean;
 }
 
+/** One same-titled candidate the gate read while choosing which window to use. */
+interface SameTitleRead {
+  windowId: string;
+  title: string;
+  /** Whether this window held the step's target, lacked it, or could not be read. */
+  outcome: 'holds' | 'missing' | 'ambiguous' | 'error';
+  /** The target description, or the driver error code for an unreadable window. */
+  detail: string;
+}
+
+/**
+ * What the gate learned from the same-titled windows it read. A proof that ran
+ * out says which windows were tried and what each of them lacked, so a target
+ * that is really there is never reported as a bare "0 reads".
+ */
+function describeSameTitleReads(reads: SameTitleRead[]): string {
+  if (!reads.length) return '';
+  const parts = reads.map(read => {
+    const what = read.outcome === 'holds' ? `held ${read.detail}` :
+      read.outcome === 'missing' ? `no ${read.detail}` :
+      read.outcome === 'ambiguous' ? `${read.detail} was ambiguous in it` :
+      `read failed (${read.detail})`;
+    return `${read.windowId} "${read.title}" ${what}`;
+  });
+  return `${reads.length} same-title window${reads.length === 1 ? '' : 's'} read ` +
+    `(${parts.join('; ')})`;
+}
+
 /**
  * What a type step's characters are typed into, decided once and shared by the
  * readiness proof and the dispatch, so the field that is proved is the field
@@ -319,6 +358,16 @@ function describeTarget(step: ReadinessGatedStep): string {
   if (step.kind === 'key') return 'the bound window';
   if (step.kind === 'click' && step.target.kind === 'point') return 'the bound window';
   return describeLocator(step.target as ElementLocator);
+}
+
+/**
+ * What a step's window test asks a candidate tree for, in the wording of a
+ * candidate-read diagnostic (the target itself, not the bound window).
+ */
+function describeTargetOf(step: StepV2): string {
+  const { points, locators } = windowTestInputs(step);
+  return [...locators.map(describeLocator), ...points.map(point => `the point ${point.join(',')}`)]
+    .join(' and ') || 'the target';
 }
 
 /**
@@ -415,12 +464,10 @@ function addressable(locator: ElementLocator): ElementLocator {
 }
 
 /**
- * The test a window must pass to be the one a step was recorded in. A window
- * holds the step when it contains the recorded point, or when its tree
- * addresses the recorded element exactly once. A test returns undefined when
- * the tree cannot rule the window in or out.
+ * What a step asks a window's tree about: the recorded points it must contain
+ * and the element locators it must address.
  */
-function windowTest(step: StepV2): ((snapshot: Snapshot) => boolean | undefined) | undefined {
+function windowTestInputs(step: StepV2): { points: Point[]; locators: ElementLocator[] } {
   const points: Point[] = [];
   const locators: ElementLocator[] = [];
   if (step.kind === 'click') {
@@ -431,6 +478,17 @@ function windowTest(step: StepV2): ((snapshot: Snapshot) => boolean | undefined)
   } else if (step.kind === 'drag') {
     locators.push(step.from, step.to);
   }
+  return { points, locators };
+}
+
+/**
+ * The test a window must pass to be the one a step was recorded in. A window
+ * holds the step when it contains the recorded point, or when its tree
+ * addresses the recorded element exactly once. A test returns undefined when
+ * the tree cannot rule the window in or out.
+ */
+function windowTest(step: StepV2): ((snapshot: Snapshot) => boolean | undefined) | undefined {
+  const { points, locators } = windowTestInputs(step);
   if (!points.length && !locators.length) return undefined;
   return snapshot => {
     if (points.length && !snapshot.tree.bounds) return undefined;
@@ -599,19 +657,53 @@ class StepRunner {
   private async awaitReadyWindow(step: ReadinessGatedStep): Promise<{ binding: WindowBinding; snapshot: Snapshot }> {
     // The same same-title disambiguation the step itself will use: the gate must
     // not turn a window the flow can prove into an ambiguity, and a window that
-    // does not hold the target yet is "not ready", not ambiguous.
-    const pick = (candidates: WindowInfo[]) => this.pickSameTitled(candidates, step, { prove: true });
-    const deadline = performance.now() + readinessProofTimeoutMs;
+    // does not hold the target yet is "not ready", not ambiguous. Choosing reads
+    // each candidate's tree before the bound window is known; those reads are
+    // kept so a proof that runs out can name every window it tried and what each
+    // one lacked.
+    const candidates: SameTitleRead[] = [];
+    const pick = async (windows: WindowInfo[]) => {
+      const chosen = await this.pickSameTitled(windows, step, {
+        prove: true,
+        onRead: read => {
+          const seen = candidates.findIndex(candidate => candidate.windowId === read.windowId);
+          if (seen === -1) candidates.push(read);
+          else candidates[seen] = read;
+        },
+      });
+      // Several windows can hold the same target (one folder open twice) while
+      // none of them is the operator's. Nothing tells them apart, so the proof
+      // refuses; the message names what each window had rather than a count.
+      if (chosen === undefined && candidates.some(read => read.outcome === 'holds')) {
+        throw new Fault('AMBIGUOUS_TARGET',
+          `More than one window titled "${windows[0]?.title ?? ''}" holds ${describeTargetOf(step)}: ` +
+          `${describeSameTitleReads(candidates)}; no window was focused and no input was delivered`);
+      }
+      return chosen;
+    };
+    // One monotonic deadline per phase. Selecting the window reads candidate
+    // trees and gets its own, longer bound; the stability proof keeps the short
+    // one and only starts once the bound window is known. Both are still
+    // enforced with a cancellation, so a read that lands late can never start
+    // the focus command it was waiting for.
+    let selecting = true;
+    let deadline = performance.now() + readinessSelectionTimeoutMs;
     const remaining = () => deadline - performance.now();
-    // One signal for the whole proof. It is cancelled at the deadline so a read
-    // that finishes late cannot start the focus command it was waiting for.
-    const cancel = new AbortController();
-    const cutoff = setTimeout(() => cancel.abort(
-      new Fault('TARGET_NOT_READY', 'The readiness deadline passed before the window could be focused')),
-      readinessProofTimeoutMs);
     const fail = (problem: string, reads: number): Fault => new Fault('TARGET_NOT_READY',
-      `${describeTarget(step)} was not ready ${readinessProofTimeoutMs} ms after the window was brought forward: ` +
-      `${problem} (${reads} read${reads === 1 ? '' : 's'}); no input was delivered`);
+      `${describeTarget(step)} was not ready ` +
+      `${selecting ? readinessSelectionTimeoutMs : readinessProofTimeoutMs} ms ` +
+      `${selecting ? 'while its window was being chosen' : 'after the window was brought forward'}: ` +
+      `${problem} (${reads} read${reads === 1 ? '' : 's'} of the bound window` +
+      `${candidates.length ? `; ${describeSameTitleReads(candidates)}` : ''}); no input was delivered`);
+    const cancel = new AbortController();
+    let cutoff: ReturnType<typeof setTimeout> | undefined;
+    const arm = () => {
+      if (cutoff !== undefined) clearTimeout(cutoff);
+      cutoff = setTimeout(() => cancel.abort(
+        new Fault('TARGET_NOT_READY', 'The readiness deadline passed before the window could be focused')),
+        Math.max(0, deadline - performance.now()));
+    };
+    arm();
     let previous: string | undefined;
     let problem = 'the window has not been read yet';
     let reads = 0;
@@ -628,6 +720,14 @@ class StepRunner {
           if (binding === undefined) {
             binding = await this.withinDeadline(
               this.resolver.resolveWindow(step.scope, pick, { repair: false }), deadline, () => fail(problem, reads));
+            if (selecting) {
+              // The window is chosen; the target's stability is what the short
+              // proof now judges, so its budget starts here rather than having
+              // been spent on reading the candidates.
+              selecting = false;
+              deadline = performance.now() + readinessProofTimeoutMs;
+              arm();
+            }
             await this.withinDeadline(
               this.resolver.confirmForeground(binding, cancel.signal), deadline, () => fail(problem, reads));
           }
@@ -661,7 +761,7 @@ class StepRunner {
         await sleep(Math.max(0, Math.min(readinessProbeIntervalMs, remaining())), undefined, { signal: this.signal });
       }
     } finally {
-      clearTimeout(cutoff);
+      if (cutoff !== undefined) clearTimeout(cutoff);
       // Whatever ended the proof, a read that lands afterwards must not start
       // the focus command it was waiting for.
       if (!cancel.signal.aborted) {
@@ -1434,9 +1534,10 @@ class StepRunner {
   private async pickSameTitled(
     candidates: WindowInfo[],
     step: StepV2,
-    { prove = false }: { prove?: boolean } = {},
+    { prove = false, onRead }: { prove?: boolean; onRead?: (read: SameTitleRead) => void } = {},
   ): Promise<{ window: WindowInfo; reason: 'target' | 'focused' } | undefined> {
     const test = windowTest(step);
+    const target = describeTargetOf(step);
     if (!test) {
       // The step names nothing the tree can be asked about, so the operator's
       // own front window is the only evidence there is.
@@ -1454,12 +1555,22 @@ class StepRunner {
         // else is the driver's own failure and keeps its code.
         if (!prove) return undefined;
         const fault = toFault(error);
+        onRead?.({ windowId: candidate.id, title: candidate.title, outcome: 'error', detail: fault.code });
         if (!readinessTransientCodes.has(fault.code)) throw error;
         throw fault;
       }
       const result = test(snapshot);
       // An ambiguous element keeps this window in contention.
-      if (result === undefined) return undefined;
+      if (result === undefined) {
+        onRead?.({ windowId: candidate.id, title: candidate.title, outcome: 'ambiguous', detail: target });
+        return undefined;
+      }
+      onRead?.({
+        windowId: candidate.id,
+        title: candidate.title,
+        outcome: result ? 'holds' : 'missing',
+        detail: target,
+      });
       if (result) holders.push(candidate);
     }
     if (holders.length === 0) {
