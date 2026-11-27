@@ -21,6 +21,14 @@ export interface WindowInfo {
   minimized?: boolean;
 }
 
+/** One display's virtual-desktop rectangle, in Quartz points. */
+export interface DisplayInfo {
+  id?: string;
+  /** A second display can sit to the left or above: negative x/y is normal. */
+  bounds: { x: number; y: number; width: number; height: number };
+  isPrimary?: boolean;
+}
+
 /** One running application from the driver's app inventory. */
 export interface RunningApp {
   /** The process the app owns windows through; the join key to WindowInfo.pid. */
@@ -94,6 +102,14 @@ export interface Desktop {
    * it re-reads the bound window instead of focusing it.
    */
   hoverAt(snapshot: Snapshot, target: Target, point: Point, options?: HoverOptions): Promise<Delivery | undefined>;
+  /**
+   * Physical pointer move to a recorded screen point with no window binding.
+   * Requires headed mode; the point and the driver's own pre-move must fall
+   * inside one display, and the path is built from that display's bounds.
+   */
+  hoverScreen(point: Point, options?: { travel?: boolean }): Promise<Delivery | undefined>;
+  /** The connected displays and their virtual-desktop bounds, read-only. */
+  listDisplays(timeoutMs?: number): Promise<DisplayInfo[]>;
   /** Physical press, move and release between two endpoints; requires headed mode. */
   drag(snapshot: Snapshot, target: Target, from: DragEndpoint, to: DragEndpoint, options: DragOptions): Promise<Delivery | undefined>;
   type(ref: string, text: string): Promise<Delivery | undefined>;
@@ -218,6 +234,29 @@ function windowList(data: unknown): WindowInfo[] {
       ...(typeof window.minimized === 'boolean' ? { minimized: window.minimized } : {}),
     };
   });
+}
+
+/** The display layout, parsed fail-closed: a malformed answer is no layout. */
+function displayList(data: unknown): DisplayInfo[] {
+  if (!Array.isArray(data)) throw new Fault('BAD_RESPONSE', 'Expected a display inventory');
+  const displays = data.map(object).map(display => {
+    const bounds = object(display.bounds);
+    const numbers = [bounds.x, bounds.y, bounds.width, bounds.height];
+    if (!numbers.every(value => typeof value === 'number' && Number.isFinite(value)) ||
+        (bounds.width as number) <= 0 || (bounds.height as number) <= 0) {
+      throw new Fault('BAD_RESPONSE', 'Missing or invalid display bounds');
+    }
+    return {
+      ...(typeof display.id === 'string' ? { id: display.id } : {}),
+      bounds: {
+        x: bounds.x as number, y: bounds.y as number,
+        width: bounds.width as number, height: bounds.height as number,
+      },
+      ...(typeof display.is_primary === 'boolean' ? { isPrimary: display.is_primary } : {}),
+    };
+  });
+  if (!displays.length) throw new Fault('BAD_RESPONSE', 'The display inventory is empty');
+  return displays;
 }
 
 function appList(data: unknown): RunningApp[] {
@@ -659,6 +698,47 @@ export async function withDesktop<T>(
         }
         return delivery;
       },
+      async listDisplays(timeoutMs = 5000) {
+        return displayList(await call('list-displays', [], undefined, timeoutMs));
+      },
+      async hoverScreen(point, { travel = false } = {}) {
+        if (!options.headed) {
+          throw new Fault('HEADED_REQUIRED', 'Physical pointer movement requires --headed');
+        }
+        // A screen hover binds no window, so the display layout is the only
+        // proof the point exists. A layout that cannot be read is treated like
+        // an off-screen point: fail closed, move nothing.
+        let displays: DisplayInfo[];
+        try {
+          displays = displayList(await call('list-displays', [], undefined, 5000));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          throw new Fault('UNSAFE_POINT',
+            `The display layout could not be read (${message}); nothing was moved`);
+        }
+        const inside = (bounds: DisplayInfo['bounds'], step: Point) =>
+          contains(bounds, step) && contains(bounds, [step[0] - 1, step[1]]);
+        const display = displays.find(candidate => inside(candidate.bounds, point));
+        if (!display) {
+          throw new Fault('UNSAFE_POINT',
+            `The recorded screen point ${point.join(',')} is not inside one display ` +
+            `(the driver first posts ${point[0] - 1},${point[1]}); nothing was moved`);
+        }
+        const path = travel ? hoverPath(point, display.bounds) : [point];
+        for (const step of path) {
+          if (!inside(display.bounds, step)) {
+            throw new Fault('UNSAFE_POINT',
+              `The screen hover move to ${step.join(',')} leaves the display ${display.id ?? ''}` +
+              `(the driver first posts ${step[0] - 1},${step[1]}); nothing was moved`.trim());
+          }
+        }
+        let delivery: Delivery | undefined;
+        for (const [index, step] of path.entries()) {
+          delivery = await act('mouse-move', [`--xy=${step.join(',')}`]);
+          if (index < path.length - 1) await sleep(hoverStepMs);
+        }
+        return delivery;
+      },
       focus(ref) {
         return call('focus', [ref]).then(() => undefined);
       },
@@ -781,7 +861,9 @@ export function offlineDesktop(data: unknown, expected: Target): Desktop {
       throw new Fault('WINDOW_MISMATCH', 'Offline fixtures do not include window screenshots');
     },
     click: mutate, clickPoint: mutate, scroll: mutate, scrollPoint: mutate, drag: mutate,
-    hoverAt: mutate, type: mutate, press: mutate, ensure: mutate,
+    hoverAt: mutate,
+    hoverScreen: mutate,
+    listDisplays: mutate, type: mutate, press: mutate, ensure: mutate,
     async focus() { throw new Fault('WINDOW_MISMATCH', 'Offline fixtures cannot focus elements'); },
     async readClipboard() { throw new Fault('WINDOW_MISMATCH', 'Offline fixtures do not include a clipboard'); },
     async writeClipboard() { throw new Fault('WINDOW_MISMATCH', 'Offline fixtures cannot write the clipboard'); },

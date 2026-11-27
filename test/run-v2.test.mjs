@@ -190,6 +190,17 @@ function fakeWorld(options = {}) {
       state.calls.push(['hoverAt', point, options.travel === true, performance.now()]);
       return delivered('hover');
     },
+    async hoverScreen(point, options = {}) {
+      state.calls.push(['hoverScreen', point, options.travel === true, performance.now()]);
+      return delivered('hoverScreen');
+    },
+    async listDisplays() {
+      state.calls.push(['listDisplays']);
+      return [
+        { id: '1', isPrimary: true, bounds: { x: 0, y: 0, width: 1470, height: 956 } },
+        { id: '3', isPrimary: false, bounds: { x: 0, y: -1440, width: 2560, height: 1440 } },
+      ];
+    },
     async focus(ref) {
       state.calls.push(['focus', ref]);
     },
@@ -1268,6 +1279,114 @@ test('a hover dwells at least 400 ms, and a longer recorded dwell is kept', asyn
   assert.ok(long[3] - short[3] >= 400, `short hover dwelled ${long[3] - short[3]} ms`);
   assert.ok(tail[3] - long[3] >= 700, `long hover dwelled ${tail[3] - long[3]} ms`);
 });
+
+const screenHover = (extra = {}) => ({
+  id: 'screen-hover', kind: 'hover', scope: { kind: 'screen' },
+  point: [238, 397], durationMs: 0, ...extra,
+});
+
+test('a screen hover binds no window and only moves the pointer', async t => {
+  const { world, run } = harness(t, { headed: true });
+  const report = await run(hoverFlow([screenHover()]));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  const hover = entry(report, 'screen-hover');
+  assert.equal(hover.deliveredVia, 'screen_point');
+  assert.deepEqual(hover.scope, { kind: 'screen' });
+  assert.match(hover.message, /recorded screen point \(238,397\)/);
+  const moves = callsOf(world, 'hoverScreen');
+  assert.equal(moves.length, 1);
+  assert.deepEqual(moves[0].slice(0, 3), ['hoverScreen', [238, 397], true]);
+  // Nothing about a window was read or moved: no binding, no snapshot, no
+  // foreground proof, and no input of any kind.
+  assert.deepEqual([
+    callsOf(world, 'listWindows'), callsOf(world, 'snapshotWindow'), callsOf(world, 'snapshot'),
+    ...readOnlyCalls(world), callsOf(world, 'hoverAt'),
+  ], [[], [], [], [], [], [], [], [], [], []]);
+});
+
+test('an element hover whose window is gone degrades to its recorded point', async t => {
+  const { world, run } = harness(t, {
+    headed: true,
+    windows: initialWindows().filter(window => window.app !== textedit),
+  });
+  const report = await run(hoverFlow([notesHover('hover-notes', { point: [360, 170] })]));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  const hover = entry(report, 'hover-notes');
+  assert.equal(hover.deliveredVia, 'screen_point');
+  assert.match(hover.message, /HOVER_SCREEN_FALLBACK \(WINDOW_NOT_FOUND/);
+  assert.deepEqual(callsOf(world, 'hoverScreen').map(call => call[1]), [[360, 170]]);
+  assert.deepEqual(callsOf(world, 'hoverAt'), []);
+  assert.deepEqual(readOnlyCalls(world), [[], [], [], [], [], []]);
+});
+
+test('an element hover with no point keeps WINDOW_NOT_FOUND and moves nothing', async t => {
+  const { world, run } = harness(t, {
+    headed: true,
+    windows: initialWindows().filter(window => window.app !== textedit),
+  });
+  const report = await run(hoverFlow([notesHover('hover-notes')]));
+  assert.equal(entry(report, 'hover-notes').code, 'WINDOW_NOT_FOUND');
+  assert.equal(entry(report, 'hover-notes').deliveredVia, undefined);
+  assert.deepEqual(callsOf(world, 'hoverScreen'), []);
+  assert.deepEqual(callsOf(world, 'hoverAt'), []);
+});
+
+test('two same-titled windows with no front one degrade to the point', async t => {
+  const { world, run } = harness(t, {
+    headed: true,
+    focused: 'w-99',
+    windows: [
+      windowRecord({ id: 'w-21', app: textedit, pid: 601, title: 'QA Notes', fields: [['notes', '@w21:e1']] }),
+      windowRecord({ id: 'w-23', app: textedit, pid: 601, title: 'QA Notes', fields: [['notes', '@w23:e1']] }),
+      windowRecord({ id: 'w-99', app: 'com.apple.finder', pid: 700, title: 'Finder', fields: [] }),
+    ],
+  });
+  const report = await run(hoverFlow([notesHover('hover-notes', { point: [360, 170] })]));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  const hover = entry(report, 'hover-notes');
+  assert.equal(hover.deliveredVia, 'screen_point');
+  assert.match(hover.message, /HOVER_SCREEN_FALLBACK \(AMBIGUOUS_TARGET/);
+  assert.deepEqual(callsOf(world, 'hoverScreen').map(call => call[1]), [[360, 170]]);
+});
+
+test('a secure hover target refuses instead of falling back', async t => {
+  const { world, run } = harness(t, {
+    headed: true,
+    windows: [{
+      id: 'w-21', app: textedit, pid: 601, title: 'QA Notes',
+      data: {
+        complete: true, window: { id: 'w-21', title: 'QA Notes' },
+        tree: {
+          role: 'window', name: 'QA Notes', bounds: { x: 100, y: 100, width: 800, height: 600 },
+          children: [{
+            role: 'textfield', name: 'notes', ref_id: '@w21:e1',
+            bounds: { x: 120, y: 150, width: 600, height: 40 }, states: ['secure'],
+          }],
+        },
+      },
+    }],
+  });
+  const report = await run(hoverFlow([notesHover('hover-notes', { point: [360, 170] })]));
+  const hover = entry(report, 'hover-notes');
+  assert.equal(hover.code, 'UNSAFE_TARGET');
+  assert.equal(hover.deliveredVia, undefined);
+  assert.deepEqual(callsOf(world, 'hoverScreen'), []);
+  assert.deepEqual(callsOf(world, 'hoverAt'), []);
+});
+
+test('a point outside the bound window and a lost foreground never fall back', async t => {
+  const outside = await harness(t, { headed: true }).run(
+    hoverFlow([notesHover('hover-notes', { point: [2000, 2000] })]));
+  assert.equal(entry(outside, 'hover-notes').code, 'UNSAFE_POINT');
+  assert.equal(entry(outside, 'hover-notes').deliveredVia, undefined);
+
+  const background = harness(t, { headed: true, focused: 'w-22' });
+  const report = await background.run(hoverFlow([notesHover('hover-notes', { point: [360, 170] })]));
+  assert.equal(entry(report, 'hover-notes').code, 'HOVER_NOT_FOREGROUND');
+  assert.equal(entry(report, 'hover-notes').deliveredVia, undefined);
+  assert.deepEqual(callsOf(background.world, 'hoverScreen'), []);
+});
+
 
 /** One Finder-style window: an item label whose name sits in its value. */
 function finderItemsWorld(t, items) {

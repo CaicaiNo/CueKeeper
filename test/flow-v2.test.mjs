@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { flowV2Check, reportV2Check } from '../dist/contracts-v2.js';
 import { hashFlow } from '../dist/flow.js';
 import {
-  dryRunFlowV2, hashFlowV2, parseFlowV2, planFlowV2, pointTargetSteps, scopeKey, scopeLabel,
+  describePlannedStep, dryRunFlowV2, hashFlowV2, parseFlowV2, planFlowV2, pointTargetSteps, scopeKey, scopeLabel,
 } from '../dist/flow-v2.js';
 import { loadSession } from '../dist/workbench-session.js';
 import { startWorkbench } from '../dist/workbench.js';
@@ -184,6 +184,101 @@ test('a hover point is optional, bounded and leaves older flows valid', () => {
   assert.throws(() => parseFlowV2(hoverFlow([100001, 0])), /Invalid flow version 2/);
   assert.throws(() => parseFlowV2(hoverFlow([120, 340, 0])), /Invalid flow version 2/);
 });
+
+/** A coordinate hover: the point itself is the target, the hint is display-only. */
+const screenHover = (extra = {}) => ({
+  version: 2, id: 'hover-screen', name: 'Screen hover',
+  steps: [{
+    id: 'h', kind: 'hover',
+    scope: { kind: 'screen' },
+    point: [238, 397], durationMs: 339,
+    ...extra,
+  }],
+});
+
+test('a coordinate hover is a screen scope with its own required point', () => {
+  const flow = parseFlowV2(screenHover({
+    hint: {
+      app: 'com.apple.finder', windowTitle: 'multica-v1-https',
+      element: { kind: 'element', role: 'group', name: '' },
+    },
+  }));
+  assert.deepEqual(flow.steps[0].scope, { kind: 'screen' });
+  assert.deepEqual(flow.steps[0].point, [238, 397]);
+  assert.equal('target' in flow.steps[0], false);
+  assert.equal(scopeKey(flow.steps[0].scope), 'screen');
+  assert.equal(scopeLabel(flow.steps[0].scope), '整块屏幕');
+  assert.equal(schema('flow-v2').properties.steps.items.anyOf
+    .filter(branch => branch.properties?.kind?.const === 'hover').length, 2,
+  'hover publishes one window branch and one screen branch');
+
+  // The point is required, bound to the same pixel range as a click point.
+  const { point, ...withoutPoint } = screenHover().steps[0];
+  assert.throws(() => parseFlowV2({ ...screenHover(), steps: [withoutPoint] }), /Invalid flow version 2/);
+  assert.doesNotThrow(() => parseFlowV2(screenHover({ point: [0, 0] })));
+
+  // A screen hover carries no element target and no hand-off: the point is the
+  // whole address, so a leftover target or focusAfter is refused rather than
+  // silently ignored.
+  assert.throws(() => parseFlowV2(screenHover({
+    target: { kind: 'element', role: 'group', name: 'canvas' },
+  })), /Invalid flow version 2/);
+  assert.throws(() => parseFlowV2(screenHover({
+    focusAfter: { kind: 'window', app: 'com.apple.finder', windowKey: 'f', windowTitle: 'x' },
+  })), /Invalid flow version 2/);
+  // A hint that looks like a locator is still the closed hint shape.
+  assert.throws(() => parseFlowV2(screenHover({
+    hint: { element: { kind: 'element', role: 'group', path: ['window', 'group'], index: 3 } },
+  })), /Invalid flow version 2/);
+});
+
+test('the screen scope is closed to click, scroll and type', () => {
+  const screen = { kind: 'screen' };
+  const click = {
+    version: 2, id: 'screen-click', name: 'Screen click',
+    steps: [{ id: 'c', kind: 'click', scope: screen, target: { kind: 'element', role: 'button', name: '保存' } }],
+  };
+  assert.equal(flowV2Check.Check(click), false);
+  const scroll = structuredClone(click);
+  scroll.steps[0] = {
+    id: 's', kind: 'scroll', scope: screen,
+    target: { kind: 'element', role: 'list' }, deltaX: 0, deltaY: 120,
+  };
+  assert.equal(flowV2Check.Check(scroll), false);
+  const type = structuredClone(click);
+  type.steps[0] = {
+    id: 't', kind: 'type', scope: screen,
+    target: { kind: 'element', role: 'textfield', name: '搜索' }, text: 'hello',
+  };
+  assert.equal(flowV2Check.Check(type), false);
+});
+
+test('a coordinate hover passes the dry run and says it is unverified', () => {
+  const flow = parseFlowV2(screenHover());
+  const plan = planFlowV2(flow)[0];
+  assert.deepEqual(plan.point, [238, 397]);
+  assert.equal(describePlannedStep(plan), 'h hover · 屏幕坐标 (238,397)');
+
+  const report = dryRunFlowV2(flow);
+  const entry = report.entries[0];
+  assert.equal(entry.status, 'resolved');
+  assert.deepEqual(entry.scope, { kind: 'screen' });
+  assert.equal(entry.deliveredVia, 'screen_point');
+  assert.match(entry.message, /无法证明/);
+  assert.equal(reportV2Check.Check(report), true);
+
+  // A different point is a different flow, and a click point is still refused.
+  assert.notEqual(hashFlowV2(flow), hashFlowV2(parseFlowV2(screenHover({ point: [239, 397] }))));
+  const clickPoint = structuredClone(flow);
+  clickPoint.id = 'click-point';
+  clickPoint.steps = [{
+    id: 'c', kind: 'click',
+    scope: { kind: 'window', app: 'com.apple.finder', windowKey: 'f', windowTitle: 'x' },
+    target: { kind: 'point', point: [120, 80] },
+  }];
+  assert.throws(() => dryRunFlowV2(clickPoint), { code: 'UNSAFE_POINT' });
+});
+
 
 test('a v2 dry run resolves every scope without starting the desktop driver', t => {
   const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-v2-'));

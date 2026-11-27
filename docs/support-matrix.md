@@ -26,8 +26,8 @@
 | 滚轮（坐标） | 支持。落点无元素时记 `target.point` 加原始 delta | 支持，必须 `--headed`。驱动 `mouse-wheel --x --y --dx= --dy=`（负值用 `=` 形式，避免被当成 flag） | `test/pointer-input.test.mjs`（适配器参数）、`test/viewer.test.mjs` | 未验证 → HAOC-76/87 | `HEADED_REQUIRED`、`UNSAFE_POINT`、`WINDOW_CHANGED`、`UNSUPPORTED_SCROLL`（适配器兜底；双轴为 0 已在规划期拒绝）、`OUTSIDE_WINDOW`（录制） |
 | 左键拖拽（元素端点） | 支持。按下移动超过 3 个逻辑点即记 `kind: "drag"`；起点或终点距命中元素中心 ≤ 4 pt 时记元素定位器；`path` 按 8 px / 16 ms 抽稀（≤ 64 点），`durationMs` 记按下到松开的时长 | 支持，必须 `--headed`。驱动 `drag --from <ref> --to <ref> --duration`；回放前重新聚焦并核对窗口，起止元素在快照中重新解析 | `test/drag-input.test.mjs`、`test/cuekeeper.test.mjs`（录制 CLI）、`test/recording-pointer-tests.swift`（采样/端点/时长）、`test/app-identity-replay.test.mjs` | 未验证 → HAOC-76/87（Finder 文件拖放、spring-loaded 文件夹、自动滚动） | `HEADED_REQUIRED`、`NOT_FOUND`、`AMBIGUOUS_TARGET`、`UNSAFE_TARGET`、`WINDOW_CHANGED`、`UNSAFE_POINT`（按副本路径的流程带坐标端点） |
 | 左键拖拽（坐标端点） | 支持。落点不在元素中心时记 `from`/`to` 的 `target.point`；文本选择与窗口移动必须走这一形态 | 支持，必须 `--headed`。驱动 `drag --from-xy=x,y --to-xy=x,y --duration`；回放前重新聚焦窗口并核对起点在窗口内；终点允许在窗口外（窗口移动） | `test/drag-input.test.mjs`（录制绑定、schema、回放调用、适配器参数、干跑） | 未验证 → HAOC-76/87（文本选择范围、窗口移动落点） | `HEADED_REQUIRED`、`UNSAFE_POINT`（起点在窗口外或按副本路径的流程）、`WINDOW_CHANGED`、`NOT_FOUND`（元素端点） |
-| 悬停（元素） | 支持。`mouseMoved` 在同一点 3 pt 内停留 ≥300 ms 时记 `kind: "hover"`，`durationMs` 记实际停留；事件只在目标窗口、目标应用前台且不在录制 HUD 上时采集 | 支持，必须 `--headed`。元素取快照 bounds 中心，驱动 `mouse-move --xy`，再等待 `durationMs` | `test/input-ii.test.mjs`（录制、schema、回放调用、适配器参数）、`test/recording-pointer-tests.swift`（停留/过路/移动重置） | 未验证 → HAOC-76/87（tooltip 延时、菜单展开、停留时长） | `HEADED_REQUIRED`、`NOT_FOUND`、`UNSAFE_TARGET`（安全控件）、`HOVER_UNRESOLVED`（元素无 bounds）、`UNSAFE_POINT` |
-| 悬停（坐标） | 支持。落点没有可绑定元素时记 `target.point`；固定应用路径的录制跳过并报 `UNTARGETED_HOVER` | 支持，必须 `--headed`。驱动 `mouse-move --xy`，再等待 `durationMs`；固定应用路径的流程拒绝坐标（`UNSAFE_POINT`） | `test/input-ii.test.mjs` | 未验证 → HAOC-76/87 | `HEADED_REQUIRED`、`UNSAFE_POINT`、`WINDOW_CHANGED`（回放前窗口核对）、`UNTARGETED_HOVER`（录制警告） |
+| 悬停（元素） | 支持。`mouseMoved` 在同一点 3 pt 内停留 ≥300 ms 时记 `kind: "hover"`，`durationMs` 记实际停留；指针下的控件有名字或 `identifier` 时记元素型（`scope` 为窗口、`target` 加实际停留点），事件只在目标窗口、目标应用前台且不在录制 HUD 上时采集 | 支持，必须 `--headed`。解析窗口、前台与元素后，沿目标内的短路径驱动 `mouse-move --xy`（至少 3 次，间隔 40 ms），最后落在录制点或元素中心，再等待 `max(durationMs, 400)` | `test/hover-replay.test.mjs`、`test/input-ii.test.mjs`、`test/recording-pointer-tests.swift` | 未验证 → HAOC-76/87（tooltip 延时、菜单展开、停留时长） | `HEADED_REQUIRED`、`NOT_FOUND`、`WINDOW_NOT_FOUND`、`WINDOW_CHANGED`、`AMBIGUOUS_TARGET`、`UNSAFE_TARGET`（安全控件）、`HOVER_UNRESOLVED`（元素无 bounds）、`UNSAFE_POINT`、`HOVER_NOT_FOREGROUND`；前四类在有 `point` 时降级为坐标型并在报告标 `HOVER_SCREEN_FALLBACK` |
+| 悬停（坐标） | 支持。落点只命中窗口根、匿名容器或空名文本时记 `kind: "hover"` + `scope:{kind:'screen'}` + 必填 `point`；`hint` 只记录 `app` / `windowTitle` / `element`（role、name、identifier），不参与解析；没有窗口归属的悬停仍跳过并报 `UNTARGETED_HOVER` | 支持，必须 `--headed`。只调 `list-displays`，要求落点与驱动预移动点 `(x-1,y)` 在同一块显示器内（副屏负坐标合法），按该显示器构造路径驱动 `mouse-move --xy`，再等待 `max(durationMs, 400)`；不建窗口绑定、不读快照、不聚焦、不点击 | `test/hover-replay.test.mjs`、`test/record-v2.test.mjs`、`test/workbench-target-dialog.test.mjs` | 未验证 → HAOC-76/87（副屏、窗口改名/换目录、tooltip 肉眼确认） | `HEADED_REQUIRED`、`UNSAFE_POINT`（落点或 `list-displays` 不可证明，零移动）、`UNTARGETED_HOVER`（录制跳过）、`HOVER_SCREEN_FALLBACK`（元素型降级，报告里的说明而非失败） |
 
 ### 滚轮的已知限制
 
@@ -46,9 +46,10 @@
 ### 悬停的已知限制
 
 - **停留阈值固定 300 ms、半径 3 pt**：更短的掠过不产生步骤；到达后不再移动也会由会话定时器补发一次，不会每个 mouseMoved 都记。
-- **元素回放取中心**：元素目标在回放时移动到 bounds 中心，不是录制时的精确落点。只在元素边缘才出现的 tooltip 可能不触发；需要精确点位时用坐标悬停。
-- **只移动、不等待 UI 断言**：`durationMs` 是停留等待，不保证 tooltip / 菜单在其它机器上同样出现；回放失败只覆盖移动本身（`HEADED_REQUIRED`、`UNSAFE_POINT`、`HOVER_UNRESOLVED`），瞬时消失需用后续 `assert` 判断。
-- **真机 tooltip 延时、菜单展开与停留时长**归 HAOC-87。
+- **元素型回放用录制的实际停留点**：元素型悬停优先落在录制时指针停下的点，只有旧 flow 或录制点不在目标内时才退回 bounds 中心。坐标型悬停按录制的屏幕坐标回放，与录制时的屏幕布局绑定，版面/分辨率变化后可能落到别处，需要重新录制。
+- **两种悬停都不看 UI 结果**：`durationMs` 是停留等待，不保证 tooltip / 菜单在其它机器上同样出现；回放失败只覆盖移动本身（`HEADED_REQUIRED`、`UNSAFE_POINT`、`HOVER_UNRESOLVED`、`HOVER_NOT_FOREGROUND`），瞬时消失需用后续 `assert` 判断。坐标型回放一律视为不可自动验证。
+- **元素型降级只在四种解析失败时发生**：`WINDOW_NOT_FOUND` / `WINDOW_CHANGED` / `AMBIGUOUS_TARGET` / `NOT_FOUND` 且本步有 `point` 时改为坐标回放，报告带 `HOVER_SCREEN_FALLBACK` 和原始错误码；secure、坐标在已证明窗口外、后台窗口、驱动故障/超时/`HEADED_REQUIRED` 都不降级。
+- **真机 tooltip 延时、菜单展开、副屏与窗口改名后的坐标回放**归 HAOC-87。
 
 ### 剪贴板与 IME 的已知限制
 
@@ -139,7 +140,8 @@ Shell 的完整约束见 [Shell 步骤设计](shell-steps.md) 与 [Root 步骤�
 | `UNTARGETED_DRAG` | 固定应用路径的录制里，拖拽端点无法绑定到元素 | 是（录制警告） |
 | `UNSUPPORTED_DRAG_BUTTON` | 适配器直接收到右键拖拽（正常流程在规划期已先拒绝） | 否，直接失败 |
 | `UNTARGETED_POINT` | 固定应用路径的录制里，坐标点击 / 滚动 / 悬停无法绑定到元素 | 是（录制警告） |
-| `UNTARGETED_HOVER` | 固定应用路径的录制里，悬停落点无法绑定到元素 | 是（录制警告） |
+| `UNTARGETED_HOVER` | 悬停落点无法归属到任何窗口（桌面空白、无法证明窗口），跳过且不产生缺口 | 是（录制警告） |
+| `HOVER_SCREEN_FALLBACK` | 元素型悬停的窗口/元素已不能证明（四类解析失败）且该步保留了录制点，改按屏幕坐标移动指针；报告 `deliveredVia: "screen_point"`，message 带原始错误码 | 否，降级成功；指针只移动与停留 |
 | `UNTARGETED_FILE_CLICK` | 全局录制里 Finder 的点击没命中任何有名字的文件项，改记坐标 | 是（录制警告），回放前需改成有名字的元素 |
 | `UNTARGETED_ELEMENT_CLICK` | 全局录制里点击没命中任何有名字的元素（含只命中窗口根的空白点击），改记坐标 | 是（录制警告），回放前需改成有名字的元素，dry-run 以 `UNSAFE_POINT` 拒绝 |
 | `CLICK_TARGET_UNPRESSABLE` | 录制到的控件及其所有容器都没有 AX action ref（Electron 页面常见）：回放只能按控件中心做物理点击（需 `--headed`），不是语义 press | 是（录制警告），需要时重新拾取目标 |

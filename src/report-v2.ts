@@ -15,6 +15,8 @@ export interface StepResult {
   message?: string;
   code?: string;
   delivery?: DeliveryV2;
+  /** Which path a hover took: its resolved element or the recorded screen point. */
+  deliveredVia?: ReportV2Entry['deliveredVia'];
   textMode?: 'literal' | 'input';
   input?: string;
   /** The declared focusAfter scope the step handed the foreground to. */
@@ -60,6 +62,7 @@ export class ReportV2Session {
       ...(result.message === undefined ? {} : { message: result.message }),
       ...(result.code === undefined ? {} : { code: result.code }),
       ...(result.delivery === undefined ? {} : { delivery: result.delivery }),
+      ...(result.deliveredVia === undefined ? {} : { deliveredVia: result.deliveredVia }),
       ...(result.focusAfter === undefined ? {} : { focusAfter: result.focusAfter }),
       ...(result.checkpoint === undefined ? {} : { checkpoint: result.checkpoint }),
       ...(result.stateCheck === undefined ? {} : { stateCheck: result.stateCheck }),

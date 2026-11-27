@@ -15,6 +15,8 @@ export interface PlannedStepV2 {
   id: string;
   kind: StepV2['kind'];
   scope?: Scope;
+  /** The recorded screen point of a coordinate hover, for its plan line. */
+  point?: [number, number];
 }
 
 const windowWaitKinds = new Set(['window_exists', 'element_enabled', 'element', 'window']);
@@ -45,6 +47,7 @@ export function isFlowV2(input: unknown): input is FlowV2 {
 export function scopeKey(scope: Scope): string {
   if (scope.kind === 'window') return `window:${scope.app}:${scope.windowKey}`;
   if (scope.kind === 'app') return `app:${scope.app}`;
+  if (scope.kind === 'screen') return 'screen';
   if (scope.kind === 'file') {
     return 'path' in scope
       ? `file:${scope.path}`
@@ -64,6 +67,7 @@ export function scopeKey(scope: Scope): string {
 export function scopeLabel(scope: Scope): string {
   if (scope.kind === 'window') return `${scope.app} · ${scope.windowTitle} (${scope.windowKey})`;
   if (scope.kind === 'app') return scope.app;
+  if (scope.kind === 'screen') return '整块屏幕';
   if (scope.kind === 'file') {
     if ('path' in scope) return `文件 · ${scope.path}`;
     return `文件 · ${'name' in scope ? scope.name : `*${scope.suffix}`}（${scope.directory}）`;
@@ -109,6 +113,8 @@ function validateScope(scope: Scope, where: string, state: ScopeState) {
     bindWindowKey(scope, where, state);
     return;
   }
+  // The desktop names no app, window key or path: nothing to bind.
+  if (scope.kind === 'screen') return;
   if (scope.kind === 'app') {
     state.apps.add(scope.app);
     return;
@@ -358,6 +364,7 @@ export function planFlowV2(flow: FlowV2): PlannedStepV2[] {
     id: step.id,
     kind: step.kind,
     ...(step.kind === 'gap' ? {} : { scope: step.scope }),
+    ...(step.kind === 'hover' && step.scope.kind === 'screen' ? { point: step.point } : {}),
   }));
 }
 
@@ -385,14 +392,36 @@ export function dryRunFlowV2(flow: FlowV2): ReportV2 {
       `Flow ${flow.id} keeps ${points.map(step => step.id).join(', ')} at a recorded screen point; ` +
       'turn each into an element target before a dry run can pass');
   }
-  const entries: ReportV2Entry[] = flow.steps.map(step => ({
-    id: step.id,
-    kind: step.kind,
-    ...(step.kind === 'gap' ? {} : { scope: step.scope }),
-    status: 'resolved',
-    atMs: 0,
-    durationMs: 0,
-  }));
+  const entries: ReportV2Entry[] = flow.steps.map(step => {
+    // A coordinate hover is passive: nothing is pressed, nothing takes focus,
+    // and the pointer stops where the recording left it. It cannot prove that
+    // point still names the same control, so the entry says exactly that.
+    if (step.kind === 'hover' && step.scope.kind === 'screen') {
+      const point = step.point;
+      if (point === undefined) {
+        throw new Fault('INVALID_FLOW', 'A coordinate hover needs its recorded screen point');
+      }
+      return {
+        id: step.id,
+        kind: step.kind,
+        scope: step.scope,
+        status: 'resolved',
+        atMs: 0,
+        durationMs: 0,
+        deliveredVia: 'screen_point',
+        message: `dry run 无法证明坐标 (${point.join(',')}) 仍落在录制时的同一控件上；` +
+          '坐标与录制时的屏幕布局绑定',
+      };
+    }
+    return {
+      id: step.id,
+      kind: step.kind,
+      ...(step.kind === 'gap' ? {} : { scope: step.scope }),
+      status: 'resolved',
+      atMs: 0,
+      durationMs: 0,
+    };
+  });
   return {
     version: 2,
     flowId: flow.id,
@@ -406,5 +435,8 @@ export function dryRunFlowV2(flow: FlowV2): ReportV2 {
 
 /** Dry-run report line, e.g. `s1 type resolved · com.apple.TextEdit · QA Notes (editor)`. */
 export function describePlannedStep(step: PlannedStepV2): string {
+  if (step.kind === 'hover' && step.scope?.kind === 'screen' && step.point) {
+    return `${step.id} hover · 屏幕坐标 (${step.point.join(',')})`;
+  }
   return step.scope ? `${step.id} ${step.kind} · ${describeScope(step.scope)}` : `${step.id} ${step.kind}`;
 }

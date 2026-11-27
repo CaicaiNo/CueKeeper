@@ -34,6 +34,7 @@ export function scopeDescription(scope, appName = id => id) {
     return `文件 · ${scope.name ?? `*${scope.suffix}`}（${scope.directory}）`;
   }
   if (scope.kind === 'process') return `进程 · ${scope.name ?? scope.path}`;
+  if (scope.kind === 'screen') return '整块屏幕';
   return [SURFACE_LABELS[scope.surface] ?? scope.surface,
     scope.app ? appName(scope.app) : '', scope.windowTitle ?? ''].filter(Boolean).join(' · ');
 }
@@ -509,7 +510,9 @@ export function v2StepLabel(step, appName = id => id) {
     case 'key': return `快捷键 ${[...(step.modifiers ?? []), step.key].join('+')}`;
     case 'scroll': return `滚轮 ${targetLabel(step.target)}`;
     case 'drag': return `拖拽 ${targetLabel(step.from)} → ${targetLabel(step.to)}`;
-    case 'hover': return `悬停 · ${targetLabel(step.target)} · ${step.durationMs} ms`;
+    case 'hover': return step.scope?.kind === 'screen'
+      ? `悬停 · 屏幕坐标 (${step.point.join(', ')}) · ${step.durationMs} ms`
+      : `悬停 · ${targetLabel(step.target)} · ${step.durationMs} ms`;
     case 'paste': return step.source.kind === 'copy'
       ? `粘贴 · 复制 ${step.source.stepId}`
       : `粘贴 · 参数 ${step.source.input}`;

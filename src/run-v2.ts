@@ -231,6 +231,15 @@ const clickRetryDelayMs = 300;
 const hoverDwellFloorMs = 400;
 
 /**
+ * The hover failures that mean "this element can no longer be proved", not
+ * "the desktop is broken". Only these degrade to the recorded screen point,
+ * and only when the step kept one.
+ */
+const hoverScreenFallbackCodes = new Set([
+  'WINDOW_NOT_FOUND', 'WINDOW_CHANGED', 'AMBIGUOUS_TARGET', 'NOT_FOUND',
+]);
+
+/**
  * A window that was just raised answers the accessibility read before it
  * accepts input: an Electron page in particular exposes a control's reference
  * while its press still fails. The first input after a switch therefore reads
@@ -520,7 +529,10 @@ function windowTestInputs(step: StepV2): { points: Point[]; locators: ElementLoc
   if (step.kind === 'click') {
     if (step.target.kind === 'point') points.push(step.target.point);
     else locators.push(step.target);
-  } else if (step.kind === 'hover' || step.kind === 'scroll' || step.kind === 'type' || step.kind === 'paste') {
+  } else if (step.kind === 'hover') {
+    // A screen hover has no element to test a window with.
+    if ('target' in step) locators.push(step.target);
+  } else if (step.kind === 'scroll' || step.kind === 'type' || step.kind === 'paste') {
     locators.push(step.target);
   } else if (step.kind === 'drag') {
     locators.push(step.from, step.to);
@@ -1342,21 +1354,7 @@ class StepRunner {
           return delivery === undefined ? {} : { delivery };
         }, step);
       case 'hover':
-        return this.readOnlyWindowStep(step.scope, async (binding, snapshot) => {
-          const { node } = resolve(snapshot, step.target as ElementLocator);
-          if (node.secure) throw new Fault('UNSAFE_TARGET', 'Hover target is secure');
-          const point = hoverPoint(node, step.point, snapshot);
-          const delivery = await this.desktop.hoverAt(
-            snapshot, this.targetOf(binding), point, { readOnly: true, travel: true },
-          );
-          // A tooltip or submenu closes the moment the pointer leaves, so the
-          // dwell is what the next step sees. A recording's own dwell can be
-          // shorter than the time an app needs to settle its hover state, so
-          // the step waits at least the floor. The pointer is not moved away
-          // afterwards: the open tooltip is state the flow may rely on.
-          await sleep(Math.max(step.durationMs, hoverDwellFloorMs), undefined, { signal: this.signal });
-          return delivery === undefined ? {} : { delivery };
-        }, step);
+        return this.hoverStep(step);
       case 'paste':
         return this.pasteStep(step);
       case 'wait':
@@ -1512,6 +1510,77 @@ class StepRunner {
       }
     }
     throw lastError;
+  }
+
+  /**
+   * A hover is read-only, and its two shapes take different proof paths. A
+   * window hover keeps every check: the window identity, the foreground and the
+   * element. A screen hover binds nothing: the recorded point is the address,
+   * and only the display layout is read. An element hover whose window or
+   * element can no longer be proved (and only those four failures) degrades to
+   * the recorded point in the same step, so a re-titled or closed window no
+   * longer loses a hover the recording can still place on screen.
+   */
+  private async hoverStep(step: Extract<StepV2, { kind: 'hover' }>): Promise<StepOutcome> {
+    if (step.scope.kind === 'screen') {
+      const point = step.point;
+      if (point === undefined) {
+        throw new Fault('INVALID_FLOW', 'A coordinate hover needs its recorded screen point');
+      }
+      const outcome = await this.screenHover(point, step.durationMs);
+      return { ...outcome, deliveredVia: 'screen_point' };
+    }
+    if (!('target' in step)) {
+      throw new Fault('INVALID_FLOW', 'A window hover needs its element target');
+    }
+    const { scope, target, point: recordedPoint, durationMs } = step;
+    try {
+      const outcome = await this.readOnlyWindowStep(scope, async (binding, snapshot) => {
+        const { node } = resolve(snapshot, target);
+        if (node.secure) throw new Fault('UNSAFE_TARGET', 'Hover target is secure');
+        const point = hoverPoint(node, recordedPoint, snapshot);
+        const delivery = await this.desktop.hoverAt(
+          snapshot, this.targetOf(binding), point, { readOnly: true, travel: true },
+        );
+        // A tooltip or submenu closes the moment the pointer leaves, so the
+        // dwell is what the next step sees. A recording's own dwell can be
+        // shorter than the time an app needs to settle its hover state, so
+        // the step waits at least the floor. The pointer is not moved away
+        // afterwards: the open tooltip is state the flow may rely on.
+        await sleep(Math.max(durationMs, hoverDwellFloorMs), undefined, { signal: this.signal });
+        return delivery === undefined ? {} : { delivery };
+      }, step);
+      return { ...outcome, deliveredVia: 'element' };
+    } catch (error) {
+      // Only a vanished/ambiguous window or element degrades. A secure target,
+      // a point outside the proved window, a lost foreground or a driver fault
+      // still fails: those say the desktop changed, not that the locator did.
+      if (!(error instanceof Fault) || !hoverScreenFallbackCodes.has(error.code) || recordedPoint === undefined) {
+        throw error;
+      }
+      const outcome = await this.screenHover(recordedPoint, durationMs);
+      return {
+        ...outcome,
+        deliveredVia: 'screen_point',
+        message: `HOVER_SCREEN_FALLBACK (${error.code}: ${error.message}); ` +
+          'the pointer was moved to the recorded screen point',
+      };
+    }
+  }
+
+  /**
+   * A pointer move to a recorded screen point with no window binding. Only the
+   * display layout is read; the step stays read-only and never clicks, focuses
+   * or raises anything.
+   */
+  private async screenHover(point: Point, durationMs: number): Promise<StepOutcome> {
+    const delivery = await this.desktop.hoverScreen(point, { travel: true });
+    await sleep(Math.max(durationMs, hoverDwellFloorMs), undefined, { signal: this.signal });
+    return {
+      ...(delivery === undefined ? {} : { delivery }),
+      message: `the pointer moved to the recorded screen point (${point.join(',')}); ` +
+        'those coordinates are bound to the screen layout of the recording',
+    };
   }
 
   /**

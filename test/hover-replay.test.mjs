@@ -38,6 +38,12 @@ function hoverFixture(t, spec) {
   writeFileSync(statePath, JSON.stringify({ opened: true, pid: 901, startedAt: '901.1' }));
   writeFileSync(focusPath, JSON.stringify({ id: spec.focusId ?? spec.windows[0].id, reads: 0 }));
   const windows = spec.windows;
+  // The screen hover reads the display layout instead of a window. The default
+  // is one display that holds every point the window fixtures use.
+  const displays = spec.displays ?? [{
+    id: '1', is_primary: true, scale: 2,
+    bounds: { x: 0, y: 0, width: 1470, height: 956 },
+  }];
 
   const driver = join(dir, 'agent-desktop');
   writeFileSync(driver, `#!/usr/bin/env node
@@ -68,6 +74,10 @@ else if (command === 'list-windows') {
   writeFocus(focus);
   const frames = ${JSON.stringify(spec.snapshots ?? [windowTree({ x: 100, y: 100, width: 800, height: 600 }, 'CLI Notes')])};
   data = frames[Math.min(seen, frames.length - 1)];
+} else if (command === 'list-displays') {
+  ${spec.failDisplays === true
+    ? `console.log(JSON.stringify({ version: '2.6', command, ok: false, error: { code: 'DISPLAYS_UNAVAILABLE', message: 'no display server' } })); process.exit(1);`
+    : `data = ${JSON.stringify(displays)};`}
 } else if (command === 'focus-window') data = { focused: { id: value('--window-id') } };
 else data = { disposition: { delivery: 'delivered_verified' } };
 console.log(JSON.stringify({ version: '2.6', command, ok: true, data }));
@@ -130,6 +140,106 @@ const notesWindows = () => [
   { id: 'w-31', app: notesApp, title: 'CLI Notes' },
   { id: 'w-32', app: notesApp, title: 'Draft' },
 ];
+
+/** One coordinate hover: no app, no window, only a recorded screen point. */
+function screenHoverFlow(spec) {
+  return {
+    version: 2, id: 'hover-screen', name: 'Screen hover',
+    steps: [{
+      id: 'hover', kind: 'hover',
+      scope: { kind: 'screen' },
+      point: spec.point,
+      durationMs: spec.durationMs ?? 0,
+      ...(spec.hint === undefined ? {} : { hint: spec.hint }),
+    }],
+  };
+}
+
+const movePoints = calls => calls
+  .filter(call => call.command === 'mouse-move')
+  .map(call => call.args.at(-1).replace('--xy=', '').split(',').map(Number));
+
+test('CLI: screen hovers move to their recorded points without reading any window', t => {
+  const cli = hoverFixture(t, {
+    app: notesApp, appPath: notesPath, windows: notesWindows(), focusId: 'w-31',
+    displays: [
+      { id: '1', is_primary: true, scale: 2, bounds: { x: 0, y: 0, width: 1470, height: 956 } },
+      { id: '3', is_primary: false, scale: 1, bounds: { x: 0, y: -1440, width: 2560, height: 1440 } },
+    ],
+  });
+  const result = cli.run({
+    version: 2, id: 'hover-screen', name: 'Screen hovers',
+    steps: [
+      {
+        id: 'hover-main', kind: 'hover', scope: { kind: 'screen' },
+        point: [240, 380], durationMs: 0,
+        hint: { app: notesApp, windowTitle: 'CLI Notes', element: { kind: 'element', role: 'group', name: '' } },
+      },
+      // A point on a display mounted above the main one: negative y is normal.
+      { id: 'hover-second', kind: 'hover', scope: { kind: 'screen' }, point: [900, -700], durationMs: 120 },
+    ],
+  });
+  assert.equal(result.status, 0, result.stderr);
+
+  const calls = cli.calls();
+  const windowCalls = calls.filter(call =>
+    ['list-windows', 'snapshot', 'focus-window', 'focus', 'click', 'right-click', 'double-click'].includes(call.command));
+  assert.deepEqual(windowCalls, [], 'a screen hover never proves a window or presses anything');
+  const points = movePoints(calls);
+  assert.ok(points.length >= 6, `only ${points.length} mouse-move commands`);
+  assert.deepEqual(points.at(-1), [900, -700]);
+  // Every move is inside the display that holds its recorded point.
+  assert.ok(points.slice(0, 4).every(([x, y]) => x >= 0 && x < 1470 && y >= 0 && y < 956), JSON.stringify(points));
+  assert.ok(points.slice(4).every(([x, y]) => y >= -1440 && y < 0), JSON.stringify(points));
+
+  const [main, second] = JSON.parse(result.stdout).data.entries;
+  for (const entry of [main, second]) {
+    assert.equal(entry.status, 'passed');
+    assert.deepEqual(entry.scope, { kind: 'screen' });
+    assert.equal(entry.deliveredVia, 'screen_point');
+    assert.match(entry.message, /recorded screen point/);
+    assert.ok(entry.durationMs >= 400, `the dwell was only ${entry.durationMs} ms`);
+  }
+});
+
+test('CLI: a point outside every display is refused before the first move', t => {
+  const cli = hoverFixture(t, { app: notesApp, appPath: notesPath, windows: notesWindows(), focusId: 'w-31' });
+  const result = cli.run(screenHoverFlow({ point: [2000, 100] }));
+  const entry = JSON.parse(result.stdout).data.entries[0];
+  assert.equal(entry.code, 'UNSAFE_POINT');
+  assert.match(entry.message, /not inside one display/);
+  assert.deepEqual(cli.calls().filter(call => call.command === 'mouse-move'), []);
+});
+
+test('CLI: an unreadable display layout keeps the pointer still', t => {
+  const cli = hoverFixture(t, {
+    app: notesApp, appPath: notesPath, windows: notesWindows(), focusId: 'w-31', failDisplays: true,
+  });
+  const result = cli.run(screenHoverFlow({ point: [240, 380] }));
+  const entry = JSON.parse(result.stdout).data.entries[0];
+  assert.equal(entry.code, 'UNSAFE_POINT');
+  assert.deepEqual(cli.calls().filter(call => call.command === 'mouse-move'), []);
+});
+
+test('CLI: an element hover whose window is gone falls back to its recorded point', t => {
+  const cli = hoverFixture(t, {
+    app: finderApp, appPath: finderPath,
+    windows: [
+      { id: 'w-41', app: finderApp, title: 'Downloads', focused: true },
+      { id: 'w-42', app: finderApp, title: 'Documents', focused: false },
+    ],
+  });
+  const result = cli.run(hoverFlow({ app: finderApp, appPath: finderPath, title: '最近使用', point: [300, 320] }));
+  assert.equal(result.status, 0, result.stderr);
+  const entry = JSON.parse(result.stdout).data.entries[0];
+  assert.equal(entry.status, 'passed');
+  assert.equal(entry.deliveredVia, 'screen_point');
+  assert.match(entry.message, /HOVER_SCREEN_FALLBACK \(WINDOW_NOT_FOUND/);
+  const calls = cli.calls();
+  assert.deepEqual(calls.filter(call => /click|focus|activate/.test(call.command)), []);
+  assert.deepEqual(movePoints(calls).at(-1), [300, 320]);
+});
+
 
 test('CLI: a hover in the front window moves only the pointer, never focus or click', t => {
   const cli = hoverFixture(t, { app: notesApp, appPath: notesPath, windows: notesWindows(), focusId: 'w-31' });

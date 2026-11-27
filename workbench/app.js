@@ -212,7 +212,9 @@ function actionLabel(action) {
       return label;
     case 'scroll': return `${scrollLabel(action)} · ${label}`;
     case 'drag': return `${dragSummary(action)} · ${action.durationMs} ms`;
-    case 'hover': return `悬停 · ${label} · ${action.durationMs} ms`;
+    case 'hover': return action.scope?.kind === 'screen'
+      ? `悬停 · 屏幕坐标 (${action.point.join(', ')}) · ${action.durationMs} ms`
+      : `悬停 · ${label} · ${action.durationMs} ms`;
     case 'paste':
       // v1 pins clipboard text on the step; v2 names the copy step or input.
       if (typeof action.text === 'string') return `粘贴 ${action.text.length} 字 · ${label}`;
@@ -707,6 +709,10 @@ function renderInspector() {
           ['时长', `${row.action.durationMs} ms`]]
         : []),
       ...(row.action.kind === 'hover' ? [['停留', `${row.action.durationMs} ms`]] : []),
+      ...(row.action.kind === 'hover' && row.scope?.kind === 'screen' ? [
+        ['坐标', `(${row.action.point.join(', ')})`],
+        ...(row.action.hint ? [['录制时目标', hoverHintLabel(row.action.hint)]] : []),
+      ] : []),
       ...(row.action.kind === 'paste'
         ? [typeof row.action.text === 'string'
           ? ['文本', `${row.action.text.length} 字（内容不写入报告）`]
@@ -1533,7 +1539,7 @@ function v2EditDialog(step) {
   switch (step.kind) {
     case 'click': case 'scroll':
       return v2TargetDialog(step);
-    case 'hover': return v2HoverDialog(step);
+    case 'hover': return step.scope?.kind === 'screen' ? v2ScreenHoverDialog(step) : v2HoverDialog(step);
     case 'type': return v2TypeDialog(step);
     case 'drag': return v2DragDialog(step);
     case 'key': return v2KeyDialog(step);
@@ -1626,6 +1632,19 @@ function targetSummaryText(target, { window: windowTitle = '', frame } = {}) {
   return head +
     (windowTitle ? `· ${windowTitle}` : '') +
     (frame ? ` · ${frame.width} × ${frame.height}` : '');
+}
+
+/**
+ * The display-only note a coordinate hover kept about what the recording saw.
+ * It never becomes a locator: the point is the address, this is for the person
+ * deciding whether to re-record.
+ */
+function hoverHintLabel(hint) {
+  const element = hint?.element;
+  const roles = element
+    ? `${element.role}（${(element.name ?? '').trim() || '无名称'}）`
+    : '';
+  return [roles, hint?.windowTitle ?? ''].filter(Boolean).join(' · ');
 }
 
 /**
@@ -1770,6 +1789,36 @@ function v2TargetDialog(step) {
         },
       },
     });
+  });
+}
+
+/**
+ * A coordinate hover is a dwell at a recorded screen point. There is no window
+ * to read a control from, so its editor keeps only what an operator can act on
+ * without re-recording: the point it will move to, what the recording saw there,
+ * and how long the pointer stays. No role/name/path/index fields and no pick
+ * entry — a pick would need a window this step deliberately does not bind.
+ */
+function v2ScreenHoverDialog(step) {
+  const [x, y] = step.point;
+  const hint = hoverHintLabel(step.hint);
+  const duration = input({
+    type: 'number', min: '0', max: '60000', step: '10',
+    value: String(step.durationMs ?? 0),
+  });
+  openDialog(withStepId('编辑悬停目标', step), [
+    el('p', { className: 'target-summary' }, `屏幕坐标 (${x}, ${y})`),
+    muted(`整块屏幕${hint ? ` · 录制时：${hint}` : ''}`),
+    field('悬停时长（毫秒）', duration),
+    muted('坐标型悬停只移动指针并停留，不点击、不聚焦。坐标与录制时的屏幕布局绑定；' +
+      '窗口改名或版面变化后可能不再落在同一处，必要时重新录制。'),
+  ], '应用', () => {
+    const raw = duration.value.trim();
+    const ms = Number(raw);
+    if (!raw || !Number.isSafeInteger(ms) || ms < 0 || ms > 60000) {
+      throw new Error('悬停时长填 0–60000 之间的整数毫秒。');
+    }
+    return v2Edit({ kind: 'update', id: step.id, patch: { durationMs: ms } });
   });
 }
 
