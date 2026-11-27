@@ -156,12 +156,14 @@ struct HoverTracker {
  * what keeps a hover from being written mirrored.
  */
 struct HoverEmission {
+    let dwellMs: Int
     /// Quartz screen point (origin top-left) — the one that goes into the flow.
     let point: CGPoint
     /// AppKit screen point (origin bottom-left) — only for hit tests.
     let hitPoint: CGPoint
 
-    init(screenPoint: CGPoint, primaryScreenHeight: CGFloat) {
+    init(dwellMs: Int, screenPoint: CGPoint, primaryScreenHeight: CGFloat) {
+        self.dwellMs = dwellMs
         point = screenPoint
         hitPoint = CGPoint(x: screenPoint.x, y: primaryScreenHeight - screenPoint.y)
     }
@@ -170,7 +172,7 @@ struct HoverEmission {
         [Int(point.x.rounded()), Int(point.y.rounded())]
     }
 
-    func payload(dwellMs: Int, t: Int, seen: Int, evidence: [String: Any] = [:]) -> [String: Any] {
+    func payload(t: Int, seen: Int, evidence: [String: Any] = [:]) -> [String: Any] {
         var row: [String: Any] = [
             "kind": "hover",
             "point": payloadPoint,
@@ -180,6 +182,40 @@ struct HoverEmission {
         ]
         for (key, value) in evidence { row[key] = value }
         return row
+    }
+}
+
+/**
+ * The hover half of a capture session: a pointer that settles becomes at most
+ * one hover step.
+ *
+ * Both ways a dwell can be reported — the sample that reaches the threshold and
+ * the timer that notices the pointer stopped — ask this type, and it owns the
+ * tracker, so no call site can pass the flipped point and no dwell can be
+ * reported twice. Everything except the AppKit guards and the emit itself is
+ * decided here, which is what the offline pointer suite drives.
+ */
+struct HoverRecorder {
+    private var tracker = HoverTracker()
+
+    mutating func reset() {
+        tracker.reset()
+    }
+
+    /// The sample-triggered path: a move that completes the dwell.
+    mutating func sample(location: CGPoint, timestamp: UInt64,
+                         primaryScreenHeight: CGFloat) -> HoverEmission? {
+        guard let dwellMs = tracker.sample(location: location, timestamp: timestamp),
+              let anchor = tracker.location else { return nil }
+        return HoverEmission(dwellMs: dwellMs, screenPoint: anchor,
+                             primaryScreenHeight: primaryScreenHeight)
+    }
+
+    /// The timer path: the pointer stopped moving, so no further sample arrives.
+    mutating func flush(now: UInt64, primaryScreenHeight: CGFloat) -> HoverEmission? {
+        guard let dwellMs = tracker.flush(now: now), let anchor = tracker.location else { return nil }
+        return HoverEmission(dwellMs: dwellMs, screenPoint: anchor,
+                             primaryScreenHeight: primaryScreenHeight)
     }
 }
 

@@ -48,7 +48,7 @@ final class Capture {
     private var hotkeyTap: CFMachPort?
     private var hotkeys = RecordingHotkeys()
     private var pointer = RecordingPointer()
-    private var hover = HoverTracker()
+    private var hover = HoverRecorder()
     private var stopReleaseDeadline: TimeInterval?
     private var pauseBoundaryPending = false
     private var seconds: TimeInterval = 0
@@ -1433,33 +1433,33 @@ final class Capture {
                 return
             }
         }
-        guard let dwellMs = hover.sample(location: event.location, timestamp: event.timestamp) else { return }
-        finishDwell(dwellMs)
+        guard let emission = hover.sample(location: event.location, timestamp: event.timestamp,
+                                          primaryScreenHeight: primary.frame.maxY) else { return }
+        emitHover(emission)
     }
 
     /// Called from the session timer: a pointer that stopped moving sends no
     /// further samples, so its dwell would otherwise never be reported.
     private func flushHover() {
         guard !systemDialogVisible, started != nil, !stopped, stopReleaseDeadline == nil, pausedAt == nil,
-              targetIsFrontmost else {
+              targetIsFrontmost, let primary = NSScreen.screens.first else {
             hover.reset()
             return
         }
-        guard let dwellMs = hover.flush(now: DispatchTime.now().uptimeNanoseconds) else { return }
-        finishDwell(dwellMs)
+        guard let emission = hover.flush(now: DispatchTime.now().uptimeNanoseconds,
+                                         primaryScreenHeight: primary.frame.maxY) else { return }
+        emitHover(emission)
     }
 
-    /// Both hover paths end here, so the coordinate space is chosen once.
-    private func finishDwell(_ dwellMs: Int) {
-        guard let anchor = hover.location else { return }
-        emitHover(dwellMs, screenPoint: anchor)
-    }
-
-    /// `screenPoint` is the raw Quartz point (origin top-left), exactly like a
-    /// click's. Only the window hit test and the pointer evidence flip it.
-    private func emitHover(_ dwellMs: Int, screenPoint: CGPoint) {
-        guard started != nil, let primary = NSScreen.screens.first, registerEvent() else { return }
-        let emission = HoverEmission(screenPoint: screenPoint, primaryScreenHeight: primary.frame.maxY)
+    /// `emission` already carries the Quartz point that goes into the flow and
+    /// the AppKit point the window hit test needs, so this only adds the times,
+    /// the ownership evidence and the event.
+    private func emitHover(_ emission: HoverEmission) {
+        guard started != nil, registerEvent() else { return }
+        // The pointer's own times, read before the AX ownership query: a slow
+        // round trip must not move the step's `atMs` or its wall clock.
+        let t = elapsedMs()
+        let seen = wallClockMs()
         var evidence: [String: Any] = [:]
         if global {
             // A hover outside the focused window is noise, not a step.
@@ -1467,8 +1467,7 @@ final class Capture {
             guard live["decision"] as? String == "record" else { return }
             evidence = live
         }
-        emit(emission.payload(dwellMs: dwellMs, t: elapsedMs(),
-                              seen: Int(Date().timeIntervalSince1970 * 1000), evidence: evidence))
+        emit(emission.payload(t: t, seen: seen, evidence: evidence))
     }
 
     /// Wheel input is scoped to the selected window and recorded as line deltas,

@@ -432,57 +432,84 @@ struct RecordingPointerTests {
     }
 
     /// A hover is stored in the same Quartz space as a click (origin top-left);
-    /// the AppKit flip exists only for the window hit test. Both emission paths
-    /// are covered: the sample that reaches the dwell threshold, and the timer
-    /// flush when the pointer stops sending samples.
+    /// the AppKit flip exists only for the window hit test. The cases drive
+    /// `HoverRecorder` — the type both production paths call — so the sample
+    /// path and the timer flush are each asserted to hand out exactly one step,
+    /// with the Quartz point in the payload and the AppKit point for the hit
+    /// test. `receiveHover`/`flushHover` only add the AppKit guards and emit.
     private static func testHoverEmission() -> Int {
         func ms(_ value: UInt64) -> UInt64 { value * 1_000_000 }
         let screenHeight: CGFloat = 956
+        let s7 = CGPoint(x: 604, y: 671)
+        let s8 = CGPoint(x: 603, y: 634)
+
+        // A pass shorter than the dwell never becomes a hover, by either path.
+        var passing = HoverRecorder()
+        precondition(passing.sample(location: s7, timestamp: ms(0), primaryScreenHeight: screenHeight) == nil)
+        precondition(passing.sample(location: CGPoint(x: 606, y: 671), timestamp: ms(200),
+                                    primaryScreenHeight: screenHeight) == nil)
+        precondition(passing.flush(now: ms(250), primaryScreenHeight: screenHeight) == nil)
 
         // Sample-triggered path, the s7 hover of global-9d815eb5: the pointer
         // rested at Quartz (604, 671) on a 956 pt screen.
-        var settled = HoverTracker()
-        precondition(settled.sample(location: CGPoint(x: 604, y: 671), timestamp: ms(0)) == nil)
-        precondition(settled.sample(location: CGPoint(x: 604, y: 671), timestamp: ms(319)) == 319)
-        let sampled = HoverEmission(screenPoint: settled.location!, primaryScreenHeight: screenHeight)
-        let sampledRow = sampled.payload(dwellMs: 319, t: 5699, seen: 1_700_000_000_000)
+        var settled = HoverRecorder()
+        precondition(settled.sample(location: s7, timestamp: ms(0), primaryScreenHeight: screenHeight) == nil)
+        let sampled = settled.sample(location: s7, timestamp: ms(319), primaryScreenHeight: screenHeight)
+        let sampledRow = sampled?.payload(t: 5699, seen: 1_700_000_000_000) ?? [:]
+        precondition(sampled?.dwellMs == 319)
         precondition(sampledRow["point"] as? [Int] == [604, 671], "hover must store the Quartz point")
         precondition(sampledRow["point"] as? [Int] != [604, 285], "hover must not store the AppKit point")
-        precondition(sampled.hitPoint.x == 604 && sampled.hitPoint.y == 285, "hit test keeps the AppKit point")
+        precondition(sampled?.hitPoint.x == 604 && sampled?.hitPoint.y == 285, "hit test keeps the AppKit point")
         precondition(sampledRow["dwellMs"] as? Int == 319)
+        // One dwell never reports twice: neither a later sample nor the timer.
+        precondition(settled.sample(location: s7, timestamp: ms(600), primaryScreenHeight: screenHeight) == nil)
+        precondition(settled.flush(now: ms(700), primaryScreenHeight: screenHeight) == nil)
 
-        // Timer flush path, the s8 hover: one sample, then the pointer stops.
-        var flushed = HoverTracker()
-        precondition(flushed.sample(location: CGPoint(x: 603, y: 634), timestamp: ms(0)) == nil)
-        precondition(flushed.flush(now: ms(405)) == 405)
-        let flushedOver = HoverEmission(screenPoint: flushed.location!, primaryScreenHeight: screenHeight)
-        let flushedRow = flushedOver.payload(dwellMs: 405, t: 6621, seen: 1_700_000_000_000)
+        // Timer flush path, the s8 hover: one sample, then the pointer stops and
+        // no further sample arrives, so only the session timer can report it.
+        var flushed = HoverRecorder()
+        precondition(flushed.sample(location: s8, timestamp: ms(0), primaryScreenHeight: screenHeight) == nil)
+        let flushedOver = flushed.flush(now: ms(405), primaryScreenHeight: screenHeight)
+        let flushedRow = flushedOver?.payload(t: 6621, seen: 1_700_000_000_000) ?? [:]
+        precondition(flushedOver?.dwellMs == 405)
         precondition(flushedRow["point"] as? [Int] == [603, 634])
-        precondition(flushedOver.hitPoint.x == 603 && flushedOver.hitPoint.y == 322)
+        precondition(flushedOver?.hitPoint.x == 603 && flushedOver?.hitPoint.y == 322)
+        precondition(flushed.flush(now: ms(900), primaryScreenHeight: screenHeight) == nil)
+
+        // A pause or a press resets the pending dwell: no hover comes out of it.
+        var paused = HoverRecorder()
+        precondition(paused.sample(location: s7, timestamp: ms(0), primaryScreenHeight: screenHeight) == nil)
+        paused.reset()
+        precondition(paused.flush(now: ms(900), primaryScreenHeight: screenHeight) == nil)
+        precondition(paused.sample(location: s7, timestamp: ms(950), primaryScreenHeight: screenHeight) == nil)
 
         // The same physical spot clicked at the same moment writes the same
         // number: a hover and a click share one coordinate space.
         let click = RecordingPointer.Click(
-            down: PointerSample(timestamp: 0, location: CGPoint(x: 604, y: 671), eventNumber: 1, clickState: 1),
+            down: PointerSample(timestamp: 0, location: s7, eventNumber: 1, clickState: 1),
             button: 0, count: 1, truncated: false)
         precondition(click.payload(t: 0, seen: 0)["point"] as? [Int] == sampledRow["point"] as? [Int])
 
         // The stored point does not depend on the screen height; the hit-test
         // point does, because AppKit measures up from the primary screen's bottom.
-        let tall = HoverEmission(screenPoint: CGPoint(x: 604, y: 671), primaryScreenHeight: 1080)
-        precondition(tall.payloadPoint == [604, 671] && tall.hitPoint.x == 604 && tall.hitPoint.y == 409)
+        precondition(sampledRow["point"] as? [Int] ==
+                     HoverEmission(dwellMs: 319, screenPoint: s7, primaryScreenHeight: 1080).payloadPoint)
+        let tall = HoverEmission(dwellMs: 319, screenPoint: s7, primaryScreenHeight: 1080)
+        precondition(tall.hitPoint.x == 604 && tall.hitPoint.y == 409)
 
         // Global capture merges the ownership evidence without touching the point.
-        let evidenced = sampled.payload(dwellMs: 319, t: 5699, seen: 1,
-                                        evidence: ["decision": "record", "owner": ["role": "AXWindow"]])
+        let evidenced = sampled?.payload(t: 5699, seen: 1,
+                                         evidence: ["decision": "record", "owner": ["role": "AXWindow"]]) ?? [:]
         precondition(evidenced["point"] as? [Int] == [604, 671])
         precondition(evidenced["decision"] as? String == "record")
 
         // The dwell clamp and the rounding are unchanged.
-        let plain = HoverEmission(screenPoint: CGPoint(x: 604.4, y: 671.6), primaryScreenHeight: screenHeight)
+        let plain = HoverEmission(dwellMs: 120, screenPoint: CGPoint(x: 604.4, y: 671.6),
+                                  primaryScreenHeight: screenHeight)
         precondition(plain.payloadPoint == [604, 672])
-        precondition(plain.payload(dwellMs: 120, t: 0, seen: 0)["dwellMs"] as? Int == 300)
-        precondition(plain.payload(dwellMs: 90_000, t: 0, seen: 0)["dwellMs"] as? Int == 60_000)
+        precondition(plain.payload(t: 0, seen: 0)["dwellMs"] as? Int == 300)
+        precondition(HoverEmission(dwellMs: 90_000, screenPoint: s7, primaryScreenHeight: screenHeight)
+            .payload(t: 0, seen: 0)["dwellMs"] as? Int == 60_000)
         return 6
     }
 }
