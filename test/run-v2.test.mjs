@@ -2862,3 +2862,95 @@ test('HAOC-207 review 3: two controls that keep claiming focus are never typed i
   assert.deepEqual(callsOf(world, 'type'), []);
   assert.deepEqual(callsOf(world, 'typeFocused'), []);
 });
+
+// HAOC-207 fourth review round (HAOC-209): a foreground switch during the
+// proof, a secure focused host, and rename-field candidates that cannot be told
+// apart.
+
+test('HAOC-207 review 4: the operator taking the foreground during the proof sends no input', async t => {
+  const { world, run } = harness(t);
+  const real = world.desktop.snapshotWindow.bind(world.desktop);
+  let reads = 0;
+  world.desktop.snapshotWindow = async id => {
+    const snapshot = await real(id);
+    if (id === 'w-21') {
+      reads += 1;
+      // Between the two reads the operator switches to the draft window.
+      if (reads === 1) world.state.focused = 'w-22';
+    }
+    return snapshot;
+  };
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'blocked');
+  assert.equal(entry(report, 'press').code, 'FOCUS_INTERRUPTED');
+  assert.deepEqual(callsOf(world, 'click'), [], 'the press is not delivered into a window the run lost');
+  assert.deepEqual(callsOf(world, 'focusWindow'), [], 'the run does not take the foreground back');
+});
+
+test('HAOC-207 review 4: a secure focused host is refused before the text dispatch', async t => {
+  const { world, run } = harness(t, {
+    windows: [notesWindowTree([{
+      role: 'row', name: 'report.txt', ref_id: '@w21:e1', secure: true, states: ['focused'],
+      bounds: { x: 120, y: 150, width: 400, height: 24 },
+    }])],
+    focused: 'w-21',
+  });
+
+  const report = await run(readinessFlow({
+    id: 'type', kind: 'type', scope: notesScope,
+    target: { kind: 'element', role: 'textfield', name: '' }, input: 'note',
+  }));
+
+  assert.equal(report.status, 'blocked');
+  assert.equal(entry(report, 'type').code, 'UNSAFE_TARGET');
+  assert.match(entry(report, 'type').message, /secure control/);
+  assert.deepEqual(callsOf(world, 'typeFocused'), [], 'no characters reach the secure host');
+  assert.deepEqual(callsOf(world, 'type'), []);
+  assert.deepEqual(callsOf(world, 'click'), [], 'the host is not clicked first either');
+});
+
+test('HAOC-207 review 4: two rename fields the same distance away are never typed into', async t => {
+  const { world, run } = harness(t, {
+    windows: [notesWindowTree([
+      {
+        role: 'textfield', ref_id: '@w21:e1', states: [],
+        // 40 pt above the anchor's centre, which sits at (180, 516).
+        bounds: { x: 120, y: 456, width: 120, height: 40 },
+      },
+      {
+        role: 'textfield', ref_id: '@w21:e2', states: [],
+        // 40 pt below it: the two are equally close and cannot be told apart.
+        bounds: { x: 120, y: 536, width: 120, height: 40 },
+      },
+      {
+        role: 'button', name: 'Continue', ref_id: '@w21:e9', states: [],
+        bounds: { x: 120, y: 500, width: 120, height: 32 },
+      },
+    ])],
+    focused: 'w-21',
+  });
+
+  const report = await run(parseFlowV2({
+    version: 2, id: 'rename-tie', name: 'Rename tie',
+    appPaths: { [textedit]: appPaths[textedit] },
+    inputs: ['note'],
+    steps: [
+      // The click anchors the text step to a point between two equal fields.
+      { id: 'anchor', kind: 'click', scope: notesScope, target: { kind: 'element', role: 'button', name: 'Continue' } },
+      { id: 'activate', kind: 'activate_app', scope: { kind: 'app', app: textedit } },
+      {
+        id: 'type', kind: 'type', scope: notesScope,
+        target: { kind: 'element', role: 'textfield', name: '' }, input: 'note',
+      },
+    ],
+  }));
+
+  assert.equal(report.status, 'failed');
+  assert.equal(entry(report, 'type').code, 'TARGET_NOT_READY');
+  assert.match(entry(report, 'type').message, /equally close/);
+  assert.deepEqual(callsOf(world, 'click').map(call => call[1]), ['@w21:e9'], 'only the anchor was clicked');
+  assert.deepEqual(callsOf(world, 'type'), [], 'neither field receives characters');
+  assert.deepEqual(callsOf(world, 'typeFocused'), []);
+});

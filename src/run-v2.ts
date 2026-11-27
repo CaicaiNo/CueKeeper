@@ -244,7 +244,7 @@ const readinessProbeIntervalMs = 200;
  * enabled, stable control for this long is not still loading, and the run says
  * so instead of pressing into a half-drawn page.
  */
-const readinessProofTimeoutMs = 2000;
+const readinessProofTimeoutMs = 1500;
 
 /** Steps whose first event after a window switch waits for a ready target. */
 const readinessGated = new Set<StepV2['kind']>(['click', 'type', 'key']);
@@ -299,7 +299,7 @@ type TypeDispatch =
   /** Finder's inline rename editor: click the row's name column, then type. */
   | { via: 'inline-rename' }
   /** The focused cell/row hosts the editor: type into the first responder. */
-  | { via: 'focused-host' }
+  | { via: 'focused-host'; node: Node }
   /** More than one control claims the characters; dispatch does not guess. */
   | { via: 'ambiguous'; reason: string }
   /** The step's own dispatch refuses this target. */
@@ -648,6 +648,12 @@ class StepRunner {
         if (remaining() <= 0) throw fail(read?.problem ?? problem, reads);
         if (read?.refuse) return { binding: binding!, snapshot: snapshot! };
         if (read?.signature !== undefined && read.signature === previous) {
+          // The windows were read over a moment in which the operator can take
+          // the foreground away. Dispatch only happens while the run still
+          // owns it; a switch since the first read stops the step with zero
+          // input, and the check itself stays inside the proof's budget.
+          await this.withinDeadline(
+            this.resolver.confirmForeground(binding!, cancel.signal), deadline, () => fail(problem, reads));
           return { binding: binding!, snapshot: snapshot! };
         }
         previous = read?.signature;
@@ -719,9 +725,10 @@ class StepRunner {
       // A target that still names two controls is not proved yet; the next read
       // may settle it, and one that never does ends as a readiness fault.
       if (plan.via === 'ambiguous') return { problem: plan.reason };
-      // The inline rename editor and the focused cell are not addressable
-      // controls; the window they appear in is what can be proved.
-      if (plan.via === 'inline-rename' || plan.via === 'focused-host') return settledWindow();
+      // The inline rename editor is not an addressable control; the window it
+      // appears in is what can be proved. The focused host is a real node and
+      // is proved like any other target (a secure one is refused).
+      if (plan.via === 'inline-rename') return settledWindow();
       return this.proveNode(window, plan.node);
     }
     let resolved: Actionable;
@@ -813,11 +820,24 @@ class StepRunner {
     // value still holds the old file name. That is stronger evidence than a
     // distance guess.
     const clickName = this.lastClickTarget?.name;
-    const byName = focused || locator.name || !clickName ? undefined : flatten(snapshot.tree).find(({ node }) =>
+    const byNameMatches = focused || locator.name || !clickName ? [] : flatten(snapshot.tree).filter(({ node }) =>
       /^(textfield|textbox|textarea|searchfield|combobox)$/.test(node.role) &&
       (node.value === clickName || node.name === clickName));
-    const near = focused || byName || locator.name || !this.lastClickPoint ? undefined : (() => {
-      const candidates = flatten(snapshot.tree).filter(({ node }) =>
+    if (byNameMatches.length > 1) {
+      return {
+        via: 'ambiguous',
+        reason: `${byNameMatches.length} editable controls carry the clicked name "${clickName}"`,
+      };
+    }
+    const byName = byNameMatches[0];
+    /** The closest candidate, or a tie when two sit at the same distance. */
+    const closest = (candidates: { entry: Located; distance: number }[]): Located | 'tied' | undefined => {
+      if (!candidates.length) return undefined;
+      if (candidates.length > 1 && candidates[1].distance - candidates[0].distance < 0.5) return 'tied';
+      return candidates[0].entry;
+    };
+    const nearPick = focused || byName || locator.name || !this.lastClickPoint ? undefined : closest(
+      flatten(snapshot.tree).filter(({ node }) =>
         node.ref && /^(textfield|textbox|textarea|searchfield|combobox)$/.test(node.role) && node.bounds)
         .map(entry => {
           const b = entry.node.bounds!;
@@ -825,9 +845,12 @@ class StepRunner {
           const dy = b.y + b.height / 2 - this.lastClickPoint![1];
           return { entry, distance: Math.hypot(dx, dy) };
         })
-        .sort((a, b) => a.distance - b.distance);
-      return candidates[0] && candidates[0].distance <= 120 ? candidates[0].entry : undefined;
-    })();
+        .filter(candidate => candidate.distance <= 120)
+        .sort((a, b) => a.distance - b.distance));
+    if (nearPick === 'tied') {
+      return { via: 'ambiguous', reason: 'two editable controls sat equally close to the last click' };
+    }
+    const near = nearPick;
     // Finder's rename editor is not exposed as an editable element: AX shows
     // only the focused cell. A focused editable control elsewhere in the
     // window means the recorded characters belong there instead.
@@ -839,22 +862,30 @@ class StepRunner {
     const host = hosts[0];
     // The editor is usually a nameless textfield where the file name was.
     // Click it first: it has no AX focus of its own.
-    const renameField = !this.lastClickPoint || locator.name ? undefined : flatten(snapshot.tree)
-      .filter(({ node }) => node.role === 'textfield' && node.ref && node.bounds)
-      .map(entry => {
-        const b = entry.node.bounds!;
-        const dx = b.x + b.width / 2 - this.lastClickPoint![0];
-        const dy = b.y + b.height / 2 - this.lastClickPoint![1];
-        return { entry, distance: Math.hypot(dx, dy) };
-      })
-      .filter(candidate => candidate.distance <= 120)
-      .sort((a, b) => a.distance - b.distance)[0]?.entry;
-    if (renameField) {
-      return renameField.node.secure
-        ? { via: 'refused', reason: `${describeControl(renameField.node)} is a secure control; the run does not type into it` }
-        : { via: 'rename-field', node: renameField.node };
+    const renamePick = !this.lastClickPoint || locator.name ? undefined : closest(
+      flatten(snapshot.tree)
+        .filter(({ node }) => node.role === 'textfield' && node.ref && node.bounds)
+        .map(entry => {
+          const b = entry.node.bounds!;
+          const dx = b.x + b.width / 2 - this.lastClickPoint![0];
+          const dy = b.y + b.height / 2 - this.lastClickPoint![1];
+          return { entry, distance: Math.hypot(dx, dy) };
+        })
+        .filter(candidate => candidate.distance <= 120)
+        .sort((a, b) => a.distance - b.distance));
+    if (renamePick === 'tied') {
+      return { via: 'ambiguous', reason: 'two rename fields sat equally close to the last click' };
     }
-    if (host) return { via: 'focused-host' };
+    if (renamePick) {
+      return renamePick.node.secure
+        ? { via: 'refused', reason: `${describeControl(renamePick.node)} is a secure control; the run does not type into it` }
+        : { via: 'rename-field', node: renamePick.node };
+    }
+    if (host) {
+      return host.node.secure
+        ? { via: 'refused', reason: `${describeControl(host.node)} is a secure control; the run does not type into it` }
+        : { via: 'focused-host', node: host.node };
+    }
     const direct = focused ?? byName ?? near;
     if (direct) {
       return direct.node.secure
