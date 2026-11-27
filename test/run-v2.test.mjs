@@ -2557,3 +2557,177 @@ test('HAOC-207 review: a wait or hover keeps its declared focusAfter and still l
   assert.equal(hoverReads, 3,
     'the hover read once and did not consume the switch: the press paid its two-read proof');
 });
+
+// HAOC-207 second review round (HAOC-209): deadline over a hung driver call,
+// the targets the two dispatch paths really choose, window identity across a
+// rebind, and same-titled selection that keeps missing, ambiguous and driver
+// failures apart.
+
+test('HAOC-207 review 2: a snapshot that never answers stops the step at its deadline', async t => {
+  const { world, run } = harness(t);
+  const real = world.desktop.snapshotWindow.bind(world.desktop);
+  let reads = 0;
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  world.desktop.snapshotWindow = async id => {
+    if (id === 'w-21') {
+      reads += 1;
+      if (reads === 2) await held;
+    }
+    return real(id);
+  };
+
+  const started = performance.now();
+  const report = await run(readinessFlow(pressContinue));
+  const elapsed = performance.now() - started;
+
+  assert.equal(report.status, 'failed');
+  assert.equal(entry(report, 'press').code, 'TARGET_NOT_READY');
+  assert.ok(elapsed < 2200,
+    `the deadline ended the wait while the read was still hanging (${Math.round(elapsed)} ms)`);
+  assert.deepEqual(callsOf(world, 'click'), [], 'a hanging read proves nothing and delivers nothing');
+
+  // The driver call is still in flight; releasing it later must not turn into input.
+  release();
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.deepEqual(callsOf(world, 'click'), [], 'the late result of the released read is dropped');
+});
+
+test('HAOC-207 review 2: a right click proves the row its dispatch would press', async t => {
+  const { world, run } = finderWorld(t, {
+    windows: [finderWindow('w-99', 'cuekeeper-demo', [{
+      role: 'outline', name: 'Files', bounds: { x: 110, y: 130, width: 780, height: 500 }, children: [{
+        role: 'row', name: 'report.txt', ref_id: '@w99:e1', available_actions: ['RightClick'],
+        states: ['selected', 'disabled'],
+        bounds: { x: 120, y: 140, width: 400, height: 24 },
+      }],
+    }])],
+    focused: 'w-99',
+  });
+
+  const report = await run(finderReadinessFlow({
+    id: 'context', kind: 'click', button: 'right',
+    target: { kind: 'element', role: 'outline', name: 'Files' },
+  }));
+
+  assert.equal(report.status, 'failed');
+  assert.equal(entry(report, 'context').code, 'TARGET_NOT_READY');
+  assert.match(entry(report, 'context').message, /row "report\.txt" is still disabled/);
+  assert.deepEqual(callsOf(world, 'click'), [], 'the disabled row the right click would target is never pressed');
+});
+
+test('HAOC-207 review 2: a type step proves the field it would really type into', async t => {
+  const { world, run } = harness(t, {
+    windows: [{
+      id: 'w-21', app: textedit, pid: 601, title: 'QA Notes',
+      data: {
+        complete: true,
+        window: { id: 'w-21', title: 'QA Notes' },
+        tree: {
+          role: 'window', name: 'QA Notes', bounds: { x: 100, y: 100, width: 800, height: 600 },
+          children: [{
+            role: 'textfield', name: 'rename', ref_id: '@w21:e1', states: ['focused', 'disabled'],
+            bounds: { x: 120, y: 150, width: 600, height: 40 },
+          }],
+        },
+      },
+    }],
+    focused: 'w-21',
+  });
+
+  // An unnamed target is resolved by the text path's own focus heuristics; the
+  // proof has to see the same field, disabled, and refuse to type into it.
+  const report = await run(readinessFlow({
+    id: 'type', kind: 'type', scope: notesScope,
+    target: { kind: 'element', role: 'textfield', name: '' }, input: 'note',
+  }));
+
+  assert.equal(report.status, 'failed');
+  assert.equal(entry(report, 'type').code, 'TARGET_NOT_READY');
+  assert.match(entry(report, 'type').message, /is still disabled/);
+  assert.deepEqual(callsOf(world, 'type'), []);
+  assert.deepEqual(callsOf(world, 'typeFocused'), []);
+});
+
+test('HAOC-207 review 2: a window replaced mid-proof starts the two reads over', async t => {
+  const { world, run } = harness(t);
+  const real = world.desktop.snapshotWindow.bind(world.desktop);
+  const order = [];
+  world.desktop.snapshotWindow = async id => {
+    order.push(id);
+    const snapshot = await real(id);
+    if (id === 'w-21') {
+      // The recorded window is replaced by a same-titled one between reads.
+      world.state.windows = world.state.windows.filter(window => window.id !== 'w-21');
+      if (!world.state.windows.some(window => window.id === 'w-23')) {
+        world.state.windows.push(windowRecord({
+          id: 'w-23', app: textedit, pid: 601, title: 'QA Notes', fields: [['notes', '@w23:e1']],
+        }));
+      }
+      world.state.focused = 'w-23';
+    }
+    return snapshot;
+  };
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(order.slice(0, 3), ['w-21', 'w-23', 'w-23'],
+    'the old window does not count toward the two agreeing reads of the new one');
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w23:e9']], 'the new window\'s control is pressed once');
+});
+
+test('HAOC-207 review 2: a same-titled window that holds the target only on the second round still clicks', async t => {
+  const draft = windowRecord({ id: 'w-22', app: textedit, pid: 601, title: 'QA Notes', fields: [['draft', '@w22:e1']] });
+  // Only the window the flow was recorded in has the recorded control.
+  draft.data.tree.children = draft.data.tree.children.filter(child => child.name !== 'Continue');
+  const { world, run } = harness(t, {
+    windows: [
+      windowRecord({ id: 'w-21', app: textedit, pid: 601, title: 'QA Notes', fields: [['notes', '@w21:e1']] }),
+      draft,
+    ],
+    focused: 'w-22',
+  });
+  const button = continueButtonOf(world);
+  paintOnRead(world, (window, index) => {
+    if (window.id !== 'w-21') return;
+    const present = window.data.tree.children.includes(button);
+    if (index === 1 && present) {
+      window.data.tree.children = window.data.tree.children.filter(child => child !== button);
+    } else if (index > 1 && !present) {
+      window.data.tree.children = [...window.data.tree.children, button];
+    }
+  });
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w21:e9']],
+    'neither window held the target on the first round; the second round proved one and pressed it once');
+});
+
+test('HAOC-207 review 2: a driver dependency failure while choosing keeps its own code', async t => {
+  const { world, run } = harness(t, {
+    windows: [
+      windowRecord({ id: 'w-21', app: textedit, pid: 601, title: 'QA Notes', fields: [['notes', '@w21:e1']] }),
+      windowRecord({ id: 'w-22', app: textedit, pid: 601, title: 'QA Notes', fields: [['draft', '@w22:e1']] }),
+    ],
+    focused: 'w-21',
+  });
+  const real = world.desktop.snapshotWindow.bind(world.desktop);
+  let tries = 0;
+  world.desktop.snapshotWindow = async id => {
+    if (id === 'w-22') {
+      tries += 1;
+      throw new DesktopFault('DESKTOP_DEPENDENCY', 'snapshot');
+    }
+    return real(id);
+  };
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(entry(report, 'press').code, 'DESKTOP_DEPENDENCY',
+    'a driver failure is not a readiness wait and must not be retried into TARGET_NOT_READY');
+  assert.equal(tries, 1, 'the failing read was not retried');
+  assert.deepEqual(callsOf(world, 'click'), []);
+});
