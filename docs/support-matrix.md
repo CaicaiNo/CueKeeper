@@ -156,7 +156,10 @@ Shell 的完整约束见 [Shell 步骤设计](shell-steps.md) 与 [Root 步骤�
 | `UNTARGETED_TEXT` | 文本事件没有焦点元素证据，兜底读树也没有证明唯一聚焦可编辑控件，这些字符被丢弃 | 是（录制警告，不产生缺口） |
 | `CAPTURE_BACKLOG` | 队列落后 helper 超过 8 秒，积压的文本事件被丢弃 | 是（录制警告，不产生一串缺口） |
 | `CAPTURE_STARTUP` | 录制开头（第一个可重放步骤之前）没有窗口证据的事件——500 ms 内无窗口的事件，以及任何时刻开头的 `CAPTURE_SCOPE_UNVERIFIED` 缺口——被当作启动噪音丢弃 | 是（录制警告） |
-| `SNAPSHOT_UNAVAILABLE` | 指针手势的兜底读树失败，该手势记缺口 | 是（录制警告 + 缺口） |
+| `SNAPSHOT_UNAVAILABLE` | 指针手势的兜底读树失败（重试一次更大的预算后仍不完整），该手势记缺口 | 是（录制警告 + 缺口） |
+| `SNAPSHOT_SLOW_READ` | 按窗口 ID 读树第一次用尽驱动观测预算（`complete:false`，窗口在改标题/加载目录/重绘），第二次读成功；步骤保留，不产生缺口 | 是（录制警告） |
+| `TAP_SLOW_CALLBACK` | 事件 tap 回调耗时接近系统禁用阈值（≥250 ms），已由每次 AX 读取 0.25 s 上限约束；只是诊断，不产生缺口 | 是（录制警告，前 3 次） |
+| `TAP_INTERRUPTED` | 系统禁用了 tap（回调过慢或用户态禁用）：立刻重新启用，间隔内输入无法证明未丢，因此保留 `STALE_CAPTURE` 缺口；detail 带原因、上一次回调耗时与在处理什么 | 是（录制警告 + 缺口） |
 | `IME_COMPOSITION_UNSUPPORTED` | 录到 IME 提交的 Unicode 文本；组合过程不重放 | 是（录制警告），文本本身会入 flow |
 | `OUTSIDE_WINDOW` | 点击或滚动落在录制开始时的目标窗口之外 | 否，录制失败 |
 | `WINDOW_CHANGED` / `WINDOW_MISMATCH` / `WINDOW_NOT_FOUND` | 回放时窗口 ID、标题或前台状态与绑定的窗口不一致 | 否，不会点错窗口 |

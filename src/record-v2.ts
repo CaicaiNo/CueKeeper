@@ -47,6 +47,11 @@ const captureBacklogMs = 8000;
  * event stream past it. The read a click schedules for the window it changed
  * is the one deliberate exception: it is the screen the next click in that
  * window is made against, and it runs off the event stream.
+ *
+ * `complete: false` inside this budget is the driver saying it ran out of
+ * observation time, which is not proof the tree is unusable (a window that is
+ * retitling or loading a folder rebuilds it), so `readWindow` retries such a
+ * read once, after the rebuild, before the step becomes a gap.
  */
 const snapshotTimeoutMs = 3000;
 /**
@@ -76,6 +81,22 @@ const gapOriginChars = 480;
 const defaultSnapshotTtlMs = 30_000;
 /** How many window trees may stay cached at once; the least recently used goes. */
 const defaultCachedWindows = 8;
+/**
+ * The driver's observation budget for one fallback tree read. A pointer event
+ * that carries no element of its own waits for this; it is deliberately short
+ * because the read blocks the event stream it serves.
+ */
+const defaultSnapshotBudgetMs = 3000;
+/**
+ * The budget one incomplete read is retried with. `complete: false` means the
+ * driver ran out of its observation budget, not that the tree is unusable: a
+ * window that is retitling, loading a folder or drawing a new page rebuilds its
+ * tree, and by the time the failed read returns that rebuild has usually
+ * finished, so the same budget reads the finished tree. The two attempts stay
+ * under the 8 s backlog window, so a slow tree cannot hold the stream past it.
+ * A tree that is really unreadable fails both reads and stays a gap.
+ */
+const snapshotRetryBudgetMs = 3000;
 /**
  * How long after a click the window is read again. A click that opens a sheet
  * or switches a page changes the screen before its own tree read can run, so
@@ -116,8 +137,12 @@ export interface WindowEvidence {
   windowTitle: string;
 }
 
-/** Reads one window's accessibility tree; a failure becomes a capture gap. */
-export type WindowReader = (window: WindowEvidence) => Promise<Snapshot>;
+/**
+ * Reads one window's accessibility tree; a failure becomes a capture gap. The
+ * second argument is the driver's observation budget, so a read that ran out of
+ * a short budget can be retried with a larger one before it becomes a gap.
+ */
+export type WindowReader = (window: WindowEvidence, budgetMs?: number) => Promise<Snapshot>;
 
 export interface GlobalRecordingOptions {
   /** Bundle IDs whose events are dropped before any content is read. */
@@ -129,6 +154,11 @@ export interface GlobalRecordingOptions {
   snapshotTtlMs?: number;
   /** How many window trees may be cached at once; defaults to 8. */
   maxCachedWindows?: number;
+  /**
+   * The driver's observation budget for one fallback window read; defaults to
+   * 3 s. An incomplete read is retried once at that same budget.
+   */
+  snapshotBudgetMs?: number;
   /**
    * Runs the tree read a click schedules for the window it changed. Tests
    * inject a queue so the read happens when they say; the default is a timer
@@ -474,6 +504,7 @@ export class GlobalRecording {
   private stepLimit: number;
   private snapshotTtlMs: number;
   private maxCachedWindows: number;
+  private snapshotBudgetMs: number;
   private scheduleSettle: (task: () => Promise<void>) => void;
   private ended = false;
   /** Window ids in least-recently-used order, so the cache stays bounded. */
@@ -499,6 +530,7 @@ export class GlobalRecording {
     this.stepLimit = options.stepLimit ?? defaultStepLimit;
     this.snapshotTtlMs = options.snapshotTtlMs ?? defaultSnapshotTtlMs;
     this.maxCachedWindows = options.maxCachedWindows ?? defaultCachedWindows;
+    this.snapshotBudgetMs = options.snapshotBudgetMs ?? defaultSnapshotBudgetMs;
     this.scheduleSettle = options.scheduleSettle ?? ((task) => {
       const timer = setTimeout(() => { void task(); }, settledTreeDelayMs);
       timer.unref?.();
@@ -1255,7 +1287,7 @@ export class GlobalRecording {
       // pages can make a walk take most of a second — while a read that began
       // after the click still describes what the click produced and is rejected.
       const at = this.now();
-      const reading = this.read(this.windowFor(binding)).catch(() => undefined);
+      const reading = this.read(this.windowFor(binding), this.snapshotBudgetMs).catch(() => undefined);
       const settledRead = reading.then(() => undefined, () => undefined);
       this.settling.set(binding.key, settledRead);
       const snapshot = await Promise.race([reading, abandoned]);
@@ -2289,11 +2321,9 @@ export class GlobalRecording {
       return { snapshot: cached, reused: true };
     }
     if (cached) this.dropTree(binding);
-    let snapshot: Snapshot;
-    this.snapshotReads += 1;
-    try {
-      snapshot = await this.read(this.windowFor(binding));
-    } catch (error) {
+    const read = await this.readWindow(binding);
+    if (!read.snapshot) {
+      const error = read.error;
       const code = error instanceof Fault ? error.code : undefined;
       // A window that is gone or was replaced cannot be the window the running
       // flow acts on: apps that hide a window when they lose focus hand it a new
@@ -2315,9 +2345,41 @@ export class GlobalRecording {
       }
       return undefined;
     }
+    const snapshot = read.snapshot;
     if (keep) this.cacheTree(binding, snapshot);
     else this.dropTree(binding);
     return { snapshot, reused: false };
+  }
+
+  /**
+   * One fresh read of the bound window, with the retry a slow tree needs.
+   *
+   * `INCOMPLETE_TREE` from a by-ID read means the driver spent its observation
+   * budget before it finished walking the tree: the window is retitling, loading
+   * a folder or drawing a new page, and the tree it is rebuilding is exactly the
+   * one this event needs. That is a slow read, not an unreadable tree: by the
+   * time the incomplete answer arrives, the rebuild has usually finished, so the
+   * read is retried once before the step becomes a gap. A tree that is still
+   * incomplete on the second read keeps the gap: nothing about the retry
+   * weakens what a gap blocks.
+   */
+  private async readWindow(binding: WindowBinding): Promise<{ snapshot?: Snapshot; error?: unknown }> {
+    const window = this.windowFor(binding);
+    this.snapshotReads += 1;
+    try {
+      return { snapshot: await this.read(window, this.snapshotBudgetMs) };
+    } catch (error) {
+      if (!(error instanceof Fault) || error.code !== 'INCOMPLETE_TREE') return { error };
+      this.snapshotReads += 1;
+      try {
+        const snapshot = await this.read(window, snapshotRetryBudgetMs);
+        this.warn('SNAPSHOT_SLOW_READ',
+          `An accessibility read ran out of its ${this.snapshotBudgetMs} ms budget and was retried with ${snapshotRetryBudgetMs} ms; the tree it then read was used instead of a gap`);
+        return { snapshot };
+      } catch (retryError) {
+        return { error: retryError };
+      }
+    }
   }
 
   /**
@@ -2754,8 +2816,9 @@ export async function recordGlobal(
   let sessionTimeout: NodeJS.Timeout | undefined;
 
   const recording = new GlobalRecording(
-    window => desktop.snapshotWindow(
-      `w-${window.windowNumber}`, window.windowTitle, snapshotTimeoutMs, { forceElectronA11y: true },
+    (window, budgetMs) => desktop.snapshotWindow(
+      `w-${window.windowNumber}`, window.windowTitle, Math.max(1, Math.round(budgetMs ?? snapshotTimeoutMs)),
+      { forceElectronA11y: true },
     ),
     { exclude },
   );
@@ -2859,7 +2922,14 @@ export async function recordGlobal(
         continue;
       }
       if (data.kind === 'warning') {
-        recording.warn(captureCode(data.code), `Some input may have been skipped: ${captureCode(data.code)}`);
+        const code = captureCode(data.code);
+        // A warning that carries the helper's own bounded reason says what it
+        // was about (`TAP_INTERRUPTED: timeout: previous callback 640 ms in
+        // pointer`); one without keeps the message it always had.
+        const detail = typeof data.detail === 'string' && /^[ -~]{1,240}$/.test(data.detail)
+          ? `${code}: ${data.detail}`
+          : `Some input may have been skipped: ${code}`;
+        recording.warn(code, detail);
         continue;
       }
       if (data.kind === 'boundary') {

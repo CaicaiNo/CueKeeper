@@ -4116,7 +4116,9 @@ test('a gap and an unprovable click before the first step are startup noise', as
 });
 
 test('a failed tree read reports the window and title it was of', async () => {
+  let reads = 0;
   const recording = new GlobalRecording(async window => {
+    reads += 1;
     throw new Fault('INCOMPLETE_TREE',
       `Window snapshot is incomplete (window w-${window.windowNumber}, title "Downloads — 1 item selected")`);
   }, { now: () => NOW });
@@ -4128,12 +4130,89 @@ test('a failed tree read reports the window and title it was of', async () => {
   const flow = recording.finish();
   assert.deepEqual(flow.steps.map(step => step.kind), ['gap']);
   assert.equal(flow.steps[0].code, 'STALE_CAPTURE');
+  // A tree that is still incomplete when the retry reads it keeps its gap.
+  assert.equal(reads, 2);
   const warning = recording.captureWarnings.find(entry => entry.code === 'SNAPSHOT_UNAVAILABLE');
   // The warning the user sees on the next recording has to say which window and
   // title the read was of, not just the code.
   assert.match(warning.message, /INCOMPLETE_TREE/);
   assert.match(warning.message, /w-11/);
   assert.match(warning.message, /1 item selected/);
+});
+
+test('a read that ran out of its budget is retried, not turned into a gap', async () => {
+  const data = fixture('two-apps-three-windows');
+  const budgets = [];
+  let attempts = 0;
+  const recording = new GlobalRecording(async (window, budgetMs) => {
+    budgets.push(budgetMs);
+    attempts += 1;
+    // The first read hits the driver's observation budget while the window is
+    // retitling; by the time it answers, the rebuild has finished.
+    if (attempts === 1) {
+      throw new Fault('INCOMPLETE_TREE',
+        `Window snapshot is incomplete (window w-${window.windowNumber}, title "下载"; recorded title "Downloads")`);
+    }
+    return structuredClone(data.snapshots[String(window.windowNumber)]);
+  }, { now: () => NOW });
+  await recording.add(parseCaptureEvent({
+    kind: 'hover', t: 100, seen: NOW, focusGeneration: 1, secure: false,
+    point: [150, 110], dwellMs: 400, owner: FINDER_WINDOW,
+  }));
+  const flow = recording.finish();
+  // The hover is a step: the retried read named the control it dwelled on.
+  assert.deepEqual(flow.steps.map(step => step.kind), ['hover']);
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.equal(attempts, 2);
+  assert.ok(budgets[1] >= budgets[0], 'the retry must not read with a smaller budget');
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'SNAPSHOT_UNAVAILABLE'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'SNAPSHOT_SLOW_READ'),
+    'a retry that saved a step must still be reported');
+});
+
+test('a window retitled since the event still reads its tree', async () => {
+  const retitled = structuredClone(fixture('two-apps-three-windows').snapshots['11']);
+  // The same window after Finder followed its folder: the recorded title is
+  // only a hint, so the tree is read and named as it is now.
+  retitled.tree.name = '下载';
+  const seenTitles = [];
+  const recording = new GlobalRecording(async window => {
+    seenTitles.push(window.windowTitle);
+    return structuredClone(retitled);
+  }, { now: () => NOW });
+  await recording.add(parseCaptureEvent({
+    kind: 'hover', t: 100, seen: NOW, focusGeneration: 1, secure: false,
+    point: [150, 110], dwellMs: 400, owner: FINDER_WINDOW,
+  }));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['hover']);
+  assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
+  assert.deepEqual(seenTitles, ['Downloads'], 'the event title is what the reader is asked for, as a hint');
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'SNAPSHOT_UNAVAILABLE'), false);
+});
+
+test('a tap interruption keeps its gap and the events after it record cleanly', async () => {
+  const data = fixture('two-apps-three-windows');
+  const recording = new GlobalRecording(readerFor(data), { now: () => NOW });
+  await recording.add(parseCaptureEvent(data.events[0]));
+  // The system disabled the tap for one interval: the gap it proves is kept,
+  // because nothing about that interval was observed.
+  await recording.add(parseCaptureEvent({
+    kind: 'gap', gapCode: 'STALE_CAPTURE', detail: 'tap_interrupted',
+    t: 200, seen: NOW, focusGeneration: 1, secure: false,
+  }));
+  // After the helper re-enabled the tap, the same window records normally: the
+  // interruption must not turn the events that follow it into more gaps.
+  const owner = data.events[0].owner;
+  await recording.add(parseCaptureEvent({
+    kind: 'hover', t: 300, seen: NOW, focusGeneration: 1, secure: false, decision: 'record',
+    point: [150, 110], dwellMs: 400, owner,
+  }));
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'gap', 'hover']);
+  assert.equal(flow.steps[1].code, 'STALE_CAPTURE');
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'STALE_CAPTURE_TAP_INTERRUPTED'));
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'SNAPSHOT_UNAVAILABLE'), false);
 });
 
 test('a gap after the first step is still kept', async () => {
