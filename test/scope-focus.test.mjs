@@ -52,3 +52,55 @@ test('the same driver failure stays fatal when the window is not focused', async
   await assert.rejects(() => resolver.focusAfter(scope), error => error.code === 'ACTION_FAILED');
   assert.equal(resolver.foreground, undefined);
 });
+
+test('HAOC-222 review 2: a deadline that passed during the foreground read starts no focus', async () => {
+  // The proof observed another window in front, so it would focus the bound one.
+  // The caller's deadline passed while that read was in flight; the focus command
+  // must not be issued even though the deadline's own timer has not fired.
+  const windows = [
+    { id: 'w-11', title: 'Notes', isFocused: false, pid: 42 },
+    { id: 'w-12', title: 'Other', isFocused: true, pid: 43 },
+  ];
+  const calls = [];
+  const desktop = {
+    async focusedWindow() {
+      return { id: 'w-12', title: 'Other' };
+    },
+    async focusWindow(windowId) {
+      calls.push(windowId);
+    },
+  };
+  const identity = {
+    pid: 42,
+    processInstance: 'instance-1',
+    async prepare() {
+      return { pid: 42, startedAt: 'instance-1' };
+    },
+    async ownedWindows() {
+      return windows;
+    },
+    async focusOwnedWindow(target) {
+      await target.focusWindow('w-11');
+    },
+  };
+  const resolver = new ScopeResolver({
+    desktop, identityFor: () => identity, signal: new AbortController().signal,
+    wait: async () => {},
+  });
+  const binding = {
+    app: 'com.example.Electron', windowKey: 'main', pid: 42, processInstance: 'instance-1',
+    windowNumber: 11, windowId: 'w-11', title: 'Notes', observedTitle: 'Notes', focusGeneration: 0,
+  };
+
+  await assert.rejects(
+    resolver.confirmForeground(binding, undefined, () => {
+      throw new Fault('TARGET_NOT_READY', 'the readiness deadline passed during the foreground read');
+    }),
+    /readiness deadline passed/,
+  );
+  assert.deepEqual(calls, [], 'no focus command follows a foreground read that outlived the deadline');
+
+  // Control: the same foreground state does focus when the deadline still holds.
+  await resolver.confirmForeground(binding);
+  assert.deepEqual(calls, ['w-11'], 'the guard is the only reason the focus was withheld');
+});

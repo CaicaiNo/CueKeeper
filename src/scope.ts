@@ -283,13 +283,24 @@ export class ScopeResolver {
    * Brings the bound window forward only when the run owns the foreground. A
    * window the run did not leave in front is a user switch, not a hand-off, so
    * the step stops instead of stealing focus back.
+   *
+   * `signal` is aborted when the caller's deadline passes, and `live` re-checks
+   * that deadline after the foreground read and immediately before the focus
+   * command. A foreground read that lands after the deadline therefore cannot
+   * start the side effect it was waiting for, even when the deadline's timer
+   * could not run while the driver blocked the event loop.
    */
-  async confirmForeground(binding: WindowBinding, signal?: AbortSignal): Promise<void> {
+  async confirmForeground(
+    binding: WindowBinding,
+    signal?: AbortSignal,
+    live?: () => void,
+  ): Promise<void> {
     this.signal.throwIfAborted();
     const focused = await this.observedForeground();
     // A caller that gave the observation a deadline must not have the focus
     // command it was waiting for issued by a read that landed afterwards.
     signal?.throwIfAborted();
+    live?.();
     if (this.expectedForeground !== undefined && focused !== undefined &&
         focused.id !== this.expectedForeground && focused.id !== binding.windowId) {
       throw new Fault('FOCUS_INTERRUPTED',
@@ -299,7 +310,7 @@ export class ScopeResolver {
       this.expectedForeground = binding.windowId;
       return;
     }
-    await this.focus(binding, signal);
+    await this.focus(binding, signal, live);
   }
 
   /**
@@ -335,11 +346,12 @@ export class ScopeResolver {
   }
 
   /** Focuses a bound window and proves its owner after the driver call. */
-  private async focus(binding: WindowBinding, signal?: AbortSignal): Promise<void> {
+  private async focus(binding: WindowBinding, signal?: AbortSignal, live?: () => void): Promise<void> {
     // Checked immediately before the driver command: the command is the side
     // effect, and a deadline that passed while waiting for the foreground must
     // not start it.
     signal?.throwIfAborted();
+    live?.();
     const identity = this.identityFor(binding.app);
     try {
       await identity.focusOwnedWindow(this.desktop, binding.windowId, this.focusTimeoutMs);
