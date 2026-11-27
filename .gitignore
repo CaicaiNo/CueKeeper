@@ -8,5 +8,8 @@ coverage/
 .DS_Store
 .opencode/
 
+# Generated per-run by the Multica daemon; workspace-specific, never commit it.
+AGENTS.md
+
 # Recorded input values stay local; a flow committed to git must not carry them.
 *.values.json
