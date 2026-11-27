@@ -19,7 +19,7 @@ import { defaultLifecyclePollMs, LifecycleWatcher } from './lifecycle.js';
 import type { LifecycleObservation, LifecycleWatchOptions } from './lifecycle.js';
 import type { Located, Node, Point, Snapshot } from './locator.js';
 import {
-  clickIdentity, contains, elementNames, Fault, flatten, hitTest, object, resolve, toLocator,
+  clickIdentity, contains, elementNames, Fault, flatten, hitTest, isReAddressable, object, resolve, toLocator,
 } from './locator.js';
 import type { LifecycleEvent } from './wait-candidates.js';
 
@@ -1544,11 +1544,12 @@ export class GlobalRecording {
     }
     const binding = this.bindingFor(event);
     if (!binding) {
-      // A hover names no action a replay must perform, and v2 has no coordinate
-      // hover, so a hover the helper could not attribute blocks nothing. A
-      // hover over a menu item reaches this path as a real `record` action whose
-      // window is the app window that opened the menu; the menu choice itself is
-      // still recorded by the click that follows, on its own evidence.
+      // A hover names no action a replay must perform. Without a window there is
+      // no screen point to trust either: the pointer could have stopped on the
+      // desktop, so this stays a skip and blocks nothing. A hover over a menu
+      // item reaches this path as a real `record` action whose window is the app
+      // window that opened the menu; the menu choice itself is still recorded by
+      // the click that follows, on its own evidence.
       this.warn('UNTARGETED_HOVER',
         'A hover named no window this recording can address; it was skipped because a hover is read-only');
       return;
@@ -1563,7 +1564,6 @@ export class GlobalRecording {
       return;
     }
     if (!this.claim(event, binding)) return;
-    this.ensureScope(binding);
     const read = await this.snapshot(binding, {
       event, validate: tree => this.hit(tree, event.point) !== undefined,
       // A hover changes nothing on screen, so a read that only ran out of budget
@@ -1573,22 +1573,57 @@ export class GlobalRecording {
     });
     if (!read) return;
     const snapshot = read.snapshot;
-    const hit = this.hit(snapshot, event.point);
-    // A hover without a named element cannot be replayed: v2 has no coordinate
-    // hover. It is noise, not a missing step, so it is skipped with a warning.
-    if (!hit) {
-      this.warn('UNTARGETED_HOVER', 'A hover did not land on a re-addressable control and was skipped');
+    // A coordinate hover is only replayable while the recorded point is inside
+    // the window its evidence named. A tree whose shapes extend past the window
+    // (or one read without a frame) must not turn an outside point into a
+    // screen hover: nothing proves it belongs to this recording.
+    if (!contains(snapshot.tree.bounds, event.point)) {
+      this.warn('UNTARGETED_HOVER',
+        'A hover landed outside the window its evidence named; it was skipped because no replay can place that point');
       return;
     }
-    if (hit.node.secure) return;
+    const hit = this.hit(snapshot, event.point);
+    // A hover is replayed by resting the pointer. When the tree names the control
+    // under the pointer, the step can address it as an element; when it only
+    // reaches a window/application root, or the node has no usable identity, the
+    // recorded screen point is the honest address. The hint keeps a readable
+    // note of what the recording saw, and replay never resolves it.
+    const node = hit && hit.node.role !== 'window' && hit.node.role !== 'application'
+      ? hit.node
+      : undefined;
+    if (node?.secure) return;
+    const point: Point = [Math.round(event.point[0]), Math.round(event.point[1])];
+    const durationMs = Math.max(0, Math.min(60_000, Math.round(event.dwellMs)));
+    const locator = node ? toLocator(snapshot, hit!) : undefined;
+    if (locator && isReAddressable(locator)) {
+      this.ensureScope(binding);
+      this.push({
+        kind: 'hover', scope: this.windowScope(binding), target: locator,
+        durationMs,
+        // The element's own bounds often belong to an anonymous container whose
+        // centre is not the row the pointer stopped on, so the screen point the
+        // helper resolved is kept with the step. It is inside the window because
+        // `hit` found the element there.
+        point,
+      });
+      return;
+    }
+    // A coordinate hover names no window, so it never creates a scope or a
+    // navigation step; a later click still adds whichever navigation it needs.
     this.push({
-      kind: 'hover', scope: this.windowScope(binding), target: toLocator(snapshot, hit),
-      durationMs: Math.max(0, Math.min(60_000, Math.round(event.dwellMs))),
-      // The element's own bounds often belong to an anonymous container whose
-      // centre is not the row the pointer stopped on, so the screen point the
-      // helper resolved is kept with the step. It is inside the window because
-      // `hit` found the element there.
-      point: [Math.round(event.point[0]), Math.round(event.point[1])],
+      kind: 'hover', scope: { kind: 'screen' }, point, durationMs,
+      hint: {
+        app: binding.app,
+        windowTitle: binding.title,
+        ...(locator ? {
+          element: {
+            kind: 'element' as const,
+            role: locator.role,
+            ...(locator.name === undefined ? {} : { name: locator.name }),
+            ...(locator.identifier === undefined ? {} : { identifier: locator.identifier }),
+          },
+        } : {}),
+      },
     });
   }
 

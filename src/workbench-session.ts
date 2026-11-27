@@ -37,7 +37,7 @@ type TimelineAction = {
 
 type ScopeGroup = {
   key: string;
-  kind: 'window' | 'app' | 'surface' | 'file' | 'process' | 'gap';
+  kind: 'window' | 'app' | 'surface' | 'file' | 'process' | 'screen' | 'gap';
   app?: string;
   window?: string;
   surface?: string;
@@ -63,6 +63,7 @@ function scopeRowTarget(scope: Scope | undefined): { app: string; window: string
   if (scope.kind === 'app') return { app: scope.app, window: '' };
   if (scope.kind === 'file') return { app: '', window: fileNameOf(scope) };
   if (scope.kind === 'process') return { app: '', window: `进程 · ${processNameOf(scope)}` };
+  if (scope.kind === 'screen') return { app: '', window: '整块屏幕' };
   const app = scope.surface === 'app_menu_bar' || scope.surface === 'app_context_menu'
     ? scope.app : '';
   const window = scope.surface === 'app_context_menu' ? scope.windowTitle : scope.surface;
@@ -78,6 +79,9 @@ function scopeGroupOf(scope: Scope | undefined, key: string, stepId: string): Sc
   if (scope.kind === 'file') return { key, kind: 'file', file: fileNameOf(scope), stepIds: [stepId] };
   if (scope.kind === 'process') {
     return { key, kind: 'process', process: processNameOf(scope), stepIds: [stepId] };
+  }
+  if (scope.kind === 'screen') {
+    return { key, kind: 'screen', window: '整块屏幕', stepIds: [stepId] };
   }
   return {
     key, kind: 'surface', surface: scope.surface, stepIds: [stepId],
@@ -394,6 +398,8 @@ async function loadV2Session(
     const scope = step.scope;
     if (scope.kind === 'file' || scope.kind === 'process') {
       // A file or process check names no app.
+    } else if (scope.kind === 'screen') {
+      // A coordinate hover names the desktop, not an app.
     } else if (scope.kind === 'surface') {
       if (scope.surface === 'app_menu_bar' || scope.surface === 'app_context_menu') appIds.add(scope.app);
     } else {

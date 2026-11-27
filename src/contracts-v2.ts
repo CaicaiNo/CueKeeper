@@ -52,6 +52,11 @@ const clickPoint = T.Tuple([
 const pointTarget = object({ kind: T.Literal('point'), point: clickPoint });
 const clickTarget = T.Union([element, pointTarget]);
 
+// A coordinate hover names the whole desktop instead of one window: the recorded
+// screen point is the target, and the desktop is legal only for this one step
+// type. A window that happened to hold the pointer is context, never a binding.
+const screenScope = object({ kind: T.Literal('screen') });
+
 // The raw-coordinate locator is refused everywhere else: a global flow stays
 // bound to a scope and an element, and only a recorded click may fall back.
 const windowScope = object({
@@ -118,7 +123,7 @@ const processNameScope = object({ kind: T.Literal('process'), name: processName 
 const processPathScope = object({ kind: T.Literal('process'), path: systemPath });
 const processScope = T.Union([processNameScope, processPathScope]);
 export const scopeSchema = T.Union([
-  windowScope, appScope, surfaceScope, fileDirectoryScope, filePathScope, processScope,
+  windowScope, appScope, surfaceScope, fileDirectoryScope, filePathScope, processScope, screenScope,
 ]);
 const focusAfter = T.Optional(T.Union([windowScope, appScope]));
 
@@ -268,10 +273,32 @@ const dragStep = object({
 // the same way; the point only says where inside it the pointer stopped, which
 // is what made the app open its tooltip or submenu. It is optional: an older
 // flow, or a hover that cannot keep a point, falls back to the element centre.
-const hoverStep = object({
+//
+// A recording whose control could not be named (an anonymous container, empty
+// static text, a background spot) becomes a coordinate hover instead: the screen
+// point is the whole address, `hint` is a display-only note of what the
+// recording saw, and replay never resolves a window or element for it.
+const hoverHintElement = object({
+  kind: T.Literal('element'), role: label,
+  name: T.Optional(T.String({ maxLength: 256 })),
+  identifier: T.Optional(T.String({ maxLength: 512 })),
+});
+const hoverHint = object({
+  app: T.Optional(bundleId),
+  windowTitle: T.Optional(label),
+  element: T.Optional(hoverHintElement),
+});
+const windowHoverStep = object({
   ...stepBase, kind: T.Literal('hover'), scope: windowScope, focusAfter,
   target: element, durationMs: T.Integer({ minimum: 0, maximum: 60_000 }),
   point: T.Optional(clickPoint),
+});
+// No `target` and no `focusAfter`: the point is the address, and a hover never
+// takes focus anyway.
+const screenHoverStep = object({
+  ...stepBase, kind: T.Literal('hover'), scope: screenScope,
+  point: clickPoint, durationMs: T.Integer({ minimum: 0, maximum: 60_000 }),
+  hint: T.Optional(hoverHint),
 });
 // Paste never embeds clipboard content in v2: it names the earlier copy step or
 // a runtime input parameter.
@@ -345,7 +372,7 @@ const gapCodes = T.Union([
 const gapStep = object({ ...stepBase, kind: T.Literal('gap'), code: gapCodes });
 
 const step = T.Union([
-  clickStep, typeStep, keyStep, scrollStep, dragStep, hoverStep, pasteStep,
+  clickStep, typeStep, keyStep, scrollStep, dragStep, windowHoverStep, screenHoverStep, pasteStep,
   waitStep, assertStep, launchApp, activateApp, focusWindow, openSystemSurface,
   surfacePress, manualCheckpoint, gapStep,
 ]);
@@ -445,6 +472,10 @@ const entry = object({
   code: T.Optional(T.String()),
   phase: T.Optional(phase),
   delivery: T.Optional(deliveryState),
+  // Which path a hover actually took: the resolved element or the recorded
+  // screen point (including the element step that fell back to it). Only hover
+  // entries carry it.
+  deliveredVia: T.Optional(T.Union([T.Literal('element'), T.Literal('screen_point')])),
   // The scope a step asked to leave in front, recorded after the step so a
   // later focus loss can be told apart from the step's own hand-off.
   focusAfter: T.Optional(T.Union([windowScope, appScope])),

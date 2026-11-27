@@ -101,6 +101,14 @@ async function recording(root) {
   flow.name = '目标编辑弹窗夹具';
   flow.steps.splice(3, 0,
     { id: 'hover-group', kind: 'hover', scope: canvasScope, target: hoverTarget, durationMs: 405 },
+    {
+      id: 'hover-screen', kind: 'hover', scope: { kind: 'screen' },
+      point: [238, 397], durationMs: 339,
+      hint: {
+        app: 'com.apple.finder', windowTitle: 'multica-v1-https',
+        element: { kind: 'element', role: 'group', name: '' },
+      },
+    },
     { id: 'click-point', kind: 'click', scope: canvasScope, target: { kind: 'point', point: [120, 80] } },
     {
       id: 'click-element', kind: 'click', scope: canvasScope,
@@ -625,6 +633,37 @@ test('悬停拾取到没有 bounds 的控件时报 HOVER_UNRESOLVED，且不落�
   const step = await stepOf('hover-group');
   assert.deepEqual(step.target, hoverTarget, 'nothing was saved');
   assert.equal(step.durationMs, 405, 'the dwell was not saved either');
+});
+
+test('坐标型悬停弹窗只有摘要、坐标与停留时长', async t => {
+  const { document } = await bootPage(t);
+  const row = rowOf(document, 'hover-screen');
+  assert.match(row.textContent, /悬停 · 屏幕坐标 \(238, 397\) · 339 ms/);
+  assert.match(row.textContent, /整块屏幕/);
+
+  const editor = await openEditor(document, 'hover-screen');
+  assert.ok(editor.textContent.includes('屏幕坐标 (238, 397)'));
+  assert.match(editor.textContent, /悬停时长（毫秒）/);
+  assert.equal(editor.querySelectorAll('input').length, 1, 'only the dwell is editable');
+  assert.equal(editor.textContent.includes('从窗口拾取'), false, 'there is no window to pick from');
+  assert.equal(editor.textContent.includes('高级定位'), false);
+  assert.equal(editor.textContent.includes('控件类型'), false);
+  assert.equal(editor.textContent.includes('控件名称'), false);
+});
+
+test('改坐标型悬停时长后应用，写回 durationMs 且坐标不变', async t => {
+  const { document, stepOf } = await bootPage(t);
+  const editor = await openEditor(document, 'hover-screen');
+
+  durationInput(editor).value = '620';
+  await submitDialog(document);
+
+  assert.equal(dialog(document).open, false);
+  const step = await stepOf('hover-screen');
+  assert.equal(step.durationMs, 620);
+  assert.deepEqual(step.point, [238, 397]);
+  assert.deepEqual(step.scope, { kind: 'screen' });
+  assert.equal('target' in step, false);
 });
 
 test('悬停时长越界或留空时不写回', async t => {

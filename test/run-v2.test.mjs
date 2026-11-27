@@ -188,7 +188,29 @@ function fakeWorld(options = {}) {
     },
     async hoverAt(_snapshot, _target, point, options = {}) {
       state.calls.push(['hoverAt', point, options.travel === true, performance.now()]);
+      const fail = state.hooks.hoverAt?.(state, point);
+      if (fail) throw fail;
       return delivered('hover');
+    },
+    async hoverWindowBounds(snapshot) {
+      state.calls.push(['hoverWindowBounds', snapshot.windowId]);
+      const fail = state.hooks.hoverWindowBounds?.(state);
+      if (fail) throw fail;
+      const window = byId(snapshot.windowId);
+      const bounds = window?.data?.tree?.bounds;
+      if (!bounds) throw new Fault('UNSAFE_POINT', 'The hover window has no bounds to place the pointer in');
+      return bounds;
+    },
+    async hoverScreen(point, options = {}) {
+      state.calls.push(['hoverScreen', point, options.travel === true, performance.now()]);
+      return delivered('hoverScreen');
+    },
+    async listDisplays() {
+      state.calls.push(['listDisplays']);
+      return [
+        { id: '1', isPrimary: true, bounds: { x: 0, y: 0, width: 1470, height: 956 } },
+        { id: '3', isPrimary: false, bounds: { x: 0, y: -1440, width: 2560, height: 1440 } },
+      ];
     },
     async focus(ref) {
       state.calls.push(['focus', ref]);
@@ -1268,6 +1290,168 @@ test('a hover dwells at least 400 ms, and a longer recorded dwell is kept', asyn
   assert.ok(long[3] - short[3] >= 400, `short hover dwelled ${long[3] - short[3]} ms`);
   assert.ok(tail[3] - long[3] >= 700, `long hover dwelled ${tail[3] - long[3]} ms`);
 });
+
+const screenHover = (extra = {}) => ({
+  id: 'screen-hover', kind: 'hover', scope: { kind: 'screen' },
+  point: [238, 397], durationMs: 0, ...extra,
+});
+
+test('a screen hover binds no window and only moves the pointer', async t => {
+  const { world, run } = harness(t, { headed: true });
+  const report = await run(hoverFlow([screenHover()]));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  const hover = entry(report, 'screen-hover');
+  assert.equal(hover.deliveredVia, 'screen_point');
+  assert.deepEqual(hover.scope, { kind: 'screen' });
+  assert.equal(hover.delivery, 'delivered_unverified');
+  assert.match(hover.message, /recorded screen point \(238,397\)/);
+  const moves = callsOf(world, 'hoverScreen');
+  assert.equal(moves.length, 1);
+  assert.deepEqual(moves[0].slice(0, 3), ['hoverScreen', [238, 397], true]);
+  // Nothing about a window was read or moved: no binding, no snapshot, no
+  // foreground proof, and no input of any kind.
+  assert.deepEqual([
+    callsOf(world, 'listWindows'), callsOf(world, 'snapshotWindow'), callsOf(world, 'snapshot'),
+    ...readOnlyCalls(world), callsOf(world, 'hoverAt'),
+  ], [[], [], [], [], [], [], [], [], [], []]);
+});
+
+test('an element hover whose window is gone degrades to its recorded point', async t => {
+  const { world, run } = harness(t, {
+    headed: true,
+    windows: initialWindows().filter(window => window.app !== textedit),
+  });
+  const report = await run(hoverFlow([notesHover('hover-notes', { point: [360, 170] })]));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  const hover = entry(report, 'hover-notes');
+  assert.equal(hover.deliveredVia, 'screen_point');
+  assert.equal(hover.delivery, 'delivered_unverified');
+  assert.match(hover.message, /HOVER_SCREEN_FALLBACK \(WINDOW_NOT_FOUND/);
+  assert.deepEqual(callsOf(world, 'hoverScreen').map(call => call[1]), [[360, 170]]);
+  assert.deepEqual(callsOf(world, 'hoverAt'), []);
+  assert.deepEqual(readOnlyCalls(world), [[], [], [], [], [], []]);
+});
+
+test('an element hover with no point keeps WINDOW_NOT_FOUND and moves nothing', async t => {
+  const { world, run } = harness(t, {
+    headed: true,
+    windows: initialWindows().filter(window => window.app !== textedit),
+  });
+  const report = await run(hoverFlow([notesHover('hover-notes')]));
+  assert.equal(entry(report, 'hover-notes').code, 'WINDOW_NOT_FOUND');
+  assert.equal(entry(report, 'hover-notes').deliveredVia, undefined);
+  assert.deepEqual(callsOf(world, 'hoverScreen'), []);
+  assert.deepEqual(callsOf(world, 'hoverAt'), []);
+});
+
+test('two same-titled windows with no front one degrade to the point', async t => {
+  const { world, run } = harness(t, {
+    headed: true,
+    focused: 'w-99',
+    windows: [
+      windowRecord({ id: 'w-21', app: textedit, pid: 601, title: 'QA Notes', fields: [['notes', '@w21:e1']] }),
+      windowRecord({ id: 'w-23', app: textedit, pid: 601, title: 'QA Notes', fields: [['notes', '@w23:e1']] }),
+      windowRecord({ id: 'w-99', app: 'com.apple.finder', pid: 700, title: 'Finder', fields: [] }),
+    ],
+  });
+  const report = await run(hoverFlow([notesHover('hover-notes', { point: [360, 170] })]));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  const hover = entry(report, 'hover-notes');
+  assert.equal(hover.deliveredVia, 'screen_point');
+  assert.match(hover.message, /HOVER_SCREEN_FALLBACK \(AMBIGUOUS_TARGET/);
+  assert.deepEqual(callsOf(world, 'hoverScreen').map(call => call[1]), [[360, 170]]);
+});
+
+test('a secure hover target refuses instead of falling back', async t => {
+  const { world, run } = harness(t, {
+    headed: true,
+    windows: [{
+      id: 'w-21', app: textedit, pid: 601, title: 'QA Notes',
+      data: {
+        complete: true, window: { id: 'w-21', title: 'QA Notes' },
+        tree: {
+          role: 'window', name: 'QA Notes', bounds: { x: 100, y: 100, width: 800, height: 600 },
+          children: [{
+            role: 'textfield', name: 'notes', ref_id: '@w21:e1',
+            bounds: { x: 120, y: 150, width: 600, height: 40 }, states: ['secure'],
+          }],
+        },
+      },
+    }],
+  });
+  const report = await run(hoverFlow([notesHover('hover-notes', { point: [360, 170] })]));
+  const hover = entry(report, 'hover-notes');
+  assert.equal(hover.code, 'UNSAFE_TARGET');
+  assert.equal(hover.deliveredVia, undefined);
+  assert.deepEqual(callsOf(world, 'hoverScreen'), []);
+  assert.deepEqual(callsOf(world, 'hoverAt'), []);
+});
+
+test('a point outside the bound window and a lost foreground never fall back', async t => {
+  const outside = await harness(t, { headed: true }).run(
+    hoverFlow([notesHover('hover-notes', { point: [2000, 2000] })]));
+  assert.equal(entry(outside, 'hover-notes').code, 'UNSAFE_POINT');
+  assert.equal(entry(outside, 'hover-notes').deliveredVia, undefined);
+
+  const background = harness(t, { headed: true, focused: 'w-22' });
+  const report = await background.run(hoverFlow([notesHover('hover-notes', { point: [360, 170] })]));
+  assert.equal(entry(report, 'hover-notes').code, 'HOVER_NOT_FOREGROUND');
+  assert.equal(entry(report, 'hover-notes').deliveredVia, undefined);
+  assert.deepEqual(callsOf(background.world, 'hoverScreen'), []);
+});
+
+test('a point outside a proved window is refused before the element is resolved', async t => {
+  // The window moved; the recorded control is not in its tree at all. The stale
+  // point must not turn "element not found" into a successful screen hover.
+  const { world, run } = harness(t, {
+    headed: true,
+    windows: [{
+      id: 'w-21', app: textedit, pid: 601, title: 'QA Notes',
+      data: {
+        complete: true, window: { id: 'w-21', title: 'QA Notes' },
+        tree: {
+          role: 'window', name: 'QA Notes', bounds: { x: 100, y: 100, width: 800, height: 600 },
+          children: [{
+            role: 'button', name: 'Continue', ref_id: '@w21:e9',
+            bounds: { x: 120, y: 500, width: 120, height: 32 }, states: [],
+          }],
+        },
+      },
+    }],
+  });
+  const report = await run(hoverFlow([notesHover('hover-notes', { point: [950, 170] })]));
+  const hover = entry(report, 'hover-notes');
+  assert.equal(hover.code, 'UNSAFE_POINT');
+  assert.match(hover.message, /recorded hover point 950,170 is outside the bound window/);
+  assert.equal(hover.deliveredVia, undefined);
+  assert.deepEqual(callsOf(world, 'hoverScreen'), []);
+  assert.deepEqual(callsOf(world, 'hoverAt'), []);
+});
+
+test('a driver fault after the move starts is reported once, never retried or degraded', async t => {
+  // The pointer move itself failed after the window and element were proved.
+  // Retrying it could move the pointer twice, and degrading it would call a
+  // broken desktop a successful screen hover.
+  const lost = harness(t, {
+    headed: true,
+    hooks: { hoverAt: () => new Fault('NOT_FOUND', 'the window vanished during the move') },
+  });
+  const lostReport = await lost.run(hoverFlow([notesHover('hover-notes', { point: [360, 170] })]));
+  assert.equal(entry(lostReport, 'hover-notes').code, 'NOT_FOUND');
+  assert.equal(callsOf(lost.world, 'hoverAt').length, 1);
+  assert.deepEqual(callsOf(lost.world, 'hoverScreen'), []);
+
+  const uncertain = harness(t, {
+    headed: true,
+    delivery: command => command === 'hover' ? 'delivery_uncertain' : 'delivered_verified',
+  });
+  const uncertainReport = await uncertain.run(
+    hoverFlow([notesHover('hover-notes', { point: [360, 170] })]));
+  assert.equal(entry(uncertainReport, 'hover-notes').code, 'DELIVERY_UNCERTAIN');
+  assert.equal(callsOf(uncertain.world, 'hoverAt').length, 1);
+  assert.deepEqual(callsOf(uncertain.world, 'hoverScreen'), []);
+});
+
 
 /** One Finder-style window: an item label whose name sits in its value. */
 function finderItemsWorld(t, items) {

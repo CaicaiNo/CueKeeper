@@ -16,6 +16,7 @@ import { ensureNew, readJson, writeNew } from './files.js';
 import { parseFlow, plan } from './flow.js';
 import {
   UnsupportedFlowVersionError, describePlannedStep, dryRunFlowV2, hashFlowV2, isFlowV2, parseFlowV2, planFlowV2,
+  screenHoverSteps,
 } from './flow-v2.js';
 import type { FlowV2 } from './contracts-v2.js';
 import {
@@ -501,6 +502,14 @@ async function main() {
       if (!values['foreground']) {
         throw new UsageFault('FOREGROUND_REQUIRED',
           'Live replay of a version 2 flow drives the mouse and keyboard across apps; pass --foreground to confirm');
+      }
+      // A coordinate hover is passive but still moves the real pointer, and its
+      // point is tied to the layout of the recording. Say how many a run will
+      // deliver before it takes the foreground; the report marks each one.
+      const screenHovers = screenHoverSteps(flow).length;
+      if (screenHovers) {
+        process.stderr.write(
+          `屏幕坐标悬停 ${screenHovers} 条：只移动指针并停留，不点击、不聚焦；坐标与录制时的屏幕布局绑定\n`);
       }
       // A checkpoint needs an operator in the same session. Machine output has
       // no independent confirmation channel unless the parent asked for the

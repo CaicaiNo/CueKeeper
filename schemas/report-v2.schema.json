@@ -447,6 +447,19 @@
                     ]
                   }
                 ]
+              },
+              {
+                "additionalProperties": false,
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "screen",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
             ]
           },
@@ -532,6 +545,18 @@
               },
               {
                 "const": "unknown",
+                "type": "string"
+              }
+            ]
+          },
+          "deliveredVia": {
+            "anyOf": [
+              {
+                "const": "element",
+                "type": "string"
+              },
+              {
+                "const": "screen_point",
                 "type": "string"
               }
             ]

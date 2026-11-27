@@ -12,7 +12,7 @@ import type {
 } from './contracts-v2.js';
 import type { Delivery } from './contracts.js';
 import { DesktopFault } from './desktop.js';
-import type { ClickOptions, Desktop, DragEndpoint, WindowInfo } from './desktop.js';
+import type { ClickOptions, Desktop, DragEndpoint, HoverBounds, WindowInfo } from './desktop.js';
 import { parseFlowV2 } from './flow-v2.js';
 import { InstallState } from './install-state.js';
 import type { InstallStateDeps } from './install-state.js';
@@ -229,6 +229,15 @@ const clickRetryDelayMs = 300;
  * pointer to rest, and a next step that reads that state would otherwise race.
  */
 const hoverDwellFloorMs = 400;
+
+/**
+ * The hover failures that mean "this element can no longer be proved", not
+ * "the desktop is broken". Only these degrade to the recorded screen point,
+ * and only when the step kept one.
+ */
+const hoverScreenFallbackCodes = new Set([
+  'WINDOW_NOT_FOUND', 'WINDOW_CHANGED', 'AMBIGUOUS_TARGET', 'NOT_FOUND',
+]);
 
 /**
  * A window that was just raised answers the accessibility read before it
@@ -520,7 +529,10 @@ function windowTestInputs(step: StepV2): { points: Point[]; locators: ElementLoc
   if (step.kind === 'click') {
     if (step.target.kind === 'point') points.push(step.target.point);
     else locators.push(step.target);
-  } else if (step.kind === 'hover' || step.kind === 'scroll' || step.kind === 'type' || step.kind === 'paste') {
+  } else if (step.kind === 'hover') {
+    // A screen hover has no element to test a window with.
+    if ('target' in step) locators.push(step.target);
+  } else if (step.kind === 'scroll' || step.kind === 'type' || step.kind === 'paste') {
     locators.push(step.target);
   } else if (step.kind === 'drag') {
     locators.push(step.from, step.to);
@@ -1342,21 +1354,7 @@ class StepRunner {
           return delivery === undefined ? {} : { delivery };
         }, step);
       case 'hover':
-        return this.readOnlyWindowStep(step.scope, async (binding, snapshot) => {
-          const { node } = resolve(snapshot, step.target as ElementLocator);
-          if (node.secure) throw new Fault('UNSAFE_TARGET', 'Hover target is secure');
-          const point = hoverPoint(node, step.point, snapshot);
-          const delivery = await this.desktop.hoverAt(
-            snapshot, this.targetOf(binding), point, { readOnly: true, travel: true },
-          );
-          // A tooltip or submenu closes the moment the pointer leaves, so the
-          // dwell is what the next step sees. A recording's own dwell can be
-          // shorter than the time an app needs to settle its hover state, so
-          // the step waits at least the floor. The pointer is not moved away
-          // afterwards: the open tooltip is state the flow may rely on.
-          await sleep(Math.max(step.durationMs, hoverDwellFloorMs), undefined, { signal: this.signal });
-          return delivery === undefined ? {} : { delivery };
-        }, step);
+        return this.hoverStep(step);
       case 'paste':
         return this.pasteStep(step);
       case 'wait':
@@ -1515,34 +1513,120 @@ class StepRunner {
   }
 
   /**
-   * Resolves a window and proves the run may act in it without moving focus.
-   * Hover is the one read-only input: it must not raise its window, click a
-   * Finder sidebar item to reopen one, or take a declared hand-off. The binding
-   * itself is the same evidence a focusable step uses, and the foreground is
-   * checked by reading it, never by taking it.
+   * A hover is read-only, and its two shapes take different proof paths. A
+   * window hover keeps every check: the window identity, the foreground and the
+   * element. A screen hover binds nothing: the recorded point is the address,
+   * and only the display layout is read. An element hover whose window or
+   * element can no longer be proved (and only those four failures) degrades to
+   * the recorded point in the same step, so a re-titled or closed window no
+   * longer loses a hover the recording can still place on screen.
    */
-  private async readOnlyWindowStep(
+  private async hoverStep(step: Extract<StepV2, { kind: 'hover' }>): Promise<StepOutcome> {
+    if (step.scope.kind === 'screen') {
+      const point = step.point;
+      if (point === undefined) {
+        throw new Fault('INVALID_FLOW', 'A coordinate hover needs its recorded screen point');
+      }
+      const outcome = await this.screenHover(point, step.durationMs);
+      return { ...outcome, deliveredVia: 'screen_point' };
+    }
+    if (!('target' in step)) {
+      throw new Fault('INVALID_FLOW', 'A window hover needs its element target');
+    }
+    const { scope, target, point: recordedPoint, durationMs } = step;
+    // Resolution only: the window, the foreground, the element, the recorded
+    // point and the last window re-read before the first move are proved here,
+    // and only this phase may retry or degrade.
+    let prepared: {
+      binding: WindowBinding; snapshot: Snapshot; point: Point; notes: string[]; bounds: HoverBounds;
+    };
+    try {
+      const resolution = await this.prepareReadOnlyHover(scope, target, recordedPoint, step);
+      const bounds = await this.desktop.hoverWindowBounds(
+        resolution.snapshot, this.targetOf(resolution.binding),
+      );
+      prepared = { ...resolution, bounds };
+    } catch (error) {
+      // Only a vanished/ambiguous window or element degrades. A secure target,
+      // a point outside the proved window, a lost foreground or a driver fault
+      // still fails: those say the desktop changed, not that the locator did.
+      if (!(error instanceof Fault) || !hoverScreenFallbackCodes.has(error.code) || recordedPoint === undefined) {
+        throw error;
+      }
+      const outcome = await this.screenHover(recordedPoint, durationMs);
+      return {
+        ...outcome,
+        deliveredVia: 'screen_point',
+        message: `HOVER_SCREEN_FALLBACK (${error.code}: ${error.message}); ` +
+          'the pointer was moved to the recorded screen point',
+      };
+    }
+    const { binding, snapshot, point, notes, bounds } = prepared;
+    // Input phase: the pointer move itself is dispatched exactly once. A fault
+    // here (NOT_FOUND from the driver, an uncertain delivery, a broken display
+    // layout) is reported as it is, never retried and never degraded — the
+    // resolution was already proved, so this is the environment, not the
+    // locator.
+    const delivery = await this.desktop.hoverAt(
+      snapshot, this.targetOf(binding), point,
+      { readOnly: true, travel: true, verifiedBounds: bounds },
+    );
+    // A tooltip or submenu closes the moment the pointer leaves, so the dwell is
+    // what the next step sees. A recording's own dwell can be shorter than the
+    // time an app needs to settle its hover state, so the step waits at least
+    // the floor. The pointer is not moved away afterwards: the open tooltip is
+    // state the flow may rely on.
+    await sleep(Math.max(durationMs, hoverDwellFloorMs), undefined, { signal: this.signal });
+    const outcome: StepOutcome = {
+      ...(delivery === undefined ? {} : { delivery }),
+      deliveredVia: 'element',
+    };
+    if (!notes.length) return outcome;
+    const note = notes.join('; ');
+    return { ...outcome, message: note };
+  }
+
+  /**
+   * Resolves a window and proves the run may act in it without moving focus,
+   * then proves the hover's own target. Hover is the one read-only input: it
+   * must not raise its window, click a Finder sidebar item to reopen one, or
+   * take a declared hand-off. The binding itself is the same evidence a
+   * focusable step uses, and the foreground is checked by reading it, never by
+   * taking it.
+   *
+   * A hover can land while its window is still repainting (a tooltip that
+   * appears late, a list that virtualises). Like the focusable path, the
+   * read-only one retries a target that is momentarily missing from a fresh
+   * tree. Nothing here has moved the pointer yet, so a retry has no side effect.
+   */
+  private async prepareReadOnlyHover(
     scope: WindowScope,
-    work: (binding: WindowBinding, snapshot: Snapshot) => Promise<StepOutcome>,
+    target: ElementLocator,
+    recordedPoint: Point | undefined,
     step: StepV2,
-  ): Promise<StepOutcome> {
-    // A hover can land while its window is still repainting (a tooltip that
-    // appears late, a list that virtualises). The focusable path retries a
-    // missing target against a fresh tree, and a read-only step keeps the same
-    // patience without ever taking a side effect: every attempt binds, proves
-    // the foreground and reads the tree again, and the pointer is only moved by
-    // the attempt whose target resolved.
+  ): Promise<{ binding: WindowBinding; snapshot: Snapshot; point: Point; notes: string[] }> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 4; attempt += 1) {
-      const binding = await this.resolver.resolveWindow(
-        scope,
-        candidates => this.pickSameTitled(candidates, step),
-        { repair: false },
-      );
-      await this.resolver.requireForeground(binding);
-      const snapshot = await this.resolver.snapshot(binding);
       try {
-        const outcome = await work(binding, snapshot);
+        const binding = await this.resolver.resolveWindow(
+          scope,
+          candidates => this.pickSameTitled(candidates, step),
+          { repair: false },
+        );
+        await this.resolver.requireForeground(binding);
+        const snapshot = await this.resolver.snapshot(binding);
+        // The recorded point belongs to this window. Check it before the element
+        // is resolved: when the window moved or shrank, a missing element must
+        // not turn a stale point into a "successful" screen hover. Outside the
+        // proved window is UNSAFE_POINT, exactly as it is after resolution.
+        if (recordedPoint !== undefined && !contains(snapshot.tree.bounds, recordedPoint)) {
+          throw new Fault('UNSAFE_POINT',
+            `The recorded hover point ${recordedPoint.join(',')} is outside the bound window; ` +
+            'the window moved or resized since the recording — edit the step and pick the target again');
+        }
+        const { node } = resolve(snapshot, target);
+        if (node.secure) throw new Fault('UNSAFE_TARGET', 'Hover target is secure');
+        const point = hoverPoint(node, recordedPoint, snapshot);
         const notes: string[] = [];
         if (binding.rebound) {
           binding.rebound = false;
@@ -1552,9 +1636,7 @@ class StepRunner {
           const which = binding.sharedTitle === 'target' ? 'the one that held its target' : 'the focused one';
           notes.push(`more than one window was titled "${scope.windowTitle}", so the step ran in ${which}`);
         }
-        if (!notes.length) return outcome;
-        const note = notes.join('; ');
-        return { ...outcome, message: outcome.message ? `${outcome.message}; ${note}` : note };
+        return { binding, snapshot, point, notes };
       } catch (error) {
         const retryable = error instanceof Fault && error.code === 'NOT_FOUND';
         if (!retryable || attempt === 3) throw error;
@@ -1563,6 +1645,23 @@ class StepRunner {
       }
     }
     throw lastError;
+  }
+
+  /**
+   * A pointer move to a recorded screen point with no window binding. Only the
+   * display layout is read; the step stays read-only and never clicks, focuses
+   * or raises anything. A screen point cannot be verified against a control, so
+   * the delivery is always `delivered_unverified` even when the driver reports
+   * the move as delivered.
+   */
+  private async screenHover(point: Point, durationMs: number): Promise<StepOutcome> {
+    await this.desktop.hoverScreen(point, { travel: true });
+    await sleep(Math.max(durationMs, hoverDwellFloorMs), undefined, { signal: this.signal });
+    return {
+      delivery: 'delivered_unverified',
+      message: `the pointer moved to the recorded screen point (${point.join(',')}); ` +
+        'those coordinates are bound to the screen layout of the recording',
+    };
   }
 
   /** A declared focusAfter scope, or the launched app's own front window. */
