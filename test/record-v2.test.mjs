@@ -1557,6 +1557,137 @@ test('a hover keeps the screen point the recorded pointer rested on', async () =
   assert.doesNotThrow(() => parseFlowV2(flow));
 });
 
+/** One window whose only child is the anonymous container under the pointer. */
+function hoverTree(child, bounds = { x: 400, y: 200, width: 800, height: 640 }) {
+  return {
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@atrust:e1', bounds, states: [], secure: false,
+      children: [{
+        role: 'group', name: '', ref: '@atrust:e2', bounds, states: [], secure: false,
+        children: child ? [child] : [],
+      }],
+    },
+  };
+}
+
+async function hoverRecording(snapshot, point, owner = ATRUST_OWNER) {
+  const recording = new GlobalRecording(async () => structuredClone(snapshot), { now: () => NOW });
+  await recording.add(parseCaptureEvent({
+    kind: 'hover', t: 1000, seen: NOW, focusGeneration: 1, secure: false,
+    point, dwellMs: 405, decision: 'record', owner: { ...owner, role: 'AXGroup' },
+  }));
+  return recording;
+}
+
+test('an anonymous container hover is recorded as a screen point with an element hint', async () => {
+  const snapshot = hoverTree(undefined);
+  const recording = await hoverRecording(snapshot, [700, 520]);
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps.map(step => step.kind), ['hover']);
+  const step = flow.steps[0];
+  assert.deepEqual(step.scope, { kind: 'screen' });
+  assert.deepEqual(step.point, [700, 520]);
+  assert.equal(step.durationMs, 405);
+  assert.equal('target' in step, false, 'no element locator a replay could chase');
+  assert.deepEqual(step.hint, {
+    app: 'com.electron.atrust',
+    windowTitle: 'aTrust',
+    element: { kind: 'element', role: 'group', name: '' },
+  });
+  // A hint is display-only: it carries no path, index, PID or window number.
+  const serialized = JSON.stringify(flow);
+  assert.doesNotMatch(serialized, /"path"|"index"|"pid"|windowNumber|@atrust/);
+  assert.doesNotThrow(() => parseFlowV2(flow));
+});
+
+test('a named statictext hover stays an element step', async () => {
+  const snapshot = hoverTree({
+    role: 'statictext', name: '下载', ref: '@atrust:e3', bounds: { x: 400, y: 200, width: 800, height: 640 },
+    states: [], secure: false, children: [],
+  });
+  const recording = await hoverRecording(snapshot, [700, 520]);
+
+  const flow = recording.finish();
+  const step = flow.steps[0];
+  assert.equal(step.scope.kind, 'window');
+  assert.deepEqual(step.target, { kind: 'element', role: 'statictext', name: '下载' });
+  assert.deepEqual(step.point, [700, 520]);
+  assert.equal(step.hint, undefined);
+});
+
+test('a control with only an identifier is still a re-addressable element', async () => {
+  const snapshot = hoverTree({
+    role: 'button', identifier: 'save-button', ref: '@atrust:e4',
+    bounds: { x: 400, y: 200, width: 800, height: 640 }, states: [], secure: false, children: [],
+  });
+  const recording = await hoverRecording(snapshot, [700, 520]);
+
+  const flow = recording.finish();
+  const step = flow.steps[0];
+  assert.equal(step.scope.kind, 'window');
+  assert.equal(step.target.identifier, 'save-button');
+});
+
+test('an empty-name statictext hover is a screen point too', async () => {
+  const snapshot = hoverTree({
+    role: 'statictext', name: '', ref: '@atrust:e6',
+    bounds: { x: 400, y: 200, width: 800, height: 640 }, states: [], secure: false, children: [],
+  });
+  const recording = await hoverRecording(snapshot, [700, 520]);
+
+  const flow = recording.finish();
+  const step = flow.steps[0];
+  assert.deepEqual(step.scope, { kind: 'screen' });
+  assert.deepEqual(step.hint.element, { kind: 'element', role: 'statictext', name: '' });
+});
+
+test('a hover on empty window space is a screen point with only a window hint', async () => {
+  const snapshot = {
+    windowId: 'w-44',
+    tree: {
+      role: 'window', name: 'aTrust', ref: '@atrust:e1',
+      bounds: { x: 400, y: 200, width: 800, height: 640 }, states: [], secure: false,
+      children: [{
+        role: 'button', name: '登录', ref: '@atrust:e4',
+        bounds: { x: 520, y: 480, width: 100, height: 40 }, states: [], secure: false, children: [],
+      }],
+    },
+  };
+  const recording = await hoverRecording(snapshot, [700, 300]);
+
+  const flow = recording.finish();
+  const step = flow.steps[0];
+  assert.deepEqual(step.scope, { kind: 'screen' });
+  assert.deepEqual(step.point, [700, 300]);
+  assert.deepEqual(step.hint, { app: 'com.electron.atrust', windowTitle: 'aTrust' });
+  assert.equal('element' in step.hint, false, 'no control was under the pointer');
+});
+
+test('a hover without window evidence still records nothing', async () => {
+  const snapshot = hoverTree(undefined);
+  const detached = {
+    app: 'com.electron.atrust', pid: 500, processInstance: 1_700_000_000_500, windowNumber: undefined,
+  };
+  const recording = await hoverRecording(snapshot, [700, 520], detached);
+
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_HOVER'));
+  assert.throws(() => recording.finish(), { code: 'EMPTY_RECORDING' });
+});
+
+test('a secure hover records no step and no screen point', async () => {
+  const snapshot = hoverTree({
+    role: 'textfield', name: '密码', ref: '@atrust:e5',
+    bounds: { x: 400, y: 200, width: 800, height: 640 }, states: ['secure'], secure: true, children: [],
+  });
+  const recording = await hoverRecording(snapshot, [700, 520]);
+
+  // A secure hover is not evidence of an action, so it adds no step and no
+  // screen point; with nothing else recorded the flow refuses to be empty.
+  assert.throws(() => recording.finish(), { code: 'EMPTY_RECORDING' });
+});
+
 // A click that opens a sheet or switches the page changes the screen before
 // its own tree read can run, so the click's element is only in the tree from
 // before it. That tree is read right after the previous click and is what

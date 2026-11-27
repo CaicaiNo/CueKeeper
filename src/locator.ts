@@ -313,6 +313,16 @@ export function resolve(snapshot: Snapshot, locator: ElementLocator): Located {
   throw new Fault('NOT_FOUND', 'Locator did not match in the target window');
 }
 
+/**
+ * Whether a recorded locator names something a later replay can still find:
+ * a visible name or a stable accessibility identifier. An anonymous container
+ * (or empty static text) can only be matched by path and index, which a reflow
+ * or a rebuilt page moves to another control, so its identity is not real.
+ */
+export function isReAddressable(locator: { name?: string; identifier?: string }): boolean {
+  return Boolean((locator.name ?? '').trim() || locator.identifier);
+}
+
 export function toLocator(snapshot: Snapshot, entry: Located): ElementLocator {
   const names = elementNames(snapshot.tree);
   const locator: ElementLocator = { kind: 'element', role: entry.node.role, name: names.get(entry.node) ?? '' };
