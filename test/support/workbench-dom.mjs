@@ -30,7 +30,7 @@ export class Element {
     this.classList = new ClassList();
     this._className = '';
     this._id = '';
-    this.value = '';
+    this._value = '';
     this.checked = false;
     this.disabled = false;
     this.hidden = false;
@@ -55,6 +55,25 @@ export class Element {
     this._className = String(value ?? '');
     this.classList = new ClassList();
     for (const name of this._className.split(/\s+/).filter(Boolean)) this.classList.add(name);
+  }
+
+  get value() { return this._value; }
+
+  /**
+   * A single-line text input drops line breaks from its value, exactly as the
+   * browser does when a recorded name such as `保存\n副标题` is backfilled.
+   * Tests that compare a form against a raw locator depend on this.
+   */
+  set value(next) {
+    const text = String(next ?? '');
+    this._value = this.tagName === 'INPUT' && this.sanitizesLineBreaks()
+      ? text.replace(/[\r\n]/g, '')
+      : text;
+  }
+
+  sanitizesLineBreaks() {
+    const type = (this.attributes.get('type') ?? 'text').toLowerCase();
+    return !['number', 'checkbox', 'radio', 'hidden', 'file', 'range', 'color'].includes(type);
   }
 
   get textContent() {

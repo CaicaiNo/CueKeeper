@@ -1644,17 +1644,29 @@ function pickedTargetPatch(locator) {
 }
 
 /**
- * Click and scroll address exactly one control, so their editor keeps only the
- * summary and the pick entry. The macOS role/name/path/index fields describe a
- * control the operator can already see, and a recorded deep anonymous group
- * cannot be repaired by hand; picking from the window is the real edit.
+ * Click and scroll address exactly one control, so their editor keeps the
+ * summary, the pick entry and the three fields that repair a recorded locator:
+ * the control type (role), the name the operator sees, and which same-named
+ * control to take (index). A recorded deep anonymous group can be fixed by
+ * typing a name or by picking a control; path, the exact-name flag and the
+ * replay preview are not offered, because an everyday repair never needs them.
  *
  * The pick lands in this form and is written on 应用, so closing the editor
- * never leaves a half-edited target behind. A coordinate target says so in the
- * summary and becomes an element locator as soon as a control is picked.
+ * never leaves a half-edited target behind. The fields are compared against
+ * what the form shows after backfilling, not against the raw locator: a
+ * single-line input cannot hold a line break from a recorded name, and reading
+ * the values back keeps an untouched form from looking edited.
+ *
+ * Applying an untouched form keeps the recorded target as it is (a coordinate
+ * stays a coordinate, a recorded path and identifier survive). An edit that
+ * only changes the index stays inside the recorded role/name/path range, so
+ * its path is kept; a new role or name names a different control, so the old
+ * path is dropped. A recorded index that was never re-entered is refused after
+ * the range changes instead of silently addressing a different control.
  */
 function v2TargetDialog(step) {
   const windowTitle = targetWindowLabel(step);
+  const recorded = step.target?.kind === 'element' ? step.target : undefined;
   let target = step.target;
   let picked;
   let frame;
@@ -1663,17 +1675,101 @@ function v2TargetDialog(step) {
     summary.textContent = targetSummaryText(target, { window: windowTitle, frame });
   };
   renderSummary();
+  const role = input({ maxLength: 256, value: recorded?.role ?? '', placeholder: '例如 button' });
+  const name = input({ maxLength: 256, value: recorded?.name ?? '', placeholder: '例如 保存' });
+  const index = el('input', {
+    type: 'number', className: 'input input-sm', min: '0', step: '1',
+    value: recorded?.index === undefined ? '' : String(recorded.index),
+  });
+  const fill = locator => {
+    role.value = locator?.role ?? '';
+    name.value = typeof locator?.name === 'string' ? locator.name : '';
+    index.value = locator?.index === undefined ? '' : String(locator.index);
+  };
+  // What the operator actually has on screen. The browser sanitizes a text
+  // input on assignment, so this is the only honest baseline for "not edited".
+  const shown = () => ({ role: role.value, name: name.value, index: index.value });
+  let baseline = shown();
+  // Retyping the same digit is still a choice: an input event on the index
+  // field re-specifies it even when the resulting number is unchanged.
+  let indexRespecified = false;
+  index.oninput = () => { indexRespecified = true; };
+  const untouched = () => {
+    const now = shown();
+    return now.role === baseline.role && now.name === baseline.name && now.index === baseline.index;
+  };
   openDialog(withStepId(step.kind === 'scroll' ? '编辑滚动目标' : '编辑点击目标', step), [
     summary,
     v2PickEntry(step, (locator, candidate) => {
       target = locator;
       picked = true;
       frame = candidate?.bounds;
+      fill(locator);
+      baseline = shown();
+      indexRespecified = false;
       renderSummary();
     }, { commit: false }),
+    field('控件类型（role）', role, '控件的类别：button 按钮、textfield 输入框、menuitem 菜单项……'),
+    field('控件名称（name）', name, '界面上显示的文字，例如按钮「保存」；不改沿用录制值，改成空表示不限定名称'),
+    field('同名控件序号（index，可选）', index, '类型与名称相同的控件有多个时取第几个，从 0 开始；留空表示不限定'),
   ], '应用', () => {
-    if (!picked) return;
-    return v2Edit({ kind: 'update', id: step.id, patch: { target: pickedTargetPatch(target) } });
+    if (untouched()) {
+      // A pick the operator accepted without further edits: its locator exactly.
+      // Otherwise the recorded target stays as it is, including a path this
+      // editor does not show.
+      return picked
+        ? v2Edit({ kind: 'update', id: step.id, patch: { target: pickedTargetPatch(target) } })
+        : undefined;
+    }
+    const now = shown();
+    const roleValue = String(now.role ?? '').trim();
+    if (!roleValue) throw new Error('填写控件类型（role），或点「从窗口拾取」选一个控件。');
+    const rawIndex = String(now.index ?? '').trim();
+    if (rawIndex !== '' && (!Number.isSafeInteger(Number(rawIndex)) || Number(rawIndex) < 0)) {
+      throw new Error('同名控件序号（index）填 0 或更大的整数，或留空。');
+    }
+    // The locator the fields were filled from: the picked control, or the
+    // recorded target a coordinate step does not have.
+    const source = picked ? target : recorded;
+    const roleChanged = roleValue !== String(baseline.role ?? '').trim();
+    const nameChanged = String(now.name ?? '') !== baseline.name;
+    const indexChanged = rawIndex !== baseline.index.trim();
+    // An untouched name keeps the recorded value: a line break a single-line
+    // input could not display, and — while the recorded range is still the one
+    // being edited — the empty string that means "this control has no name".
+    // A new role rebuilds the range, so a blank field is then simply "not
+    // filled" (no name restriction), like any hand-written locator.
+    const sameRange = !roleChanged && !nameChanged;
+    const nextName = nameChanged
+      ? (String(now.name ?? '') || undefined)
+      : (typeof source?.name === 'string' && (source.name !== '' || sameRange) ? source.name : undefined);
+    // The index is positional in the role/name/path range. Reusing an
+    // unedited one after that range changed would address another control.
+    if (!indexChanged && !indexRespecified && rawIndex !== '' && (roleChanged || nameChanged)) {
+      throw new Error('改了控件类型或名称后，原来的同名序号不再指向同一个控件；请重新填写序号，或留空。');
+    }
+    const nextIndex = rawIndex === '' ? undefined : Number(rawIndex);
+    // The recorded path is the role chain down to the old control and the range
+    // the old index was taken from. Only an index-only edit stays inside that
+    // range; a new role or name names a different control, so the old chain is
+    // dropped instead of narrowing the new one out.
+    const nextPath = roleChanged || nameChanged ? undefined : source?.path;
+    return v2Edit({
+      kind: 'update', id: step.id,
+      patch: {
+        target: {
+          kind: 'element', role: roleValue,
+          ...(nextName === undefined ? {} : { name: nextName }),
+          ...(nextPath ? { path: nextPath } : {}),
+          ...(nextIndex === undefined ? {} : { index: nextIndex }),
+          // The merge inherits any field the patch omits from the recorded
+          // target; the edited locator keeps nothing the form could not show.
+          ...(nextName === undefined ? { name: null } : {}),
+          ...(nextPath ? {} : { path: null }),
+          ...(nextIndex === undefined ? { index: null } : {}),
+        },
+      },
+    });
   });
 }
 
