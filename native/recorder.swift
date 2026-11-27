@@ -48,7 +48,7 @@ final class Capture {
     private var hotkeyTap: CFMachPort?
     private var hotkeys = RecordingHotkeys()
     private var pointer = RecordingPointer()
-    private var hover = HoverTracker()
+    private var hover = HoverRecorder()
     private var stopReleaseDeadline: TimeInterval?
     private var pauseBoundaryPending = false
     private var seconds: TimeInterval = 0
@@ -1433,9 +1433,9 @@ final class Capture {
                 return
             }
         }
-        guard let dwellMs = hover.sample(location: event.location, timestamp: event.timestamp),
-              let anchor = hover.location else { return }
-        emitHover(dwellMs, point: NSPoint(x: anchor.x, y: primary.frame.maxY - anchor.y))
+        guard let emission = hover.sample(location: event.location, timestamp: event.timestamp,
+                                          primaryScreenHeight: primary.frame.maxY) else { return }
+        emitHover(emission)
     }
 
     /// Called from the session timer: a pointer that stopped moving sends no
@@ -1446,27 +1446,28 @@ final class Capture {
             hover.reset()
             return
         }
-        guard let dwellMs = hover.flush(now: DispatchTime.now().uptimeNanoseconds),
-              let anchor = hover.location else { return }
-        emitHover(dwellMs, point: NSPoint(x: anchor.x, y: primary.frame.maxY - anchor.y))
+        guard let emission = hover.flush(now: DispatchTime.now().uptimeNanoseconds,
+                                         primaryScreenHeight: primary.frame.maxY) else { return }
+        emitHover(emission)
     }
 
-    private func emitHover(_ dwellMs: Int, point: NSPoint) {
+    /// `emission` already carries the Quartz point that goes into the flow and
+    /// the AppKit point the window hit test needs, so this only adds the times,
+    /// the ownership evidence and the event.
+    private func emitHover(_ emission: HoverEmission) {
         guard started != nil, registerEvent() else { return }
-        var payload: [String: Any] = [
-            "kind": "hover",
-            "point": [Int(point.x.rounded()), Int(point.y.rounded())],
-            "dwellMs": max(300, min(60_000, dwellMs)),
-            "t": elapsedMs(),
-            "seen": Int(Date().timeIntervalSince1970 * 1000),
-        ]
+        // The pointer's own times, read before the AX ownership query: a slow
+        // round trip must not move the step's `atMs` or its wall clock.
+        let t = elapsedMs()
+        let seen = wallClockMs()
+        var evidence: [String: Any] = [:]
         if global {
             // A hover outside the focused window is noise, not a step.
-            let evidence = livePointerEvidence(point: point)
-            guard evidence["decision"] as? String == "record" else { return }
-            for (key, value) in evidence { payload[key] = value }
+            let live = livePointerEvidence(point: emission.hitPoint)
+            guard live["decision"] as? String == "record" else { return }
+            evidence = live
         }
-        emit(payload)
+        emit(emission.payload(t: t, seen: seen, evidence: evidence))
     }
 
     /// Wheel input is scoped to the selected window and recorded as line deltas,
