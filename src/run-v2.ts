@@ -724,6 +724,7 @@ class StepRunner {
       const chosen = await this.pickSameTitled(windows, step, {
         prove: true,
         signal: cancel.signal,
+        ensureLive: () => live(problem),
         onRead: event => {
           noteSameTitleRead(round, event);
           noteSameTitleRead(candidates, event);
@@ -815,7 +816,8 @@ class StepRunner {
             }
             live(problem);
             await this.withinDeadline(
-              this.resolver.confirmForeground(binding, cancel.signal), deadline, () => fail(problem, reads));
+              this.resolver.confirmForeground(binding, cancel.signal, () => live(problem)),
+              deadline, () => fail(problem, reads));
             live(problem);
           }
           snapshot = await this.withinDeadline(
@@ -840,7 +842,8 @@ class StepRunner {
           // owns it; a switch since the first read stops the step with zero
           // input, and the check itself stays inside the proof's budget.
           await this.withinDeadline(
-            this.resolver.confirmForeground(binding!, cancel.signal), deadline, () => fail(problem, reads));
+            this.resolver.confirmForeground(binding!, cancel.signal, () => live(read?.problem ?? problem)),
+            deadline, () => fail(problem, reads));
           live(read.problem);
           return { binding: binding!, snapshot: snapshot! };
         }
@@ -1622,10 +1625,16 @@ class StepRunner {
   private async pickSameTitled(
     candidates: WindowInfo[],
     step: StepV2,
-    { prove = false, signal, onRead }: {
+    { prove = false, signal, ensureLive, onRead }: {
       prove?: boolean;
       /** Cancelled when the proof's phase ends; no further read starts after it. */
       signal?: AbortSignal;
+      /**
+       * The phase's own deadline, checked before each driver read and before a
+       * result is adopted. Unlike the signal it still refuses a read that landed
+       * after the deadline while the event loop was blocked.
+       */
+      ensureLive?: () => void;
       onRead?: (event: SameTitleReadEvent) => void;
     } = {},
   ): Promise<{ window: WindowInfo; reason: 'target' | 'focused' } | undefined> {
@@ -1643,6 +1652,7 @@ class StepRunner {
       // A proof whose phase ended starts no further read: that driver call would
       // be exactly the late evidence the phase deadline exists to refuse.
       signal?.throwIfAborted();
+      ensureLive?.();
       // Registered before the driver is asked, so a read that never answers is
       // still named in the timeout report, with its attempt count.
       onRead?.({ phase: 'start', windowId: candidate.id, title: candidate.title });
@@ -1659,28 +1669,30 @@ class StepRunner {
           phase: 'done', windowId: candidate.id, title: candidate.title,
           outcome: 'error', detail: fault.code,
         });
+        ensureLive?.();
         if (!readinessTransientCodes.has(fault.code)) throw error;
         throw fault;
       }
+      // Recorded before the deadline is re-checked: a read that landed late is
+      // reported, but it never decides which window was chosen or why the choice
+      // failed.
       const result = test(snapshot);
+      onRead?.({
+        phase: 'done', windowId: candidate.id, title: candidate.title,
+        outcome: result === undefined ? 'ambiguous' : result ? 'holds' : 'missing',
+        detail: target,
+      });
+      ensureLive?.();
       if (result === undefined) {
         // This window's tree cannot rule the recorded target in or out, so the
         // window stays in contention. A plain step keeps that ambiguity; the
         // readiness gate reads the rest of the candidates and reports which
         // window was ambiguous, instead of calling the choice ambiguous because
         // a twin held the target.
-        onRead?.({
-          phase: 'done', windowId: candidate.id, title: candidate.title,
-          outcome: 'ambiguous', detail: target,
-        });
         if (!prove) return undefined;
         ambiguous.push(candidate);
         continue;
       }
-      onRead?.({
-        phase: 'done', windowId: candidate.id, title: candidate.title,
-        outcome: result ? 'holds' : 'missing', detail: target,
-      });
       if (result) holders.push(candidate);
     }
     // A window the tree could not rule out may be the recorded one, so no
