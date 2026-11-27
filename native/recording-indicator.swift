@@ -2,6 +2,74 @@ import AppKit
 import CoreGraphics
 import QuartzCore
 
+/// Places the HUD's status dot and its text as one group inside the plate.
+/// Kept as plain functions with no side effects so the offline tests compile
+/// this file directly and assert the same placement the panel uses.
+///
+/// The rule is: the dot and the text are one piece. Their combined width is
+/// centred on the plate, the gap between them is fixed, and both are centred
+/// vertically on the plate's midline.
+enum IndicatorLayout {
+    struct Frames: Equatable {
+        let dot: CGRect
+        let label: CGRect
+    }
+
+    /// Diameter of the status dot.
+    static let dotSize: CGFloat = 10
+    /// Space between the dot and the text.
+    static let gap: CGFloat = 10
+    /// Smallest distance the group keeps from the plate's left/right edge.
+    static let padding: CGFloat = 10
+    static let font = NSFont.monospacedDigitSystemFont(ofSize: 14, weight: .semibold)
+
+    /// The label the panel draws, created here so the panel and the offline
+    /// tests measure one identically configured control instead of drifting.
+    static func makeLabel() -> NSTextField {
+        let label = NSTextField(labelWithString: "")
+        label.font = font
+        label.alignment = .left
+        label.lineBreakMode = .byClipping
+        return label
+    }
+
+    /// The size the label really needs. Measuring the bare string under-reports
+    /// by the cell's horizontal insets — 251.9 pt against the 256 pt the full
+    /// recording line needs — which clipped the right edge of the final glyph.
+    /// Ask the control itself instead.
+    static func textSize(for label: NSTextField) -> CGSize {
+        let size = label.fittingSize
+        return CGSize(width: ceil(size.width), height: ceil(size.height))
+    }
+
+    /// Frames are returned in the same coordinate space as `hud`.
+    ///
+    /// A text wider than the plate can hold is clamped to the remaining space
+    /// instead of overlapping the dot or leaving the plate; when the plate is
+    /// too narrow even for the dot and the gap, the gap gives way first, so
+    /// every frame still starts and ends inside the plate.
+    static func frames(hud: CGRect,
+                       text: CGSize,
+                       dotSize: CGFloat = IndicatorLayout.dotSize,
+                       gap: CGFloat = IndicatorLayout.gap,
+                       padding: CGFloat = IndicatorLayout.padding) -> Frames {
+        let available = max(0, hud.width - 2 * padding)
+        let dotWidth = max(0, min(dotSize, available))
+        let spacing = max(0, min(gap, available - dotWidth))
+        let textWidth = max(0, min(text.width, available - dotWidth - spacing))
+        let textHeight = max(0, text.height)
+        let groupWidth = dotWidth + spacing + textWidth
+        let groupMinX = hud.minX + (hud.width - groupWidth) / 2
+        let midY = hud.midY
+
+        return Frames(
+            dot: CGRect(x: groupMinX, y: midY - dotWidth / 2, width: dotWidth, height: dotWidth),
+            label: CGRect(x: groupMinX + dotWidth + spacing, y: midY - textHeight / 2,
+                          width: textWidth, height: textHeight)
+        )
+    }
+}
+
 @MainActor
 final class RecordingIndicator {
     enum Visibility {
@@ -107,7 +175,7 @@ private final class IndicatorPanel: NSPanel {
     /// The glow reaches this far inside the screen edge. Static, gradient-only.
     private let glowWidth: CGFloat = 48
     private let hud: NSRect
-    private let label = NSTextField(labelWithString: "")
+    private let label = IndicatorLayout.makeLabel()
     private var glow: [CAGradientLayer] = []
     private let badge = CALayer()
     private let dot = CALayer()
@@ -161,7 +229,6 @@ private final class IndicatorPanel: NSPanel {
         badge.addSublayer(dot)
         backing.addSublayer(badge)
 
-        label.font = .monospacedDigitSystemFont(ofSize: 14, weight: .semibold)
         label.textColor = mode == .replay ? accent : .white
         let shadow = NSShadow()
         shadow.shadowColor = NSColor.black.withAlphaComponent(0.55)
@@ -171,10 +238,8 @@ private final class IndicatorPanel: NSPanel {
         // The label is sized to its text and placed as half of one dot+text
         // group: the group is centred on the plate, not the text on what is
         // left of the plate after the dot.
-        label.alignment = .left
-        label.lineBreakMode = .byClipping
         view.addSubview(label)
-        applyLayout(text: "")
+        layout()
     }
 
     private static func edgeGlow(accent: NSColor, size: CGSize, width: CGFloat) -> [CAGradientLayer] {
@@ -202,16 +267,14 @@ private final class IndicatorPanel: NSPanel {
         ]
     }
 
-    /// Sizes the label to its text and places the dot+text group in the plate.
-    /// Only a wording change (running → paused) can move the group; the clock
-    /// uses monospaced digits, so tick by tick the frames stay identical.
-    private func applyLayout(text: String) {
-        let font = label.font ?? .systemFont(ofSize: 14)
-        let measured = (text as NSString).size(withAttributes: [.font: font])
-        let local = CGRect(origin: .zero, size: hud.size)
+    /// Sizes the label from the control's own fitting size and places the
+    /// dot+text group in the plate. Only a wording change (running → paused)
+    /// can move the group; the clock uses monospaced digits, so tick by tick
+    /// the frames stay identical.
+    private func layout() {
         let frames = IndicatorLayout.frames(
-            hud: local,
-            text: CGSize(width: ceil(measured.width), height: ceil(measured.height)))
+            hud: CGRect(origin: .zero, size: hud.size),
+            text: IndicatorLayout.textSize(for: label))
         dot.frame = frames.dot
         dot.cornerRadius = frames.dot.width / 2
         label.frame = frames.label.offsetBy(dx: hud.minX, dy: hud.minY)
@@ -220,7 +283,7 @@ private final class IndicatorPanel: NSPanel {
     func update(text: String, paused: Bool) {
         if label.stringValue != text {
             label.stringValue = text
-            applyLayout(text: text)
+            layout()
         }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
