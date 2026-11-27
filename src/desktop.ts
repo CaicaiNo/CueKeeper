@@ -66,6 +66,21 @@ export interface HoverOptions {
    * the foreground, and refuses to move when either cannot be proven now.
    */
   readOnly?: boolean;
+  /**
+   * Bounds already proved by `hoverWindowBounds` in the same step. The adapter
+   * then builds its path from them instead of re-reading the window, so the
+   * read before the first move belongs to the step's resolution phase and can
+   * still be degraded; only the moves themselves stay outside it.
+   */
+  verifiedBounds?: HoverBounds;
+}
+
+/** A window rectangle in Quartz points, as the driver reports it. */
+export interface HoverBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 /**
@@ -102,6 +117,13 @@ export interface Desktop {
    * it re-reads the bound window instead of focusing it.
    */
   hoverAt(snapshot: Snapshot, target: Target, point: Point, options?: HoverOptions): Promise<Delivery | undefined>;
+  /**
+   * The read-only pre-flight of a window hover: re-read the bound window, prove
+   * it is still the same window and in front, and return the frame the path is
+   * built from. It moves nothing, so a resolution failure here may still be
+   * degraded; pass the result to `hoverAt({ verifiedBounds })`.
+   */
+  hoverWindowBounds(snapshot: Snapshot, target: Target): Promise<HoverBounds>;
   /**
    * Physical pointer move to a recorded screen point with no window binding.
    * Requires headed mode; the point and the driver's own pre-move must fall
@@ -425,6 +447,34 @@ export async function withDesktop<T>(
       }
     };
 
+    /**
+     * The read-only foreground and window proof of a window hover. A hover must
+     * not focus, raise or click its window: the bound window is read again by ID
+     * without moving focus, the foreground is read after that so the evidence is
+     * the latest the driver can give, and the path is built from this answer.
+     */
+    const hoverWindowBounds = async (current: Snapshot, target: Target): Promise<HoverBounds> => {
+      if (!options.headed) throw new Fault('HEADED_REQUIRED', 'Physical pointer movement requires --headed');
+      const observed = await snapshot(target, 3000, current.windowId);
+      if (observed.windowId !== current.windowId) {
+        throw new Fault('WINDOW_CHANGED',
+          'The hover read answered a different window than the bound one; nothing was moved');
+      }
+      const inventory = windowList(await call('list-windows', ['--timeout-ms', '3000'], undefined, 6000));
+      const focused = inventory.find(window => window.isFocused === true);
+      if (focused?.id !== current.windowId) {
+        throw new Fault('HOVER_NOT_FOREGROUND',
+          focused === undefined
+            ? 'The driver did not report which window is in front; a hover needs its window in front and never takes focus'
+            : `The hover window is not in front (${focused.id} is); a hover never takes focus`);
+      }
+      const bounds = observed.tree.bounds;
+      if (!bounds) {
+        throw new Fault('UNSAFE_POINT', 'The hover window has no bounds to place the pointer in; nothing was moved');
+      }
+      return bounds;
+    };
+
     const clickCommand = (count: number, button: 'left' | 'right') => {
       if (button === 'right') {
         if (count !== 1) throw new Fault('UNSUPPORTED_CLICK_COUNT', 'A right click cannot carry a click count');
@@ -642,7 +692,7 @@ export async function withDesktop<T>(
           `--dx=${deltaX}`, `--dy=${deltaY}`,
         ]);
       },
-      async hoverAt(current, target, point, { travel = false, readOnly = false } = {}) {
+      async hoverAt(current, target, point, { travel = false, readOnly = false, verifiedBounds } = {}) {
         if (!readOnly) {
           // A hover that is allowed to prepare its window keeps the delivery
           // gate every other coordinate input uses: bring the bound window
@@ -650,30 +700,10 @@ export async function withDesktop<T>(
           await requirePoint(current, target, point);
           return act('mouse-move', [`--xy=${point.join(',')}`]);
         }
-        if (!options.headed) throw new Fault('HEADED_REQUIRED', 'Physical pointer movement requires --headed');
-        // A read-only hover must not focus, raise or click its window. The bound
-        // window is read again by ID without moving focus, the foreground is
-        // read after that so the evidence is the latest the driver can give, and
-        // the whole path is built from the same window answer. Any point that
-        // cannot be proven inside it, or a window that is not in front, stops
-        // the step before the first move.
-        const observed = await snapshot(target, 3000, current.windowId);
-        if (observed.windowId !== current.windowId) {
-          throw new Fault('WINDOW_CHANGED',
-            'The hover read answered a different window than the bound one; nothing was moved');
-        }
-        const inventory = windowList(await call('list-windows', ['--timeout-ms', '3000'], undefined, 6000));
-        const focused = inventory.find(window => window.isFocused === true);
-        if (focused?.id !== current.windowId) {
-          throw new Fault('HOVER_NOT_FOREGROUND',
-            focused === undefined
-              ? 'The driver did not report which window is in front; a hover needs its window in front and never takes focus'
-              : `The hover window is not in front (${focused.id} is); a hover never takes focus`);
-        }
-        const bounds = observed.tree.bounds;
-        if (!bounds) {
-          throw new Fault('UNSAFE_POINT', 'The hover window has no bounds to place the pointer in; nothing was moved');
-        }
+        // Bounds proved earlier in the step skip the fresh read; the caller has
+        // already done it, and only the moves below must stay outside any
+        // resolution retry or degradation.
+        const bounds = verifiedBounds ?? await hoverWindowBounds(current, target);
         const path = travel ? hoverPath(point, bounds) : [point];
         for (const step of path) {
           // agent-desktop 1.3.1 posts mouse-move as (x - 1, y) and then the
@@ -698,6 +728,7 @@ export async function withDesktop<T>(
         }
         return delivery;
       },
+      hoverWindowBounds: (current, target) => hoverWindowBounds(current, target),
       async listDisplays(timeoutMs = 5000) {
         return displayList(await call('list-displays', [], undefined, timeoutMs));
       },
@@ -862,6 +893,7 @@ export function offlineDesktop(data: unknown, expected: Target): Desktop {
     },
     click: mutate, clickPoint: mutate, scroll: mutate, scrollPoint: mutate, drag: mutate,
     hoverAt: mutate,
+    hoverWindowBounds: mutate,
     hoverScreen: mutate,
     listDisplays: mutate, type: mutate, press: mutate, ensure: mutate,
     async focus() { throw new Fault('WINDOW_MISMATCH', 'Offline fixtures cannot focus elements'); },

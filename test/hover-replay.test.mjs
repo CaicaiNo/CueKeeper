@@ -67,6 +67,12 @@ else if (command === 'list-windows') {
 } else if (command === 'snapshot') {
   const reads = ${JSON.stringify(reads)};
   const seen = fs.existsSync(reads) ? Number(fs.readFileSync(reads, 'utf8')) : 0;
+  const failures = ${JSON.stringify(spec.snapshotFailures ?? [])};
+  if (failures[seen]) {
+    console.log(JSON.stringify({ version: '2.6', command, ok: false,
+      error: { code: failures[seen], message: 'snapshot read failed' } }));
+    process.exit(1);
+  }
   fs.writeFileSync(reads, String(seen + 1));
   const focus = readFocus();
   focus.reads += 1;
@@ -243,6 +249,55 @@ test('CLI: an element hover whose window is gone falls back to its recorded poin
   const calls = cli.calls();
   assert.deepEqual(calls.filter(call => /click|focus|activate/.test(call.command)), []);
   assert.deepEqual(movePoints(calls).at(-1), [300, 320]);
+});
+
+test('CLI: a window re-read that answers another window still falls back before moving', t => {
+  // Resolution read the bound window; the last read before the first move
+  // answers a different one. Nothing has moved yet, so the recorded point is
+  // still safe to deliver as a screen hover.
+  const swapped = {
+    complete: true,
+    window: { id: 'w-32', title: 'CLI Notes' },
+    tree: {
+      role: 'window', name: 'CLI Notes', bounds: { x: 100, y: 100, width: 800, height: 600 },
+      children: [{
+        role: 'group', name: 'canvas', ref_id: '@hover:e1',
+        bounds: { x: 120, y: 150, width: 600, height: 40 }, states: [],
+      }],
+    },
+  };
+  const cli = hoverFixture(t, {
+    app: notesApp, appPath: notesPath, windows: notesWindows(), focusId: 'w-31',
+    snapshots: [windowTree({ x: 100, y: 100, width: 800, height: 600 }, 'CLI Notes'), swapped],
+  });
+  const result = cli.run(hoverFlow({ app: notesApp, appPath: notesPath, title: 'CLI Notes', point: [180, 160] }));
+  assert.equal(result.status, 0, result.stderr);
+  const entry = JSON.parse(result.stdout).data.entries[0];
+  assert.equal(entry.status, 'passed');
+  assert.equal(entry.deliveredVia, 'screen_point');
+  assert.equal(entry.delivery, 'delivered_unverified');
+  assert.match(entry.message, /HOVER_SCREEN_FALLBACK \(WINDOW_CHANGED/);
+  const calls = cli.calls();
+  assert.equal(calls.filter(call => call.command === 'list-displays').length, 1);
+  assert.equal(movePoints(calls).length, 4);
+  assert.deepEqual(movePoints(calls).at(-1), [180, 160]);
+});
+
+test('CLI: a failed window re-read before the first move still falls back', t => {
+  const cli = hoverFixture(t, {
+    app: notesApp, appPath: notesPath, windows: notesWindows(), focusId: 'w-31',
+    snapshotFailures: [null, 'WINDOW_NOT_FOUND'],
+  });
+  const result = cli.run(hoverFlow({ app: notesApp, appPath: notesPath, title: 'CLI Notes', point: [180, 160] }));
+  assert.equal(result.status, 0, result.stderr);
+  const entry = JSON.parse(result.stdout).data.entries[0];
+  assert.equal(entry.deliveredVia, 'screen_point');
+  assert.equal(entry.delivery, 'delivered_unverified');
+  assert.match(entry.message, /HOVER_SCREEN_FALLBACK \(WINDOW_NOT_FOUND/);
+  const calls = cli.calls();
+  assert.equal(calls.filter(call => call.command === 'list-displays').length, 1);
+  assert.equal(movePoints(calls).length, 4);
+  assert.deepEqual(movePoints(calls).at(-1), [180, 160]);
 });
 
 

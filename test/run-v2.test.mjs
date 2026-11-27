@@ -192,6 +192,15 @@ function fakeWorld(options = {}) {
       if (fail) throw fail;
       return delivered('hover');
     },
+    async hoverWindowBounds(snapshot) {
+      state.calls.push(['hoverWindowBounds', snapshot.windowId]);
+      const fail = state.hooks.hoverWindowBounds?.(state);
+      if (fail) throw fail;
+      const window = byId(snapshot.windowId);
+      const bounds = window?.data?.tree?.bounds;
+      if (!bounds) throw new Fault('UNSAFE_POINT', 'The hover window has no bounds to place the pointer in');
+      return bounds;
+    },
     async hoverScreen(point, options = {}) {
       state.calls.push(['hoverScreen', point, options.travel === true, performance.now()]);
       return delivered('hoverScreen');

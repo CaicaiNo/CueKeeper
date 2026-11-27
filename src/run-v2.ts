@@ -12,7 +12,7 @@ import type {
 } from './contracts-v2.js';
 import type { Delivery } from './contracts.js';
 import { DesktopFault } from './desktop.js';
-import type { ClickOptions, Desktop, DragEndpoint, WindowInfo } from './desktop.js';
+import type { ClickOptions, Desktop, DragEndpoint, HoverBounds, WindowInfo } from './desktop.js';
 import { parseFlowV2 } from './flow-v2.js';
 import { InstallState } from './install-state.js';
 import type { InstallStateDeps } from './install-state.js';
@@ -1534,13 +1534,18 @@ class StepRunner {
       throw new Fault('INVALID_FLOW', 'A window hover needs its element target');
     }
     const { scope, target, point: recordedPoint, durationMs } = step;
-    // Resolution only: the window, the foreground, the element and the recorded
-    // point are proved here, and only this phase may retry or degrade.
+    // Resolution only: the window, the foreground, the element, the recorded
+    // point and the last window re-read before the first move are proved here,
+    // and only this phase may retry or degrade.
     let prepared: {
-      binding: WindowBinding; snapshot: Snapshot; point: Point; notes: string[];
+      binding: WindowBinding; snapshot: Snapshot; point: Point; notes: string[]; bounds: HoverBounds;
     };
     try {
-      prepared = await this.prepareReadOnlyHover(scope, target, recordedPoint, step);
+      const resolution = await this.prepareReadOnlyHover(scope, target, recordedPoint, step);
+      const bounds = await this.desktop.hoverWindowBounds(
+        resolution.snapshot, this.targetOf(resolution.binding),
+      );
+      prepared = { ...resolution, bounds };
     } catch (error) {
       // Only a vanished/ambiguous window or element degrades. A secure target,
       // a point outside the proved window, a lost foreground or a driver fault
@@ -1556,14 +1561,15 @@ class StepRunner {
           'the pointer was moved to the recorded screen point',
       };
     }
-    const { binding, snapshot, point, notes } = prepared;
+    const { binding, snapshot, point, notes, bounds } = prepared;
     // Input phase: the pointer move itself is dispatched exactly once. A fault
     // here (NOT_FOUND from the driver, an uncertain delivery, a broken display
     // layout) is reported as it is, never retried and never degraded — the
     // resolution was already proved, so this is the environment, not the
     // locator.
     const delivery = await this.desktop.hoverAt(
-      snapshot, this.targetOf(binding), point, { readOnly: true, travel: true },
+      snapshot, this.targetOf(binding), point,
+      { readOnly: true, travel: true, verifiedBounds: bounds },
     );
     // A tooltip or submenu closes the moment the pointer leaves, so the dwell is
     // what the next step sees. A recording's own dwell can be shorter than the
