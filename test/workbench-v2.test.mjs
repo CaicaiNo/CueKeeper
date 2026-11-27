@@ -393,7 +393,7 @@ test('a capture gap can be imported, blocks running and is replaced in place', a
   assert.match(saved.output, /flow\.edited-/);
 });
 
-test('a point target is marked on the timeline and refused by the workbench dry run', async t => {
+test('a point target is marked on the timeline and blocked step by step in the workbench dry run', async t => {
   const root = await mkdtemp(join(tmpdir(), 'cuekeeper-point-workbench-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const directory = join(root, 'run');
@@ -422,23 +422,26 @@ test('a point target is marked on the timeline and refused by the workbench dry 
   const { post } = await server(t, { root });
   const session = await post('import', { directory });
   assert.equal(session.v2.flow.steps[0].target.kind, 'point');
-  // A point click is a legal flow step, but no dry run may pass with one.
-  const refused = await post('run', { session: session.id, mode: 'dry-run' }, 400);
-  assert.equal(refused.error, 'UNSAFE_POINT');
-  assert.deepEqual(refused.detail.stepIds, ['click-1']);
-  // The refusal names the steps and says a live replay still handles the point,
-  // so the page never shows a bare code.
-  assert.match(refused.message, /click-1/);
-  assert.match(refused.message, /live replay still clicks it inside its window/);
+  // A point click is a legal flow step, and the dry run reports it per step
+  // instead of failing the request: the operator sees a blocked entry it can
+  // turn into an element target while every other step stays resolved.
+  const dry = await post('run', { session: session.id, mode: 'dry-run' });
+  assert.equal(dry.status, 'blocked');
+  assert.deepEqual(dry.entries.map(entry => [entry.id, entry.status, entry.code]), [
+    ['click-1', 'blocked', 'UNSAFE_POINT'],
+    ['click-2', 'resolved', undefined],
+  ]);
+  assert.match(dry.entries[0].message, /元素目标/);
+  assert.match(dry.entries[0].message, /实时回放/);
 
-  // Turning it into the element the recording already named unblocks the run.
+  // Turning it into the element the recording already named clears the block.
   await edit(post, session, {
     kind: 'update', id: 'click-1',
     patch: { target: { kind: 'element', role: 'row', name: 'manifest.json' } },
   });
-  const dry = await post('run', { session: session.id, mode: 'dry-run' });
-  assert.equal(dry.status, 'passed');
-  assert.ok(dry.entries.every(entry => entry.status === 'resolved'));
+  const passed = await post('run', { session: session.id, mode: 'dry-run' });
+  assert.equal(passed.status, 'passed');
+  assert.ok(passed.entries.every(entry => entry.status === 'resolved'));
 });
 
 test('a target label names the control in product words and never leaks a raw AX role', () => {

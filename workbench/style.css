@@ -416,6 +416,8 @@ button:disabled { cursor: default; }
 }
 .status-bar.error, .form-error { color: var(--color-error); }
 .status-bar.success { color: var(--color-success); }
+.status-bar.warning { color: var(--color-warning); }
+.point-confirm { margin-left: 6px; vertical-align: middle; }
 .form-error:empty { display: none; }
 
 /* 对话框：dialog.modal + form.modal-box，外观由 daisyUI 负责。

@@ -495,8 +495,17 @@ async function main() {
       if (dryRun) {
         const report = dryRunFlowV2(flow);
         if (values.report) await writeNew(values.report, JSON.stringify(report, null, 2) + '\n');
-        const details = planFlowV2(flow).map(describePlannedStep).join('\n');
-        success(report, `${report.mode} ${report.status}\n${details}`);
+        // Each step keeps its own state, so an operator can see the steps that
+        // resolved and the recorded point clicks that need an element target.
+        const entries = new Map(report.entries.map(entry => [entry.id, entry]));
+        const details = planFlowV2(flow).map(step => {
+          const entry = entries.get(step.id);
+          const line = `${entry?.status ?? 'resolved'} · ${describePlannedStep(step)}`;
+          return entry?.message ? `${line} · ${entry.message}` : line;
+        }).join('\n');
+        // A blocked step is not a pass: the process still exits non-zero, so a
+        // script never treats a flow with recorded coordinates as ready.
+        success(report, `${report.mode} ${report.status}\n${details}`, report.status === 'passed' ? 0 : 1);
         return;
       }
       if (!values['foreground']) {

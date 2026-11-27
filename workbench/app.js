@@ -67,6 +67,20 @@ const KIND_TONES = {
 };
 
 const STATUS_TONES = { resolved: 'info', passed: 'success', failed: 'error', blocked: 'warning', skipped: 'ghost' };
+// A report's overall state uses the same tone as its entries: a blocked dry run
+// is something to confirm (yellow), not a failure (red).
+const reportTone = status => status === 'passed' ? 'success' : status === 'blocked' ? 'warning' : 'error';
+// A recorded screen point is a legal step, but a dry run can only prove an
+// element target. The timeline marks it yellow before the run, so the operator
+// sees which steps to fix without running anything.
+const POINT_CONFIRM_TITLE = '屏幕坐标目标：dry-run 需先改成元素目标；实时回放仍会点窗口内坐标';
+const pointConfirmChip = step => step?.kind === 'click' && step.target?.kind === 'point'
+  ? el('span', {
+    className: 'point-confirm badge badge-soft badge-sm badge-warning',
+    title: POINT_CONFIRM_TITLE,
+    'aria-label': '需确认：坐标目标',
+  }, '需确认')
+  : undefined;
 // A timeline status is one 16px icon in a fixed 28px column at the right edge of
 // the row: the Chinese word lives in aria-label/title, so the badge never eats
 // width from the action name. Each status keeps its own glyph, so the row stays
@@ -518,7 +532,8 @@ function renderTimeline() {
       el('span', { className: 'step-id', title: `步骤 ${row.id}` }, row.id)),
     kindChip(row.action),
     el('span', { className: 'row-description' }, el('strong', {}, actionLabel(row.action)),
-      el('small', {}, `${row.scope ? scopeText(row.scope) : `${appLabel(row.app)} · ${row.window}`}${ignored ? ' · 已忽略' : ''}`)),
+      el('small', {}, `${row.scope ? scopeText(row.scope) : `${appLabel(row.app)} · ${row.window}`}${ignored ? ' · 已忽略' : ''}`,
+        pointConfirmChip(row.action))),
     el('span', { className: 'time row-duration', title: '动作耗时' }, duration(row.durationMs)),
     statusCell(runEntry));
     const thumbnail = row.thumbnail && el('details', {
@@ -1245,7 +1260,8 @@ function renderV2() {
     el('div', { className: 'v2-copy' },
       el('strong', {}, v2StepLabel(step, appLabel)),
       el('small', { className: 'muted' },
-        `${step.kind === 'gap' ? gapReason(step.code) : v2ScopeText(step.scope)}`)),
+        `${step.kind === 'gap' ? gapReason(step.code) : v2ScopeText(step.scope)}`,
+        pointConfirmChip(step))),
     statusCell(entry, stateCheckLabel(entry?.stateCheck)),
     rowActions(step));
   });
@@ -1328,8 +1344,10 @@ function v2DryRun() {
     renderV2();
     renderTimeline();
     const failed = report.entries.filter(entry => entry.status !== 'resolved');
+    const blocked = report.entries.filter(entry => entry.status === 'blocked');
     status(`dry-run ${resultStatus[report.status] ?? report.status} · ${report.entries.length} 步` +
-      (failed.length ? ` · ${failed.length} 步异常` : ''), report.status === 'passed' ? 'success' : 'error');
+      (blocked.length ? ` · ${blocked.length} 步需确认` : failed.length ? ` · ${failed.length} 步异常` : ''),
+    reportTone(report.status));
   }).catch(() => {});
 }
 
@@ -1508,7 +1526,8 @@ function showV2Result(report) {
   openDialog('回放报告', [
     el('p', { className: 'report-summary' },
       `共 ${report.entries.length} 步 · 通过 ${counts.passed ?? 0} · 失败 ${counts.failed ?? 0}` +
-      ` · 跳过 ${counts.skipped ?? 0}${report.stopped ? ' · 已停止' : ''}`),
+      ` · 跳过 ${counts.skipped ?? 0}${counts.blocked ? ` · 需确认 ${counts.blocked}` : ''}` +
+      `${report.stopped ? ' · 已停止' : ''}`),
     el('div', { className: 'report-table' },
       el('table', { className: 'table table-sm' },
         el('thead', {}, el('tr', {},
@@ -2459,7 +2478,7 @@ async function v2StartLive(inputs, target) {
     renderV2();
     renderTimeline();
     status(`实时回放${resultStatus[report.status] ?? report.status} · ${report.entries.length} 步` +
-      (report.stopped ? ' · 已停止' : ''), report.status === 'passed' ? 'success' : 'error');
+      (report.stopped ? ' · 已停止' : ''), reportTone(report.status));
     setTimeout(() => showV2Result(report), 0);
   } catch (error) {
     status(error.message, 'error');
@@ -3309,7 +3328,7 @@ function planText(step) {
 
 function showResult(mode, report) {
   status(`${mode === 'offline' ? '离线运行' : '实时回放'}${resultStatus[report.status]} · ${report.entries.length} 条结果`,
-    report.status === 'passed' ? 'success' : 'error');
+    reportTone(report.status));
   setTimeout(() => openDialog('运行结果', [
     el('h3', { className: `badge badge-soft badge-sm badge-${STATUS_TONES[report.status] ?? 'ghost'}` },
       resultStatus[report.status]),

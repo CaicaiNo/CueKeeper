@@ -125,7 +125,7 @@ Shell 的完整约束见 [Shell 步骤设计](shell-steps.md) 与 [Root 步骤�
 | --- | --- | --- |
 | `HEADED_REQUIRED` | 双击、三击或坐标类输入（单击 / 右键 / 滚轮）没有 `--headed` | 否，直接失败 |
 | `NOT_FOUND` | 目标元素在绑定的窗口里不存在 | 否，不会落到别的控件 |
-| `UNSAFE_POINT` | 坐标落在目标窗口之外，或固定应用路径的流程使用坐标输入，或 v2 dry-run 的流程里仍有 `target.kind: "point"` 的点击 | 否，不会点/滚到前台窗口 |
+| `UNSAFE_POINT` | 坐标落在目标窗口之外，或固定应用路径的流程使用坐标输入，或 v2 dry-run 的流程里仍有 `target.kind: "point"` 的点击（该步标 `blocked`/`UNSAFE_POINT`，整体 `blocked`，CLI 退出非 0；其余步骤照常报告） | 否，不会点/滚到前台窗口；dry-run 不做任何桌面调用 |
 | `UNSAFE_TARGET` | 目标控件是安全控件；或控件及其所有容器都没有可执行 ref，且没有 bounds 可点（消息会点名控件，并提示编辑该步重新拾取目标） | 否 |
 | `ACTION_FAILED` | 元素单击的语义按压持续失败：300 ms 后重读快照重试一次仍失败，且没有 bounds 可做中心点击，或中心点击本身也失败。消息点名控件并写明语义/物理尝试次数；安全控件不走回退 | 否，直接失败，后续步骤 skipped |
 | `TARGET_NOT_READY` | 窗口切换后的第一次 `click` / `type` / `key` 在 1.5 s 内没能证明目标可用：目标一直解析不到、一直标记 `disabled`，或两次读到的 role/name/bounds 一直不一致、跨了窗口或进程实例；无元素目标的步骤没有可读的窗口 `bounds`；或一次读取/选窗挂住、在截止时间之后才返回（迟到结果不被采用）。消息点名控件、最后一次读到的状态与读取次数 | 否，超时前零输入；证明通过后才派发，派发用的是证明接受的同一份快照，目标就绪但按压失败仍走 `ACTION_FAILED` 的恢复路径；驱动自身故障保留原码 |
@@ -143,7 +143,7 @@ Shell 的完整约束见 [Shell 步骤设计](shell-steps.md) 与 [Root 步骤�
 | `UNTARGETED_HOVER` | 悬停落点无法归属到任何窗口（桌面空白、无法证明窗口），跳过且不产生缺口 | 是（录制警告） |
 | `HOVER_SCREEN_FALLBACK` | 元素型悬停的窗口/元素已不能证明（四类解析失败）且该步保留了录制点，改按屏幕坐标移动指针；报告 `deliveredVia: "screen_point"`，message 带原始错误码 | 否，降级成功；指针只移动与停留 |
 | `UNTARGETED_FILE_CLICK` | 全局录制里 Finder 的点击没命中任何有名字的文件项，改记坐标 | 是（录制警告），回放前需改成有名字的元素 |
-| `UNTARGETED_ELEMENT_CLICK` | 全局录制里点击没命中任何有名字的元素（含只命中窗口根的空白点击），改记坐标 | 是（录制警告），回放前需改成有名字的元素，dry-run 以 `UNSAFE_POINT` 拒绝 |
+| `UNTARGETED_ELEMENT_CLICK` | 全局录制里点击没命中任何有名字的元素（含只命中窗口根的空白点击），改记坐标 | 是（录制警告），回放前需改成有名字的元素，dry-run 把该步标 `blocked`/`UNSAFE_POINT`（黄色需确认） |
 | `CLICK_TARGET_UNPRESSABLE` | 录制到的控件及其所有容器都没有 AX action ref（Electron 页面常见）：回放只能按控件中心做物理点击（需 `--headed`），不是语义 press | 是（录制警告），需要时重新拾取目标 |
 | `HOVER_UNRESOLVED` | 悬停的元素目标没有 bounds，无法算出回放坐标 | 否，直接失败 |
 | `CLIPBOARD_UNSUPPORTED_TYPE` | 开启剪贴板录制，但 clipboard 不是纯文本 | 是（录制警告，保留快捷键） |
