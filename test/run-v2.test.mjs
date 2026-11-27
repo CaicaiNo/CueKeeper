@@ -2375,7 +2375,7 @@ test('HAOC-207 review: a snapshot that lands after the deadline is refused and n
   world.desktop.snapshotWindow = async id => {
     if (id === 'w-21') {
       reads += 1;
-      if (reads === 2) await new Promise(resolve => setTimeout(resolve, 1550));
+      if (reads === 2) await new Promise(resolve => setTimeout(resolve, 2050));
     }
     return real(id);
   };
@@ -2385,7 +2385,7 @@ test('HAOC-207 review: a snapshot that lands after the deadline is refused and n
   assert.equal(report.status, 'failed');
   assert.equal(entry(report, 'press').code, 'TARGET_NOT_READY');
   assert.deepEqual(callsOf(world, 'click'), [], 'a late read is not evidence and delivers nothing');
-  assert.ok(entry(report, 'press').durationMs < 2000,
+  assert.ok(entry(report, 'press').durationMs < 2600,
     `the step stopped at its deadline instead of using the late read (${entry(report, 'press').durationMs} ms)`);
 });
 
@@ -2518,7 +2518,6 @@ test('HAOC-207 review: secure input that starts during the wait stops the first 
 });
 
 test('HAOC-207 review: a wait or hover keeps its declared focusAfter and still leaves the next press gated', async t => {
-  const draftScope = { kind: 'window', app: textedit, windowKey: 'draft', windowTitle: 'QA Draft' };
   const withWait = harness(t);
   const waitReport = await withWait.run(parseFlowV2({
     version: 2, id: 'wait-handoff', name: 'Wait hand-off', appPaths: { [textedit]: appPaths[textedit] },
@@ -2583,7 +2582,7 @@ test('HAOC-207 review 2: a snapshot that never answers stops the step at its dea
 
   assert.equal(report.status, 'failed');
   assert.equal(entry(report, 'press').code, 'TARGET_NOT_READY');
-  assert.ok(elapsed < 2200,
+  assert.ok(elapsed < 2700,
     `the deadline ended the wait while the read was still hanging (${Math.round(elapsed)} ms)`);
   assert.deepEqual(callsOf(world, 'click'), [], 'a hanging read proves nothing and delivers nothing');
 
@@ -2730,4 +2729,136 @@ test('HAOC-207 review 2: a driver dependency failure while choosing keeps its ow
     'a driver failure is not a readiness wait and must not be retried into TARGET_NOT_READY');
   assert.equal(tries, 1, 'the failing read was not retried');
   assert.deepEqual(callsOf(world, 'click'), []);
+});
+
+// HAOC-207 third review round (HAOC-209): a late read must not start a focus
+// command, a control-level secure refusal must stop the dispatch, and the text
+// target must be unique before any characters are sent.
+
+/** A textedit window whose tree a test spells out. */
+function notesWindowTree(children) {
+  return {
+    id: 'w-21', app: textedit, pid: 601, title: 'QA Notes',
+    data: {
+      complete: true,
+      window: { id: 'w-21', title: 'QA Notes' },
+      tree: { role: 'window', name: 'QA Notes', bounds: { x: 100, y: 100, width: 800, height: 600 }, children },
+    },
+  };
+}
+
+
+test('HAOC-207 review 3: a foreground read released after the deadline starts no focus command', async t => {
+  const { world, run } = harness(t);
+  const realFocused = world.desktop.focusedWindow.bind(world.desktop);
+  let reads = 0;
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  world.desktop.focusedWindow = async () => {
+    reads += 1;
+    // The proof's own foreground observation hangs; the run has to end anyway.
+    if (reads === 2) await held;
+    return realFocused();
+  };
+
+  const started = performance.now();
+  const report = await run(readinessFlow({
+    id: 'press', kind: 'click', scope: draftScope,
+    target: { kind: 'element', role: 'button', name: 'Continue' },
+  }));
+  const elapsed = performance.now() - started;
+
+  assert.equal(report.status, 'failed');
+  assert.equal(entry(report, 'press').code, 'TARGET_NOT_READY');
+  assert.ok(elapsed < 2700, `the step ended at its deadline (${Math.round(elapsed)} ms)`);
+  assert.deepEqual(callsOf(world, 'focusWindow'), [], 'nothing is focused while the proof is unfinished');
+
+  // The observation the deadline gave up on lands now; it must not become a
+  // focus command, and the foreground must not switch.
+  release();
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.deepEqual(callsOf(world, 'focusWindow'), [], 'the late foreground read started no focus command');
+  assert.equal(world.state.focused, 'w-21', 'the foreground never changed after the run ended');
+  assert.deepEqual(callsOf(world, 'click'), []);
+});
+
+test('HAOC-207 review 3: a secure focused field is refused before any characters are sent', async t => {
+  const { world, run } = harness(t, {
+    windows: [notesWindowTree([{
+      role: 'textfield', name: 'password', ref_id: '@w21:e1', secure: true, states: ['focused'],
+      bounds: { x: 120, y: 150, width: 600, height: 40 },
+    }])],
+    focused: 'w-21',
+  });
+
+  const report = await run(readinessFlow({
+    id: 'type', kind: 'type', scope: notesScope,
+    target: { kind: 'element', role: 'textfield', name: '' }, input: 'note',
+  }));
+
+  assert.equal(report.status, 'blocked');
+  assert.equal(entry(report, 'type').code, 'UNSAFE_TARGET');
+  assert.match(entry(report, 'type').message, /secure control/);
+  assert.deepEqual(callsOf(world, 'type'), [], 'no characters reach a secure field');
+  assert.deepEqual(callsOf(world, 'typeFocused'), [], 'no characters reach the first responder either');
+  assert.deepEqual(callsOf(world, 'click'), [], 'the field is not clicked for focus first');
+});
+
+test('HAOC-207 review 3: a text target that is momentarily ambiguous is re-read and typed once', async t => {
+  const twin = {
+    role: 'textfield', name: 'notes', ref_id: '@w21:e2', states: [],
+    bounds: { x: 120, y: 200, width: 600, height: 40 },
+  };
+  const { world, run } = harness(t, {
+    windows: [notesWindowTree([
+      {
+        role: 'textfield', name: 'notes', ref_id: '@w21:e1', states: [],
+        bounds: { x: 120, y: 150, width: 600, height: 40 },
+      },
+      twin,
+    ])],
+    focused: 'w-21',
+  });
+  paintOnRead(world, (window, index) => {
+    // The twin is there for the first read and gone from the second on.
+    if (index >= 2 && window.data.tree.children.includes(twin)) {
+      window.data.tree.children = window.data.tree.children.filter(child => child !== twin);
+    }
+  });
+
+  const report = await run(readinessFlow({
+    id: 'type', kind: 'type', scope: notesScope,
+    target: { kind: 'element', role: 'textfield', name: 'notes' }, input: 'note',
+  }));
+
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'type'), [['type', '@w21:e1', 'draft text']],
+    'the single remaining field is typed into exactly once');
+});
+
+test('HAOC-207 review 3: two controls that keep claiming focus are never typed into', async t => {
+  const { world, run } = harness(t, {
+    windows: [notesWindowTree([
+      {
+        role: 'textfield', ref_id: '@w21:e1', states: ['focused'],
+        bounds: { x: 120, y: 150, width: 600, height: 40 },
+      },
+      {
+        role: 'textfield', ref_id: '@w21:e2', states: ['focused'],
+        bounds: { x: 120, y: 220, width: 600, height: 40 },
+      },
+    ])],
+    focused: 'w-21',
+  });
+
+  const report = await run(readinessFlow({
+    id: 'type', kind: 'type', scope: notesScope,
+    target: { kind: 'element', role: 'textfield', name: '' }, input: 'note',
+  }));
+
+  assert.equal(report.status, 'failed');
+  assert.equal(entry(report, 'type').code, 'TARGET_NOT_READY');
+  assert.match(entry(report, 'type').message, /2 editable controls reported focus/);
+  assert.deepEqual(callsOf(world, 'type'), []);
+  assert.deepEqual(callsOf(world, 'typeFocused'), []);
 });
