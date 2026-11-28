@@ -136,6 +136,13 @@ test('two coordinate clicks stay yellow until they are edited, through dry-run �
     'the edited step loses its marker in the action timeline');
   assert.doesNotMatch(actionRow(document, 'click-a').textContent, /坐标回放/,
     'the action timeline shows the step the workflow now holds');
+  document.getElementById('inspect-click-a').click();
+  await tick();
+  const inspector = document.getElementById('inspector');
+  assert.match(inspector.textContent, /保存/,
+    'the inspector names the current element target');
+  assert.doesNotMatch(inspector.textContent, /坐标回放|需确认|120, 80/,
+    'the inspector does not keep the recorded point after the target became an element');
   assert.equal(statusBar(document).classList.contains('warning'), false,
     'the stale dry-run notice is retired');
   assert.doesNotMatch(statusBar(document).textContent, /步需确认/);
@@ -166,4 +173,35 @@ test('two coordinate clicks stay yellow until they are edited, through dry-run �
     assert.ok(actionRow(document, id).querySelector('.row-status').classList.contains('status-resolved'),
       `${id} resolves in the action timeline too`);
   }
+
+  // Deleting a step from the workflow leaves its recording row in the action
+  // timeline, but that row is history now: it must not regain the live yellow
+  // marker, and its detail must stay the recorded point.
+  buttonByText(v2Row(document, 'click-a'), '删除步骤').click();
+  await tick(200);
+  assert.equal(v2Row(document, 'click-a'), undefined, 'the deleted step leaves the v2 timeline');
+  const historyRow = actionRow(document, 'click-a');
+  assert.ok(historyRow, 'the recording snapshot stays in the action timeline');
+  assert.equal(historyRow.querySelector('.point-confirm'), null, 'the history row is not yellow');
+  assert.doesNotMatch(historyRow.textContent, /需确认/, 'the history row does not ask for confirmation');
+  assert.match(historyRow.textContent, /历史/, 'the history row is labelled as history');
+  document.getElementById('inspect-click-a').click();
+  await tick();
+  const historyInspector = document.getElementById('inspector');
+  assert.match(historyInspector.textContent, /历史|已从当前工作流删除/,
+    'the detail panel explains that the step is history');
+  assert.doesNotMatch(historyInspector.textContent, /需确认/,
+    'the history detail does not keep the live confirmation marker');
+  assert.match(historyInspector.textContent, /坐标回放 \(120, 80\)/,
+    'the history detail shows the recorded point without the live marker');
+
+  // A later dry run passes on the remaining workflow and still leaves the
+  // deleted row as plain history.
+  buttonByText(document.querySelector('.v2-header'), 'dry-run').click();
+  await tick(200);
+  assert.ok(statusBar(document).classList.contains('success'), statusBar(document).className);
+  assert.match(statusBar(document).textContent, /dry-run 通过/);
+  assert.equal(actionRow(document, 'click-a').querySelector('.point-confirm'), null,
+    'the deleted step stays non-yellow after a later dry run');
+  assert.doesNotMatch(actionRow(document, 'click-a').textContent, /需确认/);
 });

@@ -73,11 +73,12 @@ export function roleLabel(role) {
  * field or button title) first, then the deepest path segment, then its role.
  * A raw point keeps the warning; nothing readable becomes 「未命名控件」.
  */
-export function targetLabel(target) {
+export function targetLabel(target, { confirmPoint = true } = {}) {
   if (!target) return '目标窗口';
   if (target.kind === 'window') return '窗口';
   if (target.kind === 'point') {
-    return `坐标回放 · 需确认${Array.isArray(target.point) ? ` (${target.point.join(', ')})` : ''}`;
+    const point = Array.isArray(target.point) ? ` (${target.point.join(', ')})` : '';
+    return `坐标回放${confirmPoint ? ' · 需确认' : ''}${point}`;
   }
   const name = typeof target.name === 'string' ? target.name.trim() : '';
   if (name) return name;
