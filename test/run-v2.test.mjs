@@ -3433,3 +3433,285 @@ test('HAOC-222 review 2: the last candidate read that lands late cannot decide t
   assert.deepEqual(callsOf(world, 'focusWindow'), []);
   assert.deepEqual(callsOf(world, 'click'), [], 'zero input either way');
 });
+
+// HAOC-227: a slow accessibility read is not a change. The stability proof's
+// budget follows what the reads actually cost, so a target that holds still
+// across two slow reads is pressed once; and the tree that chose a same-title
+// window is the proof's first read instead of a second whole-tree read.
+
+/** Delays every window read, as a large accessibility tree answers. */
+function slowReads(world, delayMs) {
+  const real = world.desktop.snapshotWindow.bind(world.desktop);
+  world.desktop.snapshotWindow = async id => {
+    await new Promise(resolve => setTimeout(resolve, delayMs));
+    return real(id);
+  };
+}
+
+/** How many times the proof read one window. */
+const readsOfWindow = (world, windowId) =>
+  callsOf(world, 'snapshotWindow').filter(call => call[1] === windowId).length;
+
+test('HAOC-227: two slow reads of a stable target agree and press once', async t => {
+  const { world, run } = harness(t);
+  // Every read costs 700 ms: one whole read fits the old 1500 ms proof, the
+  // second one only fits if the budget follows the read that just happened.
+  slowReads(world, 700);
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w21:e9']], 'exactly one press was delivered');
+  assert.equal(readsOfWindow(world, 'w-21'), 2,
+    'the proof compared the target across two reads instead of timing out after the first');
+});
+
+test('HAOC-227: slow reads of a target that keeps moving still time out with zero input', async t => {
+  const { world, run } = harness(t);
+  const button = continueButtonOf(world);
+  const original = { ...button.bounds };
+  paintOnRead(world, (_window, index) => {
+    button.bounds = { ...original, x: original.x + index * 7 };
+  });
+  slowReads(world, 700);
+
+  const started = performance.now();
+  const report = await run(readinessFlow(pressContinue));
+  const elapsed = performance.now() - started;
+
+  assert.equal(report.status, 'failed');
+  const failed = entry(report, 'press');
+  assert.equal(failed.code, 'TARGET_NOT_READY');
+  assert.match(failed.message, /still changing between reads/);
+  const reads = Number(failed.message.match(/\((\d+) reads? of the bound window/)?.[1] ?? 0);
+  assert.ok(reads >= 2, `the message names how many slow reads it made (${reads})`);
+  assert.match(failed.message, /read 1: button "Continue"/,
+    'the message says where each read found the control, not just "1 read"');
+  assert.deepEqual(callsOf(world, 'click'), [], 'a moving target is never pressed');
+  assert.ok(elapsed < 6000, `the slow proof stayed inside its hard cap (${Math.round(elapsed)} ms)`);
+});
+
+test('HAOC-227: slow reads of a missing target fail with zero input', async t => {
+  const { world, run } = harness(t);
+  paintOnRead(world, window => {
+    window.data.tree.children = window.data.tree.children.filter(child => child.name !== 'Continue');
+  });
+  slowReads(world, 700);
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'failed');
+  const failed = entry(report, 'press');
+  assert.equal(failed.code, 'TARGET_NOT_READY');
+  assert.match(failed.message, /is still not provable \(NOT_FOUND\)/);
+  const reads = Number(failed.message.match(/\((\d+) reads? of the bound window/)?.[1] ?? 0);
+  assert.ok(reads >= 2, `the proof kept reading rather than failing on the first slow read (${reads})`);
+  assert.deepEqual(callsOf(world, 'click'), [], 'a target that is not there is never pressed');
+});
+
+test('HAOC-227: the tree that chose a same-title window is the proof\'s first read', async t => {
+  const holder = windowRecord({ id: 'w-21', app: textedit, pid: 601, title: 'QA Notes', fields: [['notes', '@w21:e1']] });
+  const twin = withoutContinue(
+    windowRecord({ id: 'w-22', app: textedit, pid: 601, title: 'QA Notes', fields: [['draft', '@w22:e1']] }),
+  );
+  const { world, run } = harness(t, { windows: [twin, holder], focused: 'w-22' });
+  // The agreeing read is the only read after the choice; it sees a fresh tree.
+  const real = world.desktop.snapshotWindow.bind(world.desktop);
+  let holderReads = 0;
+  world.desktop.snapshotWindow = async id => {
+    if (id === 'w-21') {
+      holderReads += 1;
+      if (holderReads === 2) continueButtonOf(world).ref_id = '@w21:e90';
+    }
+    return real(id);
+  };
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.equal(readsOfWindow(world, 'w-21'), 2,
+    'choosing read the holder once and the proof added exactly one agreeing read');
+  assert.equal(readsOfWindow(world, 'w-22'), 1, 'the twin was read once while choosing');
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w21:e90']],
+    'dispatch uses the newest read, not the tree the choice was made from');
+});
+
+// HAOC-227 first review round (HAOC-230): a read is refused against the
+// deadline fixed when it started, even when it blocks the event loop so its
+// timer cannot run; and a timeout message keeps "no second read completed"
+// apart from "the target changed", and never elides the reads it did make.
+
+test('HAOC-227 review: a read that answers after its own deadline is not adopted as proof', async t => {
+  const { world, run } = harness(t);
+  const real = world.desktop.snapshotWindow.bind(world.desktop);
+  let reads = 0;
+  world.desktop.snapshotWindow = async id => {
+    if (id === 'w-21') {
+      reads += 1;
+      if (reads === 2) {
+        // A real accessibility read can block the event loop. The promise then
+        // resolves before its deadline timer gets to run, so a race alone would
+        // accept evidence that landed 250 ms past the read's 1500 ms deadline.
+        await new Promise(resolve => setTimeout(resolve, 100));
+        const until = performance.now() + 1450;
+        while (performance.now() < until) { /* blocked driver read */ }
+      }
+    }
+    return real(id);
+  };
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'failed');
+  const failed = entry(report, 'press');
+  assert.equal(failed.code, 'TARGET_NOT_READY');
+  assert.match(failed.message, /the read answered after its own deadline/);
+  assert.match(failed.message, /1 read of the bound window/,
+    'the late read is not adopted as a second read');
+  assert.deepEqual(callsOf(world, 'click'), [], 'late evidence never becomes input');
+  assert.equal(reads, 2, 'the proof did read twice; the second read simply landed late');
+});
+
+test('HAOC-227 review: a stable target whose second read never answers is not reported as changing', async t => {
+  const { world, run } = harness(t);
+  // Each read costs 2200 ms: the first fits the phase cap, the agreeing read
+  // cannot, and it is still in flight when the cap stops the proof.
+  slowReads(world, 2200);
+
+  const started = performance.now();
+  const report = await run(readinessFlow(pressContinue));
+  const elapsed = performance.now() - started;
+
+  assert.equal(report.status, 'failed');
+  const failed = entry(report, 'press');
+  assert.equal(failed.code, 'TARGET_NOT_READY');
+  assert.doesNotMatch(failed.message, /still changing between reads/,
+    'no change was observed: the second read had not answered');
+  assert.match(failed.message, /no second read had completed before the deadline/);
+  assert.match(failed.message, /1 read of the bound window/);
+  assert.match(failed.message, /read 1: button "Continue" at/,
+    'the read that did finish is still reported with its place');
+  assert.deepEqual(callsOf(world, 'click'), [], 'nothing is dispatched without the agreeing read');
+  assert.ok(elapsed >= 3800 && elapsed < 6000,
+    `the proof stopped at its 4000 ms cap (${Math.round(elapsed)} ms)`);
+});
+
+test('HAOC-227 review: a timeout message keeps every distinct position it read', async t => {
+  const { world, run } = harness(t);
+  const button = continueButtonOf(world);
+  const original = { ...button.bounds };
+  // Every read sees the control somewhere else, so every read is a distinct entry.
+  paintOnRead(world, (_window, index) => {
+    button.bounds = { ...original, x: original.x + index * 7 };
+  });
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'failed');
+  const failed = entry(report, 'press');
+  assert.equal(failed.code, 'TARGET_NOT_READY');
+  const reads = Number(failed.message.match(/\((\d+) reads? of the bound window/)?.[1] ?? 0);
+  assert.ok(reads >= 5, `the fast proof made several reads (${reads})`);
+  for (let index = 1; index <= reads; index += 1) {
+    assert.ok(failed.message.includes(`read ${index}:`),
+      `read ${index} of ${reads} is named, not elided`);
+  }
+  assert.ok(!/…|more\)/.test(failed.message), 'no range of reads is folded away');
+  const positions = [...failed.message.matchAll(/at (\d+),(\d+) /g)].map(match => `${match[1]},${match[2]}`);
+  assert.equal(positions.length, reads, 'each counted read reports where it saw the control');
+  assert.equal(new Set(positions).size, positions.length, 'every reported place is a different one');
+  assert.deepEqual(callsOf(world, 'click'), []);
+});
+
+// HAOC-227 second review round (HAOC-230): the wording follows the reads that
+// were really adopted, so three reads are never called one; and a target
+// pressed through its parent row keeps both places, which a merged signature
+// used to drop from the message entirely.
+
+test('HAOC-227 review 2: three adopted reads are reported as three, with their states', async t => {
+  const { world, run } = harness(t);
+  const button = continueButtonOf(world);
+  const real = world.desktop.snapshotWindow.bind(world.desktop);
+  let reads = 0;
+  world.desktop.snapshotWindow = async id => {
+    if (id === 'w-21') {
+      reads += 1;
+      // Enabled, disabled, enabled again: the gate still has no agreeing pair,
+      // and the fourth read never answers.
+      if (reads === 2) button.states = ['disabled'];
+      if (reads === 3) button.states = [];
+      if (reads === 4) await new Promise(() => { /* a read that never answers */ });
+    }
+    return real(id);
+  };
+
+  const started = performance.now();
+  const report = await run(readinessFlow(pressContinue));
+  const elapsed = performance.now() - started;
+
+  assert.equal(report.status, 'failed');
+  const failed = entry(report, 'press');
+  assert.equal(failed.code, 'TARGET_NOT_READY');
+  assert.match(failed.message, /3 reads of the bound window/,
+    'the message counts the reads it actually adopted');
+  assert.match(failed.message, /still changing between reads/);
+  assert.doesNotMatch(failed.message, /no second read had completed/,
+    'three reads were made; the message must not claim only one completed');
+  for (const label of ['read 1:', 'read 2:', 'read 3:']) {
+    assert.ok(failed.message.includes(label), `the message names ${label.slice(0, -1)}`);
+  }
+  assert.match(failed.message, /read 2: button "Continue" at \d+,\d+ \d+×\d+ \(disabled\)/,
+    'the disabled read keeps its state');
+  assert.deepEqual(callsOf(world, 'click'), [], 'a target without an agreeing pair is never pressed');
+  assert.ok(elapsed >= 1300 && elapsed < 2700,
+    `the hanging fourth read ends the proof at its deadline (${Math.round(elapsed)} ms)`);
+});
+
+test('HAOC-227 review 2: a target pressed through its row keeps both places in the message', async t => {
+  const text = {
+    role: 'statictext', name: '文稿', ref_id: '@w99:e2',
+    bounds: { x: 120, y: 205, width: 100, height: 18 },
+  };
+  const row = {
+    role: 'treeitem', name: '文稿', ref_id: '@w99:e1', available_actions: ['Click'],
+    bounds: { x: 110, y: 200, width: 180, height: 24 },
+    children: [text],
+  };
+  const { world, run } = finderWorld(t, {
+    windows: [finderWindow('w-99', 'cuekeeper-demo', [{
+      role: 'outline', name: '文稿', ref_id: '@w99:e0',
+      bounds: { x: 105, y: 120, width: 220, height: 480 },
+      children: [row],
+    }])],
+  });
+  const rowBounds = { ...row.bounds };
+  const textBounds = { ...text.bounds };
+  // Both the recorded statictext and the row that really gets pressed move by
+  // one point on every read, so no two reads name the same place.
+  paintOnRead(world, (_window, index) => {
+    row.bounds = { ...rowBounds, x: rowBounds.x + index };
+    text.bounds = { ...textBounds, x: textBounds.x + index };
+  });
+
+  const report = await run(finderReadinessFlow({
+    id: 'sidebar', kind: 'click',
+    target: { kind: 'element', role: 'statictext', name: '文稿' },
+  }));
+
+  assert.equal(report.status, 'failed');
+  const failed = entry(report, 'sidebar');
+  assert.equal(failed.code, 'TARGET_NOT_READY');
+  const reads = Number(failed.message.match(/\((\d+) reads? of the bound window/)?.[1] ?? 0);
+  assert.ok(reads >= 2, `the proof read until its deadline (${reads})`);
+  for (let index = 1; index <= reads; index += 1) {
+    assert.ok(failed.message.includes(`read ${index}:`),
+      `read ${index} of ${reads} keeps an observation`);
+  }
+  assert.match(
+    failed.message,
+    /statictext "文稿" at \d+,\d+ \d+×\d+; pressed via treeitem "文稿" at \d+,\d+ \d+×\d+/,
+    'the target and the control that would be pressed are both reported');
+  assert.match(failed.message, /still changing between reads/);
+  assert.ok(!/…|more\)/.test(failed.message), 'no read is elided');
+  assert.deepEqual(callsOf(world, 'click'), [], 'zero input either way');
+});

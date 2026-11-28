@@ -127,7 +127,12 @@ export class ScopeResolver {
    */
   async resolveWindow(
     scope: WindowScope,
-    pick?: (candidates: WindowInfo[]) => Promise<{ window: WindowInfo; reason: 'target' | 'focused' } | undefined>,
+    pick?: (candidates: WindowInfo[]) => Promise<{
+      window: WindowInfo;
+      reason: 'target' | 'focused';
+      /** The tree that proved the choice, so a caller need not read it again. */
+      read?: { snapshot: Snapshot; tookMs: number };
+    } | undefined>,
     { repair = true }: { repair?: boolean } = {},
   ): Promise<WindowBinding> {
     this.signal.throwIfAborted();

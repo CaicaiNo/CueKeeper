@@ -249,11 +249,24 @@ const hoverScreenFallbackCodes = new Set([
 const readinessProbeIntervalMs = 200;
 
 /**
- * The bound on that proof. It is short on purpose: an app that cannot expose an
- * enabled, stable control for this long is not still loading, and the run says
- * so instead of pressing into a half-drawn page.
+ * The starting bound on that proof. It is short on purpose: an app that cannot
+ * expose an enabled, stable control for this long is not still loading, and the
+ * run says so instead of pressing into a half-drawn page.
+ *
+ * The bound grows with what the reads actually cost (see `extendProof`): a tree
+ * that takes a second to read - a Finder window with a large sidebar - leaves
+ * no room for the second read that has to agree with it, and refusing there
+ * would report a target that is really there as "still changing". A read is not
+ * a change.
  */
 const readinessProofTimeoutMs = 1500;
+
+/**
+ * The hard cap on the stability phase, read time included. However slow the
+ * reads are, a target that never settles stops the run here instead of hanging
+ * it, and nothing is dispatched on a read that landed after this.
+ */
+const readinessProofMaxTimeoutMs = 4000;
 
 /**
  * Choosing between same-titled windows is not a stability judgment: the proof
@@ -304,6 +317,55 @@ interface ReadinessRead {
   problem: string;
   /** The step's own refusal applies (secure or unpressable target); it reports it. */
   refuse?: boolean;
+  /**
+   * What this read saw, short enough for a timeout message. A slow target that
+   * never settles names every read and where each one found it, so "still
+   * changing" is never reported without the evidence behind it.
+   */
+  observed?: string;
+}
+
+/** Where a control was, and the state that made it unusable. */
+function describeObservedNode(node: Node): string {
+  const bounds = node.bounds;
+  const where = bounds
+    ? ` at ${bounds.x},${bounds.y} ${bounds.width}×${bounds.height}`
+    : ' (no bounds)';
+  const state = node.secure ? ' (secure)' : node.states.includes('disabled') ? ' (disabled)' : '';
+  return `${describeControl(node)}${where}${state}`;
+}
+
+/** What one read saw of the bound window, for a timeout message. */
+function describeObservedWindow(snapshot: Snapshot): string {
+  const bounds = snapshot.tree.bounds;
+  return bounds
+    ? `the window at ${bounds.x},${bounds.y} ${bounds.width}×${bounds.height}`
+    : 'the window (no bounds)';
+}
+
+/** The reads a timed-out proof made, so the message says where each one saw it. */
+function describeProofReads(reads: ReadinessRead[]): string {
+  // Consecutive reads that saw the same thing are one entry: a target that is
+  // simply absent, or simply disabled, does not repeat for every read. A read
+  // without a normal observation (no window bounds, an ambiguous target) still
+  // reports the reason it was counted, so no adopted read silently disappears.
+  const entries: { first: number; last: number; observed: string }[] = [];
+  reads.forEach((read, index) => {
+    const observed = read.observed ?? read.problem;
+    const previous = entries[entries.length - 1];
+    if (previous !== undefined && previous.observed === observed) {
+      previous.last = index + 1;
+      return;
+    }
+    entries.push({ first: index + 1, last: index + 1, observed });
+  });
+  if (!entries.length) return '';
+  // Every distinct observation is kept: a timeout message that elides the middle
+  // reads hides exactly the evidence that says whether the target moved, so only
+  // consecutive identical observations are folded (above), never a range.
+  return entries.map(entry =>
+    `read ${entry.first === entry.last ? entry.first : `${entry.first}–${entry.last}`}: ${entry.observed}`)
+    .join('; ');
 }
 
 /** One same-titled candidate the gate read while choosing which window to use. */
@@ -316,6 +378,17 @@ interface SameTitleRead {
   outcome: 'reading' | 'holds' | 'missing' | 'ambiguous' | 'error';
   /** The target description, or the driver error code for an unreadable window. */
   detail: string;
+}
+
+/**
+ * The tree one candidate was read from, kept for the chosen window: choosing a
+ * window reads the tree that proves the target is in it, so the stability proof
+ * can start from that read instead of paying for the same whole-tree read twice.
+ */
+interface CandidateRead {
+  snapshot: Snapshot;
+  /** What the read cost, so the proof's budget follows how slow reads are. */
+  tookMs: number;
 }
 
 /** One candidate read starting or finishing, reported as it happens. */
@@ -726,6 +799,13 @@ class StepRunner {
     // kept so a proof that runs out can name every window it tried, how many
     // reads it took, and what each one lacked.
     const candidates: SameTitleRead[] = [];
+    /**
+     * The tree the window choice itself read. Choosing between same-titled
+     * windows reads whole trees; the one that proved the chosen window holds
+     * the target is exactly the first read the stability proof would ask for,
+     * so it is kept instead of paying for the same tree twice.
+     */
+    let selectionRead: CandidateRead | undefined;
     /** Cancelled when the current phase ends; a read that starts after it is refused. */
     const cancel = new AbortController();
     const pick = async (windows: WindowInfo[]) => {
@@ -733,6 +813,7 @@ class StepRunner {
       // round into one accumulator would let a stale "holds" from an earlier
       // round be mistaken for a second window holding the target now.
       const round: SameTitleRead[] = [];
+      selectionRead = undefined;
       const chosen = await this.pickSameTitled(windows, step, {
         prove: true,
         signal: cancel.signal,
@@ -742,7 +823,10 @@ class StepRunner {
           noteSameTitleRead(candidates, event);
         },
       });
-      if (chosen !== undefined) return chosen;
+      if (chosen !== undefined) {
+        selectionRead = chosen.read;
+        return chosen;
+      }
       const ambiguous = round.filter(read => read.outcome === 'ambiguous');
       if (ambiguous.length) {
         // A tree full of matching controls cannot say whether this is the
@@ -765,29 +849,54 @@ class StepRunner {
       return undefined;
     };
     // One monotonic deadline per phase. Selecting the window reads candidate
-    // trees and gets its own, longer bound; the stability proof keeps the short
-    // one and only starts once the bound window is known. Both are still
-    // enforced with a cancellation, so a read that lands late can never start
-    // the focus command it was waiting for.
+    // trees and gets its own, longer bound; the stability proof only starts once
+    // the bound window is known, and its own budget grows with the reads it
+    // actually pays for, up to a hard cap. Both are still enforced with a
+    // cancellation, so a read that lands late can never start the focus command
+    // it was waiting for.
     let selecting = true;
     let deadline = performance.now() + readinessSelectionTimeoutMs;
+    /** When the stability phase started, and the hard cap on all of it. */
+    let proofStartedAt = 0;
+    let proofCapAt = 0;
+    /** Every read the stability proof adopted, for a timeout message. */
+    const proofReads: ReadinessRead[] = [];
     const remaining = () => deadline - performance.now();
     const unreadProblem = 'the window has not been read yet';
-    const fail = (problem: string, reads: number): Fault => new Fault('TARGET_NOT_READY',
-      `${describeTarget(step)} was not ready ` +
-      `${selecting ? readinessSelectionTimeoutMs : readinessProofTimeoutMs} ms ` +
-      `${selecting ? 'while its window was being chosen' : 'after the window was brought forward'}: ` +
-      `${problem === unreadProblem && candidates.length ? 'the window choice did not settle before its deadline' : problem} ` +
-      `(${reads} read${reads === 1 ? '' : 's'} of the bound window` +
-      `${candidates.length ? `; ${describeSameTitleReads(candidates)}` : ''}); no input was delivered`);
+    const fail = (problem: string, reads: number): Fault => {
+      const elapsed = selecting
+        ? `${readinessSelectionTimeoutMs} ms`
+        : `${Math.max(0, Math.round(performance.now() - proofStartedAt))} ms`;
+      const saw = reads ? describeProofReads(proofReads) : '';
+      return new Fault('TARGET_NOT_READY',
+        `${describeTarget(step)} was not ready ${elapsed} ` +
+        `${selecting ? 'while its window was being chosen' : 'after the window was brought forward'}: ` +
+        `${problem === unreadProblem && candidates.length ? 'the window choice did not settle before its deadline' : problem} ` +
+        `(${reads} read${reads === 1 ? '' : 's'} of the bound window` +
+        `${saw ? `; ${saw}` : ''}` +
+        `${candidates.length ? `; ${describeSameTitleReads(candidates)}` : ''}); no input was delivered`);
+    };
     let cutoff: ReturnType<typeof setTimeout> | undefined;
-    const arm = () => {
+    const arm = (until: number) => {
       if (cutoff !== undefined) clearTimeout(cutoff);
       cutoff = setTimeout(() => cancel.abort(
         new Fault('TARGET_NOT_READY', 'The readiness deadline passed before the window could be focused')),
-        Math.max(0, deadline - performance.now()));
+        Math.max(0, until - performance.now()));
     };
-    arm();
+    arm(deadline);
+    /**
+     * Grows the stability budget by what the last read actually cost: the read
+     * that has to agree with it is another read of the same size, taken after
+     * the probe interval. A read that took most of the short budget therefore
+     * no longer leaves its partner to be refused as "still changing"; the hard
+     * cap still stops a target that never settles.
+     */
+    const extendProof = (tookMs: number) => {
+      const next = Math.min(proofCapAt,
+        Math.max(deadline, performance.now() + tookMs * 2 + readinessProbeIntervalMs));
+      if (next > deadline) deadline = next;
+      arm(deadline);
+    };
     let previous: string | undefined;
     let problem = unreadProblem;
     let reads = 0;
@@ -811,6 +920,7 @@ class StepRunner {
         live(problem);
         let snapshot: Snapshot | undefined;
         let read: ReadinessRead | undefined;
+        let tookMs = 0;
         try {
           if (binding === undefined) {
             binding = await this.withinDeadline(
@@ -819,12 +929,14 @@ class StepRunner {
             // before the stability budget starts and before focus is asked for.
             live(problem);
             if (selecting) {
-              // The window is chosen; the target's stability is what the short
-              // proof now judges, so its budget starts here rather than having
-              // been spent on reading the candidates.
+              // The window is chosen; the target's stability is what the proof
+              // now judges, so its budget starts here rather than having been
+              // spent on reading the candidates.
               selecting = false;
-              deadline = performance.now() + readinessProofTimeoutMs;
-              arm();
+              proofStartedAt = performance.now();
+              deadline = proofStartedAt + readinessProofTimeoutMs;
+              proofCapAt = proofStartedAt + readinessProofMaxTimeoutMs;
+              arm(deadline);
             }
             live(problem);
             await this.withinDeadline(
@@ -832,8 +944,33 @@ class StepRunner {
               deadline, () => fail(problem, reads));
             live(problem);
           }
-          snapshot = await this.withinDeadline(
-            this.resolver.snapshot(binding!), deadline, () => fail(problem, reads));
+          const reuse = selectionRead;
+          selectionRead = undefined;
+          if (reuse !== undefined && reuse.snapshot.windowId === binding!.windowId) {
+            // The tree that chose this window already proved the target is in
+            // it. Only the agreeing read after the raise is still missing.
+            snapshot = reuse.snapshot;
+            tookMs = reuse.tookMs;
+          } else {
+            const started = performance.now();
+            // The first read of a window can itself take a whole tree's time;
+            // it may use the phase's cap, because a slow read is not a change.
+            // Every later read is bounded by the budget grown from the read
+            // before it.
+            const readDeadline = reads === 0 ? proofCapAt : deadline;
+            arm(readDeadline);
+            snapshot = await this.withinDeadline(
+              this.resolver.snapshot(binding!), readDeadline, () => fail(problem, reads));
+            // A driver read that blocked the event loop past its own deadline
+            // resolves before the deadline timer can run, so the race alone does
+            // not refuse it. The deadline fixed when this read started is the
+            // one that decides: evidence that landed at or past it is not
+            // evidence and must not extend the budget or be dispatched from.
+            if (performance.now() >= readDeadline) {
+              throw fail('the read answered after its own deadline', reads);
+            }
+            tookMs = performance.now() - started;
+          }
           reads += 1;
           read = this.readinessOf(snapshot, binding!, step);
         } catch (error) {
@@ -844,23 +981,46 @@ class StepRunner {
           if (!readinessTransientCodes.has(fault.code)) throw error;
           problem = `${fault.code}: ${fault.message}`;
           binding = undefined;
+          selectionRead = undefined;
+        }
+        if (read !== undefined) {
+          proofReads.push(read);
+          // The timeout wording follows what the adopted reads actually saw. A
+          // target has changed only when two reads name a different place or
+          // state; a single observation keeps that read's own reason (missing,
+          // disabled, no bounds, ambiguous) instead of claiming a change.
+          const seen = new Set(proofReads.map(item => item.observed ?? item.problem));
+          if (read.signature === undefined) {
+            // The last read could not prove the target at all; its own reason
+            // (disabled, missing, no bounds, ambiguous) is the conclusion, even
+            // if an earlier read had seen it settled.
+            problem = read.problem;
+          } else if (seen.size > 1) {
+            problem = `${describeTarget(step)} was still changing between reads`;
+          } else if (reads === 1) {
+            problem = `${describeTarget(step)} was read once; no second read had completed before the deadline`;
+          } else {
+            problem = `${describeTarget(step)} was read ${reads} times; no two in a row agreed before the deadline`;
+          }
+          extendProof(tookMs);
         }
         // A read that outlived the deadline is not evidence.
-        live(read?.problem ?? problem);
+        live(problem);
         if (read?.refuse) return { binding: binding!, snapshot: snapshot! };
         if (read?.signature !== undefined && read.signature === previous) {
           // The windows were read over a moment in which the operator can take
           // the foreground away. Dispatch only happens while the run still
           // owns it; a switch since the first read stops the step with zero
           // input, and the check itself stays inside the proof's budget.
+          problem = `${describeTarget(step)} was read twice the same, but the foreground ` +
+            'could not be confirmed before the deadline';
           await this.withinDeadline(
-            this.resolver.confirmForeground(binding!, cancel.signal, () => live(read?.problem ?? problem)),
+            this.resolver.confirmForeground(binding!, cancel.signal, () => live(problem)),
             deadline, () => fail(problem, reads));
-          live(read.problem);
+          live(problem);
           return { binding: binding!, snapshot: snapshot! };
         }
         previous = read?.signature;
-        if (read !== undefined) problem = read.problem;
         await sleep(Math.max(0, Math.min(readinessProbeIntervalMs, remaining())), undefined, { signal: this.signal });
       }
     } finally {
@@ -910,6 +1070,7 @@ class StepRunner {
       : {
         signature: `${window}|${windowReadinessSignature(snapshot)}`,
         problem: 'the window bounds were still changing between reads',
+        observed: describeObservedWindow(snapshot),
       };
     if (step.kind === 'key' || (step.kind === 'click' && step.target.kind === 'point')) return settledWindow();
     if (step.kind === 'type') {
@@ -919,7 +1080,10 @@ class StepRunner {
       } catch (error) {
         const fault = toFault(error);
         if (fault.code === 'NOT_FOUND' || fault.code === 'AMBIGUOUS') {
-          return { problem: `${describeTarget(step)} is still not provable (${fault.code})` };
+          return {
+            problem: `${describeTarget(step)} is still not provable (${fault.code})`,
+            observed: fault.code === 'NOT_FOUND' ? 'no such control in the tree' : 'more than one control matched',
+          };
         }
         if (fault.code === 'UNSAFE_TARGET') return { problem: fault.message, refuse: true };
         throw error;
@@ -941,7 +1105,10 @@ class StepRunner {
       const fault = toFault(error);
       if (fault.code === 'UNSAFE_TARGET') return { problem: fault.message, refuse: true };
       if (fault.code === 'NOT_FOUND' || fault.code === 'AMBIGUOUS') {
-        return { problem: `${describeTarget(step)} is still not provable (${fault.code})` };
+        return {
+          problem: `${describeTarget(step)} is still not provable (${fault.code})`,
+          observed: fault.code === 'NOT_FOUND' ? 'no such control in the tree' : 'more than one control matched',
+        };
       }
       throw error;
     }
@@ -950,7 +1117,14 @@ class StepRunner {
       if (press.signature === undefined) return press;
       const node = this.proveNode(window, resolved.node);
       if (node.signature === undefined) return node;
-      return { signature: `${node.signature}|${press.signature}`, problem: node.problem };
+      return {
+        signature: `${node.signature}|${press.signature}`,
+        problem: node.problem,
+        // The recorded target and the control that is really pressed both move
+        // when the tree repaints; the message keeps both places, so a Finder
+        // sidebar statictext dispatched through its row says where each was.
+        observed: `${node.observed}; pressed via ${press.observed}`,
+      };
     }
     return this.proveNode(window, resolved.node);
   }
@@ -958,10 +1132,16 @@ class StepRunner {
   /** One control's part of the readiness signature, with the window it lives in. */
   private proveNode(window: string, node: Node): ReadinessRead {
     if (node.secure) return { problem: `${describeControl(node)} is a secure control`, refuse: true };
-    if (node.states.includes('disabled')) return { problem: `${describeControl(node)} is still disabled` };
+    if (node.states.includes('disabled')) {
+      return {
+        problem: `${describeControl(node)} is still disabled`,
+        observed: describeObservedNode(node),
+      };
+    }
     return {
       signature: `${window}|${readinessSignature(node)}`,
       problem: `${describeControl(node)} was still changing between reads`,
+      observed: describeObservedNode(node),
     };
   }
 
@@ -1736,7 +1916,7 @@ class StepRunner {
       ensureLive?: () => void;
       onRead?: (event: SameTitleReadEvent) => void;
     } = {},
-  ): Promise<{ window: WindowInfo; reason: 'target' | 'focused' } | undefined> {
+  ): Promise<{ window: WindowInfo; reason: 'target' | 'focused'; read?: CandidateRead } | undefined> {
     const test = windowTest(step);
     const target = describeTargetOf(step);
     if (!test) {
@@ -1747,6 +1927,8 @@ class StepRunner {
     }
     const holders: WindowInfo[] = [];
     const ambiguous: WindowInfo[] = [];
+    /** The tree each candidate was read from, handed back for the chosen one. */
+    const reads = new Map<string, CandidateRead>();
     for (const candidate of candidates) {
       // A proof whose phase ended starts no further read: that driver call would
       // be exactly the late evidence the phase deadline exists to refuse.
@@ -1756,8 +1938,11 @@ class StepRunner {
       // still named in the timeout report, with its attempt count.
       onRead?.({ phase: 'start', windowId: candidate.id, title: candidate.title });
       let snapshot: Snapshot;
+      let tookMs: number;
       try {
+        const started = performance.now();
         snapshot = await this.desktop.snapshotWindow(candidate.id);
+        tookMs = performance.now() - started;
       } catch (error) {
         // A tree that cannot be read right now leaves the window in contention.
         // A caller under its own deadline retries a transient read; anything
@@ -1792,7 +1977,10 @@ class StepRunner {
         ambiguous.push(candidate);
         continue;
       }
-      if (result) holders.push(candidate);
+      if (result) {
+        holders.push(candidate);
+        reads.set(candidate.id, { snapshot, tookMs });
+      }
     }
     // A window the tree could not rule out may be the recorded one, so no
     // candidate is chosen while one of them is ambiguous.
@@ -1806,11 +1994,15 @@ class StepRunner {
         `None of the ${candidates.length} windows titled "${candidates[0]?.title ?? ''}" ` +
         'holds the recorded target yet');
     }
-    if (holders.length === 1) return { window: holders[0], reason: 'target' };
+    if (holders.length === 1) {
+      return { window: holders[0], reason: 'target', read: reads.get(holders[0].id) };
+    }
     // Several windows hold the target — the same folder open twice looks the
     // same in both — so the operator's own window decides between them.
     const focused = holders.filter(window => window.isFocused === true);
-    if (focused.length === 1) return { window: focused[0], reason: 'focused' };
+    if (focused.length === 1) {
+      return { window: focused[0], reason: 'focused', read: reads.get(focused[0].id) };
+    }
     // Genuinely ambiguous: more than one window holds the target and none is
     // the operator's. Retrying cannot settle this, so it stays a refusal.
     return undefined;
