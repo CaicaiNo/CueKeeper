@@ -36,8 +36,10 @@ export function createGuide({ dialog, dom, onStart }) {
       return;
     }
     if (health.ok === true) {
-      healthBox.append(el('div', { className: 'alert alert-soft alert-success' },
-        '录制环境已就绪：录制器、辅助功能、输入监控与 agent-desktop 都通过。'));
+      healthBox.append(
+        el('div', { className: 'alert alert-soft alert-success' },
+          '录制环境已就绪：录制器、辅助功能、输入监控与 agent-desktop 都通过。'),
+        recorderRow(health.recorderPath));
       start.disabled = false;
       return;
     }
@@ -53,6 +55,7 @@ export function createGuide({ dialog, dom, onStart }) {
               ? button('打开设置', () => void openSettings(check.id), { style: 'small' })
               : undefined)))),
       muted('如果刚重新编译过录制器，macOS 会把新二进制当成新程序：请在“系统设置 → 隐私与安全性”的辅助功能和输入监控里重新勾选 cuekeeper-capture。'),
+      recorderRow(health.recorderPath),
       steps.length ? muted(steps[0]) : undefined);
     start.disabled = true;
   }
@@ -68,6 +71,39 @@ export function createGuide({ dialog, dom, onStart }) {
       // The blocking line already tells the operator where to go if the
       // shortcut cannot be opened.
     }
+  }
+
+  async function revealRecorder() {
+    try {
+      await fetch('/api/guide/reveal-recorder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', [healthHeader]: '1' },
+        body: '{}',
+      });
+    } catch {
+      // The exact path is printed next to the button; Finder is a convenience.
+    }
+  }
+
+  function copyRecorderPath() {
+    const path = health?.recorderPath;
+    if (!path) return;
+    try {
+      void navigator.clipboard?.writeText(path);
+    } catch {
+      // Some embedded pages disable the clipboard; the code element remains
+      // selectable by hand.
+    }
+  }
+
+  function recorderRow(path) {
+    if (!path) return undefined;
+    return el('div', { className: 'guide-recorder' },
+      el('div', { className: 'guide-recorder-label' }, '录制器二进制'),
+      el('code', { title: path }, path),
+      el('div', { className: 'actions' },
+        button('复制路径', copyRecorderPath, { style: 'small', icon: 'copy' }),
+        button('在 Finder 中显示', () => void revealRecorder(), { style: 'small', icon: 'folder' })));
   }
 
   async function check() {

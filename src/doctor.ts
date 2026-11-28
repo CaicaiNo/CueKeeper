@@ -85,6 +85,8 @@ export interface RecordHealth {
   /** Failed doctor checks that keep `record --global` from starting. */
   blocking: DoctorCheck[];
   nextSteps: string[];
+  /** The exact recorder binary these checks were run against. */
+  recorderPath?: string;
 }
 
 /** The checks a `record --global` run needs; anything else does not gate it. */
@@ -420,5 +422,11 @@ export function preflightFault({ issues }: CapturePreflight) {
 export async function captureHealth(options: DoctorOptions = {}): Promise<RecordHealth> {
   const report = await diagnose(options);
   const blocking = report.checks.filter(check => check.status === 'fail' && recordingGate.has(check.id));
-  return { ok: blocking.length === 0, blocking, nextSteps: report.nextSteps };
+  const root = options.root ?? defaultRoot();
+  return {
+    ok: blocking.length === 0,
+    blocking,
+    nextSteps: report.nextSteps,
+    recorderPath: recorderPath(root, options.env ?? process.env),
+  };
 }

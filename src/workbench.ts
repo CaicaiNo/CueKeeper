@@ -286,6 +286,8 @@ export async function startWorkbench(options: {
   recordHealth?: () => Promise<RecordHealth>;
   /** Tests replace the macOS Settings opener used by the first-run guide. */
   openSettings?: (id: 'accessibility' | 'input-monitoring') => void;
+  /** Tests replace the Finder reveal for the recorder binary. */
+  revealRecorder?: () => void;
   /** Tests replace the sidecar reader a live run uses to prefill parameters. */
   resolveInputValues?: (flowPath: string, flowId: string) => Promise<InputValuesRead>;
   /** Tests replace the private directory a live run writes its inputs file to. */
@@ -327,6 +329,14 @@ export async function startWorkbench(options: {
     spawn('/usr/bin/open', [`x-apple.systempreferences:com.apple.preference.security?${pane}`], {
       stdio: 'ignore', detached: true,
     }).unref();
+  });
+  const revealRecorder = options.revealRecorder ?? (() => {
+    if (process.platform !== 'darwin') throw new Error('Finder reveal is available on macOS only');
+    const binary = process.env.CUEKEEPER_RECORDER?.trim()
+      || fileURLToPath(new URL('./cuekeeper-capture', import.meta.url));
+    // The path is resolved on the server; the page cannot ask Finder to reveal
+    // an arbitrary file.
+    spawn('/usr/bin/open', ['-R', binary], { stdio: 'ignore', detached: true }).unref();
   });
   const workRoot = workdirRoot();
   const workdirFailure = await prepareWorkdir(workRoot);
@@ -636,6 +646,10 @@ export async function startWorkbench(options: {
       const id = data.id;
       if (id !== 'accessibility' && id !== 'input-monitoring') throw new Error('Unknown settings pane');
       openSettings(id);
+      return send(response, 200, { opened: true });
+    }
+    if (path === '/api/guide/reveal-recorder') {
+      revealRecorder();
       return send(response, 200, { opened: true });
     }
     if (path === '/api/record/start') return send(response, 200, await recorder.start(data));

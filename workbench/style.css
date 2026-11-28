@@ -835,3 +835,13 @@ body.batch-view { grid-template-rows: 64px minmax(0, 1fr) 222px 30px; }
 .guide-checklist { margin: 6px 0 0; padding-left: 18px; font-size: 12px; line-height: 1.6; }
 .guide-actions { justify-content: flex-end; }
 .guide-checklist button { margin-left: 6px; }
+.guide-recorder {
+  display: grid; gap: 6px; padding: 10px 12px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--color-base-200);
+}
+.guide-recorder-label { font-size: 11px; color: var(--muted); }
+.guide-recorder code {
+  display: block; overflow-wrap: anywhere; font-size: 11.5px;
+  color: var(--color-base-content);
+}
+.guide-recorder .actions { justify-content: flex-start; gap: 6px; }

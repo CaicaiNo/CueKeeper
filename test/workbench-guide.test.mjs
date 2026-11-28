@@ -13,6 +13,7 @@ const buttonByText = (node, text) => node.querySelectorAll('button').find(candid
 
 async function bootPage(t, health) {
   const settingsCalls = [];
+  const revealCalls = [];
   const root = await mkdtemp(join(tmpdir(), 'cuekeeper-guide-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const directory = join(root, 'run');
@@ -28,6 +29,7 @@ async function bootPage(t, health) {
     directory, port: 0, library: join(root, 'library'), allowLive: false,
     allowShell: false, signal: cancellation.signal,
     openSettings: id => settingsCalls.push(id),
+    revealRecorder: () => revealCalls.push(true),
   });
   t.after(async () => { cancellation.abort(); await started.closed; });
 
@@ -54,12 +56,13 @@ async function bootPage(t, health) {
   await import(`../workbench/app.js?guide=${Date.now()}`);
   await sleep(30);
   return {
-    document, flow, url: started.url, settingsCalls,
+    document, flow, url: started.url, settingsCalls, revealCalls,
     healthCalls: () => healthCalls, startCalls: () => startCalls,
   };
 }
 
 test('the workbench serves the guide module and opens the requested settings pane', async t => {
+  const recorderPath = '/Users/sheng/Documents/git/cuekeeper-qa/dist/cuekeeper-capture';
   const blocked = {
     ok: false,
     blocking: [
@@ -67,8 +70,9 @@ test('the workbench serves the guide module and opens the requested settings pan
       { id: 'input-monitoring', label: 'input monitoring', status: 'fail', detail: 'not granted for the recorder' },
     ],
     nextSteps: ['Open System Settings and enable cuekeeper-capture.'],
+    recorderPath,
   };
-  const { document, url, settingsCalls, healthCalls } = await bootPage(t, blocked);
+  const { document, url, settingsCalls, revealCalls, healthCalls } = await bootPage(t, blocked);
   const guideModule = await fetch(`${url}/guide.js`);
   assert.equal(guideModule.status, 200, 'the guide module is part of the served workbench assets');
   const guideButton = document.getElementById('guide-button');
@@ -86,12 +90,17 @@ test('the workbench serves the guide module and opens the requested settings pan
   assert.match(dialog.textContent, /录制环境未就绪/);
   assert.match(dialog.textContent, /not granted for the recorder/);
   assert.match(dialog.textContent, /cuekeeper-capture/);
+  assert.match(dialog.textContent, new RegExp(recorderPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.equal(buttonByText(dialog, '开始录制').disabled, true,
     'the guide does not offer recording while health is blocked');
 
   buttonByText(dialog, '打开设置').click();
   await sleep(50);
   assert.deepEqual(settingsCalls, ['accessibility'], 'the guide opens the accessibility pane');
+
+  buttonByText(dialog, '在 Finder 中显示').click();
+  await sleep(50);
+  assert.deepEqual(revealCalls, [true], 'the guide reveals the exact recorder binary');
 
   const before = healthCalls();
   buttonByText(dialog, '重新检查环境').click();
@@ -117,7 +126,10 @@ test('a blocked record button opens the guide instead of starting a recording', 
 });
 
 test('the guide offers recording when health is ready and closes cleanly', async t => {
-  const { document } = await bootPage(t, { ok: true });
+  const { document } = await bootPage(t, {
+    ok: true,
+    recorderPath: '/Users/sheng/Documents/git/cuekeeper-qa/dist/cuekeeper-capture',
+  });
   document.getElementById('guide-button').click();
   await sleep(50);
   const dialog = document.getElementById('guide-dialog');
