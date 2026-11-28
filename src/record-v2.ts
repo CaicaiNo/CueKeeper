@@ -271,6 +271,19 @@ function locatorKey(locator: ClickTarget) {
   return JSON.stringify(locator);
 }
 
+/**
+ * Text bursts merge by control identity, not by the optional path hint: the
+ * helper's focus evidence has no path, while the snapshot target now does.
+ * Path and index still belong to the replay target itself.
+ */
+function textKey(locator: ClickTarget) {
+  if (locator.kind !== 'element') return locatorKey(locator);
+  return JSON.stringify({
+    kind: 'element', role: locator.role, name: locator.name ?? '',
+    ...(locator.identifier === undefined ? {} : { identifier: locator.identifier }),
+  });
+}
+
 /** The AX role/name the helper read under the pointer, when it is usable. */
 function nativeLabel(value: unknown) {
   if (typeof value !== 'string') return undefined;
@@ -2130,7 +2143,7 @@ export class GlobalRecording {
       // event. A burst that already ended before the gap is complete and must
       // not be blamed for it.
       const sameControl = !droppedTarget || !this.textBurst ||
-        locatorKey(this.textBurst.target) === locatorKey(droppedTarget);
+        textKey(this.textBurst.target) === textKey(droppedTarget);
       if (this.textBurst && sameControl && this.textBurst.scope === scopeId &&
           this.textBurst.key === this.focusKey(binding, event.focusGeneration) &&
           event.t - this.textBurst.at <= textGapMs) {
@@ -2146,14 +2159,14 @@ export class GlobalRecording {
       const pending = this.pendingText;
       if (pending && pending.scopeId === scopeId && pending.key === key &&
           event.t - pending.at >= 0 && event.t - pending.at <= textGapMs) {
-        pending.drops.push(droppedTarget ? { locator: locatorKey(droppedTarget) } : {});
+        pending.drops.push(droppedTarget ? { locator: textKey(droppedTarget) } : {});
       }
       // The first character of a burst is often the one that was lost, so the
       // burst may not exist yet: remember where it belongs and mark it when it
       // is bound.
       this.droppedText = {
         scopeId, key: this.focusKey(binding, event.focusGeneration), at: event.t,
-        ...(droppedTarget ? { locator: locatorKey(droppedTarget) } : {}),
+        ...(droppedTarget ? { locator: textKey(droppedTarget) } : {}),
       };
       return;
     }
@@ -2218,7 +2231,7 @@ export class GlobalRecording {
     scope: WindowScope, scopeId: string, at: number, target: ElementLocator, snapshot?: Snapshot,
     text: { chars?: string; issues?: readonly InputValueIssue[]; key?: string } = {},
   ) {
-    const locatorId = locatorKey(target);
+    const locatorId = textKey(target);
     const burst = this.textBurst;
     if (burst && burst.scope === scopeId && burst.locator === locatorId &&
         at - burst.at <= textGapMs) {
@@ -2292,7 +2305,7 @@ export class GlobalRecording {
     if (Math.abs(at - dropped.at) > textGapMs) return;
     // A drop for another control in the same window must wait for that
     // control's burst instead of marking this one.
-    if (dropped.locator && dropped.locator !== locatorKey(target)) return;
+    if (dropped.locator && dropped.locator !== textKey(target)) return;
     this.droppedText = undefined;
     const entry = this.inputValues.get(name);
     if (!entry) return;
@@ -2414,7 +2427,7 @@ export class GlobalRecording {
     // A drop belongs to the buffered burst only when it named this same
     // control; otherwise it stays on the droppedText marker for its own burst.
     const ownDrop = pending.drops.some(drop =>
-      !drop.locator || drop.locator === locatorKey(target));
+      !drop.locator || drop.locator === textKey(target));
     this.bindText(pending.scope, pending.scopeId, pending.at, target, snapshot, {
       chars: pending.chars,
       issues: [...pending.issues, ...(ownDrop ? ['backlog_dropped' as const] : [])],

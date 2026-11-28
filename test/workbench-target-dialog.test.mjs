@@ -439,9 +439,10 @@ test('手填新名称时丢掉旧路径，按新名称解析到侧栏控件', as
   const target = (await stepOf('click-dup')).target;
   assert.deepEqual(target, { kind: 'element', role: 'button', name: '取消' });
   assert.equal(resolve(dupSnapshot, target).node.ref, '@fake:e6', 'the sidebar 取消 control');
-  // The recorded toolbar path could never match that sidebar control.
-  assert.throws(() => resolve(dupSnapshot, { ...target, path: ['window', 'toolbar', 'button'] }),
-    /did not match/);
+  // The name is now unique, so the stale toolbar path is only a hint and the
+  // resolver can still find the sidebar control.
+  assert.equal(resolve(dupSnapshot, { ...target, path: ['window', 'toolbar', 'button'] }).node.ref,
+    '@fake:e6', 'a stale path yields to the unique new name');
 });
 
 test('改角色重建范围时，空名称不再表示「只匹配无名控件」', async t => {

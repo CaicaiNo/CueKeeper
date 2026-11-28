@@ -1068,7 +1068,7 @@ test('a Finder file click records the file item, not the unnamed field under it'
   const flow = (await recordFixture('finder-folder-file-click')).finish();
   assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
   // The pointer hit the row's textfield; the target is the file the row names.
-  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'row', name: 'manifest.json' });
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'row', name: 'manifest.json', path: [ 'window', 'outline', 'row', 'row' ] });
   assert.equal(flow.steps[0].count, 2);
   assert.equal(flowV2Check.Check(flow), true);
 });
@@ -1084,7 +1084,7 @@ test('an item label that carries its name in its value still names the click', a
   const recording = new GlobalRecording(readerFor(data), { now: () => NOW });
   for (const event of data.events) await recording.add(parseCaptureEvent(event));
   const flow = recording.finish();
-  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'statictext', name: 'manifest.json' });
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'statictext', name: 'manifest.json', path: [ 'window', 'outline', 'row', 'statictext' ] });
 });
 
 test('a Finder list view click names the file, not its date, size or kind column', async () => {
@@ -1092,7 +1092,7 @@ test('a Finder list view click names the file, not its date, size or kind column
   assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
   // The row's own name joins every column; the click must record the file the
   // name column shows, or replay would click at a coordinate instead.
-  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'treeitem', name: 'manifest.json' });
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'treeitem', name: 'manifest.json', path: [ 'window', 'outline', 'treeitem', 'treeitem' ] });
   assert.equal(flow.steps[0].count, 2);
   assert.equal(flowV2Check.Check(flow), true);
 });
@@ -1105,7 +1105,7 @@ test('a click on a Finder list view date column still names the file', async () 
   const recording = new GlobalRecording(readerFor(data), { now: () => NOW });
   for (const event of data.events) await recording.add(parseCaptureEvent(event));
   const flow = recording.finish();
-  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'treeitem', name: 'manifest.json' });
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'treeitem', name: 'manifest.json', path: [ 'window', 'outline', 'treeitem', 'treeitem' ] });
   assert.equal(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_FILE_CLICK'), false);
 });
 
@@ -1124,7 +1124,7 @@ test('an icon view item keeps the name its single-cell row carries', async () =>
   const recording = new GlobalRecording(readerFor(data), { now: () => NOW });
   for (const event of data.events) await recording.add(parseCaptureEvent(event));
   const flow = recording.finish();
-  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'row', name: 'manifest.json' });
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'row', name: 'manifest.json', path: [ 'window', 'outline', 'row' ] });
 });
 
 test('a Finder click on an item with no name anywhere keeps its point and warns', async () => {
@@ -1246,7 +1246,7 @@ test('an editor click inside the focused textfield records the field, not the gr
 
   const flow = recording.finish();
   assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'type']);
-  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'textfield', name: 'manifest.json' });
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'textfield', name: 'manifest.json', path: [ 'window', 'group', 'textfield' ] });
   // Both keystrokes are one parameterised type step against the same field.
   assert.deepEqual(flow.steps[1].target, flow.steps[0].target);
   assert.equal(flow.steps[1].input, 'text_1');
@@ -1384,7 +1384,7 @@ test('a fallback focus read is reused by every later character of the burst', as
   const flow = recording.finish();
   assert.equal(reads, 1);
   assert.deepEqual(flow.steps.map(step => step.kind), ['type']);
-  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'textfield', name: 'manifest.json' });
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'textfield', name: 'manifest.json', path: [ 'window', 'group', 'textfield' ] });
   assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
 });
 
@@ -1549,7 +1549,7 @@ test('a hover keeps the screen point the recorded pointer rested on', async () =
 
   const flow = recording.finish();
   assert.deepEqual(flow.steps.map(step => step.kind), ['hover']);
-  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'button', name: '登录' });
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'button', name: '登录', path: [ 'window', 'group', 'button' ] });
   // The pointer rested left of the button's centre (770, 520); that exact spot
   // is what replay has to reproduce.
   assert.deepEqual(flow.steps[0].point, [700, 520]);
@@ -1612,7 +1612,7 @@ test('a named statictext hover stays an element step', async () => {
   const flow = recording.finish();
   const step = flow.steps[0];
   assert.equal(step.scope.kind, 'window');
-  assert.deepEqual(step.target, { kind: 'element', role: 'statictext', name: '下载' });
+  assert.deepEqual(step.target, { kind: 'element', role: 'statictext', name: '下载', path: [ 'window', 'group', 'statictext' ] });
   assert.deepEqual(step.point, [700, 520]);
   assert.equal(step.hint, undefined);
 });
@@ -1800,7 +1800,7 @@ test('a click that changes the page is named from the tree read before it', asyn
 
   const flow = recording.finish();
   assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'click']);
-  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'button', name: '设置' });
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'button', name: '设置', path: [ 'window', 'group', 'button' ] });
   const target = flow.steps[1].target;
   assert.equal(target.kind, 'element');
   assert.equal(target.name, 'https://sdpc.sangfor.com:6440');
@@ -1951,7 +1951,7 @@ test('a click waits for the read already walking its page', async () => {
 
   const flow = recording.finish();
   assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'click']);
-  assert.deepEqual(flow.steps[1].target, { kind: 'element', role: 'group', name: '添加地址' });
+  assert.deepEqual(flow.steps[1].target, { kind: 'element', role: 'group', name: '添加地址', path: [ 'window', 'group' ] });
   assert.equal(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_ELEMENT_CLICK'), false);
   assert.equal(flowV2Check.Check(flow), true);
 });
@@ -1983,7 +1983,7 @@ test('a click inside a control that carries no action reference is named by its 
   }));
 
   const flow = recording.finish();
-  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'group', name: '接入地址' });
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'group', name: '接入地址', path: [ 'window', 'group' ] });
   assert.equal(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_ELEMENT_CLICK'), false);
   // The recorded control and every container above it carry no action
   // reference, so replay can only click its centre as physical input. The
@@ -2021,7 +2021,7 @@ test('a click named by a container that is itself pressable needs no unpressable
   }));
 
   const flow = recording.finish();
-  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'group', name: '接入地址' });
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'group', name: '接入地址', path: [ 'window', 'group' ] });
   assert.equal(recording.captureWarnings.some(warning => warning.code === 'CLICK_TARGET_UNPRESSABLE'), false);
 });
 
@@ -2642,7 +2642,7 @@ test('a hover in the press generation never settles the held press', async () =>
   const flow = recording.finish();
   assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'click']);
   // The press is kept from the tree that was on screen before it, once.
-  assert.deepEqual(flow.steps[1].target, { kind: 'element', role: 'button', name: '刷新' });
+  assert.deepEqual(flow.steps[1].target, { kind: 'element', role: 'button', name: '刷新', path: [ 'window', 'button' ] });
   assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
   assert.ok(recording.captureWarnings.some(warning => warning.code === 'HOVER_WHILE_CLICK_UNPROVEN'));
   assert.equal(flowV2Check.Check(flow), true);
@@ -2835,7 +2835,7 @@ test('a hover with a scope gap never deletes the held press', async () => {
 
   const flow = recording.finish();
   assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'click']);
-  assert.deepEqual(flow.steps[1].target, { kind: 'element', role: 'button', name: '刷新' });
+  assert.deepEqual(flow.steps[1].target, { kind: 'element', role: 'button', name: '刷新', path: [ 'window', 'button' ] });
   assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
   assert.ok(recording.captureWarnings.some(warning => warning.code === 'HOVER_WHILE_CLICK_UNPROVEN'));
   assert.equal(flowV2Check.Check(flow), true);
@@ -2990,7 +2990,7 @@ test('a menu item hover keeps the menu choice that follows', async () => {
 
   const flow = recording.finish();
   assert.deepEqual(flow.steps.map(step => step.kind), ['hover', 'click']);
-  assert.deepEqual(flow.steps[1].target, { kind: 'element', role: 'menuitem', name: '重新命名' });
+  assert.deepEqual(flow.steps[1].target, { kind: 'element', role: 'menuitem', name: '重新命名', path: [ 'window', 'menuitem' ] });
   assert.equal(flow.steps[1].scope.app, 'com.apple.finder');
   assert.equal(flow.steps.some(step => step.kind === 'gap'), false);
   assert.equal(flowV2Check.Check(flow), true);
@@ -3345,7 +3345,7 @@ test('a click that activates a window and lands on a named web control is record
   const flow = recording.finish();
   assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'activate_app', 'click']);
   assert.deepEqual(flow.steps[2].scope.app, 'com.electron.atrust');
-  assert.deepEqual(flow.steps[2].target, { kind: 'element', role: 'group', name: '设置' });
+  assert.deepEqual(flow.steps[2].target, { kind: 'element', role: 'group', name: '设置', path: [ 'window', 'webarea', 'group', 'group' ] });
   assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_ACTIVATED_WINDOW'));
   assert.equal(flowV2Check.Check(flow), true);
 });
@@ -3666,7 +3666,7 @@ test('a window that no longer covers the click is read again exactly once', asyn
   const flow = recording.finish();
   assert.deepEqual(reads, [33, 33]);
   assert.deepEqual(flow.steps.map(step => step.kind), ['click', 'click']);
-  assert.deepEqual(flow.steps[1].target, { kind: 'element', role: 'button', name: 'Save' });
+  assert.deepEqual(flow.steps[1].target, { kind: 'element', role: 'button', name: 'Save', path: [ 'window', 'button' ] });
 });
 
 test('a click with element evidence completes its path from a tree already read', async () => {
@@ -3892,7 +3892,7 @@ test('a click on a control that has only an identifier is recorded with it', asy
   }));
 
   const flow = recording.finish();
-  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'image', name: '', identifier: 'qr-code' });
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'image', name: '', path: [ 'window', 'image' ], identifier: 'qr-code' });
   assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_NAMED_BY_IDENTIFIER'));
   assert.doesNotThrow(() => parseFlowV2(flow));
   assert.equal(flowV2Check.Check(flow), true);
@@ -4946,7 +4946,7 @@ test('record --global names a click after its window retitled', { skip: process.
   assert.equal(run.code, 0, (run.stderr || '') + JSON.stringify(run.response));
   const flow = JSON.parse(run.written);
   assert.deepEqual(flow.steps.map(step => step.kind), ['click']);
-  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'treeitem', name: 'manifest.json' });
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'treeitem', name: 'manifest.json', path: [ 'window', 'outline', 'treeitem', 'treeitem' ] });
   // A retitle is not a capture failure: no gap and no unavailable-read warning.
   assert.equal(run.response.data.warnings, undefined);
   assert.equal(run.response.data.snapshotReads, 1);
@@ -5596,7 +5596,7 @@ test('a Finder navigation key drops the old directory before the next click', as
   const flow = recording.finish();
   const click = flow.steps.find(step => step.kind === 'click');
   assert.ok(click);
-  assert.deepEqual(click.target, { kind: 'element', role: 'row', name: 'right-file' });
+  assert.deepEqual(click.target, { kind: 'element', role: 'row', name: 'right-file', path: [ 'window', 'outline', 'row' ] });
   assert.equal(click.scope.windowTitle, '上级目录',
     'the click belongs to the directory Finder shows after the key');
   assert.equal(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_FILE_CLICK'), false);
@@ -5705,7 +5705,7 @@ test('an anonymous Electron container with an identifier becomes that control', 
   const flow = recording.finish();
 
   assert.deepEqual(flow.steps[0].target, {
-    kind: 'element', role: 'group', name: '', identifier: 'multi-add-switch',
+    kind: 'element', role: 'group', name: '', path: ['window', 'group'], identifier: 'multi-add-switch',
   });
   assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_NAMED_BY_IDENTIFIER'));
   assert.equal(flowV2Check.Check(flow), true);
@@ -5730,7 +5730,7 @@ test('an anonymous Electron container uses the single operable control that cove
   }));
   const flow = recording.finish();
 
-  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'statictext', name: '切换新地址' });
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'statictext', name: '切换新地址', path: [ 'window', 'group', 'statictext' ] });
   assert.equal(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_ELEMENT_CLICK'), false);
   assert.equal(flowV2Check.Check(flow), true);
 });
@@ -5805,7 +5805,9 @@ test('an anonymous hit uses a sibling control that covers the point', async () =
   }));
   const flow = recording.finish();
 
-  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'button', name: '切换新地址' });
+  assert.deepEqual(flow.steps[0].target, {
+    kind: 'element', role: 'button', name: '切换新地址', path: ['window', 'group', 'button'],
+  });
   assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_NAMED_BY_NEARBY_CONTROL'));
 });
 

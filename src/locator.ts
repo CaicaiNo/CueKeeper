@@ -273,13 +273,26 @@ export function clickIdentity(tree: Node, hit: Located): Located | undefined {
   return undefined;
 }
 
-function matches(tree: Node, locator: ElementLocator, names = elementNames(tree)): Located[] {
-  // Finder reports a file row as AXRow to the capture helper but as a
-  // `treeitem` in a window snapshot, and other AX versions use `row` or
-  // `outlinerow` for the same item. The row family is one addressable role;
-  // the name still has to match exactly.
-  const family = (role: string) => rowRoles.has(role) ? 'row' : role;
-  const candidates = flatten(tree).filter(entry => family(entry.node.role) === family(locator.role));
+// Finder reports a file row as AXRow to the capture helper but as a
+// `treeitem` in a window snapshot, and other AX versions use `row` or
+// `outlinerow` for the same item. The row family is one addressable role;
+// the name still has to match exactly.
+const family = (role: string) => rowRoles.has(role) ? 'row' : role;
+
+function identifiedMatches(tree: Node, locator: ElementLocator): Located[] {
+  if (locator.identifier === undefined) return [];
+  return flatten(tree).filter(entry =>
+    family(entry.node.role) === family(locator.role) &&
+    entry.node.identifier === locator.identifier);
+}
+
+function matches(
+  tree: Node,
+  locator: ElementLocator,
+  names = elementNames(tree),
+  options: { path?: boolean } = {},
+): Located[] {
+  let candidates = flatten(tree).filter(entry => family(entry.node.role) === family(locator.role));
   // A platform identifier can survive renamed labels. When the page no longer
   // carries it, the recorded name and path can still resolve the control.
   if (locator.identifier !== undefined) {
@@ -290,27 +303,44 @@ function matches(tree: Node, locator: ElementLocator, names = elementNames(tree)
     // different control, so a missing identifier is NOT_FOUND instead.
     if (!locator.name?.trim()) return [];
   }
-  return candidates.filter(entry =>
-    (locator.name === undefined || (names.get(entry.node) ?? '') === locator.name) &&
-    (locator.path === undefined ||
+  return candidates.filter(entry => {
+    const nameMatches = locator.name === undefined || (names.get(entry.node) ?? '') === locator.name;
+    const pathMatches = options.path === false || locator.path === undefined ||
       (locator.path.length === entry.path.length &&
-        locator.path.every((role, index) => family(role) === family(entry.path[index])))),
-  );
+        locator.path.every((role, index) => family(role) === family(entry.path[index])));
+    return nameMatches && pathMatches;
+  });
 }
 
 export function resolve(snapshot: Snapshot, locator: ElementLocator): Located {
-  const candidates = matches(snapshot.tree, locator);
-  const matchedIdentifier = locator.identifier !== undefined && candidates[0]?.node.identifier === locator.identifier;
-  // The index was recorded for the name and path. Exact identifier matches
-  // use their own evidence: one resolves, and duplicates are ambiguous.
-  if (locator.index !== undefined && !matchedIdentifier) {
-    const candidate = candidates[locator.index];
-    if (candidate) return candidate;
-  } else {
-    if (candidates.length === 1) return candidates[0];
-    if (candidates.length > 1) throw new Fault('AMBIGUOUS', `Locator matched ${candidates.length} elements`);
+  // A unique accessibility identifier is the strongest identity: it survives a
+  // renamed label. Duplicate identifiers are indistinguishable, and an index
+  // must not pretend otherwise.
+  const identified = identifiedMatches(snapshot.tree, locator);
+  if (identified.length === 1) return identified[0];
+  if (identified.length > 1) {
+    throw new Fault('AMBIGUOUS', `Locator matched ${identified.length} identifiers`);
   }
-  throw new Fault('NOT_FOUND', 'Locator did not match in the target window');
+  const names = elementNames(snapshot.tree);
+  // The name is the identity; the path only separates look-alikes. This keeps
+  // a reflowed page runnable when the control is still unique.
+  const base = matches(snapshot.tree, locator, names, { path: false });
+  if (base.length === 0) throw new Fault('NOT_FOUND', 'Locator did not match in the target window');
+  // An explicit index is positional, not a hint: if the recorded range shrank,
+  // typing or pasting into a different control is worse than failing.
+  if (locator.index !== undefined) {
+    const exact = matches(snapshot.tree, locator, names);
+    const candidate = exact[locator.index];
+    if (candidate) return candidate;
+    throw new Fault('NOT_FOUND', 'Locator did not match in the target window');
+  }
+  if (base.length === 1) return base[0];
+  // More than one candidate: use the recorded path only as a tie-breaker.
+  const exact = matches(snapshot.tree, locator, names);
+  if (exact.length === 1) return exact[0];
+  // The path named a control that is no longer there, but the name is still
+  // shared: report the ambiguity instead of guessing by role alone.
+  throw new Fault('AMBIGUOUS', `Locator matched ${base.length} elements`);
 }
 
 /**
@@ -326,13 +356,14 @@ export function isReAddressable(locator: { name?: string; identifier?: string })
 export function toLocator(snapshot: Snapshot, entry: Located): ElementLocator {
   const names = elementNames(snapshot.tree);
   const locator: ElementLocator = { kind: 'element', role: entry.node.role, name: names.get(entry.node) ?? '' };
-  // Prefer a unique role/name. A role path or explicit index is needed for repeated controls.
-  if (matches(snapshot.tree, locator, names).length > 1) {
-    locator.path = entry.path;
-    const candidates = matches(snapshot.tree, locator, names);
-    if (candidates.length > 1) {
-      locator.index = candidates.findIndex(candidate => candidate.node === entry.node);
-    }
+  // Keep the role path even when the name is unique today: a later page can
+  // add a same-named sibling, and replay uses this path as a tie-breaker. The
+  // schema caps the path, so a deeper tree falls back to name/index.
+  if (entry.path.length <= 51) locator.path = entry.path;
+  const candidates = matches(snapshot.tree, locator, names);
+  if (candidates.length > 1) {
+    const index = candidates.findIndex(candidate => candidate.node === entry.node);
+    if (index >= 0) locator.index = index;
   }
   // The name/path above is the fallback identity; the identifier is the
   // preferred one and may be the only one a control has.

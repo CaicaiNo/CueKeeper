@@ -25,7 +25,9 @@ const start = { kind: 'point', point: [135, 165] };
 const end = { kind: 'point', point: [420, 330] };
 // The text field's center is (419.5, 319); only a point on that center becomes
 // an element locator, because an element drag replays from the center.
-const editor = { kind: 'element', role: 'textfield', name: '' };
+const editor = {
+  kind: 'element', role: 'textfield', name: '', path: ['window', 'scrollarea', 'textfield'],
+};
 
 function fakeDesktop() {
   const calls = [];

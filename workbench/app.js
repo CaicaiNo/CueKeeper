@@ -3014,13 +3014,13 @@ function locatorFields(original, emptyPickHint, { collapsible = false } = {}) {
     });
   const narrowingControls = [
     el('label', { className: 'check-row' }, exactName, '要求名称完全一致（勾选且名称留空 = 只匹配没有名称的控件）'),
-    field('层级路径（path，可选）', path, '从窗口往下的中间层类型，用 / 分隔；同名控件分不开时才填'),
+    field('层级路径（path，可选）', path, '录制时自动保存，用来区分同名控件；页面变化对不上时会退回名称匹配'),
     field('同名控件序号（index，可选）', index, '类型和名称都相同的控件有多个时取第几个，从 0 开始'),
   ];
   const advanced = collapsible
     ? el('details', {
       className: 'locator-advanced',
-      open: Boolean(initial?.path?.length) || initial?.index !== undefined,
+      open: initial?.index !== undefined,
     },
     el('summary', {}, '高级定位'),
     muted('同名控件分不开时才需要这些条件；一般不用改。'),
@@ -3034,7 +3034,7 @@ function locatorFields(original, emptyPickHint, { collapsible = false } = {}) {
     index.value = target.index ?? '';
     // A pick or an edit can add a narrowing condition; show it rather than
     // leaving a now-active filter inside a closed block.
-    if (advanced && (target.path?.length || target.index !== undefined)) advanced.open = true;
+    if (advanced && target.index !== undefined) advanced.open = true;
     refresh();
   };
   const locator = () => {

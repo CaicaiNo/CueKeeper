@@ -205,7 +205,9 @@ test('repicking in the workbench writes a snapshot locator that the saved test r
   assert.equal(candidate.interactive, true);
   assert.deepEqual(candidate.point, [419, 319]);
   assert.deepEqual(candidate.bounds, { x: 112, y: 130, width: 615, height: 378 });
-  assert.deepEqual(candidate.locator, { kind: 'element', role: 'textfield', name: '' });
+  assert.deepEqual(candidate.locator, {
+    kind: 'element', role: 'textfield', name: '', path: ['window', 'scrollarea', 'textfield'],
+  });
 
   // Same write-back the 重新拾取 dialog performs on the selected timeline action.
   const row = session.timeline.find(entry => entry.action.kind === 'click');

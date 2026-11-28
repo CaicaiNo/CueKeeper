@@ -21,7 +21,9 @@ const fixture = example('textedit.snapshot');
 const snapshot = parseSnapshot(fixture.data, fixture.target);
 const target = fixture.target;
 const signal = new AbortController().signal;
-const editor = { kind: 'element', role: 'textfield', name: '' };
+const editor = {
+  kind: 'element', role: 'textfield', name: '', path: ['window', 'scrollarea', 'textfield'],
+};
 const center = [420, 319];
 const flowFor = steps => parseFlow({
   version: 1, id: 'input-ii', name: 'Input II', target, steps,

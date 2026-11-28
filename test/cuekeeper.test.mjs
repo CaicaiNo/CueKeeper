@@ -26,7 +26,9 @@ const example = name => JSON.parse(readFileSync(new URL(`../examples/${name}.jso
 const fixture = example('textedit.snapshot');
 const flow = example('textedit.flow');
 const snapshot = parseSnapshot(fixture.data, fixture.target);
-const editor = { kind: 'element', role: 'textfield' };
+const editor = {
+  kind: 'element', role: 'textfield', path: ['window', 'scrollarea', 'textfield'],
+};
 const signal = new AbortController().signal;
 const png = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
@@ -548,13 +550,17 @@ test('record CLI stores double clicks, right clicks and one coalesced scroll ste
     const [triple, right, scroll] = recorded.steps;
     assert.equal(recorded.steps.length, 3);
     assert.deepEqual(triple, {
-      id: 'step-1', kind: 'click', target: { kind: 'element', role: 'textfield', name: '' }, count: 3,
+      id: 'step-1', kind: 'click',
+      target: { kind: 'element', role: 'textfield', name: '', path: ['window', 'scrollarea', 'textfield'] },
+      count: 3,
     });
     assert.deepEqual(right, {
       id: 'step-2', kind: 'click', target: { kind: 'point', point: [105, 110] }, button: 'right',
     });
     assert.equal(scroll.kind, 'scroll');
-    assert.deepEqual(scroll.target, { kind: 'element', role: 'textfield', name: '' });
+    assert.deepEqual(scroll.target, {
+      kind: 'element', role: 'textfield', name: '', path: ['window', 'scrollarea', 'textfield'],
+    });
     assert.equal(scroll.deltaX, 0);
     assert.equal(scroll.deltaY, -6);
     assert.equal(typeof scroll.durationMs, 'number');

@@ -634,7 +634,9 @@ test('the v2 editor picks a target from the scoped window snapshot', async t => 
   assert.deepEqual(chosen.path, ['window', 'button']);
   assert.deepEqual(chosen.bounds, { x: 430, y: 40, width: 60, height: 30 });
   assert.deepEqual(chosen.point, [460, 55]);
-  assert.deepEqual(chosen.locator, { kind: 'element', role: 'button', name: '刷新' });
+  assert.deepEqual(chosen.locator, {
+    kind: 'element', role: 'button', name: '刷新', path: ['window', 'button'],
+  });
   assert.equal(desktop.calls[0][1], 'com.apple.Safari');
 
   // Confirming a candidate is one EditOp; the step now names the element.
