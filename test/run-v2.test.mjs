@@ -3433,3 +3433,105 @@ test('HAOC-222 review 2: the last candidate read that lands late cannot decide t
   assert.deepEqual(callsOf(world, 'focusWindow'), []);
   assert.deepEqual(callsOf(world, 'click'), [], 'zero input either way');
 });
+
+// HAOC-227: a slow accessibility read is not a change. The stability proof's
+// budget follows what the reads actually cost, so a target that holds still
+// across two slow reads is pressed once; and the tree that chose a same-title
+// window is the proof's first read instead of a second whole-tree read.
+
+/** Delays every window read, as a large accessibility tree answers. */
+function slowReads(world, delayMs) {
+  const real = world.desktop.snapshotWindow.bind(world.desktop);
+  world.desktop.snapshotWindow = async id => {
+    await new Promise(resolve => setTimeout(resolve, delayMs));
+    return real(id);
+  };
+}
+
+/** How many times the proof read one window. */
+const readsOfWindow = (world, windowId) =>
+  callsOf(world, 'snapshotWindow').filter(call => call[1] === windowId).length;
+
+test('HAOC-227: two slow reads of a stable target agree and press once', async t => {
+  const { world, run } = harness(t);
+  // Every read costs 700 ms: one whole read fits the old 1500 ms proof, the
+  // second one only fits if the budget follows the read that just happened.
+  slowReads(world, 700);
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w21:e9']], 'exactly one press was delivered');
+  assert.equal(readsOfWindow(world, 'w-21'), 2,
+    'the proof compared the target across two reads instead of timing out after the first');
+});
+
+test('HAOC-227: slow reads of a target that keeps moving still time out with zero input', async t => {
+  const { world, run } = harness(t);
+  const button = continueButtonOf(world);
+  const original = { ...button.bounds };
+  paintOnRead(world, (_window, index) => {
+    button.bounds = { ...original, x: original.x + index * 7 };
+  });
+  slowReads(world, 700);
+
+  const started = performance.now();
+  const report = await run(readinessFlow(pressContinue));
+  const elapsed = performance.now() - started;
+
+  assert.equal(report.status, 'failed');
+  const failed = entry(report, 'press');
+  assert.equal(failed.code, 'TARGET_NOT_READY');
+  assert.match(failed.message, /still changing between reads/);
+  const reads = Number(failed.message.match(/\((\d+) reads? of the bound window/)?.[1] ?? 0);
+  assert.ok(reads >= 2, `the message names how many slow reads it made (${reads})`);
+  assert.match(failed.message, /read 1: button "Continue"/,
+    'the message says where each read found the control, not just "1 read"');
+  assert.deepEqual(callsOf(world, 'click'), [], 'a moving target is never pressed');
+  assert.ok(elapsed < 6000, `the slow proof stayed inside its hard cap (${Math.round(elapsed)} ms)`);
+});
+
+test('HAOC-227: slow reads of a missing target fail with zero input', async t => {
+  const { world, run } = harness(t);
+  paintOnRead(world, window => {
+    window.data.tree.children = window.data.tree.children.filter(child => child.name !== 'Continue');
+  });
+  slowReads(world, 700);
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'failed');
+  const failed = entry(report, 'press');
+  assert.equal(failed.code, 'TARGET_NOT_READY');
+  assert.match(failed.message, /is still not provable \(NOT_FOUND\)/);
+  const reads = Number(failed.message.match(/\((\d+) reads? of the bound window/)?.[1] ?? 0);
+  assert.ok(reads >= 2, `the proof kept reading rather than failing on the first slow read (${reads})`);
+  assert.deepEqual(callsOf(world, 'click'), [], 'a target that is not there is never pressed');
+});
+
+test('HAOC-227: the tree that chose a same-title window is the proof\'s first read', async t => {
+  const holder = windowRecord({ id: 'w-21', app: textedit, pid: 601, title: 'QA Notes', fields: [['notes', '@w21:e1']] });
+  const twin = withoutContinue(
+    windowRecord({ id: 'w-22', app: textedit, pid: 601, title: 'QA Notes', fields: [['draft', '@w22:e1']] }),
+  );
+  const { world, run } = harness(t, { windows: [twin, holder], focused: 'w-22' });
+  // The agreeing read is the only read after the choice; it sees a fresh tree.
+  const real = world.desktop.snapshotWindow.bind(world.desktop);
+  let holderReads = 0;
+  world.desktop.snapshotWindow = async id => {
+    if (id === 'w-21') {
+      holderReads += 1;
+      if (holderReads === 2) continueButtonOf(world).ref_id = '@w21:e90';
+    }
+    return real(id);
+  };
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.equal(readsOfWindow(world, 'w-21'), 2,
+    'choosing read the holder once and the proof added exactly one agreeing read');
+  assert.equal(readsOfWindow(world, 'w-22'), 1, 'the twin was read once while choosing');
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w21:e90']],
+    'dispatch uses the newest read, not the tree the choice was made from');
+});
