@@ -16,7 +16,7 @@ import { captureHealth } from './doctor.js';
 import type { RecordHealth } from './doctor.js';
 import { readJson, writeNew } from './files.js';
 import { hashFlow, plan } from './flow.js';
-import { dryRunFlowV2, hashFlowV2, isFlowV2, pointTargetSteps } from './flow-v2.js';
+import { dryRunFlowV2, hashFlowV2, isFlowV2 } from './flow-v2.js';
 import type { FlowV2, StepV2, WindowScope } from './contracts-v2.js';
 import { Fault, object } from './locator.js';
 import {
@@ -1057,18 +1057,11 @@ export async function startWorkbench(options: {
           return send(response, 400, { error: first.code, message: first.message, detail: first });
         }
         // A dry run reports the structural scope plan without opening a window.
-        // A point target is refused here: replay cannot prove what is under a
-        // recorded coordinate, so the operator must pick an element first.
+        // A point target is reported as blocked step by step (yellow in the
+        // timeline) instead of failing the whole request: the operator sees
+        // which steps to turn into element targets, and a live replay still
+        // clicks the recorded coordinate inside its window.
         if (data.mode === 'dry-run') {
-          const points = pointTargetSteps(flow);
-          if (points.length) {
-            return send(response, 400, {
-              error: 'UNSAFE_POINT',
-              message: `Turn ${points.map(step => step.id).join(', ')} into element targets first; ` +
-                'a recorded screen point cannot pass a dry run (a live replay still clicks it inside its window)',
-              detail: { stepIds: points.map(step => step.id) },
-            });
-          }
           return send(response, 200, { ...dryRunFlowV2(flow), stopped: false });
         }
         if (!allowLive || data.confirm !== true) {

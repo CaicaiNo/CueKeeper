@@ -267,7 +267,7 @@ test('a coordinate hover passes the dry run and says it is unverified', () => {
   assert.match(entry.message, /无法证明/);
   assert.equal(reportV2Check.Check(report), true);
 
-  // A different point is a different flow, and a click point is still refused.
+  // A different point is a different flow, and a click point still blocks it.
   assert.notEqual(hashFlowV2(flow), hashFlowV2(parseFlowV2(screenHover({ point: [239, 397] }))));
   const clickPoint = structuredClone(flow);
   clickPoint.id = 'click-point';
@@ -276,7 +276,9 @@ test('a coordinate hover passes the dry run and says it is unverified', () => {
     scope: { kind: 'window', app: 'com.apple.finder', windowKey: 'f', windowTitle: 'x' },
     target: { kind: 'point', point: [120, 80] },
   }];
-  assert.throws(() => dryRunFlowV2(clickPoint), { code: 'UNSAFE_POINT' });
+  const clickReport = dryRunFlowV2(clickPoint);
+  assert.equal(clickReport.status, 'blocked');
+  assert.equal(clickReport.entries[0].code, 'UNSAFE_POINT');
 });
 
 
@@ -370,30 +372,70 @@ test('a capture refusal names every gap with its real evidence', t => {
   assert.equal(validate.error.message, refusal.message);
 });
 
-test('a flow that kept a recorded screen point is refused by the dry run', t => {
+test('a flow that kept a recorded screen point blocks the dry run step by step', t => {
   const flow = {
     version: 2, id: 'point-flow', name: '坐标点击',
-    steps: [{
-      id: 'click-1', kind: 'click',
-      scope: { kind: 'window', app: 'com.apple.finder', windowKey: 'files', windowTitle: 'Downloads' },
-      target: { kind: 'point', point: [420, 300] },
-    }],
+    steps: [
+      {
+        id: 'click-1', kind: 'click',
+        scope: { kind: 'window', app: 'com.apple.finder', windowKey: 'files', windowTitle: 'Downloads' },
+        target: { kind: 'point', point: [420, 300] },
+      },
+      {
+        id: 'click-2', kind: 'click',
+        scope: { kind: 'window', app: 'com.apple.finder', windowKey: 'files', windowTitle: 'Downloads' },
+        target: { kind: 'point', point: [520, 340] },
+      },
+      {
+        id: 'click-3', kind: 'click',
+        scope: { kind: 'window', app: 'com.apple.finder', windowKey: 'files', windowTitle: 'Downloads' },
+        target: { kind: 'element', role: 'row', name: 'manifest.json' },
+      },
+    ],
   };
   const parsed = parseFlowV2(flow);
   // The point is a legal v2 click target: it is recorded, and the timeline says
-  // it needs confirmation. It is not a legal dry-run step.
-  assert.deepEqual(pointTargetSteps(parsed).map(step => step.id), ['click-1']);
-  assert.throws(() => dryRunFlowV2(parsed), error =>
-    error.code === 'UNSAFE_POINT' && /click-1/.test(error.message));
+  // it needs confirmation. A dry run reports it per step instead of failing the
+  // whole flow, so both coordinates are visible at once.
+  assert.deepEqual(pointTargetSteps(parsed).map(step => step.id), ['click-1', 'click-2']);
+  const report = dryRunFlowV2(parsed);
+  assert.equal(report.status, 'blocked');
+  assert.equal(reportV2Check.Check(report), true);
+  const blocked = report.entries.slice(0, 2);
+  assert.deepEqual(blocked.map(entry => [entry.id, entry.status, entry.code]),
+    [['click-1', 'blocked', 'UNSAFE_POINT'], ['click-2', 'blocked', 'UNSAFE_POINT']]);
+  for (const entry of blocked) {
+    assert.match(entry.message, /元素目标/);
+    assert.match(entry.message, /实时回放仍会点窗口内坐标/);
+  }
+  assert.equal(report.entries[2].status, 'resolved');
+  assert.equal(report.entries[2].code, undefined);
 
+  // The CLI keeps the same per-step report, and a blocked flow is not a pass:
+  // it exits non-zero and never calls the desktop driver.
   const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-point-dry-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const path = join(dir, 'flow.json');
   writeFileSync(path, JSON.stringify(flow));
-  const run = cli(['run', path, '--dry-run']);
+  const marker = join(dir, 'desktop-called');
+  const stub = join(dir, 'desktop');
+  writeFileSync(stub, `#!/usr/bin/env node
+require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'called');
+console.log(JSON.stringify({ version: '2.6', command: process.argv[2], ok: true, data: {} }));
+`, { mode: 0o700 });
+  const run = cli(['run', path, '--dry-run'], { CUEKEEPER_AGENT_DESKTOP: stub });
   assert.equal(run.code, 1);
-  assert.equal(run.error.code, 'UNSAFE_POINT');
-  assert.match(run.error.message, /click-1/);
+  assert.equal(run.data.status, 'blocked');
+  assert.deepEqual(run.data.entries.map(entry => [entry.id, entry.status, entry.code]),
+    [['click-1', 'blocked', 'UNSAFE_POINT'], ['click-2', 'blocked', 'UNSAFE_POINT'],
+      ['click-3', 'resolved', undefined]]);
+  assert.equal(existsSync(marker), false, 'a dry run never starts the desktop driver');
+
+  // Once every point becomes an element target the same flow passes.
+  const fixed = structuredClone(flow);
+  fixed.steps[0].target = { kind: 'element', role: 'row', name: 'a.txt' };
+  fixed.steps[1].target = { kind: 'element', role: 'row', name: 'b.txt' };
+  assert.equal(dryRunFlowV2(parseFlowV2(fixed)).status, 'passed');
 });
 
 test('v2 rejects missing scope, bound window keys, app paths, surfaces, IDs and references', () => {

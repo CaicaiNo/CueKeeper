@@ -317,7 +317,7 @@ flow 里写作 `{{url}}`。变量名以字母开头，只含字母、数字与�
 | `record --global [--max-seconds 600] [--out <flow.json>] [--exclude <bundle-ids>] [--no-lifecycle] [--no-input-values]` | 跨 App 全局录制，生成 v2 flow；开始前自动把中文输入法切到 ABC/U.S.、结束后恢复原输入源（工作台走同一条路径）；录制期间只读观察下载与安装，把生命周期事件写入 flow 同目录的 `lifecycle.json`（`--no-lifecycle` 关闭）；普通输入框的文字写入 `<flow>.values.json`（`0600`，`--no-input-values` 关闭） |
 | `pick --app <bundle-id> --window <精确标题> [--app-path <路径>] [--select <ref>] [--snapshot <snapshot.json>]` | 只读快照，按可交互元素优先列出候选，或输出可写入 flow 的定位器 |
 | `run <flow.json> --dry-run` | 用当前窗口解析定位器；纯 Shell 流程无需快照 |
-| `run <flow-v2.json> --dry-run [--report <report-v2.json>]` | 输出 v2 结构计划，按步骤 scope 标记 `resolved`；不启动、聚焦或输入 |
+| `run <flow-v2.json> --dry-run [--report <report-v2.json>]` | 输出 v2 结构计划：按步骤 scope 标记 `resolved`，坐标点击标 `blocked`/`UNSAFE_POINT` 并让整体为 `blocked`（退出码非 0）；不启动、聚焦或输入 |
 | `run <flow-v2.json> --foreground [--inputs <values.json> \| --no-stored-inputs] [--headed] [--report <report-v2.json>]` | 跨 App 实时回放：按 scope 启动/激活、绑定窗口、每步确认前台后投递并核对投递状态；没有 `--inputs` 时自动读取 flow 旁的 `<flow>.values.json`（`--no-stored-inputs` 关闭），显式 `--inputs` 永远优先 |
 参数值旁挂存储：全局录制把 `type` 步骤读到的非安全文字写进 flow 同目录的 `<flow>.values.json`（权限 `0600`，`*.values.json` 已在 `.gitignore` 里）。它不进 flow、修订、报告、日志与上传包；回放时自动预填，工作台可逐项修改或「清除已存值」，勾选「把这次填写的值存为默认」才写回。文件损坏只警告并按没有值处理，缺参数仍必填；`--no-input-values` / `--no-stored-inputs` 分别关闭录制写入与回放读取。参数改名后值不会自动跟着改，需要重填一次。详见[输入参数值](docs/input-values.md)。
 

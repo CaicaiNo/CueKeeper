@@ -67,6 +67,17 @@ const KIND_TONES = {
 };
 
 const STATUS_TONES = { resolved: 'info', passed: 'success', failed: 'error', blocked: 'warning', skipped: 'ghost' };
+// A recorded screen point is a legal step, but a dry run can only prove an
+// element target. The timeline marks it yellow before the run, so the operator
+// sees which steps to fix without running anything.
+const POINT_CONFIRM_TITLE = '屏幕坐标目标：dry-run 需先改成元素目标；实时回放仍会点窗口内坐标';
+const pointConfirmChip = step => step?.kind === 'click' && step.target?.kind === 'point'
+  ? el('span', {
+    className: 'point-confirm badge badge-soft badge-sm badge-warning',
+    title: POINT_CONFIRM_TITLE,
+    'aria-label': '需确认：坐标目标',
+  }, '需确认')
+  : undefined;
 // A timeline status is one 16px icon in a fixed 28px column at the right edge of
 // the row: the Chinese word lives in aria-label/title, so the badge never eats
 // width from the action name. Each status keeps its own glyph, so the row stays
@@ -201,9 +212,9 @@ function resumeLabel(check) {
   return `${targetLabel(check.target)} · ${check.expect?.property} = ${short(String(check.expect?.equals ?? ''))}`;
 }
 
-function actionLabel(action) {
+function actionLabel(action, { confirmPoint = true } = {}) {
   const target = actionTarget(action);
-  const label = target ? targetLabel(target) : '';
+  const label = target ? targetLabel(target, { confirmPoint }) : '';
   switch (action.kind) {
     case 'click':
       if (action.button === 'right') return `右键 ${label}`;
@@ -494,10 +505,29 @@ function renderTimeline() {
     }
     const ignored = state.ignored.has(row.id);
     const runEntry = state.session?.version === 2 ? v2Statuses.get(row.id) : undefined;
+    // A v2 timeline row is the recording's snapshot of the step. Once the flow
+    // is edited, the current step is the one the operator sees (and the one a
+    // rerun would use), so the row's action and 需确认 marker follow it. A row
+    // whose step was deleted keeps its snapshot only as history: it must not
+    // look like a current coordinate step awaiting confirmation.
+    const isV2 = state.session?.version === 2;
+    const current = isV2 ? v2Step(row.id) : undefined;
+    const action = current ?? row.action;
+    const history = isV2 && !current;
+    const scope = action.scope ?? row.scope;
+    const confirmChip = isV2
+      ? (current ? pointConfirmChip(current) : undefined)
+      : pointConfirmChip(row.action);
+    const historyChip = history
+      ? el('span', {
+        className: 'state-chip badge badge-soft badge-sm badge-ghost deleted',
+        title: '该步骤已从当前工作流删除；这里显示的是录制快照',
+      }, '历史')
+      : undefined;
     const selector = el('input', {
       id: `select-${row.id}`, type: 'checkbox', className: 'checkbox checkbox-sm',
       checked: state.selected.has(row.id), disabled: ignored,
-      'aria-label': `选择 ${row.action.kind} ${row.id}`,
+      'aria-label': `选择 ${action.kind} ${row.id}`,
       onchange: event => {
         if (event.target.checked) state.selected.add(row.id);
         else state.selected.delete(row.id);
@@ -516,9 +546,10 @@ function renderTimeline() {
     el('span', { className: 'time' },
       el('span', { className: 'time-value', title: gapTitle(timing.get(row.id)) }, timestamp(row.atMs)),
       el('span', { className: 'step-id', title: `步骤 ${row.id}` }, row.id)),
-    kindChip(row.action),
-    el('span', { className: 'row-description' }, el('strong', {}, actionLabel(row.action)),
-      el('small', {}, `${row.scope ? scopeText(row.scope) : `${appLabel(row.app)} · ${row.window}`}${ignored ? ' · 已忽略' : ''}`)),
+    kindChip(action),
+    el('span', { className: 'row-description' }, el('strong', {}, actionLabel(action, { confirmPoint: !history })),
+      el('small', {}, `${scope ? scopeText(scope) : `${appLabel(row.app)} · ${row.window}`}${ignored ? ' · 已忽略' : ''}`,
+        historyChip, confirmChip)),
     el('span', { className: 'time row-duration', title: '动作耗时' }, duration(row.durationMs)),
     statusCell(runEntry));
     const thumbnail = row.thumbnail && el('details', {
@@ -696,53 +727,64 @@ function renderInspector() {
   }
   const ignored = state.ignored.has(row.id);
   const editable = !ignored && isCompatible(row);
-  const target = actionTarget(row.action);
+  // The action timeline keeps every recorded row, but a v2 step may have been
+  // edited or deleted since. Read the current flow step here too, so the detail
+  // panel names the same target as the row; a deleted step stays visible as the
+  // recording snapshot and must not keep a live 需确认 marker.
+  const isV2 = state.session?.version === 2;
+  const current = isV2 ? v2Step(row.id) : undefined;
+  const action = current ?? row.action;
+  const history = isV2 && !current;
+  const scope = action.scope ?? row.scope;
+  const target = actionTarget(action);
   const recordedAt = stepTiming(getRows()).get(row.id);
   panel.replaceChildren(el('div', { className: 'stack-list' },
     el('h3', { className: 'inspector-heading' },
-      el('span', { className: 'step-id badge badge-ghost badge-sm', title: '步骤 id' }, row.id), actionLabel(row.action)),
+      el('span', { className: 'step-id badge badge-ghost badge-sm', title: '步骤 id' }, row.id),
+      actionLabel(action, { confirmPoint: !history })),
     infoList([
-      ['动作', KIND_LABELS[actionKind(row.action)] ?? row.action.kind],
-      ...(row.action.kind === 'scroll' ? [['滚动', scrollLabel(row.action)]] : []),
-      ...(row.action.kind === 'drag'
-        ? [['起点', targetLabel(row.action.from)], ['终点', targetLabel(row.action.to)],
-          ['时长', `${row.action.durationMs} ms`]]
+      ['动作', KIND_LABELS[actionKind(action)] ?? action.kind],
+      ...(action.kind === 'scroll' ? [['滚动', scrollLabel(action)]] : []),
+      ...(action.kind === 'drag'
+        ? [['起点', targetLabel(action.from)], ['终点', targetLabel(action.to)],
+          ['时长', `${action.durationMs} ms`]]
         : []),
-      ...(row.action.kind === 'hover' ? [['停留', `${row.action.durationMs} ms`]] : []),
-      ...(row.action.kind === 'hover' && row.scope?.kind === 'screen' ? [
-        ['坐标', `(${row.action.point.join(', ')})`],
-        ...(row.action.hint ? [['录制时目标', hoverHintLabel(row.action.hint)]] : []),
+      ...(action.kind === 'hover' ? [['停留', `${action.durationMs} ms`]] : []),
+      ...(action.kind === 'hover' && scope?.kind === 'screen' ? [
+        ['坐标', `(${action.point.join(', ')})`],
+        ...(action.hint ? [['录制时目标', hoverHintLabel(action.hint)]] : []),
       ] : []),
-      ...(row.action.kind === 'paste'
-        ? [typeof row.action.text === 'string'
-          ? ['文本', `${row.action.text.length} 字（内容不写入报告）`]
-          : ['粘贴来源', row.action.source.kind === 'copy'
-            ? `复制 · ${row.action.source.stepId}` : `参数 · ${row.action.source.input}`]]
+      ...(action.kind === 'paste'
+        ? [typeof action.text === 'string'
+          ? ['文本', `${action.text.length} 字（内容不写入报告）`]
+          : ['粘贴来源', action.source.kind === 'copy'
+            ? `复制 · ${action.source.stepId}` : `参数 · ${action.source.input}`]]
         : []),
-      ...(row.scope ? [['作用域', scopeText(row.scope)]] : []),
-      ...(row.scope ? [] : [['应用', appLabel(row.app)], ['窗口', row.window]]),
-      ...(row.action.kind === 'manual_checkpoint' ? [
-        ['触发步骤', row.action.triggerStepId],
-        ['恢复条件', resumeLabel(row.action.resume?.check)],
-        ['等待上限', duration(row.action.timeoutMs)],
+      ...(scope ? [['作用域', scopeText(scope)]] : []),
+      ...(scope ? [] : [['应用', appLabel(row.app)], ['窗口', row.window]]),
+      ...(action.kind === 'manual_checkpoint' ? [
+        ['触发步骤', action.triggerStepId],
+        ['恢复条件', resumeLabel(action.resume?.check)],
+        ['等待上限', duration(action.timeoutMs)],
       ] : []),
       ...(target ? [['定位器', locatorDetail(target)]] : []),
       ['时间', timestamp(row.atMs)],
       ...(recordedAt ? [['距上一步', gapLabel(recordedAt)]] : []),
       ['耗时', duration(row.durationMs)],
     ], 'meta-grid'),
+    history ? muted('该步骤已从当前工作流删除；这里显示的是录制快照，仅供复盘。') : undefined,
     isCompatible(row) ? undefined : muted('该动作属于另一窗口，只能在时间线复盘。'),
-    row.action.kind === 'manual_checkpoint'
-      ? muted(row.action.reason === 'system_dialog'
+    action.kind === 'manual_checkpoint'
+      ? muted(action.reason === 'system_dialog'
         ? '回放时先检测系统弹框。请在桌面上处理弹框，再回到运行终端输入 continue。'
         : '回放时请在目标界面由操作者完成授权或输入密码，随后在运行终端输入 continue 独立确认；' +
           'CueKeeper 不读取密码，超时或取消即停在这里，后续步骤不执行。')
       : undefined,
     el('div', { className: 'actions' },
-      button('加入测试项', () => addAction(row.action), { icon: 'listPlus', disabled: !editable }),
+      button('加入测试项', () => addAction(action), { icon: 'listPlus', disabled: !editable }),
       button('添加断言', () => assertionDialog(row), { icon: 'checkCircle', disabled: !editable }),
-      button('重新拾取', () => row.action.kind === 'drag' ? dragDialog(row) : locatorDialog(row), {
-        icon: 'crosshair', disabled: !editable || row.action.kind === 'key' || row.action.kind === 'shell',
+      button('重新拾取', () => action.kind === 'drag' ? dragDialog(row) : locatorDialog(row), {
+        icon: 'crosshair', disabled: !editable || action.kind === 'key' || action.kind === 'shell',
       }),
       button(ignored ? '恢复动作' : '忽略动作', () => {
         if (ignored) state.ignored.delete(row.id);
@@ -804,6 +846,16 @@ const v2Steps = () => v2Flow()?.steps ?? [];
 const v2Step = stepId => v2Steps().find(step => step.id === stepId);
 const v2ScopeText = scope => scopeDescription(scope, appLabel);
 
+// A dry-run result describes the flow it ran on. Once an edit changes that
+// flow, its per-step marks and the status line stop being true: the report is
+// dropped and the old "N 步需确认" notice is replaced, so the page never shows
+// a stale conclusion about a flow the operator already fixed.
+function retireDryRunReport() {
+  const retired = state.v2Report?.mode === 'dry-run';
+  state.v2Report = null;
+  if (retired) status('工作流已修改，上次 dry-run 结果已失效，请重新运行');
+}
+
 window.addEventListener('beforeunload', event => {
   if (!state.v2?.dirty) return;
   event.preventDefault();
@@ -819,8 +871,8 @@ async function v2Call(route, payload = {}) {
     if (result?.v2) state.v2 = result.v2;
     else if (result?.flow) {
       state.v2 = result;
-      // A new edit invalidates the last run's per-step marks.
-      state.v2Report = null;
+      // A new edit invalidates the last run's per-step marks and notice.
+      retireDryRunReport();
     }
     const editedFlow = result?.v2?.flow ?? result?.flow;
     if (editedFlow && state.templateMode) {
@@ -838,6 +890,9 @@ async function v2Call(route, payload = {}) {
     state.v2Busy = false;
     renderV2();
     renderTimeline();
+    // The action inspector reads the current v2 step too. An already-open
+    // detail must follow an edit or delete instead of waiting for another click.
+    renderInspector();
   }
 }
 
@@ -849,6 +904,7 @@ async function v2Save() {
     state.v2 = result.v2;
     renderV2();
     renderTimeline();
+    renderInspector();
     status(`已保存工作流 · ${result.output}`, 'success');
   } catch (error) {
     status(error.message, 'error');
@@ -862,9 +918,10 @@ async function v2Undo() {
   });
   if (result?.flow) {
     state.v2 = result;
-    state.v2Report = null;
+    retireDryRunReport();
     renderV2();
     renderTimeline();
+    renderInspector();
   }
 }
 
@@ -875,9 +932,10 @@ async function v2Redo() {
   });
   if (result?.flow) {
     state.v2 = result;
-    state.v2Report = null;
+    retireDryRunReport();
     renderV2();
     renderTimeline();
+    renderInspector();
   }
 }
 
@@ -1245,7 +1303,8 @@ function renderV2() {
     el('div', { className: 'v2-copy' },
       el('strong', {}, v2StepLabel(step, appLabel)),
       el('small', { className: 'muted' },
-        `${step.kind === 'gap' ? gapReason(step.code) : v2ScopeText(step.scope)}`)),
+        `${step.kind === 'gap' ? gapReason(step.code) : v2ScopeText(step.scope)}`,
+        pointConfirmChip(step))),
     statusCell(entry, stateCheckLabel(entry?.stateCheck)),
     rowActions(step));
   });
@@ -1328,8 +1387,12 @@ function v2DryRun() {
     renderV2();
     renderTimeline();
     const failed = report.entries.filter(entry => entry.status !== 'resolved');
+    const blocked = report.entries.filter(entry => entry.status === 'blocked');
     status(`dry-run ${resultStatus[report.status] ?? report.status} · ${report.entries.length} 步` +
-      (failed.length ? ` · ${failed.length} 步异常` : ''), report.status === 'passed' ? 'success' : 'error');
+      (blocked.length ? ` · ${blocked.length} 步需确认` : failed.length ? ` · ${failed.length} 步异常` : ''),
+    // Only a v2 dry run treats blocked as a confirmation step; every other run
+    // keeps its original success / error tone.
+    report.status === 'passed' ? 'success' : report.status === 'blocked' ? 'warning' : 'error');
   }).catch(() => {});
 }
 
@@ -2285,7 +2348,7 @@ function v2GapDialog(step) {
       };
     const result = await api('v2/replace', { session: state.session.id, id: step.id, step: next });
     state.v2 = result;
-    state.v2Report = null;
+    retireDryRunReport();
     renderV2();
     renderTimeline();
     status('缺口已转换，仍需复核并保存。', 'success');

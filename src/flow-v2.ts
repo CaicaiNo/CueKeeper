@@ -371,7 +371,8 @@ export function planFlowV2(flow: FlowV2): PlannedStepV2[] {
 /**
  * Steps that a replay could only deliver as a raw screen point. A point is a
  * last-resort target: nothing in the flow proves it still lands on the same
- * control, so a dry run refuses it until the operator turns it into an element.
+ * control, so a dry run reports it as blocked until the operator turns it into
+ * an element. Only clicks can carry one: a scroll target is always an element.
  */
 export function pointTargetSteps(flow: FlowV2): StepV2[] {
   return flow.steps.filter(step => step.kind === 'click' && step.target.kind === 'point');
@@ -392,17 +393,31 @@ export function screenHoverSteps(flow: FlowV2): StepV2[] {
  * `resolved` and performs no launch, focus, clipboard or input operation. A
  * scope is only proven against a live window by the cross-app runner; until
  * then the report says exactly what the flow would bind, not that the window
- * exists. A step that would be replayed at a recorded point is refused, because
- * no scope can prove that point still names the same control.
+ * exists. A step that would be replayed at a recorded point is the one
+ * exception: no scope can prove that point still names the same control, so its
+ * entry is `blocked` / `UNSAFE_POINT` and the overall report is `blocked`
+ * while every other step still reports its own state. The flow as a whole is
+ * not thrown away, and no desktop call is made for the blocked steps.
  */
 export function dryRunFlowV2(flow: FlowV2): ReportV2 {
-  const points = pointTargetSteps(flow);
-  if (points.length) {
-    throw new Fault('UNSAFE_POINT',
-      `Flow ${flow.id} keeps ${points.map(step => step.id).join(', ')} at a recorded screen point; ` +
-      'turn each into an element target before a dry run can pass');
-  }
   const entries: ReportV2Entry[] = flow.steps.map(step => {
+    // A recorded point click keeps working in a live replay (it clicks inside
+    // the bound window), but a dry run cannot prove it: the step needs an
+    // element target before the flow can pass. Mark only this step, so the
+    // operator sees both the steps that are ready and the ones to fix.
+    if (step.kind === 'click' && step.target.kind === 'point') {
+      return {
+        id: step.id,
+        kind: step.kind,
+        scope: step.scope,
+        status: 'blocked',
+        atMs: 0,
+        durationMs: 0,
+        code: 'UNSAFE_POINT',
+        message: `坐标 (${step.target.point.join(',')}) 需改成元素目标才能通过 dry-run；` +
+          '实时回放仍会点窗口内坐标',
+      };
+    }
     // A coordinate hover is passive: nothing is pressed, nothing takes focus,
     // and the pointer stops where the recording left it. It cannot prove that
     // point still names the same control, so the entry says exactly that.
@@ -438,7 +453,7 @@ export function dryRunFlowV2(flow: FlowV2): ReportV2 {
     flowSha256: hashFlowV2(flow),
     startedAt: new Date().toISOString(),
     mode: 'dry-run',
-    status: 'passed',
+    status: entries.some(entry => entry.status === 'blocked') ? 'blocked' : 'passed',
     entries,
   };
 }
