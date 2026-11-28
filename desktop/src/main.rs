@@ -4,6 +4,7 @@ mod paths;
 mod permissions;
 mod server;
 
+use std::io::Write;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -31,7 +32,7 @@ fn main() {
             app.manage(AppState {
                 server: Mutex::new(None),
                 url: Mutex::new(None),
-                log_dir,
+                log_dir: log_dir.clone(),
             });
 
             install_menu(app)?;
@@ -53,15 +54,20 @@ fn main() {
             let handle = app.handle().clone();
             std::thread::spawn(move || start_workbench(handle));
 
-            // Give the workbench time to paint before the system permission
-            // dialogs take focus. The calls are no-ops once both grants exist.
-            std::thread::spawn(|| {
-                std::thread::sleep(Duration::from_millis(1600));
-                let (accessibility, input_monitoring) = permissions::request();
-                eprintln!(
-                    "CueKeeper permissions: accessibility={accessibility} input_monitoring={input_monitoring}"
-                );
-            });
+            // Ask once per app install, not on every launch. A missed prompt
+            // leaves the guide and the menu as the explicit way back in.
+            let config_dir = app.path().app_config_dir().unwrap_or_else(|_| log_dir.clone());
+            let _ = std::fs::create_dir_all(&config_dir);
+            let prompt_marker = config_dir.join("permission-requested");
+            if !prompt_marker.exists() {
+                let _ = std::fs::write(&prompt_marker, b"1");
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(1600));
+                    let (accessibility, input_monitoring) = permissions::request();
+                    log_permissions(&handle, accessibility, input_monitoring);
+                });
+            }
 
             Ok(())
         })
@@ -140,11 +146,10 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
 fn menu_event(app: &tauri::AppHandle, id: &str) {
     match id {
         "request_permissions" => {
-            std::thread::spawn(|| {
+            let handle = app.clone();
+            std::thread::spawn(move || {
                 let (accessibility, input_monitoring) = permissions::request();
-                eprintln!(
-                    "CueKeeper permissions: accessibility={accessibility} input_monitoring={input_monitoring}"
-                );
+                log_permissions(&handle, accessibility, input_monitoring);
                 // The prompt is the primary action. If macOS kept the old
                 // denial, leave the operator in the matching pane.
                 if !accessibility {
@@ -198,6 +203,18 @@ fn start_workbench(handle: tauri::AppHandle) {
         Err(error) => {
             let main = handle.clone();
             let _ = handle.run_on_main_thread(move || show_error(&main, &error));
+        }
+    }
+}
+
+fn log_permissions(app: &tauri::AppHandle, accessibility: bool, input_monitoring: bool) {
+    if let Some(state) = app.try_state::<AppState>() {
+        let path = state.log_dir.join("app.log");
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(
+                file,
+                "permissions accessibility={accessibility} input_monitoring={input_monitoring}"
+            );
         }
     }
 }

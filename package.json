@@ -28,7 +28,8 @@
     "quickstart": "sh scripts/quickstart.sh",
     "app:check": "sh -c 'PATH=\"$HOME/.cargo/bin:$PATH\" cargo check --manifest-path desktop/Cargo.toml'",
     "app:build": "sh -c 'PATH=\"$HOME/.cargo/bin:$PATH\" cargo build --release --manifest-path desktop/Cargo.toml'",
-    "app:package": "node scripts/package-app.mjs"
+    "app:package": "node scripts/package-app.mjs",
+    "app:icon": "sh scripts/make-icon.sh"
   },
   "dependencies": {
     "@sinclair/typebox": "0.34.41",

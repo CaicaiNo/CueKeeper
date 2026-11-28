@@ -37,7 +37,7 @@ export function createGuide({ dialog, dom, onStart }) {
     if (health.ok === true) {
       healthBox.append(
         el('div', { className: 'guide-state ok' }, '环境就绪'),
-        targetRow());
+        ...targetRows());
       start.disabled = false;
       return;
     }
@@ -52,8 +52,8 @@ export function createGuide({ dialog, dom, onStart }) {
         check.id === 'accessibility' || check.id === 'input-monitoring'
           ? button('设置', () => void openSettings(check.id), { style: 'small' })
           : undefined))),
-      health.appPath ? muted('首次启动时系统会请求权限；在设置里勾选 CueKeeper。') : undefined,
-      targetRow());
+      health.appPath ? muted('优先勾选 CueKeeper；若系统列出录制器，用下面一行添加。') : undefined,
+      ...targetRows());
     start.disabled = true;
   }
 
@@ -113,11 +113,15 @@ export function createGuide({ dialog, dom, onStart }) {
       button('显示', () => void reveal(), { style: 'small', icon: 'folder', iconOnly: true, title: revealTitle }));
   }
 
-  function targetRow() {
+  function targetRows() {
+    const rows = [];
     if (health?.appPath) {
-      return pathRow('应用', health.appPath, revealApp, '在 Finder 中显示 CueKeeper');
+      rows.push(pathRow('应用', health.appPath, revealApp, '在 Finder 中显示 CueKeeper'));
     }
-    return pathRow('录制器', health?.recorderPath, revealRecorder, '在 Finder 中显示录制器');
+    if (health?.recorderPath) {
+      rows.push(pathRow('录制器', health.recorderPath, revealRecorder, '在 Finder 中显示录制器'));
+    }
+    return rows;
   }
 
   async function check() {

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::{create_dir_all, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -18,6 +19,37 @@ pub struct Workbench {
     child: Child,
     #[cfg(unix)]
     process_group: i32,
+}
+
+fn prepare_environment(command: &mut Command, app_paths: &paths::Paths) {
+    let mut directories: Vec<PathBuf> = Vec::new();
+    if let Some(runtime) = app_paths.node.parent() {
+        directories.push(runtime.to_path_buf());
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        for relative in [".local/bin", "bin", ".cargo/bin"] {
+            directories.push(home.join(relative));
+        }
+    }
+    directories.push(PathBuf::from("/opt/homebrew/bin"));
+    directories.push(PathBuf::from("/usr/local/bin"));
+    if let Some(path) = std::env::var_os("PATH") {
+        directories.extend(std::env::split_paths(&path));
+    }
+
+    let mut seen = HashSet::new();
+    directories.retain(|directory| seen.insert(directory.clone()));
+    if let Ok(path) = std::env::join_paths(&directories) {
+        command.env("PATH", path);
+    }
+    for directory in &directories {
+        let candidate = directory.join("agent-desktop");
+        if candidate.is_file() {
+            command.env("CUEKEEPER_AGENT_DESKTOP", candidate);
+            break;
+        }
+    }
 }
 
 /// The per-user log directory. Tauri gives the platform convention; the
@@ -72,6 +104,7 @@ pub fn start(app: &tauri::AppHandle) -> Result<Workbench, String> {
         // The guide uses this to name the app bundle that owns the TCC grant.
         command.env("CUEKEEPER_APP_PATH", bundle);
     }
+    prepare_environment(&mut command, &paths);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

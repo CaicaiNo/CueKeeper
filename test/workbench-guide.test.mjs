@@ -130,14 +130,16 @@ test('the guide names the app bundle as the permission target in app mode', asyn
   const dialog = document.getElementById('guide-dialog');
   assert.match(dialog.textContent, /授权应用/);
   assert.match(dialog.textContent, /CueKeeper\.app/);
+  assert.match(dialog.textContent, /cuekeeper-capture/,
+    'the guide keeps the helper visible when macOS needs it');
   assert.match(dialog.textContent, new RegExp(appPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-  assert.doesNotMatch(dialog.textContent, /cuekeeper-capture/,
-    'app mode names the app instead of the helper binary');
 
   buttonByText(dialog, '在 Finder 中显示 CueKeeper').click();
   await sleep(50);
   assert.deepEqual(revealAppCalls, [true], 'the guide reveals the app bundle');
-  assert.deepEqual(revealCalls, [], 'app mode does not reveal the helper binary');
+  buttonByText(dialog, '在 Finder 中显示录制器').click();
+  await sleep(50);
+  assert.deepEqual(revealCalls, [true], 'the guide can reveal the helper binary too');
 });
 
 test('a blocked record button opens the guide instead of starting a recording', async t => {

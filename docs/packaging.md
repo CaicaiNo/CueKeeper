@@ -162,8 +162,14 @@ npm run app:package
 - 引导：App 模式下的 `GET /api/record/health` 返回 `appPath`，工作台引导显示「应用」和 `CueKeeper.app`，不再让用户去 Finder 找裸二进制。
 - 生命周期：退出 App 时向 Node 进程组发 `SIGTERM`，让正在录制的 helper 有机会收尾。
 - 日志：`~/Library/Logs/com.cuekeeper.app/workbench.log`；菜单「视图 → 打开日志目录」。
+- 权限请求只会在每次安装后的首次启动自动发起一次；之后用引导或菜单「请求录制权限」，不会每次启动都弹。
+- 引导同时列出 CueKeeper 和内置录制器；如果 macOS 只在辅助功能里列出录制器，用该行的「显示」直接定位 `cuekeeper-capture` 再添加。
+- App 启动 Node 前会把 `~/.local/bin`、`/opt/homebrew/bin`、`/usr/local/bin` 和内置 Node 运行时加入 PATH，并设置 `CUEKEEPER_AGENT_DESKTOP`；因此 LaunchServices 的极简 PATH 不会再导致 agent-desktop 缺失。
+- App 自己的权限探测结果追加写入 `~/Library/Logs/com.cuekeeper.app/app.log`；工作台健康检查仍以录制器为准。
 
 构建要求：Rust 1.77+（`cargo` 在 PATH 或在 `~/.cargo/bin`）、macOS、Node 22+。参数与目录包类似：`--skip-build`、`--skip-recorder`、`--skip-rust`、`--no-sign`、`--no-zip`、`--out`、`--version`。
+
+图标按 Apple 的 1024 pt macOS 模板绘制：824 pt 圆角方、100 pt 透明边、185.4 pt 圆角，PNG 四周透明，不会出现白底。需要改图标时运行 `npm run app:icon`，它会调用 `desktop/icons/make-icon.swift` 并重新生成 `icon.png`/`icon.icns`。
 
 首次打开：ad-hoc 签名未公证；若 Gatekeeper 拦截，右键 → 打开。安装建议把 App 放到 `~/Applications` 或 `/Applications` 后再授权，移动 App 会被 macOS 视为新位置。
 
