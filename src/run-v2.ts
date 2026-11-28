@@ -813,9 +813,11 @@ class StepRunner {
     // taken inside this proof's budget and the step dispatches from it, so it is
     // not read again just to count a read.
     let proved: Snapshot | undefined;
+    let fallbackUsed = this.resolver.hasFallback(step.scope.windowKey);
     const fallbackProof = fallback === undefined ? undefined : async (candidate: WindowInfo) => {
       const snapshot = await fallback(candidate);
       proved = snapshot;
+      fallbackUsed = true;
       return snapshot;
     };
     /** Cancelled when the current phase ends; a read that starts after it is refused. */
@@ -941,6 +943,7 @@ class StepRunner {
                 ...(fallbackProof === undefined ? {} : { fallback: fallbackProof }),
               }),
               deadline, () => fail(problem, reads));
+            if (binding.fallback) fallbackUsed = true;
             // A choice that only landed after its deadline is refused here,
             // before the stability budget starts and before focus is asked for.
             live(problem);
@@ -998,12 +1001,15 @@ class StepRunner {
           const fault = toFault(error);
           // A fallback the proof refused is a decision, not a slow window: the
           // run stops at once instead of retrying until the readiness budget
-          // turns it into TARGET_NOT_READY. A candidate whose tree simply does
-          // not hold the target yet is the one exception: that is exactly what
-          // the readiness proof waits for, so it keeps retrying inside its
-          // budget and ends as TARGET_NOT_READY (a failed step, not a blocked
-          // window identity).
-          if (fault.reason?.startsWith('fallback_') && fault.reason !== 'fallback_target_absent') throw error;
+          // turns it into TARGET_NOT_READY. That includes a fallback candidate
+          // whose tree simply does not hold the target: the step already chose
+          // a window it could not prove, so a second read is another guess.
+          if (fault.reason?.startsWith('fallback_')) throw error;
+          // Once a fallback window was bound, a window that closes or moves is
+          // the fallback's own terminal condition, not a transient read failure.
+          // Keep WINDOW_CHANGED instead of retrying until it becomes
+          // TARGET_NOT_READY.
+          if (fallbackUsed && fault.code === 'WINDOW_CHANGED') throw error;
           // The cancellation that ended the proof says nothing about the target;
           // the last read's own state is the message the operator needs.
           if (fault.code === 'TARGET_NOT_READY' && cancel.signal.aborted) throw fail(problem, reads);
@@ -1682,7 +1688,6 @@ class StepRunner {
         `This step has no element target that could prove the app's other window holds it (${describeTargetOf(step)})`,
         false, 'fallback_unprovable_step');
     }
-    const locators = windowFallbackLocators(step);
     const identity = this.resolver.identity(app);
     await identity.verifyOwnedWindow(candidate.id);
     const snapshot = await this.desktop.snapshotWindow(candidate.id);
@@ -1690,6 +1695,30 @@ class StepRunner {
       throw new Fault('WINDOW_CHANGED', 'The driver read a different window than the fallback candidate');
     }
     await identity.verifyOwnedWindow(candidate.id);
+    // Prove the control the step would really press, not just the recorded
+    // locator: a right click can resolve through the previous click or the
+    // selected row, and a fallback may only dispatch a target it has proven.
+    let locators: ElementLocator[];
+    if (step.kind === 'click') {
+      try {
+        locators = [this.clickTargetOf(step, snapshot).locator];
+      } catch (error) {
+        const fault = toFault(error);
+        if (fault.code === 'AMBIGUOUS') {
+          throw new Fault('AMBIGUOUS_TARGET',
+            `The fallback window "${candidate.title}" matches ${describeTargetOf(step)} more than once; ` +
+            'the run does not guess which one the recording meant', false, 'fallback_target_ambiguous');
+        }
+        if (fault.code === 'NOT_FOUND') {
+          throw new Fault('WINDOW_NOT_FOUND',
+            `its window "${candidate.title}" does not hold ${describeTargetOf(step)}`,
+            false, 'fallback_target_absent');
+        }
+        throw error;
+      }
+    } else {
+      locators = windowFallbackLocators(step);
+    }
     for (const locator of locators) {
       let node: Node;
       try {

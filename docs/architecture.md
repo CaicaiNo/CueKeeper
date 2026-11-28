@@ -54,11 +54,11 @@ flowchart LR
 v2 flow 的 `window` scope 用 `windowKey + windowTitle` 绑定：第一次绑定按记录标题在该 App 的绑定进程（同 pid、同进程代次）里找窗口，之后整次运行都跟着窗口号走，同名新窗口不能接管已有 key。
 
 - **常规绑定**：标题精确匹配一扇窗口即绑定；多扇同名窗口由该步自己的目标唯一证明（`pickSameTitled`），否则 `AMBIGUOUS_TARGET`。
-- **窗口回退**：记录标题在该进程里一扇窗口都不匹配时，只对 `click` / `scroll` / `type` / `paste` / `drag` 且带可寻址元素目标的步骤尝试一次回退。三层候选按顺序取第一层成立的：① App 只剩一扇窗口（`only_window`，沿用旧行为）；② 非最小化且 `isFocused` 的窗口恰好一扇（`focused`）；③ 非最小化窗口恰好一扇（`sole_normal`）。无候选或多候选不回退。
-- **唯一性证明**：新候选层必须先由该步自己的规则在候选窗口的一棵树里证明目标——元素目标唯一命中，`drag` 两端都唯一；命中 secure → `UNSAFE_TARGET`；0 命中 → `WINDOW_NOT_FOUND`（`fallback_target_absent`）；多命中 → `AMBIGUOUS_TARGET`（`fallback_target_ambiguous`）；坐标目标 → `fallback_point_target`；无元素目标（`key` 等）→ `fallback_unprovable_step`。证明读取的这棵树直接用于该步派发，不再整树重读；证明之后照常 `confirmForeground`，候选本来就是前台时不会发 `focus-window`。
+- **窗口回退**：记录标题在该进程里一扇窗口都不匹配时，只对 `click` / `scroll` / `type` / `paste` / `drag` 且带可寻址元素目标的步骤尝试一次回退。三层候选按顺序取第一层成立的：① App 只剩一扇窗口（`only_window`）；② 非最小化且 `isFocused` 的窗口恰好一扇（`focused`）；③ 非最小化窗口恰好一扇（`sole_normal`）。三层都必须先证明该步目标；无候选、多候选或步骤没有可证明的元素目标（坐标点击、`key` 等）都不回退，也不聚焦。
+- **唯一性证明**：三层候选都必须先由该步自己的规则在候选窗口的一棵树里证明目标——元素目标唯一命中，`drag` 两端都唯一；右键点击证明它实际会按下的目标（选中的行或上一次点击），不只看记录 locator；命中 secure → `UNSAFE_TARGET`；0 命中 → `WINDOW_NOT_FOUND`（`fallback_target_absent`）；多命中 → `AMBIGUOUS_TARGET`（`fallback_target_ambiguous`）；坐标目标 → `fallback_point_target`；无元素目标（`key` 等）→ `fallback_unprovable_step`。证明读取的这棵树直接用于该步派发，不再整树重读；证明之后照常 `confirmForeground`，候选本来就是前台时不会发 `focus-window`。`fallback_target_absent` 是决策而不是慢窗口：在就绪屏障内也立即停止，不再重读成 `TARGET_NOT_READY`；已回退绑定再消失时保留 `WINDOW_CHANGED`。
 - **一次性**：回退只改运行时绑定，不写 flow、不改 hash。同一 `windowKey` 一次运行只回退一次；回退绑定上的窗口再消失时直接 `WINDOW_CHANGED`，不再按标题或单窗口重绑。
 - **报告**：每个在回退窗口里执行的条目带 `windowFallback: { reason, recordedTitle, actualTitle, actualWindowId }`，状态仍是通过；说明文字只在该 key 的第一条 `message` 出现。`WINDOW_NOT_FOUND` 保留既有 `No window titled ... (its windows: ...)` 前缀，后面追加没有回退的原因。
-- **dry-run / 工作台**：dry-run 不打开窗口、不触发回退，只按 `windowFallbackSteps(flow)` 汇总一行提示；工作台结果里带回退的条目显示黄色「窗口回退」标记与「记录窗口 → 实际窗口」tooltip，状态不变。
+- **dry-run / 工作台**：dry-run 不打开窗口、不触发回退，只按 `windowFallbackSteps(flow)` 汇总一行提示；菜单项走菜单表面路径，不计入窗口回退；工作台结果里带回退的条目显示黄色「窗口回退」标记与「记录窗口 → 实际窗口」tooltip，状态不变。
 
 ## 里程碑
 

@@ -453,6 +453,7 @@ test('a window fallback is counted for element input steps and announced by the 
       },
       { id: 'key-escape', kind: 'key', scope, key: 'escape' },
       { id: 'hover-screen', kind: 'hover', scope: { kind: 'screen' }, point: [10, 20], durationMs: 0 },
+      { id: 'click-menu', kind: 'click', scope, target: { kind: 'element', role: 'menuitem', name: 'Rename' } },
       {
         id: 'click-nameless', kind: 'click', scope,
         target: { kind: 'element', role: 'group', name: '' },
@@ -464,6 +465,7 @@ test('a window fallback is counted for element input steps and announced by the 
   // fallback window, so they are not counted.
   assert.deepEqual(windowFallbackSteps(parsed).map(step => step.id), ['click-save', 'type-body', 'drag-row']);
   assert.equal(stepSupportsWindowFallback(parsed.steps[5]), false);
+  assert.equal(stepSupportsWindowFallback(parsed.steps[6]), false, 'a menu item goes through the menu surface');
   // The workbench page computes its dry-run hint from the same rule.
   assert.equal(windowFallbackCount(parsed), 3);
 
@@ -473,7 +475,7 @@ test('a window fallback is counted for element input steps and announced by the 
   // status from the dry run.
   assert.equal(report.entries.some(entry => 'windowFallback' in entry), false);
   assert.deepEqual(report.entries.map(entry => entry.status),
-    ['resolved', 'resolved', 'resolved', 'resolved', 'resolved', 'resolved']);
+    ['resolved', 'resolved', 'resolved', 'resolved', 'resolved', 'resolved', 'resolved']);
 
   const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-window-fallback-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -493,7 +495,8 @@ test('a window fallback is counted for element input steps and announced by the 
   writeFileSync(pointedPath, JSON.stringify(pointed));
   const refused = cli(['run', pointedPath, '--dry-run']);
   assert.equal(refused.code, 1);
-  assert.equal(refused.error.code, 'UNSAFE_POINT');
+  assert.equal(refused.data.status, 'blocked');
+  assert.equal(refused.data.entries.find(entry => entry.id === 'click-point')?.code, 'UNSAFE_POINT');
 });
 
 test('v2 rejects missing scope, bound window keys, app paths, surfaces, IDs and references', () => {

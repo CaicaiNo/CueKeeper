@@ -101,6 +101,11 @@ export class ScopeResolver {
 
   get foreground(): string | undefined { return this.expectedForeground; }
 
+  /** Whether this key is already bound through a window fallback. */
+  hasFallback(windowKey: string): boolean {
+    return this.windows.get(windowKey)?.fallback !== undefined;
+  }
+
   identity(app: string): AppIdentitySession {
     return this.identityFor(app);
   }
@@ -250,10 +255,16 @@ export class ScopeResolver {
         }
       }
     }
-    // A new candidate layer is only a binding when the caller's own target
-    // proves it. The legacy single-window rebind keeps its old behaviour; a
-    // rejected proof leaves no binding and no focus behind.
-    if (fallback && fallbackReason !== undefined && fallbackReason !== 'only_window') {
+    // Every candidate layer — the only window, the focused window, the only
+    // non-minimized window — is only a binding when the caller's own target
+    // proves it. A step with no such proof (a coordinate click, a key) gets no
+    // binding and no focus; a rejected proof also leaves neither behind.
+    if (fallbackReason !== undefined) {
+      if (!fallback) {
+        throw new Fault('WINDOW_NOT_FOUND',
+          `${missing()}; continuing in another window needs a target the step can prove`,
+          false, 'fallback_unprovable_step');
+      }
       try {
         await fallback(chosen);
       } catch (error) {

@@ -413,6 +413,10 @@ export function stepSupportsWindowFallback(step: StepV2): boolean {
   if (step.kind === 'gap' || step.scope.kind !== 'window') return false;
   if (!windowFallbackKinds.has(step.kind)) return false;
   if (step.kind === 'click' && step.target.kind === 'point') return false;
+  // Context-menu items are pressed through the menu surface, not a window;
+  // counting them as window fallback candidates would promise a path the
+  // runner never takes.
+  if (step.kind === 'click' && step.target.kind === 'element' && step.target.role === 'menuitem') return false;
   const locators = windowFallbackLocators(step);
   return locators.length > 0 && locators.every(locator => isReAddressable(locator));
 }

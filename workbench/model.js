@@ -656,6 +656,8 @@ export function windowFallbackCount(flow) {
     if (!step || step.kind === 'gap' || step.scope?.kind !== 'window') return false;
     if (!['click', 'scroll', 'type', 'paste', 'drag'].includes(step.kind)) return false;
     if (step.kind === 'click' && step.target?.kind === 'point') return false;
+    // Menu items take the menu surface path, never a window fallback.
+    if (step.kind === 'click' && step.target?.role === 'menuitem') return false;
     const locators = step.kind === 'drag' ? [step.from, step.to]
       : [step.target];
     return locators.length > 0 && locators.every(addressable);

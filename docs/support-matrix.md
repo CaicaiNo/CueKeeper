@@ -124,11 +124,11 @@ Shell 的完整约束见 [Shell 步骤设计](shell-steps.md) 与 [Root 步骤�
 记录窗口按标题解析失败时，回放不会无条件改点该 App 的前台窗口，只在该步自己的目标能证明时一次性换绑：
 
 - **触发**：`window` scope 的首次绑定找不到记录标题，且步骤属于 `click` / `scroll` / `type` / `paste` / `drag` 并带可寻址元素目标。`point` 目标、`key` / `wait` / `assert` / `hover` / `focusAfter` / `manual_checkpoint` 不触发。
-- **三层候选**：① App 只剩一扇窗口（`only_window`，旧行为）；② 非最小化且前台 `isFocused` 的窗口恰好一扇（`focused`）；③ 非最小化窗口恰好一扇（`sole_normal`）。没有候选或多于一扇都停，不按标题相似度、不遍历窗口、不跨 App。
-- **唯一性证明**：候选窗口只读一次树（`snapshotWindow`），按该步自己的规则证明目标唯一；`drag` 两端都唯一。`secure` → `UNSAFE_TARGET`；0 命中 → `WINDOW_NOT_FOUND` / `fallback_target_absent`；多命中 → `AMBIGUOUS_TARGET` / `fallback_target_ambiguous`；坐标 → `fallback_point_target`；无可证元素目标 → `fallback_unprovable_step`。证明的树直接用于派发；`confirmForeground` 在证明之后，候选已是前台时不发 `focus-window`。
+- **三层候选**：① App 只剩一扇窗口（`only_window`）；② 非最小化且前台 `isFocused` 的窗口恰好一扇（`focused`）；③ 非最小化窗口恰好一扇（`sole_normal`）。三层都必须先证明该步目标；没有候选、多于一扇，或步骤没有可证明的元素目标（坐标点击、`key` 等）都停，不按标题相似度、不遍历窗口、不跨 App、不聚焦。
+- **唯一性证明**：候选窗口只读一次树（`snapshotWindow`），按该步自己的规则证明目标唯一；`drag` 两端都唯一，右键证明实际会按下的目标（选中的行或上一次点击）。`secure` → `UNSAFE_TARGET`；0 命中 → `WINDOW_NOT_FOUND` / `fallback_target_absent`；多命中 → `AMBIGUOUS_TARGET` / `fallback_target_ambiguous`；坐标 → `fallback_point_target`；无可证元素目标 → `fallback_unprovable_step`。`fallback_target_absent` 在就绪屏障内也立即停止，不重读成 `TARGET_NOT_READY`；已回退绑定消失保留 `WINDOW_CHANGED`。证明的树直接用于派发；`confirmForeground` 在证明之后，候选已是前台时不发 `focus-window`。
 - **一次性**：同一 `windowKey` 只回退一次；回退绑定再消失时 `WINDOW_CHANGED`，不再换第二次。flow、hash、版本号都不改。
 - **报告**：条目带 `windowFallback: { reason, recordedTitle, actualTitle, actualWindowId }`，状态仍是通过；说明文字只写在该 key 第一条。失败时保留 `No window titled ... (its windows: ...)` 前缀并追加未回退原因。
-- **dry-run / 工作台**：dry-run 零桌面调用，只提示「N 个窗口步骤在记录窗口不存在时会尝试退回该 App 的前台窗口（需目标唯一）」；坐标步骤仍按 `UNSAFE_POINT` 拒绝。工作台结果用黄色「窗口回退」标记 + `记录窗口 → 实际窗口` tooltip，不标失败。
+- **dry-run / 工作台**：dry-run 零桌面调用，只提示「N 个窗口步骤在记录窗口不存在时会尝试退回该 App 的前台窗口（需目标唯一）」；菜单项走菜单表面路径，不计入；坐标步骤仍按 `UNSAFE_POINT` 拒绝。工作台结果用黄色「窗口回退」标记 + `记录窗口 → 实际窗口` tooltip，不标失败。
 
 ## 拒绝码说明
 
