@@ -284,6 +284,10 @@ export async function startWorkbench(options: {
   record?: { cli?: string; recordings?: string; stopTimeoutMs?: number };
   /** Tests replace the read-only probe that gates the record button. */
   recordHealth?: () => Promise<RecordHealth>;
+  /** Tests replace the macOS Settings opener used by the first-run guide. */
+  openSettings?: (id: 'accessibility' | 'input-monitoring') => void;
+  /** Tests replace the Finder reveal for the recorder binary. */
+  revealRecorder?: () => void;
   /** Tests replace the sidecar reader a live run uses to prefill parameters. */
   resolveInputValues?: (flowPath: string, flowId: string) => Promise<InputValuesRead>;
   /** Tests replace the private directory a live run writes its inputs file to. */
@@ -317,6 +321,23 @@ export async function startWorkbench(options: {
   // Create the durable work root before the first recording, so a workbench
   // started from a shell whose TMPDIR is already gone still has somewhere to
   // put per-run desktop state.
+  const openSettings = options.openSettings ?? ((id: 'accessibility' | 'input-monitoring') => {
+    if (process.platform !== 'darwin') throw new Error('System Settings shortcuts are available on macOS only');
+    const pane = id === 'accessibility'
+      ? 'Privacy_Accessibility' : 'Privacy_ListenEvent';
+    // Fixed panes only: the page never chooses a URL or a command.
+    spawn('/usr/bin/open', [`x-apple.systempreferences:com.apple.preference.security?${pane}`], {
+      stdio: 'ignore', detached: true,
+    }).unref();
+  });
+  const revealRecorder = options.revealRecorder ?? (() => {
+    if (process.platform !== 'darwin') throw new Error('Finder reveal is available on macOS only');
+    const binary = process.env.CUEKEEPER_RECORDER?.trim()
+      || fileURLToPath(new URL('./cuekeeper-capture', import.meta.url));
+    // The path is resolved on the server; the page cannot ask Finder to reveal
+    // an arbitrary file.
+    spawn('/usr/bin/open', ['-R', binary], { stdio: 'ignore', detached: true }).unref();
+  });
   const workRoot = workdirRoot();
   const workdirFailure = await prepareWorkdir(workRoot);
   if (workdirFailure) {
@@ -621,6 +642,16 @@ export async function startWorkbench(options: {
       });
     }
     if (path === '/api/apps') return send(response, 200, { apps: await listApps() });
+    if (path === '/api/guide/open-settings') {
+      const id = data.id;
+      if (id !== 'accessibility' && id !== 'input-monitoring') throw new Error('Unknown settings pane');
+      openSettings(id);
+      return send(response, 200, { opened: true });
+    }
+    if (path === '/api/guide/reveal-recorder') {
+      revealRecorder();
+      return send(response, 200, { opened: true });
+    }
     if (path === '/api/record/start') return send(response, 200, await recorder.start(data));
     if (path === '/api/record/stop') {
       const result = await recorder.stop();

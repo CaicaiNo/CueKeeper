@@ -140,11 +140,15 @@ function renderTimer() {
 
 function render() {
   const blocked = state.health !== undefined && state.health.ok === false;
-  startButton.disabled = state.recording || state.busy || blocked;
+  // A blocked recorder is not a dead button: pressing it opens the guide that
+  // explains the missing permission instead of silently doing nothing.
+  startButton.disabled = state.recording || state.busy;
   // Until the recorder reports that capture began, pressing start again would
   // only be refused; say that it is still starting rather than "开始录制".
-  startButton.textContent = state.phase === 'preparing' || (state.busy && !state.recording)
-    ? '正在开始…' : '开始录制';
+  startButton.textContent = blocked
+    ? '查看录制引导'
+    : state.phase === 'preparing' || (state.busy && !state.recording)
+      ? '正在开始…' : '开始录制';
   stopButton.hidden = !state.recording;
   stopButton.disabled = state.busy;
   stopButton.textContent = state.busy && state.recording ? '正在保存…' : '停止录制';
@@ -167,12 +171,12 @@ function errorText(result) {
     (partialPath ? `（部分录制：${partialPath}）` : '');
 }
 
-/** Why the record button is off, plus the first doctor next step. */
+/** The one-line state; full details live in the button title and the guide. */
 function healthText(health) {
-  const first = Array.isArray(health.blocking) ? health.blocking[0] : undefined;
-  const steps = Array.isArray(health.nextSteps) ? health.nextSteps : [];
-  const detail = first ? `${first.label}：${first.detail}` : '录制环境未就绪';
-  return `录制不可用（${detail}）${steps.length ? `。${steps[0]}` : ''}`;
+  const checks = Array.isArray(health.blocking) ? health.blocking : [];
+  return checks.length
+    ? `录制环境未就绪：${checks.map(check => check.label).join(' / ')}`
+    : '录制环境未就绪';
 }
 
 /** Read-only probe: the recorder binary, its permissions, and agent-desktop. */
@@ -314,8 +318,19 @@ async function poll() {
   }
 }
 
+function openGuide() {
+  document.getElementById('guide-button')?.click();
+}
+
 async function begin() {
   if (state.busy || state.recording) return;
+  if (state.health?.ok === false) {
+    // The record button doubles as the entry point to the permission guide.
+    // The header opens the same guide; keep the click local to this page.
+    openGuide();
+    setMessage('录制环境未就绪，已打开使用引导', true);
+    return;
+  }
   state.busy = true;
   state.stopFailed = false;
   setMessage('');
@@ -328,7 +343,14 @@ async function begin() {
     adopt(status);
     // A recorder that fails during start-up answers with its own fault instead
     // of a running status; that reason must reach the page, not just the log.
-    if (status.error) setMessage(errorText(status), true);
+    if (status.error) {
+      setMessage(errorText(status), true);
+      // A permission preflight can change between the page probe and the click.
+      // Open the same guide instead of leaving the operator with a bare code.
+      if (/^(PERMISSIONS_REQUIRED|PERM_|PERMISSION_|ACCESSIBILITY_|INPUT_MONITORING_)/.test(status.error.code)) {
+        openGuide();
+      }
+    }
   } catch (error) {
     setMessage(error.message, true);
     state.busy = false;

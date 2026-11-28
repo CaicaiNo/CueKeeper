@@ -10,6 +10,7 @@ import {
 } from './model.js';
 import { createAppPicker } from './picker.js';
 import { createBatchView } from './batch.js';
+import { createGuide } from './guide.js';
 
 const $ = name => document.getElementById(name);
 const dialog = $('dialog');
@@ -3522,6 +3523,12 @@ $('privilege-button').onclick = () => shellDialog({ root: true });
 $('run-button').onclick = () => state.running ? stopRun() : runDialog();
 for (const tab of ['actions', 'library']) $(`${tab}-tab`).onclick = () => { state.tab = tab; renderInspector(); };
 
+const guide = createGuide({
+  dialog: $('guide-dialog'), dom,
+  onStart: () => $('record-start')?.click(),
+});
+$('guide-button').onclick = () => guide.open();
+
 try {
   const initial = await api('state');
   state.library = initial.library ?? { builtin: [], custom: [] };
@@ -3537,4 +3544,12 @@ try {
 } catch (error) {
   render();
   status(error.message, 'error');
+}
+
+// First visit: open the four-step guide once. A missing global (tests, embedded
+// pages) must not turn this into a blocking error.
+try {
+  if (!localStorage.getItem('cuekeeper.guide.v1')) guide.open();
+} catch {
+  // The header button still opens it.
 }

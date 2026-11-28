@@ -17,6 +17,7 @@ export const workbenchAssets: readonly WorkbenchAsset[] = [
   { path: '/model.js', file: 'model.js', type: 'text/javascript' },
   { path: '/picker.js', file: 'picker.js', type: 'text/javascript' },
   { path: '/record.js', file: 'record.js', type: 'text/javascript' },
+  { path: '/guide.js', file: 'guide.js', type: 'text/javascript' },
   { path: '/vendor/daisyui.css', file: 'vendor/daisyui.css', type: 'text/css' },
   { path: '/preview.html', file: 'preview.html', type: 'text/html' },
   { path: '/preview.css', file: 'preview.css', type: 'text/css' },
