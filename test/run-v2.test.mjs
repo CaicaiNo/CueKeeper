@@ -3622,3 +3622,96 @@ test('HAOC-227 review: a timeout message keeps every distinct position it read',
   assert.equal(new Set(positions).size, positions.length, 'every reported place is a different one');
   assert.deepEqual(callsOf(world, 'click'), []);
 });
+
+// HAOC-227 second review round (HAOC-230): the wording follows the reads that
+// were really adopted, so three reads are never called one; and a target
+// pressed through its parent row keeps both places, which a merged signature
+// used to drop from the message entirely.
+
+test('HAOC-227 review 2: three adopted reads are reported as three, with their states', async t => {
+  const { world, run } = harness(t);
+  const button = continueButtonOf(world);
+  const real = world.desktop.snapshotWindow.bind(world.desktop);
+  let reads = 0;
+  world.desktop.snapshotWindow = async id => {
+    if (id === 'w-21') {
+      reads += 1;
+      // Enabled, disabled, enabled again: the gate still has no agreeing pair,
+      // and the fourth read never answers.
+      if (reads === 2) button.states = ['disabled'];
+      if (reads === 3) button.states = [];
+      if (reads === 4) await new Promise(() => { /* a read that never answers */ });
+    }
+    return real(id);
+  };
+
+  const started = performance.now();
+  const report = await run(readinessFlow(pressContinue));
+  const elapsed = performance.now() - started;
+
+  assert.equal(report.status, 'failed');
+  const failed = entry(report, 'press');
+  assert.equal(failed.code, 'TARGET_NOT_READY');
+  assert.match(failed.message, /3 reads of the bound window/,
+    'the message counts the reads it actually adopted');
+  assert.match(failed.message, /still changing between reads/);
+  assert.doesNotMatch(failed.message, /no second read had completed/,
+    'three reads were made; the message must not claim only one completed');
+  for (const label of ['read 1:', 'read 2:', 'read 3:']) {
+    assert.ok(failed.message.includes(label), `the message names ${label.slice(0, -1)}`);
+  }
+  assert.match(failed.message, /read 2: button "Continue" at \d+,\d+ \d+×\d+ \(disabled\)/,
+    'the disabled read keeps its state');
+  assert.deepEqual(callsOf(world, 'click'), [], 'a target without an agreeing pair is never pressed');
+  assert.ok(elapsed >= 1300 && elapsed < 2700,
+    `the hanging fourth read ends the proof at its deadline (${Math.round(elapsed)} ms)`);
+});
+
+test('HAOC-227 review 2: a target pressed through its row keeps both places in the message', async t => {
+  const text = {
+    role: 'statictext', name: '文稿', ref_id: '@w99:e2',
+    bounds: { x: 120, y: 205, width: 100, height: 18 },
+  };
+  const row = {
+    role: 'treeitem', name: '文稿', ref_id: '@w99:e1', available_actions: ['Click'],
+    bounds: { x: 110, y: 200, width: 180, height: 24 },
+    children: [text],
+  };
+  const { world, run } = finderWorld(t, {
+    windows: [finderWindow('w-99', 'cuekeeper-demo', [{
+      role: 'outline', name: '文稿', ref_id: '@w99:e0',
+      bounds: { x: 105, y: 120, width: 220, height: 480 },
+      children: [row],
+    }])],
+  });
+  const rowBounds = { ...row.bounds };
+  const textBounds = { ...text.bounds };
+  // Both the recorded statictext and the row that really gets pressed move by
+  // one point on every read, so no two reads name the same place.
+  paintOnRead(world, (_window, index) => {
+    row.bounds = { ...rowBounds, x: rowBounds.x + index };
+    text.bounds = { ...textBounds, x: textBounds.x + index };
+  });
+
+  const report = await run(finderReadinessFlow({
+    id: 'sidebar', kind: 'click',
+    target: { kind: 'element', role: 'statictext', name: '文稿' },
+  }));
+
+  assert.equal(report.status, 'failed');
+  const failed = entry(report, 'sidebar');
+  assert.equal(failed.code, 'TARGET_NOT_READY');
+  const reads = Number(failed.message.match(/\((\d+) reads? of the bound window/)?.[1] ?? 0);
+  assert.ok(reads >= 2, `the proof read until its deadline (${reads})`);
+  for (let index = 1; index <= reads; index += 1) {
+    assert.ok(failed.message.includes(`read ${index}:`),
+      `read ${index} of ${reads} keeps an observation`);
+  }
+  assert.match(
+    failed.message,
+    /statictext "文稿" at \d+,\d+ \d+×\d+; pressed via treeitem "文稿" at \d+,\d+ \d+×\d+/,
+    'the target and the control that would be pressed are both reported');
+  assert.match(failed.message, /still changing between reads/);
+  assert.ok(!/…|more\)/.test(failed.message), 'no read is elided');
+  assert.deepEqual(callsOf(world, 'click'), [], 'zero input either way');
+});

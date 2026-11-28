@@ -346,16 +346,18 @@ function describeObservedWindow(snapshot: Snapshot): string {
 /** The reads a timed-out proof made, so the message says where each one saw it. */
 function describeProofReads(reads: ReadinessRead[]): string {
   // Consecutive reads that saw the same thing are one entry: a target that is
-  // simply absent, or simply disabled, does not repeat for every read.
+  // simply absent, or simply disabled, does not repeat for every read. A read
+  // without a normal observation (no window bounds, an ambiguous target) still
+  // reports the reason it was counted, so no adopted read silently disappears.
   const entries: { first: number; last: number; observed: string }[] = [];
   reads.forEach((read, index) => {
-    if (read.observed === undefined) return;
+    const observed = read.observed ?? read.problem;
     const previous = entries[entries.length - 1];
-    if (previous !== undefined && previous.observed === read.observed) {
+    if (previous !== undefined && previous.observed === observed) {
       previous.last = index + 1;
       return;
     }
-    entries.push({ first: index + 1, last: index + 1, observed: read.observed });
+    entries.push({ first: index + 1, last: index + 1, observed });
   });
   if (!entries.length) return '';
   // Every distinct observation is kept: a timeout message that elides the middle
@@ -896,8 +898,6 @@ class StepRunner {
       arm(deadline);
     };
     let previous: string | undefined;
-    /** True once two reads actually named different targets or places. */
-    let changed = false;
     let problem = unreadProblem;
     let reads = 0;
     /**
@@ -984,18 +984,24 @@ class StepRunner {
           selectionRead = undefined;
         }
         if (read !== undefined) {
-          // A signature-bearing read says only that the target was seen once;
-          // "still changing" is claimed after two reads actually disagree, never
-          // because the agreeing read did not answer in time.
-          if (read.signature !== undefined) {
-            if (previous !== undefined && read.signature !== previous) changed = true;
-            problem = changed
-              ? `${describeTarget(step)} was still changing between reads`
-              : `${describeTarget(step)} was read once; no second read had completed before the deadline`;
-          } else {
-            problem = read.problem;
-          }
           proofReads.push(read);
+          // The timeout wording follows what the adopted reads actually saw. A
+          // target has changed only when two reads name a different place or
+          // state; a single observation keeps that read's own reason (missing,
+          // disabled, no bounds, ambiguous) instead of claiming a change.
+          const seen = new Set(proofReads.map(item => item.observed ?? item.problem));
+          if (read.signature === undefined) {
+            // The last read could not prove the target at all; its own reason
+            // (disabled, missing, no bounds, ambiguous) is the conclusion, even
+            // if an earlier read had seen it settled.
+            problem = read.problem;
+          } else if (seen.size > 1) {
+            problem = `${describeTarget(step)} was still changing between reads`;
+          } else if (reads === 1) {
+            problem = `${describeTarget(step)} was read once; no second read had completed before the deadline`;
+          } else {
+            problem = `${describeTarget(step)} was read ${reads} times; no two in a row agreed before the deadline`;
+          }
           extendProof(tookMs);
         }
         // A read that outlived the deadline is not evidence.
@@ -1111,7 +1117,14 @@ class StepRunner {
       if (press.signature === undefined) return press;
       const node = this.proveNode(window, resolved.node);
       if (node.signature === undefined) return node;
-      return { signature: `${node.signature}|${press.signature}`, problem: node.problem };
+      return {
+        signature: `${node.signature}|${press.signature}`,
+        problem: node.problem,
+        // The recorded target and the control that is really pressed both move
+        // when the tree repaints; the message keeps both places, so a Finder
+        // sidebar statictext dispatched through its row says where each was.
+        observed: `${node.observed}; pressed via ${press.observed}`,
+      };
     }
     return this.proveNode(window, resolved.node);
   }
