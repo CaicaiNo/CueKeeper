@@ -165,7 +165,7 @@ npm run app:package
 - 权限请求只会在每次安装后的首次启动自动发起一次；之后用引导或菜单「请求录制权限」，不会每次启动都弹。
 - 引导同时列出 CueKeeper 和内置录制器；如果 macOS 只在辅助功能里列出录制器，用该行的「显示」直接定位 `cuekeeper-capture` 再添加。
 - App 启动 Node 前会把 `~/.local/bin`、`/opt/homebrew/bin`、`/usr/local/bin` 和内置 Node 运行时加入 PATH，并设置 `CUEKEEPER_AGENT_DESKTOP`；因此 LaunchServices 的极简 PATH 不会再导致 agent-desktop 缺失。
-- App 自己的权限探测结果追加写入 `~/Library/Logs/com.cuekeeper.app/app.log`；工作台健康检查仍以录制器为准。
+- 「请求权限」会启动 App 内置的录制器，由它弹出系统的辅助功能/输入监控授权；不需要在 Finder 里找二进制。
 
 构建要求：Rust 1.77+（`cargo` 在 PATH 或在 `~/.cargo/bin`）、macOS、Node 22+。参数与目录包类似：`--skip-build`、`--skip-recorder`、`--skip-rust`、`--no-sign`、`--no-zip`、`--out`、`--version`。
 

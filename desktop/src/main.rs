@@ -4,7 +4,6 @@ mod paths;
 mod permissions;
 mod server;
 
-use std::io::Write;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -80,8 +79,7 @@ fn main() {
                 let handle = app.handle().clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_millis(1600));
-                    let (accessibility, input_monitoring) = permissions::request();
-                    log_permissions(&handle, accessibility, input_monitoring);
+                    request_recorder(&handle);
                 });
             }
 
@@ -161,20 +159,7 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
 
 fn menu_event(app: &tauri::AppHandle, id: &str) {
     match id {
-        "request_permissions" => {
-            let handle = app.clone();
-            std::thread::spawn(move || {
-                let (accessibility, input_monitoring) = permissions::request();
-                log_permissions(&handle, accessibility, input_monitoring);
-                // The prompt is the primary action. If macOS kept the old
-                // denial, leave the operator in the matching pane.
-                if !accessibility {
-                    permissions::open_pane("accessibility");
-                } else if !input_monitoring {
-                    permissions::open_pane("input-monitoring");
-                }
-            });
-        }
+        "request_permissions" => request_recorder(app),
         "open_accessibility" => permissions::open_pane("accessibility"),
         "open_input_monitoring" => permissions::open_pane("input-monitoring"),
         "open_guide" => eval(app, "document.getElementById('guide-button')?.click()"),
@@ -195,15 +180,15 @@ fn menu_event(app: &tauri::AppHandle, id: &str) {
     }
 }
 
-fn log_permissions(app: &tauri::AppHandle, accessibility: bool, input_monitoring: bool) {
-    if let Some(state) = app.try_state::<AppState>() {
-        let path = state.log_dir.join("app.log");
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(
-                file,
-                "permissions accessibility={accessibility} input_monitoring={input_monitoring}"
-            );
-        }
+fn request_recorder(app: &tauri::AppHandle) {
+    if let Ok(paths) = paths::resolve(app) {
+        let recorder = paths.root.join("lib").join("dist").join("cuekeeper-capture");
+        let _ = std::process::Command::new(recorder)
+            .arg("--request-permissions")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
     }
 }
 

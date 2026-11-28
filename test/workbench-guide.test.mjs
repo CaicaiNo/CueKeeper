@@ -14,6 +14,7 @@ const buttonByText = (node, text) => node.querySelectorAll('button').find(candid
 async function bootPage(t, health) {
   const settingsCalls = [];
   const revealCalls = [];
+  const requestCalls = [];
   const root = await mkdtemp(join(tmpdir(), 'cuekeeper-guide-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const directory = join(root, 'run');
@@ -30,6 +31,7 @@ async function bootPage(t, health) {
     allowShell: false, signal: cancellation.signal,
     openSettings: id => settingsCalls.push(id),
     revealRecorder: () => revealCalls.push(true),
+    requestRecorderPermissions: () => requestCalls.push(true),
   });
   t.after(async () => { cancellation.abort(); await started.closed; });
 
@@ -56,7 +58,7 @@ async function bootPage(t, health) {
   await import(`../workbench/app.js?guide=${Date.now()}`);
   await sleep(30);
   return {
-    document, flow, url: started.url, settingsCalls, revealCalls,
+    document, flow, url: started.url, settingsCalls, revealCalls, requestCalls,
     healthCalls: () => healthCalls, startCalls: () => startCalls,
   };
 }
@@ -72,7 +74,7 @@ test('the workbench serves the guide module and opens the requested settings pan
     nextSteps: ['Open System Settings and enable cuekeeper-capture.'],
     recorderPath,
   };
-  const { document, url, settingsCalls, revealCalls, healthCalls } = await bootPage(t, blocked);
+  const { document, url, settingsCalls, revealCalls, requestCalls, healthCalls } = await bootPage(t, blocked);
   const guideModule = await fetch(`${url}/guide.js`);
   assert.equal(guideModule.status, 200, 'the guide module is part of the served workbench assets');
   const guideButton = document.getElementById('guide-button');
@@ -107,6 +109,10 @@ test('the workbench serves the guide module and opens the requested settings pan
   buttonByText(dialog, '在 Finder 中显示录制器').click();
   await sleep(50);
   assert.deepEqual(revealCalls, [true], 'the guide reveals the exact recorder binary');
+
+  buttonByText(dialog, '请求权限').click();
+  await sleep(50);
+  assert.deepEqual(requestCalls, [true], 'the guide asks the embedded recorder for its permissions');
 
   const before = healthCalls();
   buttonByText(dialog, '重新检查环境').click();

@@ -1794,6 +1794,16 @@ struct RecorderCommand {
     @MainActor
     static func main() {
         let args = CommandLine.arguments
+        // Ask macOS for both grants from inside the bundled recorder. The
+        // app triggers this so the operator never has to find the helper in
+        // Finder; the TCC prompt names the process that actually needs it.
+        if args.count == 2, args[1] == "--request-permissions" {
+            let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+            let accessibility = AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary)
+            let inputMonitoring = CGRequestListenEventAccess()
+            print("{\"accessibility\":\(accessibility),\"inputMonitoring\":\(inputMonitoring)}")
+            exit(0)
+        }
         // Read-only TCC preflight for `cuekeeper doctor`; it never prompts.
         if args.count == 2, args[1] == "--permissions" {
             let accessibility = AXIsProcessTrusted()

@@ -40,6 +40,9 @@ export function createGuide({ dialog, dom, onStart }) {
 
   const healthBox = el('div', { className: 'guide-health', 'aria-live': 'polite' });
   const recheck = button('重新检查环境', () => void check(), { style: 'small', icon: 'refresh' });
+  const request = button('请求权限', () => void requestPermissions(), {
+    style: 'small primary', icon: 'lock',
+  });
   const start = button('开始录制', () => {
     dialog.close();
     onStart?.();
@@ -52,6 +55,7 @@ export function createGuide({ dialog, dom, onStart }) {
 
   function renderHealth() {
     healthBox.replaceChildren();
+    request.hidden = health?.ok === true;
     if (checking) {
       healthBox.append(el('p', { className: 'muted' }, '检查中…'));
       start.disabled = true;
@@ -88,9 +92,22 @@ export function createGuide({ dialog, dom, onStart }) {
               : undefined);
         })),
       el('p', { className: 'muted guide-hint' },
-        '在系统设置里勾选下面的录制器；完成后点“重新检查环境”。'),
+        '点“请求权限”弹出系统授权；也可以点每项的“打开设置”手动勾选。'),
       recorderRow());
     start.disabled = true;
+  }
+
+  async function requestPermissions() {
+    try {
+      await fetch('/api/guide/request-recorder-permissions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', [healthHeader]: '1' },
+        body: '{}',
+      });
+    } catch {
+      // The permission rows still open the settings panes if the prompt
+      // cannot be started.
+    }
   }
 
   async function openSettings(id) {
@@ -182,7 +199,7 @@ export function createGuide({ dialog, dom, onStart }) {
             step('3', '检查流程', 'dry-run 处理黄色步骤'),
             step('4', '回放报告', '实时回放，查看结果')))),
       el('div', { className: 'actions guide-actions' },
-        recheck, start,
+        recheck, request, start,
         button('关闭', () => dialog.close(), { style: 'small' })));
     dialog.replaceChildren(content);
   }

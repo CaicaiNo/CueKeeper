@@ -676,7 +676,6 @@ name = "cuekeeper-app"
 version = "0.1.0"
 dependencies = [
  "libc",
- "macos-accessibility-client",
  "serde",
  "serde_json",
  "tauri",
@@ -2101,16 +2100,6 @@ name = "log"
 version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
-
-[[package]]
-name = "macos-accessibility-client"
-version = "0.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c33254f6f9b60b98eff934c3664530e5058ff7173e0c6b12419a17d5461e7145"
-dependencies = [
- "core-foundation",
- "core-foundation-sys",
-]
 
 [[package]]
 name = "markup5ever"

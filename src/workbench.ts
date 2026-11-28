@@ -288,6 +288,8 @@ export async function startWorkbench(options: {
   openSettings?: (id: 'accessibility' | 'input-monitoring') => void;
   /** Tests replace the Finder reveal for the recorder binary. */
   revealRecorder?: () => void;
+  /** Tests replace the in-app recorder permission prompt. */
+  requestRecorderPermissions?: () => void;
   /** Tests replace the sidecar reader a live run uses to prefill parameters. */
   resolveInputValues?: (flowPath: string, flowId: string) => Promise<InputValuesRead>;
   /** Tests replace the private directory a live run writes its inputs file to. */
@@ -330,13 +332,19 @@ export async function startWorkbench(options: {
       stdio: 'ignore', detached: true,
     }).unref();
   });
+  const recorderBinary = () => process.env.CUEKEEPER_RECORDER?.trim()
+    || fileURLToPath(new URL('./cuekeeper-capture', import.meta.url));
   const revealRecorder = options.revealRecorder ?? (() => {
     if (process.platform !== 'darwin') throw new Error('Finder reveal is available on macOS only');
-    const binary = process.env.CUEKEEPER_RECORDER?.trim()
-      || fileURLToPath(new URL('./cuekeeper-capture', import.meta.url));
     // The path is resolved on the server; the page cannot ask Finder to reveal
     // an arbitrary file.
-    spawn('/usr/bin/open', ['-R', binary], { stdio: 'ignore', detached: true }).unref();
+    spawn('/usr/bin/open', ['-R', recorderBinary()], { stdio: 'ignore', detached: true }).unref();
+  });
+  const requestRecorderPermissions = options.requestRecorderPermissions ?? (() => {
+    if (process.platform !== 'darwin') throw new Error('Recorder permission prompts are available on macOS only');
+    // The helper calls AXIsProcessTrustedWithOptions and CGRequestListenEventAccess
+    // itself, so the system adds the embedded recorder to the correct lists.
+    spawn(recorderBinary(), ['--request-permissions'], { stdio: 'ignore', detached: true }).unref();
   });
   const workRoot = workdirRoot();
   const workdirFailure = await prepareWorkdir(workRoot);
@@ -650,6 +658,10 @@ export async function startWorkbench(options: {
     }
     if (path === '/api/guide/reveal-recorder') {
       revealRecorder();
+      return send(response, 200, { opened: true });
+    }
+    if (path === '/api/guide/request-recorder-permissions') {
+      requestRecorderPermissions();
       return send(response, 200, { opened: true });
     }
     if (path === '/api/record/start') return send(response, 200, await recorder.start(data));
