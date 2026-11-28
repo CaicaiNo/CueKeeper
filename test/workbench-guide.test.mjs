@@ -30,6 +30,7 @@ async function bootPage(t, health) {
   t.after(async () => { cancellation.abort(); await started.closed; });
 
   let healthCalls = 0;
+  let startCalls = 0;
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url, init = {}) => {
     const target = typeof url === 'string' && url.startsWith('/') ? started.url + url : url;
@@ -37,6 +38,7 @@ async function bootPage(t, health) {
       healthCalls += 1;
       return { ok: true, status: 200, json: async () => health };
     }
+    if (String(target).endsWith('/api/record/start')) startCalls += 1;
     return realFetch(target, {
       ...init, headers: { ...(init.headers ?? {}), origin: started.url },
     });
@@ -49,7 +51,7 @@ async function bootPage(t, health) {
   const document = installWorkbenchPage();
   await import(`../workbench/app.js?guide=${Date.now()}`);
   await sleep(30);
-  return { document, flow, healthCalls: () => healthCalls };
+  return { document, flow, healthCalls: () => healthCalls, startCalls: () => startCalls };
 }
 
 test('the header guide explains the four steps and shows recorder health', async t => {
@@ -84,6 +86,23 @@ test('the header guide explains the four steps and shows recorder health', async
   buttonByText(dialog, '重新检查环境').click();
   await sleep(50);
   assert.ok(healthCalls() > before, 'recheck probes the recorder again');
+});
+
+test('a blocked record button opens the guide instead of starting a recording', async t => {
+  const blocked = {
+    ok: false,
+    blocking: [{ id: 'accessibility', label: 'accessibility', status: 'fail', detail: 'not granted for the recorder' }],
+    nextSteps: ['Enable cuekeeper-capture in System Settings.'],
+  };
+  const { document, startCalls } = await bootPage(t, blocked);
+  await import(`../workbench/record.js?guide-blocked=${Date.now()}`);
+  await sleep(80);
+  const start = document.getElementById('record-start');
+  assert.equal(start.textContent, '查看录制引导');
+  start.click();
+  await sleep(50);
+  assert.equal(document.getElementById('guide-dialog').open, true);
+  assert.equal(startCalls(), 0, 'a blocked record button never posts a start request');
 });
 
 test('the guide offers recording when health is ready and closes cleanly', async t => {

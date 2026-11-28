@@ -160,14 +160,15 @@ test('the record controls start the recorder, surface errors, and reload after t
   assert.equal(calls[0].init.method, 'GET');
   assert.equal(calls[0].init.headers['x-cuekeeper-workbench'], '1');
 
-  // A missing recorder turns the start button off, names the fix on the page,
-  // and offers a recheck that restores the button without a reload.
+  // A missing recorder keeps the start button as the entry point to the guide,
+  // names the fix on the page, and offers a recheck that restores the label.
   const recheckButton = document.getElementById('record-recheck');
   assert.equal(startButton.disabled, false);
   healthMode = 'blocked';
   recheckButton.click();
   await tick();
-  assert.equal(startButton.disabled, true);
+  assert.equal(startButton.disabled, false);
+  assert.equal(startButton.textContent, '查看录制引导');
   assert.equal(recheckButton.hidden, false);
   assert.match(message.textContent, /录制不可用（recorder：missing/);
   assert.match(message.textContent, /build:recorder/);
@@ -175,6 +176,7 @@ test('the record controls start the recorder, surface errors, and reload after t
   recheckButton.click();
   await tick();
   assert.equal(startButton.disabled, false);
+  assert.equal(startButton.textContent, '开始录制');
   assert.equal(recheckButton.hidden, true);
 
   // A refused start is shown in the page, never as a dialog.
