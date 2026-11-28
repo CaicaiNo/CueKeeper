@@ -834,3 +834,4 @@ body.batch-view { grid-template-rows: 64px minmax(0, 1fr) 222px 30px; }
 .guide-health:empty { display: none; }
 .guide-checklist { margin: 6px 0 0; padding-left: 18px; font-size: 12px; line-height: 1.6; }
 .guide-actions { justify-content: flex-end; }
+.guide-checklist button { margin-left: 6px; }

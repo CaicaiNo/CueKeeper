@@ -47,10 +47,27 @@ export function createGuide({ dialog, dom, onStart }) {
       el('div', { className: 'alert alert-soft alert-error' },
         el('strong', {}, '录制环境未就绪'),
         el('ul', { className: 'guide-checklist' },
-          ...blocking.map(check => el('li', {}, `${check.label}：${check.detail}`)))),
+          ...blocking.map(check => el('li', {},
+            `${check.label}：${check.detail}`,
+            check.id === 'accessibility' || check.id === 'input-monitoring'
+              ? button('打开设置', () => void openSettings(check.id), { style: 'small' })
+              : undefined)))),
       muted('如果刚重新编译过录制器，macOS 会把新二进制当成新程序：请在“系统设置 → 隐私与安全性”的辅助功能和输入监控里重新勾选 cuekeeper-capture。'),
       steps.length ? muted(steps[0]) : undefined);
     start.disabled = true;
+  }
+
+  async function openSettings(id) {
+    try {
+      await fetch('/api/guide/open-settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', [healthHeader]: '1' },
+        body: JSON.stringify({ id }),
+      });
+    } catch {
+      // The blocking line already tells the operator where to go if the
+      // shortcut cannot be opened.
+    }
   }
 
   async function check() {

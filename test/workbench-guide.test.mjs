@@ -12,6 +12,7 @@ const buttonByText = (node, text) => node.querySelectorAll('button').find(candid
     .includes(text));
 
 async function bootPage(t, health) {
+  const settingsCalls = [];
   const root = await mkdtemp(join(tmpdir(), 'cuekeeper-guide-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const directory = join(root, 'run');
@@ -26,6 +27,7 @@ async function bootPage(t, health) {
   const started = await startWorkbench({
     directory, port: 0, library: join(root, 'library'), allowLive: false,
     allowShell: false, signal: cancellation.signal,
+    openSettings: id => settingsCalls.push(id),
   });
   t.after(async () => { cancellation.abort(); await started.closed; });
 
@@ -51,10 +53,13 @@ async function bootPage(t, health) {
   const document = installWorkbenchPage();
   await import(`../workbench/app.js?guide=${Date.now()}`);
   await sleep(30);
-  return { document, flow, healthCalls: () => healthCalls, startCalls: () => startCalls };
+  return {
+    document, flow, url: started.url, settingsCalls,
+    healthCalls: () => healthCalls, startCalls: () => startCalls,
+  };
 }
 
-test('the header guide explains the four steps and shows recorder health', async t => {
+test('the workbench serves the guide module and opens the requested settings pane', async t => {
   const blocked = {
     ok: false,
     blocking: [
@@ -63,7 +68,9 @@ test('the header guide explains the four steps and shows recorder health', async
     ],
     nextSteps: ['Open System Settings and enable cuekeeper-capture.'],
   };
-  const { document, healthCalls } = await bootPage(t, blocked);
+  const { document, url, settingsCalls, healthCalls } = await bootPage(t, blocked);
+  const guideModule = await fetch(`${url}/guide.js`);
+  assert.equal(guideModule.status, 200, 'the guide module is part of the served workbench assets');
   const guideButton = document.getElementById('guide-button');
   assert.ok(guideButton, 'the guide button is in the header');
   guideButton.click();
@@ -81,6 +88,10 @@ test('the header guide explains the four steps and shows recorder health', async
   assert.match(dialog.textContent, /cuekeeper-capture/);
   assert.equal(buttonByText(dialog, '开始录制').disabled, true,
     'the guide does not offer recording while health is blocked');
+
+  buttonByText(dialog, '打开设置').click();
+  await sleep(50);
+  assert.deepEqual(settingsCalls, ['accessibility'], 'the guide opens the accessibility pane');
 
   const before = healthCalls();
   buttonByText(dialog, '重新检查环境').click();
