@@ -67,9 +67,6 @@ const KIND_TONES = {
 };
 
 const STATUS_TONES = { resolved: 'info', passed: 'success', failed: 'error', blocked: 'warning', skipped: 'ghost' };
-// A report's overall state uses the same tone as its entries: a blocked dry run
-// is something to confirm (yellow), not a failure (red).
-const reportTone = status => status === 'passed' ? 'success' : status === 'blocked' ? 'warning' : 'error';
 // A recorded screen point is a legal step, but a dry run can only prove an
 // element target. The timeline marks it yellow before the run, so the operator
 // sees which steps to fix without running anything.
@@ -508,6 +505,10 @@ function renderTimeline() {
     }
     const ignored = state.ignored.has(row.id);
     const runEntry = state.session?.version === 2 ? v2Statuses.get(row.id) : undefined;
+    // A v2 timeline row is the recording's snapshot of the step. Once the flow
+    // is edited, the current step is the one the operator sees (and the one a
+    // rerun would use), so the row's action and 需确认 marker follow it.
+    const action = state.session?.version === 2 ? v2Step(row.id) ?? row.action : row.action;
     const selector = el('input', {
       id: `select-${row.id}`, type: 'checkbox', className: 'checkbox checkbox-sm',
       checked: state.selected.has(row.id), disabled: ignored,
@@ -530,10 +531,10 @@ function renderTimeline() {
     el('span', { className: 'time' },
       el('span', { className: 'time-value', title: gapTitle(timing.get(row.id)) }, timestamp(row.atMs)),
       el('span', { className: 'step-id', title: `步骤 ${row.id}` }, row.id)),
-    kindChip(row.action),
-    el('span', { className: 'row-description' }, el('strong', {}, actionLabel(row.action)),
+    kindChip(action),
+    el('span', { className: 'row-description' }, el('strong', {}, actionLabel(action)),
       el('small', {}, `${row.scope ? scopeText(row.scope) : `${appLabel(row.app)} · ${row.window}`}${ignored ? ' · 已忽略' : ''}`,
-        pointConfirmChip(row.action))),
+        pointConfirmChip(action))),
     el('span', { className: 'time row-duration', title: '动作耗时' }, duration(row.durationMs)),
     statusCell(runEntry));
     const thumbnail = row.thumbnail && el('details', {
@@ -819,6 +820,16 @@ const v2Steps = () => v2Flow()?.steps ?? [];
 const v2Step = stepId => v2Steps().find(step => step.id === stepId);
 const v2ScopeText = scope => scopeDescription(scope, appLabel);
 
+// A dry-run result describes the flow it ran on. Once an edit changes that
+// flow, its per-step marks and the status line stop being true: the report is
+// dropped and the old "N 步需确认" notice is replaced, so the page never shows
+// a stale conclusion about a flow the operator already fixed.
+function retireDryRunReport() {
+  const retired = state.v2Report?.mode === 'dry-run';
+  state.v2Report = null;
+  if (retired) status('工作流已修改，上次 dry-run 结果已失效，请重新运行');
+}
+
 window.addEventListener('beforeunload', event => {
   if (!state.v2?.dirty) return;
   event.preventDefault();
@@ -834,8 +845,8 @@ async function v2Call(route, payload = {}) {
     if (result?.v2) state.v2 = result.v2;
     else if (result?.flow) {
       state.v2 = result;
-      // A new edit invalidates the last run's per-step marks.
-      state.v2Report = null;
+      // A new edit invalidates the last run's per-step marks and notice.
+      retireDryRunReport();
     }
     const editedFlow = result?.v2?.flow ?? result?.flow;
     if (editedFlow && state.templateMode) {
@@ -877,7 +888,7 @@ async function v2Undo() {
   });
   if (result?.flow) {
     state.v2 = result;
-    state.v2Report = null;
+    retireDryRunReport();
     renderV2();
     renderTimeline();
   }
@@ -890,7 +901,7 @@ async function v2Redo() {
   });
   if (result?.flow) {
     state.v2 = result;
-    state.v2Report = null;
+    retireDryRunReport();
     renderV2();
     renderTimeline();
   }
@@ -1347,7 +1358,9 @@ function v2DryRun() {
     const blocked = report.entries.filter(entry => entry.status === 'blocked');
     status(`dry-run ${resultStatus[report.status] ?? report.status} · ${report.entries.length} 步` +
       (blocked.length ? ` · ${blocked.length} 步需确认` : failed.length ? ` · ${failed.length} 步异常` : ''),
-    reportTone(report.status));
+    // Only a v2 dry run treats blocked as a confirmation step; every other run
+    // keeps its original success / error tone.
+    report.status === 'passed' ? 'success' : report.status === 'blocked' ? 'warning' : 'error');
   }).catch(() => {});
 }
 
@@ -1526,8 +1539,7 @@ function showV2Result(report) {
   openDialog('回放报告', [
     el('p', { className: 'report-summary' },
       `共 ${report.entries.length} 步 · 通过 ${counts.passed ?? 0} · 失败 ${counts.failed ?? 0}` +
-      ` · 跳过 ${counts.skipped ?? 0}${counts.blocked ? ` · 需确认 ${counts.blocked}` : ''}` +
-      `${report.stopped ? ' · 已停止' : ''}`),
+      ` · 跳过 ${counts.skipped ?? 0}${report.stopped ? ' · 已停止' : ''}`),
     el('div', { className: 'report-table' },
       el('table', { className: 'table table-sm' },
         el('thead', {}, el('tr', {},
@@ -2304,7 +2316,7 @@ function v2GapDialog(step) {
       };
     const result = await api('v2/replace', { session: state.session.id, id: step.id, step: next });
     state.v2 = result;
-    state.v2Report = null;
+    retireDryRunReport();
     renderV2();
     renderTimeline();
     status('缺口已转换，仍需复核并保存。', 'success');
@@ -2478,7 +2490,7 @@ async function v2StartLive(inputs, target) {
     renderV2();
     renderTimeline();
     status(`实时回放${resultStatus[report.status] ?? report.status} · ${report.entries.length} 步` +
-      (report.stopped ? ' · 已停止' : ''), reportTone(report.status));
+      (report.stopped ? ' · 已停止' : ''), report.status === 'passed' ? 'success' : 'error');
     setTimeout(() => showV2Result(report), 0);
   } catch (error) {
     status(error.message, 'error');
@@ -3328,7 +3340,7 @@ function planText(step) {
 
 function showResult(mode, report) {
   status(`${mode === 'offline' ? '离线运行' : '实时回放'}${resultStatus[report.status]} · ${report.entries.length} 条结果`,
-    reportTone(report.status));
+    report.status === 'passed' ? 'success' : 'error');
   setTimeout(() => openDialog('运行结果', [
     el('h3', { className: `badge badge-soft badge-sm badge-${STATUS_TONES[report.status] ?? 'ghost'}` },
       resultStatus[report.status]),

@@ -6,22 +6,15 @@ import test from 'node:test';
 import { startWorkbench } from '../dist/workbench.js';
 
 // The workbench page is plain ES modules, so the real `app.js` runs against the
-// small DOM stand-in: the marker and status cells below come out of the same
-// render path the browser uses.
+// small DOM stand-in: the clicks below go through the same handlers the browser
+// uses, and both timelines are read from the real render path.
 import { installWorkbenchPage } from './support/workbench-dom.mjs';
 
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const tick = (ms = 120) => new Promise(resolve => setTimeout(resolve, ms));
+let page = 0;
+const nextPage = () => (page += 1);
 
-/** The blocked report a dry run of a flow with one recorded point returns. */
-const blockedReport = message => ({
-  version: 2, mode: 'dry-run', flowId: 'point-confirm', flowSha256: 'fixture', status: 'blocked',
-  entries: [
-    { id: 'type-address', kind: 'click', status: 'blocked', code: 'UNSAFE_POINT', message, atMs: 0, durationMs: 0 },
-    { id: 'wait-browser', kind: 'wait', status: 'resolved', atMs: 0, durationMs: 0 },
-  ],
-});
-
-async function bootPage(t, report) {
+async function bootPage(t) {
   const root = await mkdtemp(join(tmpdir(), 'cuekeeper-point-confirm-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const directory = join(root, 'run');
@@ -31,12 +24,12 @@ async function bootPage(t, report) {
   flow.id = 'point-confirm';
   flow.name = '坐标步骤夹具';
   delete flow.appPaths;
-  // The fixture has no click; turn its type step into the recorded point the
-  // operator is asked to confirm, keeping the same window scope.
-  const step = flow.steps.find(item => item.id === 'type-address');
-  step.kind = 'click';
-  step.target = { kind: 'point', point: [420, 300] };
-  delete step.input;
+  // Two recorded point clicks, the s9 / s13 shape the user hit. They sit after
+  // the launch step, inside the same Safari window scope.
+  const scope = flow.steps.find(step => step.id === 'type-address').scope;
+  flow.steps.splice(1, 0,
+    { id: 'click-a', kind: 'click', scope, target: { kind: 'point', point: [120, 80] } },
+    { id: 'click-b', kind: 'click', scope, target: { kind: 'point', point: [220, 180] } });
   await writeFile(join(directory, 'flow.json'), JSON.stringify(flow, null, 2));
 
   const cancellation = new AbortController();
@@ -46,12 +39,10 @@ async function bootPage(t, report) {
   });
   t.after(async () => { cancellation.abort(); await started.closed; });
 
+  // The page asks with relative URLs; point them at this test's server. The dry
+  // run itself is the real endpoint, so its report is the one production makes.
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url, init = {}) => {
-    // The dry run needs no desktop, so the report the page would receive from
-    // the server is handed over directly. Every other request still reaches the
-    // real workbench server.
-    if (url === '/api/run') return { ok: true, status: 200, json: async () => report };
     const target = typeof url === 'string' && url.startsWith('/') ? started.url + url : url;
     return realFetch(target, {
       ...init, headers: { ...(init?.headers ?? {}), origin: started.url },
@@ -60,9 +51,10 @@ async function bootPage(t, report) {
   t.after(() => { globalThis.fetch = realFetch; });
 
   const document = installWorkbenchPage();
-  await import('../workbench/app.js');
-  await sleep(30);
-  return { document };
+  // A fresh module per page: the app reads its DOM once at import time.
+  await import(`../workbench/app.js?page=${nextPage()}`);
+  await tick(30);
+  return { document, started };
 }
 
 const v2Row = (document, id) => document.querySelector('.v2-rows').children
@@ -71,51 +63,107 @@ const v2Row = (document, id) => document.querySelector('.v2-rows').children
 const actionRow = (document, id) => document.getElementById('timeline').children
   .find(row => row.classList.contains('row') && row.querySelector('.step-id')?.textContent === id);
 
-test('a recorded point click is yellow: 需确认 before the run, blocked after it', async t => {
-  const message = '坐标 (420,300) 需改成元素目标才能通过 dry-run；实时回放仍会点窗口内坐标';
-  const { document } = await bootPage(t, blockedReport(message));
+const dialog = document => document.getElementById('dialog');
+const buttonByText = (node, text) => node.querySelectorAll('button').find(candidate =>
+  [candidate.textContent.trim(), candidate.getAttribute('aria-label'), candidate.getAttribute('title')]
+    .includes(text));
 
-  // Before any run, the coordinate step already says it needs confirmation.
-  const staticChip = v2Row(document, 'type-address').querySelector('.point-confirm');
-  assert.ok(staticChip, 'the coordinate step carries a static 需确认 marker');
-  assert.ok(staticChip.classList.contains('badge-warning'), 'the static marker is yellow');
-  assert.equal(staticChip.textContent, '需确认');
-  assert.match(staticChip.getAttribute('title'), /元素目标/);
-  assert.ok(actionRow(document, 'type-address').querySelector('.point-confirm'),
-    'the action timeline marks the same step');
-  assert.equal(v2Row(document, 'wait-browser').querySelector('.point-confirm'), null,
+async function submitDialog(document) {
+  const form = dialog(document).children.find(node => node.tagName === 'FORM');
+  await form.onsubmit({ preventDefault() {} });
+  await tick();
+}
+
+/** Open a click step's editor and turn the coordinate into an element target. */
+async function turnIntoElement(document, id, role, name) {
+  buttonByText(v2Row(document, id), '编辑').click();
+  await tick();
+  assert.equal(dialog(document).open, true, `${id} editor opens`);
+  const inputs = dialog(document).querySelectorAll('input');
+  const roleInput = inputs.find(input => input.getAttribute('placeholder') === '例如 button');
+  const nameInput = inputs.find(input => input.getAttribute('placeholder') === '例如 保存');
+  roleInput.value = role;
+  nameInput.value = name;
+  await submitDialog(document);
+  await tick();
+}
+
+const statusBar = document => document.getElementById('status');
+
+test('two coordinate clicks stay yellow until they are edited, through dry-run → edit → dry-run', async t => {
+  const { document } = await bootPage(t);
+
+  // Before any run, both coordinate steps say they need confirmation, in the v2
+  // timeline and in the action timeline.
+  for (const id of ['click-a', 'click-b']) {
+    const v2Chip = v2Row(document, id).querySelector('.point-confirm');
+    assert.ok(v2Chip, `${id} carries a static 需确认 marker in the v2 timeline`);
+    assert.ok(v2Chip.classList.contains('badge-warning'), `${id} marker is yellow`);
+    assert.equal(v2Chip.textContent, '需确认');
+    assert.match(v2Chip.getAttribute('title'), /元素目标/);
+    const rowChip = actionRow(document, id).querySelector('.point-confirm');
+    assert.ok(rowChip, `${id} carries the same marker in the action timeline`);
+    assert.ok(rowChip.classList.contains('badge-warning'));
+  }
+  assert.equal(actionRow(document, 'wait-browser').querySelector('.point-confirm'), null,
     'an element step carries no 需确认 marker');
-  assert.equal(v2Row(document, 'type-address').querySelector('.row-status').textContent, '',
-    'no run has marked the step yet');
 
-  const dry = document.querySelector('.v2-header').children
-    .find(node => node.textContent === 'dry-run');
-  assert.ok(dry, 'the dry-run button renders');
-  dry.click();
-  await sleep(50);
+  // First dry run: both steps are blocked in yellow, the report is blocked, and
+  // the top bar counts them instead of showing a red error.
+  buttonByText(document.querySelector('.v2-header'), 'dry-run').click();
+  await tick(200);
+  assert.ok(statusBar(document).classList.contains('warning'), statusBar(document).className);
+  assert.equal(statusBar(document).classList.contains('error'), false);
+  assert.match(statusBar(document).textContent, /dry-run 阻塞/);
+  assert.match(statusBar(document).textContent, /2 步需确认/);
+  for (const id of ['click-a', 'click-b']) {
+    const v2Cell = v2Row(document, id).querySelector('.row-status');
+    assert.ok(v2Cell.classList.contains('status-blocked'), `${id} is blocked in the v2 timeline`);
+    assert.equal(v2Cell.children[0].getAttribute('data-icon'), 'alertTriangle');
+    assert.match(v2Cell.getAttribute('title'), /UNSAFE_POINT/);
+    assert.match(v2Cell.getAttribute('title'), /元素目标/);
+    assert.ok(actionRow(document, id).querySelector('.row-status').classList.contains('status-blocked'),
+      `${id} is blocked in the action timeline too`);
+  }
 
-  // The whole report is yellow: the status bar warns and counts the step,
-  // instead of showing the red error a refused request used to produce.
-  const bar = document.getElementById('status');
-  assert.ok(bar.classList.contains('warning'), `status bar is warning: ${bar.className}`);
-  assert.equal(bar.classList.contains('error'), false, 'a blocked dry run is not an error');
-  assert.match(bar.textContent, /dry-run 阻塞/);
-  assert.match(bar.textContent, /1 步需确认/);
+  // Editing invalidates the report: the first step's marker and blocked state
+  // disappear from both timelines, and the top bar stops claiming the old
+  // "2 步需确认" result.
+  await turnIntoElement(document, 'click-a', 'button', '保存');
+  assert.equal(v2Row(document, 'click-a').querySelector('.point-confirm'), null,
+    'the edited step loses its marker in the v2 timeline');
+  assert.equal(actionRow(document, 'click-a').querySelector('.point-confirm'), null,
+    'the edited step loses its marker in the action timeline');
+  assert.doesNotMatch(actionRow(document, 'click-a').textContent, /坐标回放/,
+    'the action timeline shows the step the workflow now holds');
+  assert.equal(statusBar(document).classList.contains('warning'), false,
+    'the stale dry-run notice is retired');
+  assert.doesNotMatch(statusBar(document).textContent, /步需确认/);
+  assert.match(statusBar(document).textContent, /dry-run 结果已失效/);
+  // The second step is still a coordinate, so it keeps its marker until edited.
+  assert.ok(v2Row(document, 'click-b').querySelector('.point-confirm'));
+  assert.ok(actionRow(document, 'click-b').querySelector('.point-confirm'));
 
-  // The step itself uses the existing warning status, with the code and reason
-  // in its tooltip.
-  const cell = v2Row(document, 'type-address').querySelector('.row-status');
-  assert.ok(cell.classList.contains('status-blocked'), 'the step is blocked');
-  assert.equal(cell.getAttribute('aria-label'), '阻塞');
-  assert.equal(cell.children[0].getAttribute('data-icon'), 'alertTriangle');
-  const title = cell.getAttribute('title');
-  assert.match(title, /UNSAFE_POINT/);
-  assert.match(title, /元素目标/);
-  const timelineCell = actionRow(document, 'type-address').querySelector('.row-status');
-  assert.ok(timelineCell.classList.contains('status-blocked'), 'the action timeline agrees');
+  await turnIntoElement(document, 'click-b', 'button', '取消');
+  for (const [timeline, rowOf] of [['v2', v2Row], ['actions', actionRow]]) {
+    for (const id of ['click-a', 'click-b']) {
+      assert.equal(rowOf(document, id).querySelector('.point-confirm'), null,
+        `${id} has no marker in the ${timeline} timeline after editing`);
+      assert.doesNotMatch(rowOf(document, id).textContent, /需确认/,
+        `${id} no longer reads as needing confirmation in the ${timeline} timeline`);
+    }
+  }
 
-  // A step that resolved keeps the neutral info state.
-  const resolved = v2Row(document, 'wait-browser').querySelector('.row-status');
-  assert.ok(resolved.classList.contains('status-resolved'));
-  assert.equal(resolved.getAttribute('aria-label'), '已解析');
+  // Second dry run: the same two steps now resolve, and nothing is yellow.
+  buttonByText(document.querySelector('.v2-header'), 'dry-run').click();
+  await tick(200);
+  assert.ok(statusBar(document).classList.contains('success'), statusBar(document).className);
+  assert.match(statusBar(document).textContent, /dry-run 通过/);
+  assert.doesNotMatch(statusBar(document).textContent, /需确认/);
+  for (const id of ['click-a', 'click-b']) {
+    assert.ok(v2Row(document, id).querySelector('.row-status').classList.contains('status-resolved'),
+      `${id} resolves after the edit`);
+    assert.ok(actionRow(document, id).querySelector('.row-status').classList.contains('status-resolved'),
+      `${id} resolves in the action timeline too`);
+  }
 });
