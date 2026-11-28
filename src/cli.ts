@@ -53,6 +53,16 @@ import { hashToken, loadServerConfig, parseServerHost } from './server-config.js
 import { startServer } from './server.js';
 import { startWorkbench } from './workbench.js';
 
+/**
+ * The capture warnings that explain a click recorded at its screen point
+ * instead of an element. They are listed next to the coordinate count so a
+ * recording review starts from why, not from a percentage.
+ */
+const pointClickWarnings = new Set([
+  'UNTARGETED_FILE_CLICK', 'UNTARGETED_ELEMENT_CLICK', 'NATIVE_POINT_FALLBACK',
+  'CLICK_AMBIGUOUS_CANDIDATES', 'CLICK_UNPROVEN', 'CLICK_RECOVERY_UNNAMED',
+]);
+
 const help = `Cuekeeper ${buildInfo().version}
 
   cuekeeper --version
@@ -929,9 +939,25 @@ async function main() {
         ...result.warnings, ...ime.warnings(),
         ...(inputValuesWarning ? [{ code: 'INPUT_VALUES_WRITE_FAILED', message: inputValuesWarning }] : []),
       ];
+      // How much of this recording a dry run can accept: every click that is
+      // still a screen point has to be turned into an element by hand, and the
+      // warnings say why. The percentage is a recording-quality number, not a
+      // replay guarantee.
+      const clicks = result.flow.steps.filter(
+        (step): step is Extract<FlowV2['steps'][number], { kind: 'click' }> => step.kind === 'click',
+      );
+      const elementClicks = clicks.filter(step => step.target.kind === 'element').length;
+      const pointClicks = clicks.length - elementClicks;
+      const pointWarnings = [...new Set(warnings.map(entry => entry.code).filter(code => pointClickWarnings.has(code)))];
       const data = {
         version: 2, output: saved, flowId: result.flow.id, actions: result.flow.steps.length,
         snapshotReads: result.snapshotReads,
+        ...(clicks.length ? {
+          clicks: {
+            total: clicks.length, element: elementClicks, point: pointClicks,
+            ...(pointWarnings.length ? { warnings: pointWarnings } : {}),
+          },
+        } : {}),
         ...(writtenInputValues ? { inputValues: writtenInputValues } : {}),
         ...(result.lifecycle.length ? { lifecycle: result.lifecycle.length } : {}),
         ...(workbench ? { workbench } : {}),
@@ -940,6 +966,11 @@ async function main() {
         ...(warnings.length ? { warnings } : {}),
       };
       const lines = [`Saved ${result.flow.steps.length} global steps to ${saved}${result.partial ? ' (partial flow)' : ''}`];
+      if (clicks.length) {
+        const share = Math.round((elementClicks / clicks.length) * 100);
+        lines.push(`点击目标 ${elementClicks}/${clicks.length} 为元素（${share}%）` +
+          (pointClicks ? `，${pointClicks} 个保留屏幕坐标${pointWarnings.length ? `：${pointWarnings.join(', ')}` : ''}` : ''));
+      }
       // The recording's accessibility cost: a window is read once, so this stays
       // small even when the flow has hundreds of steps.
       lines.push(`窗口树读取 ${result.snapshotReads} 次`);

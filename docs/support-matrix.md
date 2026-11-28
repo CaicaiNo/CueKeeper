@@ -142,11 +142,11 @@ Shell 的完整约束见 [Shell 步骤设计](shell-steps.md) 与 [Root 步骤�
 | `UNTARGETED_POINT` | 固定应用路径的录制里，坐标点击 / 滚动 / 悬停无法绑定到元素 | 是（录制警告） |
 | `UNTARGETED_HOVER` | 悬停落点无法归属到任何窗口（桌面空白、无法证明窗口），跳过且不产生缺口 | 是（录制警告） |
 | `HOVER_SCREEN_FALLBACK` | 元素型悬停的窗口/元素已不能证明（四类解析失败）且该步保留了录制点，改按屏幕坐标移动指针；报告 `deliveredVia: "screen_point"`，message 带原始错误码 | 否，降级成功；指针只移动与停留 |
-| `UNTARGETED_FILE_CLICK` | 全局录制里 Finder 的点击没命中任何有名字的文件项，改记坐标 | 是（录制警告），回放前需改成有名字的元素 |
+| `UNTARGETED_FILE_CLICK` | 全局录制里 Finder 的点击没命中任何有名字的文件项，或点击打开了文件夹、事后读到的已是另一个标题的窗口（此时同坐标可能压着另一个文件，不能据此命名），改记坐标 | 是（录制警告），回放前需改成有名字的元素 |
 | `CLICK_NAMED_FROM_CACHED_TREE` | 点击改变了窗口（Finder 跟随目录、页面切换），点击自己的读树已经看不到被点的控件，改用录制先前为该窗口读到的树命名 | 是（录制警告），步骤是元素目标 |
 | `CLICK_NAMED_BY_PRESSABLE_ANCESTOR` | 命中点是匿名容器，最近的可按键祖先带名字或 identifier；步骤改按该祖先按键 | 是（录制警告），回放目标更准确 |
-| `CLICK_NAMED_BY_NEARBY_CONTROL` | 命中点是匿名容器，点 24 pt 内只有一个有名字 / identifier 的后代或覆盖该点的兄弟控件；步骤改按该控件 | 是（录制警告），回放目标更准确 |
-| `CLICK_AMBIGUOUS_CANDIDATES` | 匿名命中点附近有多个命名控件，无法证明点击的是哪一个；保留坐标，不挑第一个 | 是（录制警告），回放前需改成元素 |
+| `CLICK_NAMED_BY_NEARBY_CONTROL` | 命中点是匿名容器，点 24 pt 内只有一个**可操作**（有 action ref 或 press action）且有名字 / identifier 的后代或覆盖该点的兄弟控件；步骤改按该控件。单纯静态标签不算目标 | 是（录制警告），回放目标更准确 |
+| `CLICK_AMBIGUOUS_CANDIDATES` | 匿名命中点附近有多个可操作的命名候选，无法证明点击的是哪一个；保留坐标，不挑第一个，也不再退到更大的命名父级 | 是（录制警告），回放前需改成元素 |
 | `UNTARGETED_ELEMENT_CLICK` | 全局录制里点击没命中任何有名字的元素（含只命中窗口根的空白点击），改记坐标 | 是（录制警告），回放前需改成有名字的元素，dry-run 把该步标 `blocked`/`UNSAFE_POINT`（黄色需确认） |
 | `CLICK_TARGET_UNPRESSABLE` | 录制到的控件及其所有容器都没有 AX action ref（Electron 页面常见）：回放只能按控件中心做物理点击（需 `--headed`），不是语义 press | 是（录制警告），需要时重新拾取目标 |
 | `HOVER_UNRESOLVED` | 悬停的元素目标没有 bounds，无法算出回放坐标 | 否，直接失败 |
