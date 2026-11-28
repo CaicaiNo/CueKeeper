@@ -3535,3 +3535,90 @@ test('HAOC-227: the tree that chose a same-title window is the proof\'s first re
   assert.deepEqual(callsOf(world, 'click'), [['click', '@w21:e90']],
     'dispatch uses the newest read, not the tree the choice was made from');
 });
+
+// HAOC-227 first review round (HAOC-230): a read is refused against the
+// deadline fixed when it started, even when it blocks the event loop so its
+// timer cannot run; and a timeout message keeps "no second read completed"
+// apart from "the target changed", and never elides the reads it did make.
+
+test('HAOC-227 review: a read that answers after its own deadline is not adopted as proof', async t => {
+  const { world, run } = harness(t);
+  const real = world.desktop.snapshotWindow.bind(world.desktop);
+  let reads = 0;
+  world.desktop.snapshotWindow = async id => {
+    if (id === 'w-21') {
+      reads += 1;
+      if (reads === 2) {
+        // A real accessibility read can block the event loop. The promise then
+        // resolves before its deadline timer gets to run, so a race alone would
+        // accept evidence that landed 250 ms past the read's 1500 ms deadline.
+        await new Promise(resolve => setTimeout(resolve, 100));
+        const until = performance.now() + 1450;
+        while (performance.now() < until) { /* blocked driver read */ }
+      }
+    }
+    return real(id);
+  };
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'failed');
+  const failed = entry(report, 'press');
+  assert.equal(failed.code, 'TARGET_NOT_READY');
+  assert.match(failed.message, /the read answered after its own deadline/);
+  assert.match(failed.message, /1 read of the bound window/,
+    'the late read is not adopted as a second read');
+  assert.deepEqual(callsOf(world, 'click'), [], 'late evidence never becomes input');
+  assert.equal(reads, 2, 'the proof did read twice; the second read simply landed late');
+});
+
+test('HAOC-227 review: a stable target whose second read never answers is not reported as changing', async t => {
+  const { world, run } = harness(t);
+  // Each read costs 2200 ms: the first fits the phase cap, the agreeing read
+  // cannot, and it is still in flight when the cap stops the proof.
+  slowReads(world, 2200);
+
+  const started = performance.now();
+  const report = await run(readinessFlow(pressContinue));
+  const elapsed = performance.now() - started;
+
+  assert.equal(report.status, 'failed');
+  const failed = entry(report, 'press');
+  assert.equal(failed.code, 'TARGET_NOT_READY');
+  assert.doesNotMatch(failed.message, /still changing between reads/,
+    'no change was observed: the second read had not answered');
+  assert.match(failed.message, /no second read had completed before the deadline/);
+  assert.match(failed.message, /1 read of the bound window/);
+  assert.match(failed.message, /read 1: button "Continue" at/,
+    'the read that did finish is still reported with its place');
+  assert.deepEqual(callsOf(world, 'click'), [], 'nothing is dispatched without the agreeing read');
+  assert.ok(elapsed >= 3800 && elapsed < 6000,
+    `the proof stopped at its 4000 ms cap (${Math.round(elapsed)} ms)`);
+});
+
+test('HAOC-227 review: a timeout message keeps every distinct position it read', async t => {
+  const { world, run } = harness(t);
+  const button = continueButtonOf(world);
+  const original = { ...button.bounds };
+  // Every read sees the control somewhere else, so every read is a distinct entry.
+  paintOnRead(world, (_window, index) => {
+    button.bounds = { ...original, x: original.x + index * 7 };
+  });
+
+  const report = await run(readinessFlow(pressContinue));
+
+  assert.equal(report.status, 'failed');
+  const failed = entry(report, 'press');
+  assert.equal(failed.code, 'TARGET_NOT_READY');
+  const reads = Number(failed.message.match(/\((\d+) reads? of the bound window/)?.[1] ?? 0);
+  assert.ok(reads >= 5, `the fast proof made several reads (${reads})`);
+  for (let index = 1; index <= reads; index += 1) {
+    assert.ok(failed.message.includes(`read ${index}:`),
+      `read ${index} of ${reads} is named, not elided`);
+  }
+  assert.ok(!/…|more\)/.test(failed.message), 'no range of reads is folded away');
+  const positions = [...failed.message.matchAll(/at (\d+),(\d+) /g)].map(match => `${match[1]},${match[2]}`);
+  assert.equal(positions.length, reads, 'each counted read reports where it saw the control');
+  assert.equal(new Set(positions).size, positions.length, 'every reported place is a different one');
+  assert.deepEqual(callsOf(world, 'click'), []);
+});

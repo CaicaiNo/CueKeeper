@@ -358,11 +358,12 @@ function describeProofReads(reads: ReadinessRead[]): string {
     entries.push({ first: index + 1, last: index + 1, observed: read.observed });
   });
   if (!entries.length) return '';
-  const parts = entries.map(entry => `read ${entry.first === entry.last ? entry.first : `${entry.first}–${entry.last}`}: ${entry.observed}`);
-  const shown = parts.length <= 4
-    ? parts
-    : [...parts.slice(0, 2), `… (${parts.length - 4} more)`, ...parts.slice(-2)];
-  return shown.join('; ');
+  // Every distinct observation is kept: a timeout message that elides the middle
+  // reads hides exactly the evidence that says whether the target moved, so only
+  // consecutive identical observations are folded (above), never a range.
+  return entries.map(entry =>
+    `read ${entry.first === entry.last ? entry.first : `${entry.first}–${entry.last}`}: ${entry.observed}`)
+    .join('; ');
 }
 
 /** One same-titled candidate the gate read while choosing which window to use. */
@@ -895,6 +896,8 @@ class StepRunner {
       arm(deadline);
     };
     let previous: string | undefined;
+    /** True once two reads actually named different targets or places. */
+    let changed = false;
     let problem = unreadProblem;
     let reads = 0;
     /**
@@ -958,6 +961,14 @@ class StepRunner {
             arm(readDeadline);
             snapshot = await this.withinDeadline(
               this.resolver.snapshot(binding!), readDeadline, () => fail(problem, reads));
+            // A driver read that blocked the event loop past its own deadline
+            // resolves before the deadline timer can run, so the race alone does
+            // not refuse it. The deadline fixed when this read started is the
+            // one that decides: evidence that landed at or past it is not
+            // evidence and must not extend the budget or be dispatched from.
+            if (performance.now() >= readDeadline) {
+              throw fail('the read answered after its own deadline', reads);
+            }
             tookMs = performance.now() - started;
           }
           reads += 1;
@@ -973,25 +984,37 @@ class StepRunner {
           selectionRead = undefined;
         }
         if (read !== undefined) {
+          // A signature-bearing read says only that the target was seen once;
+          // "still changing" is claimed after two reads actually disagree, never
+          // because the agreeing read did not answer in time.
+          if (read.signature !== undefined) {
+            if (previous !== undefined && read.signature !== previous) changed = true;
+            problem = changed
+              ? `${describeTarget(step)} was still changing between reads`
+              : `${describeTarget(step)} was read once; no second read had completed before the deadline`;
+          } else {
+            problem = read.problem;
+          }
           proofReads.push(read);
           extendProof(tookMs);
         }
         // A read that outlived the deadline is not evidence.
-        live(read?.problem ?? problem);
+        live(problem);
         if (read?.refuse) return { binding: binding!, snapshot: snapshot! };
         if (read?.signature !== undefined && read.signature === previous) {
           // The windows were read over a moment in which the operator can take
           // the foreground away. Dispatch only happens while the run still
           // owns it; a switch since the first read stops the step with zero
           // input, and the check itself stays inside the proof's budget.
+          problem = `${describeTarget(step)} was read twice the same, but the foreground ` +
+            'could not be confirmed before the deadline';
           await this.withinDeadline(
-            this.resolver.confirmForeground(binding!, cancel.signal, () => live(read?.problem ?? problem)),
+            this.resolver.confirmForeground(binding!, cancel.signal, () => live(problem)),
             deadline, () => fail(problem, reads));
-          live(read.problem);
+          live(problem);
           return { binding: binding!, snapshot: snapshot! };
         }
         previous = read?.signature;
-        if (read !== undefined) problem = read.problem;
         await sleep(Math.max(0, Math.min(readinessProbeIntervalMs, remaining())), undefined, { signal: this.signal });
       }
     } finally {
