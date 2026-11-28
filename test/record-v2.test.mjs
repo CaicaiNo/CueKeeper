@@ -5513,6 +5513,72 @@ test('a point warning is dropped when the second press upgrades the click to an 
   assert.deepEqual(recording.clickWarnings, [], 'the upgraded step no longer needs a point warning');
 });
 
+test('a prewarm that lands after a Finder navigation is discarded', async () => {
+  let release;
+  let reads = 0;
+  const queued = [];
+  const recording = new GlobalRecording(async () => {
+    reads += 1;
+    if (reads === 1) {
+      return new Promise(resolve => {
+        release = () => resolve(structuredClone(finderBrowserWindow()));
+      });
+    }
+    return structuredClone(finderParentWindow());
+  }, { now: () => NOW, scheduleSettle: task => { queued.push(task); } });
+
+  await recording.add(parseCaptureEvent(finderFocus('图片')));
+  const prewarm = queued.shift()();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  // The read is in flight when ⌘↑ replaces the directory.
+  await recording.add(parseCaptureEvent(finderKey('up', ['meta'], '图片', 200)));
+  release();
+  await prewarm;
+  await recording.add(parseCaptureEvent(finderClick([259, 367], '上级目录', 400)));
+
+  const flow = recording.finish();
+  const click = flow.steps.find(step => step.kind === 'click');
+  assert.equal(click.target.kind, 'element');
+  assert.equal(click.target.name, 'right-file');
+  assert.notEqual(click.target.name, '下载', 'the pre-navigation tree was not cached');
+});
+
+test('a cold first click in the startup window keeps the old title evidence', async () => {
+  const recording = new GlobalRecording(async () => structuredClone(finderNavigatedWindow()), {
+    now: () => NOW, scheduleSettle: () => {},
+  });
+  await recording.add(parseCaptureEvent(finderFocus('图片')));
+  // t < 500 ms: the startup probe must not retitle the binding before the click
+  // captures the screen it started on.
+  await recording.add(parseCaptureEvent(finderClick([259, 367], '下载', 100)));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps[0].target, { kind: 'point', point: [259, 367] });
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_FILE_CLICK'));
+});
+
+test('a click dropped by the step limit leaves no click warning', async () => {
+  const recording = new GlobalRecording(async () => {
+    throw new Error('a step-limit test must not read a tree');
+  }, { now: () => NOW, stepLimit: 1, scheduleSettle: () => {} });
+
+  await recording.add(parseCaptureEvent(finderFocus('Images')));
+  // The first click fills the only step slot.
+  await recording.add(parseCaptureEvent({
+    ...finderClick([250, 50], 'Images', 100),
+    owner: { ...finderClick([250, 50], 'Images', 100).owner, role: 'AXButton', name: '刷新' },
+  }));
+  // The held gap click is flushed by the next event, but its push is dropped.
+  await recording.add(parseCaptureEvent({
+    ...finderClick([250, 50], 'Images', 200), decision: 'gap',
+  }));
+  await recording.add(parseCaptureEvent(finderKey('escape', [], 'Images', 300)));
+
+  const flow = recording.finish();
+  assert.equal(flow.steps.length, 1);
+  assert.deepEqual(recording.clickWarnings, [], 'a step that was never written has no warning');
+});
+
 test('a Finder navigation key drops the old directory before the next click', async () => {
   let screen = finderBrowserWindow();
   const queued = [];
@@ -5693,6 +5759,54 @@ test('an operable control outside the click does not get pressed just because it
   assert.equal(recording.captureWarnings.some(warning => warning.code === 'CLICK_NAMED_BY_NEARBY_CONTROL'), false);
   assert.ok(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_ELEMENT_CLICK'));
   assert.equal(flowV2Check.Check(flow), true);
+});
+
+test('a hidden operable control is never used as the click target', async () => {
+  const snapshot = plainWindow(44, 'aTrust', { x: 400, y: 100, width: 900, height: 600 }, [{
+    role: 'group', name: '', ref: '@trust:e2',
+    bounds: { x: 700, y: 680, width: 300, height: 120 }, states: [], secure: false,
+    children: [{
+      role: 'button', name: '隐藏按钮', ref: '@trust:e3',
+      bounds: { x: 720, y: 700, width: 220, height: 20 }, states: ['hidden'], secure: false,
+      actions: ['Click'], children: [],
+    }],
+  }]);
+  const recording = new GlobalRecording(async () => structuredClone(snapshot), { now: () => NOW });
+
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 100, seen: NOW, focusGeneration: 1, secure: false,
+    point: [725, 710], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXGroup' },
+  }));
+  const flow = recording.finish();
+
+  assert.deepEqual(flow.steps[0].target, { kind: 'point', point: [725, 710] });
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'CLICK_NAMED_BY_NEARBY_CONTROL'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_ELEMENT_CLICK'));
+});
+
+test('an anonymous hit uses a sibling control that covers the point', async () => {
+  const snapshot = plainWindow(44, 'aTrust', { x: 400, y: 100, width: 900, height: 600 }, [{
+    role: 'group', name: '', ref: '@trust:e2',
+    bounds: { x: 700, y: 680, width: 300, height: 120 }, states: [], secure: false,
+    children: [{
+      role: 'group', name: '', ref: '@trust:e3',
+      bounds: { x: 720, y: 700, width: 20, height: 20 }, states: [], secure: false, children: [],
+    }, {
+      role: 'button', name: '切换新地址', ref: '@trust:e4',
+      bounds: { x: 700, y: 680, width: 300, height: 120 }, states: [], secure: false,
+      actions: ['Click'], children: [],
+    }],
+  }]);
+  const recording = new GlobalRecording(async () => structuredClone(snapshot), { now: () => NOW });
+
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 100, seen: NOW, focusGeneration: 1, secure: false,
+    point: [725, 710], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXGroup' },
+  }));
+  const flow = recording.finish();
+
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'button', name: '切换新地址' });
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_NAMED_BY_NEARBY_CONTROL'));
 });
 
 test('a plain static label next to the click is not a target', async () => {

@@ -734,7 +734,7 @@ export class GlobalRecording {
     // startup noise (a click that dismissed a dialog, a queued gap); it must not
     // become the first thing the flow reports. A scope gap is dropped later
     // regardless of its time, because it names no window either.
-    if (this.startupOpen && !this.steps.length && !this.bindingFor(event)) {
+    if (this.startupOpen && !this.steps.length && !this.bindingFor(event, { updateTitle: false })) {
       this.startupDropped += 1;
       return;
     }
@@ -862,11 +862,15 @@ export class GlobalRecording {
         if (this.ended || epoch !== this.secureEpoch || this.secureOpen) return;
         if (this.reusableTree(binding)) return;
         this.snapshotReads += 1;
+        const at = this.now();
         const snapshot = await this.read(this.windowFor(binding), this.snapshotBudgetMs);
         // A read that finished across a secure boundary describes the prompt,
         // not this window.
         if (this.ended || epoch !== this.secureEpoch) return;
-        this.cacheTree(binding, snapshot);
+        // The read may have started before a Finder navigation key and returned
+        // after it; it describes the old directory and must not be cached.
+        if (binding.navigatedAt !== undefined && at <= binding.navigatedAt) return;
+        this.cacheTree(binding, snapshot, at);
       } catch {
         // A prewarm is opportunistic; the click keeps its own evidence.
       } finally {
@@ -1410,7 +1414,7 @@ export class GlobalRecording {
     // label next to the point is a description of some other control, and
     // aiming the replay at its centre would press the wrong place entirely.
     const addressable = (node: Node) => {
-      if (node.secure || scopeRoles.has(node.role) || editableRole(node.role)) return false;
+      if (node.secure || node.states.includes('hidden') || scopeRoles.has(node.role) || editableRole(node.role)) return false;
       if (area(node.bounds) > windowArea * 0.25) return false;
       if (!node.ref && !pressable(node)) return false;
       return Boolean((names.get(node) ?? '').trim() || (node.identifier ?? '').trim());
@@ -1657,6 +1661,10 @@ export class GlobalRecording {
       // A read that completed across a secure boundary describes the screen of
       // the prompt, not of the window: it is discarded, not cached.
       if (!snapshot || this.ended || epoch !== this.secureEpoch) return;
+      // The read may have started before a Finder navigation key and returned
+      // after it; it describes the old directory and must not become the tree
+      // the next click is named from.
+      if (binding.navigatedAt !== undefined && at <= binding.navigatedAt) return;
       const changed = !binding.settled || signature(snapshot.tree) !== signature(binding.settled.snapshot.tree);
       // A slower read can finish after a later one; the newer read wins.
       if (!binding.settled || binding.settled.at <= at) binding.settled = { snapshot, at };
@@ -1728,7 +1736,7 @@ export class GlobalRecording {
         reasons.push(`${source} tree started after the click did`);
         continue;
       }
-      if (binding.navigatedAt !== undefined && entry.at < binding.navigatedAt) {
+      if (binding.navigatedAt !== undefined && entry.at <= binding.navigatedAt) {
         reasons.push(`${source} tree was read before a Finder navigation key`);
         continue;
       }
@@ -2529,7 +2537,7 @@ export class GlobalRecording {
       // ⌘↑ / ⌘[ / ⌘] / ⌘⇧G replace the directory under the window. Any tree
       // read before the key is the screen before the navigation and must not
       // name the next click; the key itself is still recorded.
-      binding.navigatedAt = event.t;
+      binding.navigatedAt = event.seen;
       this.dropBeforeClickTrees(binding);
     }
     this.ensureScope(binding);
@@ -2611,7 +2619,7 @@ export class GlobalRecording {
     });
   }
 
-  private bindingFor(event: CaptureEvent): WindowBinding | undefined {
+  private bindingFor(event: CaptureEvent, { updateTitle = true }: { updateTitle?: boolean } = {}): WindowBinding | undefined {
     const owner = event.owner;
     if (!owner?.app || !bundleIdPattern.test(owner.app)) return undefined;
     if (!owner.pid) return undefined;
@@ -2622,7 +2630,7 @@ export class GlobalRecording {
     if (existing) {
       // The same native window can retitle; the key keeps following it. A
       // surface that names no title says nothing about the window it proves.
-      if ((owner.windowTitle ?? '').trim() !== '' && existing.title !== title) existing.title = title;
+      if (updateTitle && (owner.windowTitle ?? '').trim() !== '' && existing.title !== title) existing.title = title;
       this.lastWindow = { binding: existing, generation: event.focusGeneration };
       return existing;
     }
@@ -2901,9 +2909,10 @@ export class GlobalRecording {
     return cache.snapshot;
   }
 
-  private cacheTree(binding: WindowBinding, snapshot: Snapshot) {
+  private cacheTree(binding: WindowBinding, snapshot: Snapshot, at = this.now()) {
+    if (binding.navigatedAt !== undefined && at <= binding.navigatedAt) return;
     const id = this.bindingId(binding);
-    binding.cache = { snapshot, at: this.now(), title: binding.title, bounds: snapshot.tree.bounds };
+    binding.cache = { snapshot, at, title: binding.title, bounds: snapshot.tree.bounds };
     this.cacheOrder = this.cacheOrder.filter(entry => entry !== id);
     this.cacheOrder.push(id);
     while (this.cacheOrder.length > this.maxCachedWindows) {
@@ -3134,16 +3143,22 @@ export class GlobalRecording {
         `A click on ${pending.where} at ${pending.point[0]},${pending.point[1]} could not be proven to target an element; it is kept at its screen point and must be edited into an element before replay`);
     }
     const scope = this.windowScope(pending.binding);
+    const before = this.steps.length;
     this.push({ kind: 'click', scope, target }, pending.at);
-    if (target.kind === 'point') {
-      this.pointClickWarning.set(this.steps.length - 1, new Set(['CLICK_UNPROVEN']));
-    }
-    const step = this.steps[this.steps.length - 1];
-    if (step?.kind === 'click') {
-      this.lastClick = {
-        at: pending.at, point: pending.point, index: this.steps.length - 1,
-        scope: scopeKey(scope), locator: locatorKey(target), button: 'left',
-      };
+    // A step limit can drop this click. It then has no step to describe, so it
+    // must not leave a warning (or a last-click anchor) behind for a step that
+    // was never written.
+    if (this.steps.length > before) {
+      if (target.kind === 'point') {
+        this.pointClickWarning.set(this.steps.length - 1, new Set(['CLICK_UNPROVEN']));
+      }
+      const step = this.steps[this.steps.length - 1];
+      if (step?.kind === 'click') {
+        this.lastClick = {
+          at: pending.at, point: pending.point, index: this.steps.length - 1,
+          scope: scopeKey(scope), locator: locatorKey(target), button: 'left',
+        };
+      }
     }
   }
 
