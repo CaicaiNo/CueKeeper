@@ -211,7 +211,7 @@ export class Document {
 
 /** The element ids `workbench/index.html` provides to `app.js`. */
 export const PAGE_IDS = [
-  'dialog', 'v2-pick-dialog', 'status', 'session-name', 'session-kind', 'summary', 'setup', 'timeline',
+  'dialog', 'v2-pick-dialog', 'guide-button', 'guide-dialog', 'status', 'session-name', 'session-kind', 'summary', 'setup', 'timeline',
   'timeline-count', 'ignored-control', 'selection', 'inspector', 'draft', 'draft-count',
   'test-name', 'save-button', 'run-button', 'shell-button', 'privilege-button', 'import-button',
   'app-picker', 'app-picker-icon', 'app-picker-label', 'mode-edit', 'mode-batch',
