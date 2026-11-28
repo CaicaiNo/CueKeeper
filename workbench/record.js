@@ -171,12 +171,12 @@ function errorText(result) {
     (partialPath ? `（部分录制：${partialPath}）` : '');
 }
 
-/** Why the record button is off, plus the first doctor next step. */
+/** The one-line state; full details live in the button title and the guide. */
 function healthText(health) {
-  const first = Array.isArray(health.blocking) ? health.blocking[0] : undefined;
-  const steps = Array.isArray(health.nextSteps) ? health.nextSteps : [];
-  const detail = first ? `${first.label}：${first.detail}` : '录制环境未就绪';
-  return `录制不可用（${detail}）${steps.length ? `。${steps[0]}` : ''}`;
+  const checks = Array.isArray(health.blocking) ? health.blocking : [];
+  return checks.length
+    ? `录制环境未就绪：${checks.map(check => check.label).join(' / ')}`
+    : '录制环境未就绪';
 }
 
 /** Read-only probe: the recorder binary, its permissions, and agent-desktop. */

@@ -82,19 +82,21 @@ test('the workbench serves the guide module and opens the requested settings pan
 
   const dialog = document.getElementById('guide-dialog');
   assert.equal(dialog.open, true, 'the guide opens');
-  assert.match(dialog.textContent, /4 步开始使用 CueKeeper/);
-  assert.match(dialog.textContent, /先授权录制器/);
-  assert.match(dialog.textContent, /录制真实操作/);
-  assert.match(dialog.textContent, /检查并编辑流程/);
-  assert.match(dialog.textContent, /回放并查看报告/);
-  assert.match(dialog.textContent, /录制环境未就绪/);
-  assert.match(dialog.textContent, /not granted for the recorder/);
+  assert.match(dialog.textContent, /4 步开始/);
+  assert.match(dialog.textContent, /授权录制器/);
+  assert.match(dialog.textContent, /录制操作/);
+  assert.match(dialog.textContent, /检查流程/);
+  assert.match(dialog.textContent, /回放报告/);
+  assert.match(dialog.textContent, /需要授权/);
+  const accessCheck = dialog.querySelector('.guide-check');
+  assert.match(accessCheck.getAttribute('title'), /not granted for the recorder/,
+    'the detailed probe result stays available on the compact row');
   assert.match(dialog.textContent, /cuekeeper-capture/);
   assert.match(dialog.textContent, new RegExp(recorderPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.equal(buttonByText(dialog, '开始录制').disabled, true,
     'the guide does not offer recording while health is blocked');
 
-  buttonByText(dialog, '打开设置').click();
+  buttonByText(dialog, '设置').click();
   await sleep(50);
   assert.deepEqual(settingsCalls, ['accessibility'], 'the guide opens the accessibility pane');
 
@@ -133,7 +135,7 @@ test('the guide offers recording when health is ready and closes cleanly', async
   document.getElementById('guide-button').click();
   await sleep(50);
   const dialog = document.getElementById('guide-dialog');
-  assert.match(dialog.textContent, /录制环境已就绪/);
+  assert.match(dialog.textContent, /环境就绪/);
   assert.equal(buttonByText(dialog, '开始录制').disabled, false);
   buttonByText(dialog, '关闭').click();
   assert.equal(dialog.open, false);

@@ -170,8 +170,8 @@ test('the record controls start the recorder, surface errors, and reload after t
   assert.equal(startButton.disabled, false);
   assert.equal(startButton.textContent, '查看录制引导');
   assert.equal(recheckButton.hidden, false);
-  assert.match(message.textContent, /录制不可用（recorder：missing/);
-  assert.match(message.textContent, /build:recorder/);
+  assert.match(message.textContent, /录制环境未就绪：recorder/);
+  assert.match(startButton.title, /build:recorder/);
   healthMode = 'ok';
   recheckButton.click();
   await tick();

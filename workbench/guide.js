@@ -25,38 +25,34 @@ export function createGuide({ dialog, dom, onStart }) {
   function renderHealth() {
     healthBox.replaceChildren();
     if (checking) {
-      healthBox.append(muted('正在检查录制器、权限与 agent-desktop…'));
+      healthBox.append(muted('检查中…'));
       start.disabled = true;
       return;
     }
     if (!health) {
-      healthBox.append(el('div', { className: 'alert alert-soft alert-warning' },
-        '暂时读不到录制环境。工作台仍可编辑已有流程；重新检查后再录制。'));
+      healthBox.append(el('div', { className: 'guide-state warning' }, '无法读取录制环境'));
       start.disabled = true;
       return;
     }
     if (health.ok === true) {
       healthBox.append(
-        el('div', { className: 'alert alert-soft alert-success' },
-          '录制环境已就绪：录制器、辅助功能、输入监控与 agent-desktop 都通过。'),
+        el('div', { className: 'guide-state ok' }, '环境就绪'),
         recorderRow(health.recorderPath));
       start.disabled = false;
       return;
     }
-    const blocking = Array.isArray(health.blocking) ? health.blocking : [];
-    const steps = Array.isArray(health.nextSteps) ? health.nextSteps : [];
+    const checks = Array.isArray(health.blocking) ? health.blocking : [];
     healthBox.append(
-      el('div', { className: 'alert alert-soft alert-error' },
-        el('strong', {}, '录制环境未就绪'),
-        el('ul', { className: 'guide-checklist' },
-          ...blocking.map(check => el('li', {},
-            `${check.label}：${check.detail}`,
-            check.id === 'accessibility' || check.id === 'input-monitoring'
-              ? button('打开设置', () => void openSettings(check.id), { style: 'small' })
-              : undefined)))),
-      muted('如果刚重新编译过录制器，macOS 会把新二进制当成新程序：请在“系统设置 → 隐私与安全性”的辅助功能和输入监控里重新勾选 cuekeeper-capture。'),
-      recorderRow(health.recorderPath),
-      steps.length ? muted(steps[0]) : undefined);
+      el('div', { className: 'guide-state error' }, '需要授权'),
+      el('div', { className: 'guide-checks' },
+        ...checks.map(check => el('div', {
+          className: 'guide-check', title: `${check.label}：${check.detail}`,
+        },
+        el('span', {}, check.label),
+        check.id === 'accessibility' || check.id === 'input-monitoring'
+          ? button('设置', () => void openSettings(check.id), { style: 'small' })
+          : undefined))),
+      recorderRow(health.recorderPath));
     start.disabled = true;
   }
 
@@ -99,11 +95,10 @@ export function createGuide({ dialog, dom, onStart }) {
   function recorderRow(path) {
     if (!path) return undefined;
     return el('div', { className: 'guide-recorder' },
-      el('div', { className: 'guide-recorder-label' }, '录制器二进制'),
+      el('span', { className: 'guide-recorder-label' }, '录制器'),
       el('code', { title: path }, path),
-      el('div', { className: 'actions' },
-        button('复制路径', copyRecorderPath, { style: 'small', icon: 'copy' }),
-        button('在 Finder 中显示', () => void revealRecorder(), { style: 'small', icon: 'folder' })));
+      button('复制', copyRecorderPath, { style: 'small', icon: 'copy', iconOnly: true, title: '复制路径' }),
+      button('显示', () => void revealRecorder(), { style: 'small', icon: 'folder', iconOnly: true, title: '在 Finder 中显示' }));
   }
 
   async function check() {
@@ -121,13 +116,12 @@ export function createGuide({ dialog, dom, onStart }) {
     }
   }
 
-  function step(number, title, body, hint) {
+  function step(number, title, hint) {
     return el('li', { className: 'guide-step' },
       el('span', { className: 'guide-num' }, number),
       el('div', {},
         el('strong', {}, title),
-        el('p', {}, body),
-        hint ? el('p', { className: 'muted' }, hint) : undefined));
+        el('small', { className: 'muted' }, hint)));
   }
 
   function render() {
@@ -135,27 +129,18 @@ export function createGuide({ dialog, dom, onStart }) {
     built = true;
     const content = el('div', { className: 'modal-box guide-box' },
       el('div', { className: 'dialog-head' },
-        el('h2', { id: 'guide-title' }, '4 步开始使用 CueKeeper'),
+        el('h2', { id: 'guide-title' }, '4 步开始'),
         button('关闭', () => dialog.close(), { icon: 'x', iconOnly: true, title: '关闭' })),
       el('div', { className: 'guide stack-list' },
-        muted('录制一次真实操作，确认目标后就能重复回放和断言；不需要写代码。'),
         healthBox,
         el('ol', { className: 'guide-steps' },
-          step('1', '先授权录制器',
-            '第一次使用、或重新编译 recorder 后，在系统设置里授予录制器“辅助功能”和“输入监控”权限。',
-            '需要授权的程序是 dist/cuekeeper-capture；授权后点“重新检查环境”。'),
-          step('2', '录制真实操作',
-            '选择倒计时后点“开始录制”，正常操作目标 App，完成后点“停止录制”。',
-            '录制中可以按 Ctrl+Option+P 暂停，Ctrl+Option+X 停止。'),
-          step('3', '检查并编辑流程',
-            '在工作台时间线里核对应用/窗口、目标控件和步骤顺序。',
-            '黄色“需确认”的坐标步骤先编辑成元素目标，再跑 dry-run。'),
-          step('4', '回放并查看报告',
-            'dry-run 通过后执行实时回放；报告里能看到每一步的状态、耗时和失败原因。',
-            '重复执行、批量运行、模板和行为库都在下方面板里。')),
+          step('1', '授权录制器', '辅助功能 + 输入监控'),
+          step('2', '录制操作', '倒计时 → 操作 → 停止'),
+          step('3', '检查流程', 'dry-run 处理黄色步骤'),
+          step('4', '回放报告', '实时回放，查看结果')),
         el('div', { className: 'actions guide-actions' },
           recheck, start,
-          button('稍后再说', () => dialog.close(), { style: 'small' }))));
+          button('关闭', () => dialog.close(), { style: 'small' }))));
     dialog.replaceChildren(content);
   }
 
