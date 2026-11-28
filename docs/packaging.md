@@ -239,6 +239,7 @@ release/
 - 首次启动由 App 启动内置录制器。macOS 把这次权限请求归到负责启动它的 `CueKeeper.app` 上；录制时也是同一条责任链，所以两个隐私列表里的授权对象都是主 App，而不是 `cuekeeper-capture`。
 - 输入监控通常不会自动把 App 加进列表。引导里的「打开设置」会同时打开对应面板，并在 Finder 中选中 `CueKeeper.app`：把它拖进列表即可；也可以点列表下的 ＋ 后按 ⌘⇧G 粘贴「复制」的完整路径。
 - 工作台健康检查把授权对象显示为 `CueKeeper.app`；菜单「CueKeeper → 在 Finder 中显示 CueKeeper」可再次定位。
+- 回放报告的「导出报告」由工作台写入 `~/.cuekeeper/exports/`，并在 Finder 中选中该文件；不再依赖浏览器下载。
 - 日志：`~/Library/Logs/com.cuekeeper.app/workbench.log`；菜单「视图 → 打开日志目录」可直接打开。
 
 ### 签名与分发

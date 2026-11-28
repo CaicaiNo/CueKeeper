@@ -292,6 +292,10 @@ export async function startWorkbench(options: {
   copyRecorderPath?: () => void;
   /** Tests replace the in-app recorder permission prompt. */
   requestRecorderPermissions?: () => void;
+  /** Tests replace where a replay report is exported; defaults to ~/.cuekeeper/exports. */
+  exportsRoot?: string;
+  /** Tests replace the Finder reveal after a report export. */
+  openReportFolder?: (path: string) => void;
   /** Tests replace the sidecar reader a live run uses to prefill parameters. */
   resolveInputValues?: (flowPath: string, flowId: string) => Promise<InputValuesRead>;
   /** Tests replace the private directory a live run writes its inputs file to. */
@@ -356,6 +360,12 @@ export async function startWorkbench(options: {
     // Spawn the recorder as a child of the workbench, so macOS attributes the
     // request to CueKeeper.app: the same responsible process used for recording.
     spawn(recorderBinary(), ['--request-permissions'], { stdio: 'ignore', detached: true }).unref();
+  });
+  const exportRoot = options.exportsRoot ?? join(homedir(), '.cuekeeper', 'exports');
+  const openReportFolder = options.openReportFolder ?? (path => {
+    if (process.platform !== 'darwin') return;
+    // A fixed file the server just wrote; the page cannot name a path here.
+    spawn('/usr/bin/open', ['-R', path], { stdio: 'ignore', detached: true }).unref();
   });
   const workRoot = workdirRoot();
   const workdirFailure = await prepareWorkdir(workRoot);
@@ -684,6 +694,24 @@ export async function startWorkbench(options: {
       const result = await recorder.stop();
       const view = await importRecording(result);
       return send(response, 200, { ...result, ...(view ? { session: view } : {}) });
+    }
+    if (path === '/api/report/export') {
+      const report = data.report;
+      if (report === null || typeof report !== 'object' || Array.isArray(report)) {
+        throw new Error('Export needs a replay report');
+      }
+      const flowId = typeof data.flowId === 'string' && data.flowId.trim()
+        ? data.flowId.trim() : 'report';
+      const safe = flowId.replace(/[^a-zA-Z0-9._-]+/g, '-')
+        .replace(/^[.-]+/, '').slice(0, 80) || 'report';
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const text = `${JSON.stringify(report, null, 2)}\n`;
+      if (Buffer.byteLength(text) > 16 * 1024 * 1024) throw new Error('The report is too large to export');
+      const target = join(exportRoot, `report-${safe}-${stamp}.json`);
+      await mkdir(exportRoot, { recursive: true, mode: 0o700 });
+      await writeFile(target, text, { mode: 0o600 });
+      openReportFolder(target);
+      return send(response, 200, { path: target });
     }
     if (path === '/api/import') {
       if (typeof data.directory !== 'string' || !data.directory.trim()) throw new Error('Enter a workflow file or run directory');

@@ -1578,7 +1578,16 @@ function showV2Result(report) {
         stateCheckLabel(entry.stateCheck),
       ].filter(Boolean).join(' · '), windowFallbackChip(entry)));
   });
-  const exportReport = () => {
+  const exportReport = async () => {
+    try {
+      // The workbench writes the report next to its other data and reveals it
+      // in Finder; a browser download cannot open a folder from the page.
+      const result = await api('report/export', { report, flowId: report.flowId });
+      status(`报告已导出：${result.path}`, 'success');
+      return;
+    } catch {
+      // Keep the page download as a fallback when the local export is blocked.
+    }
     const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const link = el('a', { href: url, download: `report-${report.flowId}-${Date.now()}.json` });
