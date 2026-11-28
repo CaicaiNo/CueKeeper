@@ -796,6 +796,47 @@
             "required": [
               "reason"
             ]
+          },
+          "windowFallback": {
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "reason": {
+                "anyOf": [
+                  {
+                    "const": "only_window",
+                    "type": "string"
+                  },
+                  {
+                    "const": "focused",
+                    "type": "string"
+                  },
+                  {
+                    "const": "sole_normal",
+                    "type": "string"
+                  }
+                ]
+              },
+              "recordedTitle": {
+                "minLength": 1,
+                "maxLength": 256,
+                "type": "string"
+              },
+              "actualTitle": {
+                "minLength": 1,
+                "maxLength": 256,
+                "type": "string"
+              },
+              "actualWindowId": {
+                "pattern": "^w-[a-zA-Z0-9_.:-]+$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "recordedTitle",
+              "actualTitle"
+            ]
           }
         },
         "required": [

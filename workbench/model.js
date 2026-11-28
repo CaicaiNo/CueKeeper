@@ -644,6 +644,25 @@ export function statusMap(report) {
 }
 
 /**
+ * How many steps could continue in the app's front window when the recorded
+ * title names none. Same condition as `windowFallbackSteps` in `src/flow-v2.ts`
+ * (a test compares the two on one fixture): element target, window scope, and
+ * one of click / scroll / type / paste / drag.
+ */
+export function windowFallbackCount(flow) {
+  const addressable = locator =>
+    Boolean((locator?.name ?? '').trim() || locator?.identifier);
+  return (flow?.steps ?? []).filter(step => {
+    if (!step || step.kind === 'gap' || step.scope?.kind !== 'window') return false;
+    if (!['click', 'scroll', 'type', 'paste', 'drag'].includes(step.kind)) return false;
+    if (step.kind === 'click' && step.target?.kind === 'point') return false;
+    const locators = step.kind === 'drag' ? [step.from, step.to]
+      : [step.target];
+    return locators.length > 0 && locators.every(addressable);
+  }).length;
+}
+
+/**
  * Each timed row's place in the recording and the gap since the previous timed
  * row. An untimed row is skipped rather than guessed at, so a gap always spans
  * two steps that were actually recorded with a time.

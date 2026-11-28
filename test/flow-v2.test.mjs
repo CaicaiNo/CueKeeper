@@ -9,10 +9,11 @@ import { flowV2Check, reportV2Check } from '../dist/contracts-v2.js';
 import { hashFlow } from '../dist/flow.js';
 import {
   describePlannedStep, dryRunFlowV2, hashFlowV2, parseFlowV2, planFlowV2, pointTargetSteps, scopeKey, scopeLabel,
+  stepSupportsWindowFallback, windowFallbackSteps,
 } from '../dist/flow-v2.js';
 import { loadSession } from '../dist/workbench-session.js';
 import { startWorkbench } from '../dist/workbench.js';
-import { scopeDescription, sessionDurationLabel } from '../workbench/model.js';
+import { scopeDescription, sessionDurationLabel, windowFallbackCount } from '../workbench/model.js';
 
 const example = name => JSON.parse(readFileSync(new URL(`../examples/${name}.json`, import.meta.url), 'utf8'));
 const schema = name => JSON.parse(readFileSync(new URL(`../schemas/${name}.schema.json`, import.meta.url), 'utf8'));
@@ -436,6 +437,63 @@ console.log(JSON.stringify({ version: '2.6', command: process.argv[2], ok: true,
   fixed.steps[0].target = { kind: 'element', role: 'row', name: 'a.txt' };
   fixed.steps[1].target = { kind: 'element', role: 'row', name: 'b.txt' };
   assert.equal(dryRunFlowV2(parseFlowV2(fixed)).status, 'passed');
+});
+
+test('a window fallback is counted for element input steps and announced by the dry run', t => {
+  const scope = { kind: 'window', app: 'com.apple.TextEdit', windowKey: 'editor', windowTitle: 'Notes' };
+  const flow = {
+    version: 2, id: 'window-fallback', name: '窗口回退',
+    steps: [
+      { id: 'click-save', kind: 'click', scope, target: { kind: 'element', role: 'button', name: 'Save' } },
+      { id: 'type-body', kind: 'type', scope, target: { kind: 'element', role: 'textfield', name: 'Body' }, text: 'x' },
+      {
+        id: 'drag-row', kind: 'drag', scope, durationMs: 100,
+        from: { kind: 'element', role: 'row', name: 'a' },
+        to: { kind: 'element', role: 'row', name: 'b' },
+      },
+      { id: 'key-escape', kind: 'key', scope, key: 'escape' },
+      { id: 'hover-screen', kind: 'hover', scope: { kind: 'screen' }, point: [10, 20], durationMs: 0 },
+      {
+        id: 'click-nameless', kind: 'click', scope,
+        target: { kind: 'element', role: 'group', name: '' },
+      },
+    ],
+  };
+  const parsed = parseFlowV2(flow);
+  // Point targets, key steps, screen hovers and nameless targets cannot prove a
+  // fallback window, so they are not counted.
+  assert.deepEqual(windowFallbackSteps(parsed).map(step => step.id), ['click-save', 'type-body', 'drag-row']);
+  assert.equal(stepSupportsWindowFallback(parsed.steps[5]), false);
+  // The workbench page computes its dry-run hint from the same rule.
+  assert.equal(windowFallbackCount(parsed), 3);
+
+  const report = dryRunFlowV2(parsed);
+  assert.equal(report.status, 'passed');
+  // A fallback is a runtime decision: no entry gains a field or a different
+  // status from the dry run.
+  assert.equal(report.entries.some(entry => 'windowFallback' in entry), false);
+  assert.deepEqual(report.entries.map(entry => entry.status),
+    ['resolved', 'resolved', 'resolved', 'resolved', 'resolved', 'resolved']);
+
+  const dir = mkdtempSync(join(tmpdir(), 'cuekeeper-window-fallback-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, 'flow.json');
+  writeFileSync(path, JSON.stringify(flow));
+  const run = spawnSync(process.execPath, [cliPath, 'run', path, '--dry-run'], {
+    encoding: 'utf8', timeout: 20_000,
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout,
+    /注意：3 个窗口步骤在记录窗口不存在时会尝试退回该 App 的前台窗口（需目标唯一）。/);
+  // A point step still fails the dry run and no fallback hint is claimed for it.
+  const pointed = { ...flow, steps: [...flow.steps, {
+    id: 'click-point', kind: 'click', scope, target: { kind: 'point', point: [5, 5] },
+  }] };
+  const pointedPath = join(dir, 'pointed.json');
+  writeFileSync(pointedPath, JSON.stringify(pointed));
+  const refused = cli(['run', pointedPath, '--dry-run']);
+  assert.equal(refused.code, 1);
+  assert.equal(refused.error.code, 'UNSAFE_POINT');
 });
 
 test('v2 rejects missing scope, bound window keys, app paths, surfaces, IDs and references', () => {

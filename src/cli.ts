@@ -16,7 +16,7 @@ import { ensureNew, readJson, writeNew } from './files.js';
 import { parseFlow, plan } from './flow.js';
 import {
   UnsupportedFlowVersionError, describePlannedStep, dryRunFlowV2, hashFlowV2, isFlowV2, parseFlowV2, planFlowV2,
-  screenHoverSteps,
+  screenHoverSteps, windowFallbackSteps,
 } from './flow-v2.js';
 import type { FlowV2 } from './contracts-v2.js';
 import {
@@ -503,9 +503,15 @@ async function main() {
           const line = `${entry?.status ?? 'resolved'} · ${describePlannedStep(step)}`;
           return entry?.message ? `${line} · ${entry.message}` : line;
         }).join('\n');
+        // A fallback is a runtime decision; the dry run only announces how many
+        // steps could use one. It opens no window and changes no entry.
+        const fallbacks = windowFallbackSteps(flow).length;
+        const note = fallbacks
+          ? `\n注意：${fallbacks} 个窗口步骤在记录窗口不存在时会尝试退回该 App 的前台窗口（需目标唯一）。`
+          : '';
         // A blocked step is not a pass: the process still exits non-zero, so a
         // script never treats a flow with recorded coordinates as ready.
-        success(report, `${report.mode} ${report.status}\n${details}`, report.status === 'passed' ? 0 : 1);
+        success(report, `${report.mode} ${report.status}\n${details}${note}`, report.status === 'passed' ? 0 : 1);
         return;
       }
       if (!values['foreground']) {

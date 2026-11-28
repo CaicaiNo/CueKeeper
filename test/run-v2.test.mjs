@@ -126,6 +126,7 @@ function fakeWorld(options = {}) {
       return state.windows.map(window => ({
         id: window.id, title: window.title, processInstance: window.pid,
         isFocused: window.id === state.focused,
+        ...(window.minimized === undefined ? {} : { minimized: window.minimized }),
       }));
     },
     async listWindows(app) { return inventoryOf(app); },
@@ -1845,6 +1846,207 @@ test('a same-titled window that is focused wins over an older duplicate', async 
   assert.deepEqual(callsOf(world, 'click'), [['click', '@w97:e1']]);
   assert.match(entry(report, 'click-control').message ?? '', /more than one window was titled "git".*the focused one/);
 });
+
+// --- HAOC-229: the recorded window title names no window ----------------------
+// The run may continue in another window of the same app, but only one whose
+// tree holds the step's own target exactly once, and only for one bind per key.
+
+/** A Finder window under a title the flow did not record, holding one item. */
+function retitledWindow(id, title, item) {
+  const window = gitWindow(id, item);
+  return {
+    ...window, title,
+    data: { ...window.data, window: { id, title }, tree: { ...window.data.tree, name: title } },
+  };
+}
+
+function fallbackClickFlow(count = 1) {
+  return parseFlowV2({
+    version: 2, id: 'finder-fallback-click', name: 'Finder fallback click',
+    appPaths: { [finderApp]: finderPath },
+    steps: Array.from({ length: count }, (_, index) => ({
+      id: index === 0 ? 'click-control' : `click-again-${index}`,
+      kind: 'click',
+      scope: { kind: 'window', app: finderApp, windowKey: 'git', windowTitle: 'git' },
+      target: { kind: 'element', role: 'statictext', name: 'README.md' },
+    })),
+  });
+}
+
+test('a missing recorded window continues in the app\'s single focused window after its target is proven', async t => {
+  const { world, run } = finderWorld(t, {
+    windows: [
+      retitledWindow('w-98', '下载', 'notes.txt'),
+      retitledWindow('w-97', '桌面', 'README.md'),
+    ],
+    focused: 'w-97',
+  });
+  const report = await run(fallbackClickFlow());
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  const passed = entry(report, 'click-control');
+  assert.deepEqual(passed.windowFallback, {
+    reason: 'focused', recordedTitle: 'git', actualTitle: '桌面', actualWindowId: 'w-97',
+  });
+  assert.match(passed.message ?? '', /window fallback: window "git" is gone/);
+  // Input went only to the proven window, and it was already in front.
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w97:e1']]);
+  assert.deepEqual(callsOf(world, 'focusWindow'), []);
+  // One tree read proves the target and is the tree the click dispatches from.
+  assert.deepEqual(callsOf(world, 'snapshotWindow'), [['snapshotWindow', 'w-97']]);
+  assert.ok(
+    world.state.calls.findIndex(call => call[0] === 'snapshotWindow') <
+    world.state.calls.findIndex(call => call[0] === 'click'),
+    'the candidate tree is read before any input');
+});
+
+test('a fallback binding is reused by the next step on the same key without a second proof', async t => {
+  const { world, run } = finderWorld(t, {
+    windows: [
+      retitledWindow('w-98', '下载', 'notes.txt'),
+      retitledWindow('w-97', '桌面', 'README.md'),
+    ],
+    focused: 'w-97',
+  });
+  const report = await run(fallbackClickFlow(2));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w97:e1'], ['click', '@w97:e1']]);
+  // Both entries carry the structure; only the first explains it.
+  assert.equal(entry(report, 'click-again-1').windowFallback?.actualWindowId, 'w-97');
+  assert.equal(entry(report, 'click-again-1').message, undefined);
+  // One proof read plus one ordinary read for the second step; the other
+  // window is never read.
+  assert.deepEqual(callsOf(world, 'snapshotWindow'),
+    [['snapshotWindow', 'w-97'], ['snapshotWindow', 'w-97']]);
+  assert.deepEqual(callsOf(world, 'focusWindow'), []);
+});
+
+test('a focused fallback window that matches the target twice is ambiguous and gets no input', async t => {
+  const twin = retitledWindow('w-97', '桌面', 'README.md');
+  twin.data.tree.children[0].children.push({
+    role: 'statictext', value: 'README.md', ref_id: '@w97:e2',
+    bounds: { x: 140, y: 166, width: 200, height: 20 }, states: [],
+  });
+  const { world, run } = finderWorld(t, {
+    windows: [retitledWindow('w-98', '下载', 'notes.txt'), twin],
+    focused: 'w-97',
+  });
+  const report = await run(fallbackClickFlow());
+  const failed = entry(report, 'click-control');
+  assert.equal(failed.code, 'AMBIGUOUS_TARGET');
+  assert.match(failed.message, /matches statictext "README\.md" more than once/);
+  assert.deepEqual([callsOf(world, 'click'), callsOf(world, 'clickPoint'), callsOf(world, 'focusWindow')],
+    [[], [], []]);
+});
+
+test('a focused fallback window without the target stops in WINDOW_NOT_FOUND', async t => {
+  const { world, run } = finderWorld(t, {
+    windows: [
+      retitledWindow('w-98', '下载', 'README.md'),
+      retitledWindow('w-97', '桌面', 'notes.txt'),
+    ],
+    focused: 'w-97',
+  });
+  const report = await run(fallbackClickFlow());
+  const failed = entry(report, 'click-control');
+  assert.equal(failed.code, 'WINDOW_NOT_FOUND');
+  // The old prefix is kept; the appended sentence says why no window stood in.
+  assert.match(failed.message, /No window titled "git" belongs to com.apple.finder \(its windows: "下载", "桌面"\)/);
+  assert.match(failed.message, /does not hold statictext "README\.md"/);
+  assert.deepEqual([callsOf(world, 'click'), callsOf(world, 'clickPoint'), callsOf(world, 'focusWindow')],
+    [[], [], []]);
+});
+
+test('a recorded point never falls back to another window', async t => {
+  const { world, run } = finderWorld(t, {
+    headed: true,
+    windows: [
+      retitledWindow('w-98', '下载', 'notes.txt'),
+      retitledWindow('w-97', '桌面', 'README.md'),
+    ],
+    focused: 'w-97',
+  });
+  const report = await run(pointClickFlow([200, 200]));
+  const failed = entry(report, 'open-pkg');
+  assert.equal(failed.code, 'WINDOW_NOT_FOUND');
+  assert.match(failed.message, /a point cannot prove it still names the same control in another window/);
+  assert.deepEqual(callsOf(world, 'clickPoint'), []);
+  assert.deepEqual(callsOf(world, 'focusWindow'), []);
+});
+
+test('without a focused window the only non-minimized window stands in and is focused once', async t => {
+  const { world, run } = finderWorld(t, {
+    windows: [
+      { ...retitledWindow('w-98', '下载', 'README.md'), minimized: true },
+      retitledWindow('w-97', '桌面', 'README.md'),
+    ],
+    focused: 'w-missing',
+  });
+  const report = await run(fallbackClickFlow());
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  const passed = entry(report, 'click-control');
+  assert.equal(passed.windowFallback?.reason, 'sole_normal');
+  assert.equal(passed.windowFallback?.actualWindowId, 'w-97');
+  assert.deepEqual(callsOf(world, 'focusWindow'), [['focusWindow', 'w-97']]);
+  // The proof runs before the window is raised.
+  const order = world.state.calls.map(call => call[0]);
+  assert.ok(order.indexOf('snapshotWindow') < order.indexOf('focusWindow'));
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w97:e1']]);
+});
+
+test('two non-minimized windows without a focused one are not guessed between', async t => {
+  const { world, run } = finderWorld(t, {
+    windows: [
+      retitledWindow('w-98', '下载', 'README.md'),
+      retitledWindow('w-97', '桌面', 'README.md'),
+    ],
+    focused: 'w-missing',
+  });
+  const report = await run(fallbackClickFlow());
+  const failed = entry(report, 'click-control');
+  assert.equal(failed.code, 'WINDOW_NOT_FOUND');
+  assert.match(failed.message, /more than one non-minimized window could stand in/);
+  assert.deepEqual([callsOf(world, 'click'), callsOf(world, 'focusWindow')], [[], []]);
+});
+
+test('a secure target in the fallback window is refused', async t => {
+  const secure = retitledWindow('w-97', '桌面', 'README.md');
+  // The fixture's tree is window › outline › row › statictext; the secure flag
+  // belongs to the control the step addresses.
+  secure.data.tree.children[0].children[0].children[0].secure = true;
+  const { world, run } = finderWorld(t, {
+    windows: [{ ...retitledWindow('w-98', '下载', 'notes.txt'), minimized: true }, secure],
+    focused: 'w-missing',
+  });
+  const report = await run(fallbackClickFlow());
+  const failed = entry(report, 'click-control');
+  assert.equal(failed.code, 'UNSAFE_TARGET');
+  // The proof refuses before the candidate is raised, so the secure window is
+  // neither focused nor clicked.
+  assert.deepEqual([callsOf(world, 'click'), callsOf(world, 'focusWindow')], [[], []]);
+});
+
+test('the window a fallback bound to disappearing stops the run without a second switch', async t => {
+  const { world, run } = finderWorld(t, {
+    windows: [
+      retitledWindow('w-98', '下载', 'notes.txt'),
+      retitledWindow('w-97', '桌面', 'README.md'),
+    ],
+    focused: 'w-97',
+    hooks: {
+      // The first click succeeds; the window it landed in closes right after.
+      click(state) {
+        state.windows = state.windows.filter(window => window.id !== 'w-97');
+      },
+    },
+  });
+  const report = await run(fallbackClickFlow(2));
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w97:e1']]);
+  const stopped = entry(report, 'click-again-1');
+  assert.equal(stopped.code, 'WINDOW_CHANGED');
+  assert.match(stopped.message, /does not switch a second time/);
+  assert.deepEqual(callsOf(world, 'focusWindow'), []);
+});
+
 // --- Deferred path preflight (HAOC-119) ---------------------------------------
 // A flow that installs the app before it uses it cannot fail before that
 // install. The pin is still proven at the first real use, and an existing path

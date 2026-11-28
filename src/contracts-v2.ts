@@ -445,6 +445,17 @@ const fallbackResult = object({
   reason: label,
   candidateIntentId: T.Optional(id),
 });
+// A window key bound to a window the recorded title did not name. Only the
+// first entry on that key carries the explanation in its message; every entry
+// that ran in the fallback window carries this structure.
+const windowFallbackResult = object({
+  reason: T.Union([
+    T.Literal('only_window'), T.Literal('focused'), T.Literal('sole_normal'),
+  ]),
+  recordedTitle: label,
+  actualTitle: label,
+  actualWindowId: T.Optional(T.String({ pattern: '^w-[a-zA-Z0-9_.:-]+$' })),
+});
 // Report entries never carry the typed text or a password. They may carry
 // safe metadata that explains whether a text step used a literal or a runtime
 // parameter, and how a manual checkpoint was resolved.
@@ -485,6 +496,9 @@ const entry = object({
   stateCheck: T.Optional(stateCheckResult),
   intent: T.Optional(intentResult),
   fallback: T.Optional(fallbackResult),
+  // The recorded window title named no window of the app and the step ran in a
+  // window this run could prove its own target in.
+  windowFallback: T.Optional(windowFallbackResult),
 });
 const identityStatus = T.Union([
   T.Literal('verified'), T.Literal('offline_unverified'), T.Literal('blocked'),
