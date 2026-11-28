@@ -16,7 +16,7 @@ import { captureHealth } from './doctor.js';
 import type { RecordHealth } from './doctor.js';
 import { readJson, writeNew } from './files.js';
 import { hashFlow, plan } from './flow.js';
-import { dryRunFlowV2, hashFlowV2, isFlowV2 } from './flow-v2.js';
+import { dryRunFlowV2, hashFlowV2, isFlowV2, windowFallbackSteps } from './flow-v2.js';
 import type { FlowV2, StepV2, WindowScope } from './contracts-v2.js';
 import { Fault, object } from './locator.js';
 import {
@@ -393,6 +393,9 @@ export async function startWorkbench(options: {
         ? saved.at(-1)!.flowSha256 !== flowSha256
         : flowSha256 !== editable.source.flowSha256,
       live: target && { path: target.path, revision: target.kind === 'revision' },
+      // One canonical count for the page: the runner and CLI use the same
+      // predicate, so the workbench never re-implements fallback eligibility.
+      windowFallbackCount: windowFallbackSteps(flow).length,
       validation: editable.validate(),
       canUndo: editable.canUndo,
       canRedo: editable.canRedo,

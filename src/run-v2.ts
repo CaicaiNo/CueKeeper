@@ -13,7 +13,7 @@ import type {
 import type { Delivery } from './contracts.js';
 import { DesktopFault } from './desktop.js';
 import type { ClickOptions, Desktop, DragEndpoint, HoverBounds, WindowInfo } from './desktop.js';
-import { parseFlowV2 } from './flow-v2.js';
+import { parseFlowV2, stepSupportsWindowFallback, windowFallbackLocators } from './flow-v2.js';
 import { InstallState } from './install-state.js';
 import type { InstallStateDeps } from './install-state.js';
 import { Fault, contains, flatten, resolve, toLocator } from './locator.js';
@@ -529,12 +529,36 @@ function hoverPoint(node: Node, recorded: Point | undefined, snapshot: Snapshot)
   return centre;
 }
 
+/** Whether one locator resolves to a node inside another locator's node. */
+function locatorInNode(snapshot: Snapshot, outer: ElementLocator, inner: ElementLocator): boolean {
+  try {
+    const parent = resolve(snapshot, outer).node;
+    const child = resolve(snapshot, inner).node;
+    return flatten(parent).some(({ node }) => node === child);
+  } catch {
+    return false;
+  }
+}
+
+/** A stable key for one click target, for pinning a fallback proof. */
+function clickLocatorKey(locator: ElementLocator): string {
+  return JSON.stringify([locator.role, locator.name, locator.identifier, locator.path, locator.index]);
+}
+
 /** The item a right click on a container really targets. */
 function rightClickTarget(snapshot: Snapshot, button: string | undefined, locator: ElementLocator): ElementLocator {
   if (button !== 'right') return locator;
   const containers = new Set(['outline', 'list', 'table', 'tree', 'group', 'scrollarea']);
   if (!containers.has(locator.role ?? '')) return locator;
-  const selected = flatten(snapshot.tree).filter(({ node }) => node.ref && node.states.includes('selected'));
+  // Only a selected item inside the recorded container is this step's target;
+  // another outline's selection is not evidence for this right click.
+  let container: Node;
+  try {
+    container = resolve(snapshot, locator).node;
+  } catch {
+    return locator;
+  }
+  const selected = flatten(container).filter(({ node }) => node.ref && node.states.includes('selected'));
   // The file name in Finder's list view is a textfield that accepts RightClick;
   // the row around it may only accept Click.
   const rightClickable = selected.filter(({ node }) => (node.actions ?? []).includes('RightClick'));
@@ -791,7 +815,10 @@ class StepRunner {
    * driver call that never answers or that blocks the event loop past the
    * deadline. Nothing is dispatched on late evidence.
    */
-  private async awaitReadyWindow(step: ReadinessGatedStep): Promise<{ binding: WindowBinding; snapshot: Snapshot }> {
+  private async awaitReadyWindow(
+    step: ReadinessGatedStep,
+    fallback?: (candidate: WindowInfo) => Promise<Snapshot>,
+  ): Promise<{ binding: WindowBinding; snapshot: Snapshot }> {
     // The same same-title disambiguation the step itself will use: the gate must
     // not turn a window the flow can prove into an ambiguity, and a window that
     // does not hold the target yet is "not ready", not ambiguous. Choosing reads
@@ -806,6 +833,21 @@ class StepRunner {
      * so it is kept instead of paying for the same tree twice.
      */
     let selectionRead: CandidateRead | undefined;
+    // The fallback proof's own tree is also the first stability read: it was
+    // taken inside this proof's budget and the step dispatches from it, so it is
+    // not read again just to count a read.
+    let proved: Snapshot | undefined;
+    let provedTookMs = 0;
+    let pinnedTarget: string | undefined;
+    let fallbackUsed = this.resolver.hasFallback(step.scope.windowKey);
+    const fallbackProof = fallback === undefined ? undefined : async (candidate: WindowInfo) => {
+      const started = performance.now();
+      const snapshot = await fallback(candidate);
+      provedTookMs = performance.now() - started;
+      proved = snapshot;
+      fallbackUsed = true;
+      return snapshot;
+    };
     /** Cancelled when the current phase ends; a read that starts after it is refused. */
     const cancel = new AbortController();
     const pick = async (windows: WindowInfo[]) => {
@@ -924,7 +966,12 @@ class StepRunner {
         try {
           if (binding === undefined) {
             binding = await this.withinDeadline(
-              this.resolver.resolveWindow(step.scope, pick, { repair: false }), deadline, () => fail(problem, reads));
+              this.resolver.resolveWindow(step.scope, pick, {
+                repair: false,
+                ...(fallbackProof === undefined ? {} : { fallback: fallbackProof }),
+              }),
+              deadline, () => fail(problem, reads));
+            if (binding.fallback) fallbackUsed = true;
             // A choice that only landed after its deadline is refused here,
             // before the stability budget starts and before focus is asked for.
             live(problem);
@@ -943,6 +990,11 @@ class StepRunner {
               this.resolver.confirmForeground(binding, cancel.signal, () => live(problem)),
               deadline, () => fail(problem, reads));
             live(problem);
+            if (fallbackUsed && proved !== undefined && step.kind === 'click') {
+              // Pin the control the fallback proof accepted. Later reads may
+              // settle, but they may not silently switch to another selected row.
+              pinnedTarget ??= clickLocatorKey(this.clickTargetOf(step, proved).locator);
+            }
           }
           const reuse = selectionRead;
           selectionRead = undefined;
@@ -951,6 +1003,12 @@ class StepRunner {
             // it. Only the agreeing read after the raise is still missing.
             snapshot = reuse.snapshot;
             tookMs = reuse.tookMs;
+          } else if (proved !== undefined && proved.windowId === binding!.windowId) {
+            // The fallback proof already read this tree and proved the target in
+            // it; reading it again would only duplicate the same evidence.
+            snapshot = proved;
+            tookMs = provedTookMs;
+            proved = undefined;
           } else {
             const started = performance.now();
             // The first read of a window can itself take a whole tree's time;
@@ -973,8 +1031,28 @@ class StepRunner {
           }
           reads += 1;
           read = this.readinessOf(snapshot, binding!, step);
+          if (pinnedTarget !== undefined && step.kind === 'click') {
+            let current: string;
+            try {
+              current = clickLocatorKey(this.clickTargetOf(step, snapshot).locator);
+            } catch {
+              throw fail('the fallback target could not be re-proven', reads);
+            }
+            if (current !== pinnedTarget) throw fail('the fallback target changed after it was proven', reads);
+          }
         } catch (error) {
           const fault = toFault(error);
+          // A fallback the proof refused is a decision, not a slow window: the
+          // run stops at once instead of retrying until the readiness budget
+          // turns it into TARGET_NOT_READY. That includes a fallback candidate
+          // whose tree simply does not hold the target: the step already chose
+          // a window it could not prove, so a second read is another guess.
+          if (fault.reason?.startsWith('fallback_')) throw error;
+          // Once a fallback window was bound, a window that closes or moves is
+          // the fallback's own terminal condition, not a transient read failure.
+          // Keep WINDOW_CHANGED instead of retrying until it becomes
+          // TARGET_NOT_READY.
+          if (fallbackUsed && fault.code === 'WINDOW_CHANGED') throw error;
           // The cancellation that ended the proof says nothing about the target;
           // the last read's own state is the message the operator needs.
           if (fault.code === 'TARGET_NOT_READY' && cancel.signal.aborted) throw fail(problem, reads);
@@ -1155,8 +1233,11 @@ class StepRunner {
     snapshot: Snapshot,
   ): { locator: ElementLocator; resolved: Actionable } {
     const target = step.target as ElementLocator;
+    const previous = this.lastClickTarget;
     const locator = step.button === 'right' && target.identifier === undefined
-      ? (this.lastClickTarget ?? rightClickTarget(snapshot, step.button, target))
+      ? (previous && locatorInNode(snapshot, target, previous)
+        ? previous
+        : rightClickTarget(snapshot, step.button, target))
       : target;
     return { locator, resolved: actionable(snapshot, addressable(locator)) };
   }
@@ -1635,6 +1716,81 @@ class StepRunner {
     return new Fault('ACTION_FAILED', `${describeControl(node)} failed after ${attempts} (${detail})`);
   }
 
+  /**
+   * Proves a step's own target in a window the recorded title did not name, and
+   * hands back the tree it read. Only a unique, non-secure element target can
+   * prove that window; a point, a nameless locator or a step with no element
+   * target refuses instead of guessing. Identity is checked before and after the
+   * read, exactly as the bound-window snapshot path does.
+   */
+  private async proveWindowFallback(candidate: WindowInfo, step: StepV2, app: string): Promise<Snapshot> {
+    if (step.kind === 'click' && step.target.kind === 'point') {
+      throw new Fault('WINDOW_NOT_FOUND',
+        'The recorded target is a screen point; a point cannot prove it still names the same control in another window',
+        false, 'fallback_point_target');
+    }
+    if (!stepSupportsWindowFallback(step)) {
+      throw new Fault('WINDOW_NOT_FOUND',
+        `This step has no element target that could prove the app's other window holds it (${describeTargetOf(step)})`,
+        false, 'fallback_unprovable_step');
+    }
+    const identity = this.resolver.identity(app);
+    await identity.verifyOwnedWindow(candidate.id);
+    const snapshot = await this.desktop.snapshotWindow(candidate.id);
+    if (snapshot.windowId !== candidate.id) {
+      throw new Fault('WINDOW_CHANGED', 'The driver read a different window than the fallback candidate');
+    }
+    await identity.verifyOwnedWindow(candidate.id);
+    // Prove the control the step would really press, not just the recorded
+    // locator: a right click can resolve through the previous click or the
+    // selected row, and a fallback may only dispatch a target it has proven.
+    let locators: ElementLocator[];
+    if (step.kind === 'click') {
+      try {
+        locators = [this.clickTargetOf(step, snapshot).locator];
+      } catch (error) {
+        const fault = toFault(error);
+        if (fault.code === 'AMBIGUOUS') {
+          throw new Fault('AMBIGUOUS_TARGET',
+            `The fallback window "${candidate.title}" matches ${describeTargetOf(step)} more than once; ` +
+            'the run does not guess which one the recording meant', false, 'fallback_target_ambiguous');
+        }
+        if (fault.code === 'NOT_FOUND') {
+          throw new Fault('WINDOW_NOT_FOUND',
+            `its window "${candidate.title}" does not hold ${describeTargetOf(step)}`,
+            false, 'fallback_target_absent');
+        }
+        throw error;
+      }
+    } else {
+      locators = windowFallbackLocators(step);
+    }
+    for (const locator of locators) {
+      let node: Node;
+      try {
+        ({ node } = resolve(snapshot, locator));
+      } catch (error) {
+        const fault = toFault(error);
+        if (fault.code === 'AMBIGUOUS') {
+          throw new Fault('AMBIGUOUS_TARGET',
+            `The fallback window "${candidate.title}" matches ${describeTargetOf(step)} more than once; ` +
+            'the run does not guess which one the recording meant', false, 'fallback_target_ambiguous');
+        }
+        if (fault.code === 'NOT_FOUND') {
+          throw new Fault('WINDOW_NOT_FOUND',
+            `its window "${candidate.title}" does not hold ${describeTargetOf(step)}`,
+            false, 'fallback_target_absent');
+        }
+        throw error;
+      }
+      if (node.secure) {
+        throw new Fault('UNSAFE_TARGET',
+          'The recorded target is a secure control in the app\'s other window; the run does not fall back into it');
+      }
+    }
+    return snapshot;
+  }
+
   /** Resolves and, for input steps, brings the scope window forward first. */
   private async windowStep(
     scope: WindowScope,
@@ -1652,21 +1808,37 @@ class StepRunner {
     // proven window.
     const gate = step !== undefined && readinessGated.has(step.kind) && this.pendingWindowSwitch;
     if (gate) this.pendingWindowSwitch = false;
+    // Every input step may continue in another window of the same app when the
+    // recorded title names none, but only after its own target is proven there.
+    // The proof reads the candidate once and the step dispatches from that tree.
+    const proofBox: { tree?: Snapshot } = {};
+    const takeProof = (): Snapshot | undefined => proofBox.tree;
+    const fallback = step === undefined ? undefined : async (candidate: WindowInfo) => {
+      const proof = await this.proveWindowFallback(candidate, step, scope.app);
+      proofBox.tree = proof;
+      return proof;
+    };
     for (let attempt = 0; attempt < 4; attempt += 1) {
       let binding: WindowBinding;
       let snapshot: Snapshot;
+      proofBox.tree = undefined;
       if (gate && attempt === 0) {
         // The proof hands back the very snapshot the step dispatches from, so
         // the target it accepted is the target that is pressed.
-        ({ binding, snapshot } = await this.awaitReadyWindow(step as ReadinessGatedStep));
+        ({ binding, snapshot } = await this.awaitReadyWindow(step as ReadinessGatedStep, fallback));
         await this.recheckInputGates();
       } else {
         binding = await this.resolver.resolveWindow(
           scope,
           step ? candidates => this.pickSameTitled(candidates, step) : undefined,
+          fallback === undefined ? undefined : { fallback },
         );
         await this.resolver.confirmForeground(binding);
-        snapshot = await this.resolver.snapshot(binding);
+        const provenTree = takeProof();
+        proofBox.tree = undefined;
+        snapshot = provenTree !== undefined && provenTree.windowId === binding.windowId
+          ? provenTree
+          : await this.resolver.snapshot(binding);
       }
       try {
         const outcome = await work(binding, snapshot);
@@ -1679,9 +1851,30 @@ class StepRunner {
           const which = binding.sharedTitle === 'target' ? 'the one that held its target' : 'the focused one';
           notes.push(`more than one window was titled "${scope.windowTitle}", so the step ran in ${which}`);
         }
-        if (!notes.length) return outcome;
+        const usedFallback = binding.fallback === undefined ? undefined : {
+          reason: binding.fallback.reason,
+          recordedTitle: binding.fallback.recordedTitle,
+          actualTitle: binding.observedTitle,
+          actualWindowId: binding.windowId,
+        };
+        if (binding.fallback && !binding.fallback.reported) {
+          binding.fallback.reported = true;
+          // The legacy single-window rebind already explains itself with the
+          // rebound note; the new candidate layers say which window stood in
+          // and why it was allowed to.
+          if (binding.fallback.reason !== 'only_window') {
+            const which = binding.fallback.reason === 'focused'
+              ? 'focused' : 'only non-minimized';
+            notes.push(
+              `window fallback: window "${binding.fallback.recordedTitle}" is gone; ` +
+              `continued in the app's ${which} window "${binding.fallback.actualTitle}" ` +
+              'after the step target resolved uniquely');
+          }
+        }
+        const result = usedFallback === undefined ? outcome : { ...outcome, windowFallback: usedFallback };
+        if (!notes.length) return result;
         const note = notes.join('; ');
-        return { ...outcome, message: outcome.message ? `${outcome.message}; ${note}` : note };
+        return { ...result, message: outcome.message ? `${outcome.message}; ${note}` : note };
       } catch (error) {
         const retryable = error instanceof Fault && error.code === 'NOT_FOUND';
         if (!retryable || attempt === 3) throw error;

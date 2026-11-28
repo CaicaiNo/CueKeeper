@@ -643,6 +643,7 @@ export function statusMap(report) {
   return map;
 }
 
+
 /**
  * Each timed row's place in the recording and the gap since the previous timed
  * row. An untimed row is skipped rather than guessed at, so a gap always spans

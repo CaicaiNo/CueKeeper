@@ -119,6 +119,17 @@ Shell 的完整约束见 [Shell 步骤设计](shell-steps.md) 与 [Root 步骤�
 - **边界**：稳定证明起步 1.5 s，并按上一次读取的实际耗时扩展（`2 × 读取耗时 + 200 ms 间隔`，为下一次比对留足时间，慢读不会被当成「仍在变化」）；整个稳定阶段硬上限 4 s。同一个单调时钟截止时间约束选窗、焦点、身份校验、快照与重试；**挂住不返回的驱动调用也会被截止**——回放不再等它，迟到的结果被丢弃且不会变成输入，超时报 `TARGET_NOT_READY`。同一个截止时间带一个取消信号，一直传到**焦点命令发出前**：截止之后才返回的前台观察不会再发 `focus-window`，前台也不会被切换。两次读数一致后、派发之前还要在预算内**再确认一次前台仍属于本窗口**：取证期间用户切走 → `FOCUS_INTERRUPTED`，不发 `focus-window`、零输入。等待期间可能出现密码提示或系统弹窗，所以证明结束、真正派发前会**重新核对** secure input 与系统弹窗门禁。目标就绪但按压仍返回 `ACTION_FAILED` 时走上面的重试 / 中心点回退，不会被就绪证明掩盖。上下文菜单项按菜单自己的打开-重试路径执行；没有 `name` / `identifier` 的目标只证明窗口，具体拒绝仍由该步自己的 `AMBIGUOUS` / `UNSAFE_TARGET` 给出。
 - **录制侧**：不写固定等待。步骤里的 `atMs` 已经保留了「激活到下一步」的观测间隔，回放不把它当 sleep 使用。
 
+## 窗口回退
+
+记录窗口按标题解析失败时，回放不会无条件改点该 App 的前台窗口，只在该步自己的目标能证明时一次性换绑：
+
+- **触发**：`window` scope 的首次绑定找不到记录标题，且步骤属于 `click` / `scroll` / `type` / `paste` / `drag` 并带可寻址元素目标。`point` 目标、`key` / `wait` / `assert` / `hover` / `focusAfter` / `manual_checkpoint` 不触发。
+- **三层候选**：① App 只剩一扇窗口（`only_window`）；② 非最小化且前台 `isFocused` 的窗口恰好一扇（`focused`）；③ 非最小化窗口恰好一扇（`sole_normal`）。三层都必须先证明该步目标；没有候选、多于一扇，或步骤没有可证明的元素目标（坐标点击、`key` 等）都停，不按标题相似度、不遍历窗口、不跨 App、不聚焦。回退路径的准备只读，Finder 单窗口也不会先按侧栏。
+- **唯一性证明**：候选窗口只读一次树（`snapshotWindow`），按该步自己的规则证明目标唯一；`drag` 两端都唯一，右键证明实际会按下的目标（只接受属于录制容器、或属于本步目标的选中行/上一次点击）；就绪读取必须始终保持绑定前的目标，不能稳定到另一行；回退快照的实测读取耗时计入预算。`secure` → `UNSAFE_TARGET`；0 命中 → `WINDOW_NOT_FOUND` / `fallback_target_absent`；多命中 → `AMBIGUOUS_TARGET` / `fallback_target_ambiguous`；坐标 → `fallback_point_target`；无可证元素目标 → `fallback_unprovable_step`。`fallback_target_absent` 在就绪屏障内也立即停止，不重读成 `TARGET_NOT_READY`；已回退绑定消失保留 `WINDOW_CHANGED`。证明的树直接用于派发；`confirmForeground` 在证明之后，候选已是前台时不发 `focus-window`。
+- **一次性**：同一 `windowKey` 只回退一次；回退绑定再消失时 `WINDOW_CHANGED`，不再换第二次。flow、hash、版本号都不改。
+- **报告**：条目带 `windowFallback: { reason, recordedTitle, actualTitle, actualWindowId }`，状态仍是通过；说明文字只写在该 key 第一条。失败时保留 `No window titled ... (its windows: ...)` 前缀并追加未回退原因。
+- **dry-run / 工作台**：dry-run 零桌面调用，只提示「N 个窗口步骤在记录窗口不存在时会尝试退回该 App 的前台窗口（需目标唯一）」；菜单项走菜单表面路径，不计入；坐标步骤仍按 `UNSAFE_POINT` 拒绝。工作台直接消费服务端算出的同一个回退计数；结果用黄色「窗口回退」标记 + `记录窗口 → 实际窗口` tooltip，不标失败。
+
 ## 拒绝码说明
 
 | 错误码 | 何时出现 | 是否静默降级 |

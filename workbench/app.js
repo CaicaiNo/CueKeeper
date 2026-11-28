@@ -94,6 +94,16 @@ const STATUS_MARKS = {
 const STATUS_DIAGNOSTIC = new Set(['failed', 'blocked']);
 const statusBadge = status =>
   `run-status badge badge-soft badge-sm badge-${STATUS_TONES[status] ?? 'ghost'} ${status}`;
+// A step that ran in a window the recorded title did not name stays a pass; the
+// yellow chip says why the window differs, without turning it into a failure.
+const windowFallbackTitle = fallback =>
+  `窗口回退 · 记录窗口「${fallback.recordedTitle}」 → 实际窗口「${fallback.actualTitle}」`;
+const windowFallbackChip = entry => entry?.windowFallback
+  ? el('span', {
+    className: 'badge badge-soft badge-sm badge-warning window-fallback',
+    title: windowFallbackTitle(entry.windowFallback),
+  }, '窗口回退')
+  : undefined;
 const statusCell = (entry, detail) => {
   if (!entry) return el('span', { className: 'row-status' });
   const mark = STATUS_MARKS[entry.status] ?? { icon: 'list', label: resultStatus[entry.status] ?? entry.status };
@@ -549,7 +559,7 @@ function renderTimeline() {
     kindChip(action),
     el('span', { className: 'row-description' }, el('strong', {}, actionLabel(action, { confirmPoint: !history })),
       el('small', {}, `${scope ? scopeText(scope) : `${appLabel(row.app)} · ${row.window}`}${ignored ? ' · 已忽略' : ''}`,
-        historyChip, confirmChip)),
+        historyChip, confirmChip, windowFallbackChip(runEntry))),
     el('span', { className: 'time row-duration', title: '动作耗时' }, duration(row.durationMs)),
     statusCell(runEntry));
     const thumbnail = row.thumbnail && el('details', {
@@ -1388,8 +1398,14 @@ function v2DryRun() {
     renderTimeline();
     const failed = report.entries.filter(entry => entry.status !== 'resolved');
     const blocked = report.entries.filter(entry => entry.status === 'blocked');
+    // The dry run cannot open a window; it only says how many steps could use
+    // the app's front window when their recorded title is gone.
+    const fallbacks = state.v2?.windowFallbackCount ?? 0;
     status(`dry-run ${resultStatus[report.status] ?? report.status} · ${report.entries.length} 步` +
-      (blocked.length ? ` · ${blocked.length} 步需确认` : failed.length ? ` · ${failed.length} 步异常` : ''),
+      (blocked.length ? ` · ${blocked.length} 步需确认` : failed.length ? ` · ${failed.length} 步异常` : '') +
+      (fallbacks
+        ? ` · ${fallbacks} 个窗口步骤在记录窗口不存在时会尝试退回该 App 的前台窗口（需目标唯一）`
+        : ''),
     // Only a v2 dry run treats blocked as a confirmation step; every other run
     // keeps its original success / error tone.
     report.status === 'passed' ? 'success' : report.status === 'blocked' ? 'warning' : 'error');
@@ -1559,7 +1575,7 @@ function showV2Result(report) {
       el('td', { className: 'report-detail' }, [
         entry.code ? `${entry.code}${entry.message ? ` · ${entry.message}` : ''}` : '',
         stateCheckLabel(entry.stateCheck),
-      ].filter(Boolean).join(' · ')));
+      ].filter(Boolean).join(' · '), windowFallbackChip(entry)));
   });
   const exportReport = () => {
     const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });

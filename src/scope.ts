@@ -13,6 +13,21 @@ import type { Snapshot } from './locator.js';
 // for the whole run. Titles are labels for the first bind only; a new window
 // never takes over an existing key.
 
+/** The recorded window title no longer names a window of the app. */
+export type WindowFallbackReason = 'only_window' | 'focused' | 'sole_normal';
+
+/**
+ * The recorded title named no window and this run bound another one after the
+ * step's own target was proven in it. `reported` is set once the message has
+ * been written, so a later step on the same key carries only the structure.
+ */
+export interface WindowFallback {
+  reason: WindowFallbackReason;
+  recordedTitle: string;
+  actualTitle: string;
+  reported?: boolean;
+}
+
 /** One window key bound to the running process that owns it. */
 export interface WindowBinding {
   app: string;
@@ -35,6 +50,8 @@ export interface WindowBinding {
    * target told them apart, `focused` that the app's focused window was used.
    */
   sharedTitle?: 'target' | 'focused' | false;
+  /** Set when this key was bound to a window the recorded title did not name. */
+  fallback?: WindowFallback;
 }
 
 export interface AppBinding {
@@ -83,6 +100,11 @@ export class ScopeResolver {
   }
 
   get foreground(): string | undefined { return this.expectedForeground; }
+
+  /** Whether this key is already bound through a window fallback. */
+  hasFallback(windowKey: string): boolean {
+    return this.windows.get(windowKey)?.fallback !== undefined;
+  }
 
   identity(app: string): AppIdentitySession {
     return this.identityFor(app);
@@ -133,7 +155,19 @@ export class ScopeResolver {
       /** The tree that proved the choice, so a caller need not read it again. */
       read?: { snapshot: Snapshot; tookMs: number };
     } | undefined>,
-    { repair = true }: { repair?: boolean } = {},
+    {
+      repair = true,
+      fallback,
+    }: {
+      repair?: boolean;
+      /**
+       * Proves the step's own target inside a candidate window and hands back
+       * the tree it read, which the step then dispatches from. Only a caller
+       * that can prove its step passes one; without it a retitled window is
+       * never replaced by the app's front window.
+       */
+      fallback?: (candidate: WindowInfo) => Promise<Snapshot>;
+    } = {},
   ): Promise<WindowBinding> {
     this.signal.throwIfAborted();
     const existing = this.windows.get(scope.windowKey);
@@ -142,6 +176,11 @@ export class ScopeResolver {
     const identity = this.identityFor(scope.app);
     const owned = await identity.ownedWindows(this.desktop);
     const matches = owned.filter(window => window.title === scope.windowTitle);
+    /** The message a missing title keeps, whatever explains the refusal. */
+    const missing = () => {
+      const open = owned.map(window => `"${titleOf(window)}"`).join(', ');
+      return `No window titled "${scope.windowTitle}" belongs to ${scope.app} (its windows: ${open || 'none'})`;
+    };
     let chosen = matches[0];
     let rebound = false;
     let sharedTitle: WindowBinding['sharedTitle'] = false;
@@ -163,11 +202,14 @@ export class ScopeResolver {
       chosen = picked.window;
       sharedTitle = picked.reason;
     }
-    if (!chosen && repair && scope.app === 'com.apple.finder') {
+    if (!chosen && repair && scope.app === 'com.apple.finder' && fallback === undefined) {
       // Finder's sidebar view ("最近使用") is a window title the replay can
       // reopen: the recorded click on that view only exists because the view
       // was already open. Pressing the sidebar item is preparation, not a
       // recorded step, so it is best-effort and never fails the run by itself.
+      // A fallback candidate is chosen from the window inventory alone: pressing
+      // a sidebar item to prepare one of several windows would be a guess, and
+      // the proof path must stay read-only.
       await this.openFinderSidebar(scope.windowTitle);
       const refreshed = await identity.ownedWindows(this.desktop);
       const retry = refreshed.filter(window => window.title === scope.windowTitle);
@@ -176,6 +218,7 @@ export class ScopeResolver {
         rebound = true;
       }
     }
+    let fallbackReason: WindowFallbackReason | undefined;
     if (!chosen) {
       // Finder and editors retitle their window as the user navigates
       // ("最近使用" → a folder name, "untitled" → a file name). When the app
@@ -184,12 +227,51 @@ export class ScopeResolver {
       if (owned.length === 1) {
         chosen = owned[0];
         rebound = true;
+        fallbackReason = 'only_window';
       } else {
-        // Which windows the app does have is what tells the operator whether the
-        // recorded one was closed, renamed, or never reopened.
-        const open = owned.map(window => `"${titleOf(window)}"`).join(', ');
+        // The recorded title named no window. Before the run gives up it may
+        // continue in one window of the same process, but only one the step can
+        // prove: the app's single focused window, or its only non-minimized
+        // window. A proof callback is mandatory — without one nothing is bound.
+        const visible = owned.filter(window => window.minimized !== true);
+        if (fallback && visible.length) {
+          const focused = visible.filter(window => window.isFocused === true);
+          if (focused.length === 1) {
+            chosen = focused[0];
+            fallbackReason = 'focused';
+          } else if (visible.length === 1) {
+            chosen = visible[0];
+            fallbackReason = 'sole_normal';
+          }
+        }
+        if (!chosen) {
+          const reason = visible.length > 1
+            ? 'fallback_multiple_candidates' : 'fallback_no_candidate';
+          const why = visible.length > 1
+            ? 'more than one non-minimized window could stand in, and none is provably the step\'s own'
+            : 'the app has no non-minimized window to fall back to';
+          throw new Fault('WINDOW_NOT_FOUND',
+            `${missing()}; ${why}; a flow starts in the window it was recorded in`, false, reason);
+        }
+      }
+    }
+    // Every candidate layer — the only window, the focused window, the only
+    // non-minimized window — is only a binding when the caller's own target
+    // proves it. A step with no such proof (a coordinate click, a key) gets no
+    // binding and no focus; a rejected proof also leaves neither behind.
+    if (fallbackReason !== undefined) {
+      if (!fallback) {
         throw new Fault('WINDOW_NOT_FOUND',
-          `No window titled "${scope.windowTitle}" belongs to ${scope.app} (its windows: ${open || 'none'}); a flow starts in the window it was recorded in`);
+          `${missing()}; continuing in another window needs a target the step can prove`,
+          false, 'fallback_unprovable_step');
+      }
+      try {
+        await fallback(chosen);
+      } catch (error) {
+        if (error instanceof Fault && error.code === 'WINDOW_NOT_FOUND') {
+          throw new Fault(error.code, `${missing()}; ${error.message}`, error.dependency, error.reason);
+        }
+        throw error;
       }
     }
     const windowNumber = parseWindowId(chosen.id);
@@ -208,6 +290,13 @@ export class ScopeResolver {
       focusGeneration: 0,
       ...(rebound ? { rebound: true } : {}),
       ...(sharedTitle ? { sharedTitle } : {}),
+      ...(fallbackReason ? {
+        fallback: {
+          reason: fallbackReason,
+          recordedTitle: scope.windowTitle,
+          actualTitle: titleOf(chosen),
+        },
+      } : {}),
     };
     this.windows.set(scope.windowKey, binding);
     return binding;
@@ -246,6 +335,13 @@ export class ScopeResolver {
     // the folder is reopened). Rebind the same app's window when the recorded
     // title matches, or when that app has exactly one window, and mark the
     // binding so the report can say a rebind happened.
+    if (binding.fallback) {
+      // This key already left its recorded window once. Switching again would
+      // walk the run through whatever windows happen to be open.
+      throw new Fault('WINDOW_CHANGED',
+        `The window this run fell back to (was "${binding.observedTitle}") is no longer open; ` +
+        'the run does not switch a second time');
+    }
     const byTitle = owned.filter(window => titleOf(window) === binding.title);
     const chosen = byTitle.length === 1 ? byTitle[0] : owned.length === 1 ? owned[0] : undefined;
     if (!chosen) {

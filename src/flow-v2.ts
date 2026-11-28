@@ -5,7 +5,8 @@ import type {
 } from './contracts-v2.js';
 import { canonicalJson, parseFlow } from './flow.js';
 import type { Flow } from './contracts.js';
-import { Fault } from './locator.js';
+import type { ElementLocator } from './contracts.js';
+import { Fault, isReAddressable } from './locator.js';
 
 // Flow v2 parsing, semantic validation, canonical hashing and the read-only
 // dry-run plan. Live replay of a v2 flow belongs to the scope resolver and the
@@ -386,6 +387,46 @@ export function pointTargetSteps(flow: FlowV2): StepV2[] {
  */
 export function screenHoverSteps(flow: FlowV2): StepV2[] {
   return flow.steps.filter(step => step.kind === 'hover' && step.scope.kind === 'screen');
+}
+
+/** The step kinds a fallback window can be proven for. */
+const windowFallbackKinds = new Set<StepV2['kind']>(['click', 'scroll', 'type', 'paste', 'drag']);
+
+/**
+ * Every element a step must address uniquely before a fallback window may be
+ * used. A drag needs both endpoints; the other input steps need their target.
+ */
+export function windowFallbackLocators(step: StepV2): ElementLocator[] {
+  if (step.kind === 'drag') return [step.from, step.to];
+  if (step.kind === 'click') return step.target.kind === 'point' ? [] : [step.target];
+  if (step.kind === 'scroll' || step.kind === 'type' || step.kind === 'paste') return [step.target];
+  return [];
+}
+
+/**
+ * Whether this step can prove its own target inside another window of the same
+ * app. A point target cannot (no control proves the coordinate), and a target
+ * with no name or identifier cannot either. The runner and the dry-run summary
+ * read this one predicate, so the two never drift apart.
+ */
+export function stepSupportsWindowFallback(step: StepV2): boolean {
+  if (step.kind === 'gap' || step.scope.kind !== 'window') return false;
+  if (!windowFallbackKinds.has(step.kind)) return false;
+  if (step.kind === 'click' && step.target.kind === 'point') return false;
+  // Context-menu items are pressed through the menu surface, not a window;
+  // counting them as window fallback candidates would promise a path the
+  // runner never takes.
+  if (step.kind === 'click' && step.target.kind === 'element' && step.target.role === 'menuitem') return false;
+  const locators = windowFallbackLocators(step);
+  return locators.length > 0 && locators.every(locator => isReAddressable(locator));
+}
+
+/**
+ * The steps that may continue in the app's front window when the recorded title
+ * names no window. A dry run announces the count; nothing is opened or read.
+ */
+export function windowFallbackSteps(flow: FlowV2): StepV2[] {
+  return flow.steps.filter(step => stepSupportsWindowFallback(step));
 }
 
 /**
