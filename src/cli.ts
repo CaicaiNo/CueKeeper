@@ -53,16 +53,6 @@ import { hashToken, loadServerConfig, parseServerHost } from './server-config.js
 import { startServer } from './server.js';
 import { startWorkbench } from './workbench.js';
 
-/**
- * The capture warnings that explain a click recorded at its screen point
- * instead of an element. They are listed next to the coordinate count so a
- * recording review starts from why, not from a percentage.
- */
-const pointClickWarnings = new Set([
-  'UNTARGETED_FILE_CLICK', 'UNTARGETED_ELEMENT_CLICK', 'NATIVE_POINT_FALLBACK',
-  'CLICK_AMBIGUOUS_CANDIDATES', 'CLICK_UNPROVEN', 'CLICK_RECOVERY_UNNAMED',
-]);
-
 const help = `Cuekeeper ${buildInfo().version}
 
   cuekeeper --version
@@ -948,7 +938,9 @@ async function main() {
       );
       const elementClicks = clicks.filter(step => step.target.kind === 'element').length;
       const pointClicks = clicks.length - elementClicks;
-      const pointWarnings = [...new Set(warnings.map(entry => entry.code).filter(code => pointClickWarnings.has(code)))];
+      // Only warnings that still describe a point step count. A double click can
+      // upgrade the first point to an element, and the old warning must not stay.
+      const pointWarnings = result.clickWarnings;
       const data = {
         version: 2, output: saved, flowId: result.flow.id, actions: result.flow.steps.length,
         snapshotReads: result.snapshotReads,

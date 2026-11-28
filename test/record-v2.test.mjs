@@ -5380,6 +5380,29 @@ const finderFocus = (title, t = 0) => ({
   owner: { ...FINDER_OWNER, windowNumber: 11, windowTitle: title },
 });
 
+/** The parent directory after ⌘↑, with a different file under the click point. */
+function finderParentWindow() {
+  return {
+    windowId: 'w-11',
+    tree: {
+      role: 'window', name: '上级目录', ref: '@find:p1', bounds: FINDER_BOUNDS, states: [], secure: false,
+      children: [{
+        role: 'outline', name: '', ref: '@find:p2',
+        bounds: { x: 200, y: 200, width: 900, height: 600 }, states: [], secure: false,
+        children: [{
+          role: 'row', name: 'right-file', ref: '@find:p3',
+          bounds: { x: 210, y: 350, width: 200, height: 30 }, states: [], secure: false, children: [],
+        }],
+      }],
+    },
+  };
+}
+
+const finderKey = (key, modifiers, title, t) => ({
+  kind: 'key', t, seen: NOW, focusGeneration: 1, secure: false, key, modifiers,
+  owner: { ...FINDER_OWNER, windowNumber: 11, windowTitle: title },
+});
+
 const finderClick = (point, title, t) => ({
   kind: 'click', t, seen: NOW, focusGeneration: 1, secure: false,
   point, decision: 'record',
@@ -5464,6 +5487,88 @@ test('a Finder click with no tree yet is named from its one bounded read', async
   assert.equal(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_FILE_CLICK'), false);
 });
 
+test('a point warning is dropped when the second press upgrades the click to an element', async () => {
+  const blank = {
+    windowId: 'w-11',
+    tree: {
+      role: 'window', name: '图片', ref: '@find:e1', bounds: FINDER_BOUNDS, states: [], secure: false,
+      children: [],
+    },
+  };
+  let reads = 0;
+  const recording = new GlobalRecording(async () => {
+    reads += 1;
+    return structuredClone(reads === 1 ? blank : finderBrowserWindow());
+  }, { now: () => NOW, snapshotTtlMs: 0, scheduleSettle: () => {} });
+
+  await recording.add(parseCaptureEvent(finderFocus('图片')));
+  await recording.add(parseCaptureEvent(finderClick([259, 367], '图片', 400)));
+  assert.deepEqual(recording.clickWarnings, ['UNTARGETED_ELEMENT_CLICK']);
+
+  await recording.add(parseCaptureEvent({
+    ...finderClick([260, 368], '图片', 500), count: 2,
+  }));
+  const flow = recording.finish();
+  assert.equal(flow.steps[0].target.kind, 'element');
+  assert.deepEqual(recording.clickWarnings, [], 'the upgraded step no longer needs a point warning');
+});
+
+test('a Finder navigation key drops the old directory before the next click', async () => {
+  let screen = finderBrowserWindow();
+  const queued = [];
+  const recording = new GlobalRecording(async () => structuredClone(screen), {
+    now: () => NOW, scheduleSettle: task => { queued.push(task); },
+  });
+
+  await recording.add(parseCaptureEvent(finderFocus('图片')));
+  await queued.shift()();
+  // ⌘↑ replaces 图片 with its parent; the pre-click tree is now stale.
+  await recording.add(parseCaptureEvent(finderKey('up', ['meta'], '图片', 200)));
+  screen = finderParentWindow();
+  await recording.add(parseCaptureEvent(finderClick([259, 367], '上级目录', 400)));
+
+  const flow = recording.finish();
+  const click = flow.steps.find(step => step.kind === 'click');
+  assert.ok(click);
+  assert.deepEqual(click.target, { kind: 'element', role: 'row', name: 'right-file' });
+  assert.equal(click.scope.windowTitle, '上级目录',
+    'the click belongs to the directory Finder shows after the key');
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_FILE_CLICK'), false);
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+test('a cold Finder click whose event title is already the destination keeps its point', async () => {
+  // The bound window still says 图片, but the click event and its read both say
+  // 下载. There is no tree from before the click, so neither screen can prove
+  // which file the point belonged to.
+  const queued = [];
+  const recording = new GlobalRecording(async () => structuredClone(finderNavigatedWindow()), {
+    now: () => NOW, scheduleSettle: task => { queued.push(task); },
+  });
+  await recording.add(parseCaptureEvent(finderFocus('图片')));
+  await recording.add(parseCaptureEvent(finderClick([259, 367], '下载', 721)));
+
+  const flow = recording.finish();
+  assert.deepEqual(flow.steps[0].target, { kind: 'point', point: [259, 367] });
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_FILE_CLICK'));
+});
+
+test('a long tree title is stored as a display title and cannot abort the recording', async () => {
+  const screen = finderBrowserWindow();
+  screen.tree.name = 'x'.repeat(270);
+  const queued = [];
+  const recording = new GlobalRecording(async () => structuredClone(screen), {
+    now: () => NOW, scheduleSettle: task => { queued.push(task); },
+  });
+  await recording.add(parseCaptureEvent(finderFocus('图片')));
+  await queued.shift()();
+  await recording.add(parseCaptureEvent(finderClick([259, 367], '图片', 721)));
+
+  const flow = recording.finish();
+  assert.equal(flow.steps[0].scope.windowTitle.length, 256);
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
 test('a Finder click whose read only sees the navigated window keeps its point and says so', async () => {
   const recording = new GlobalRecording(async () => structuredClone(finderNavigatedWindow()), { now: () => NOW });
 
@@ -5540,7 +5645,31 @@ test('an anonymous Electron container with an identifier becomes that control', 
   assert.equal(flowV2Check.Check(flow), true);
 });
 
-test('an anonymous Electron container uses the single operable control under the point', async () => {
+test('an anonymous Electron container uses the single operable control that covers the point', async () => {
+  const snapshot = plainWindow(44, 'aTrust', { x: 400, y: 100, width: 900, height: 600 }, [{
+    role: 'group', name: '', ref: '@trust:e2',
+    bounds: { x: 700, y: 680, width: 300, height: 120 }, states: [], secure: false,
+    children: [{
+      role: 'statictext', name: '切换新地址', ref: '@trust:e3',
+      bounds: { x: 720, y: 700, width: 220, height: 20 }, states: [], secure: false,
+      actions: ['Click'], children: [],
+    }],
+  }]);
+  const recording = new GlobalRecording(async () => structuredClone(snapshot), { now: () => NOW });
+
+  // The pointer landed inside the operable control, not on an icon beside it.
+  await recording.add(parseCaptureEvent({
+    kind: 'click', t: 100, seen: NOW, focusGeneration: 1, secure: false,
+    point: [725, 710], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXGroup' },
+  }));
+  const flow = recording.finish();
+
+  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'statictext', name: '切换新地址' });
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_ELEMENT_CLICK'), false);
+  assert.equal(flowV2Check.Check(flow), true);
+});
+
+test('an operable control outside the click does not get pressed just because it is close', async () => {
   const snapshot = plainWindow(44, 'aTrust', { x: 400, y: 100, width: 900, height: 600 }, [{
     role: 'group', name: '', ref: '@trust:e2',
     bounds: { x: 700, y: 680, width: 300, height: 120 }, states: [], secure: false,
@@ -5552,16 +5681,17 @@ test('an anonymous Electron container uses the single operable control under the
   }]);
   const recording = new GlobalRecording(async () => structuredClone(snapshot), { now: () => NOW });
 
-  // The pointer landed on the unnamed icon column, left of the label.
+  // The pointer is 15 pt left of the control. Proximity does not prove the
+  // control received the press, so the step keeps its own point.
   await recording.add(parseCaptureEvent({
     kind: 'click', t: 100, seen: NOW, focusGeneration: 1, secure: false,
     point: [725, 710], decision: 'record', owner: { ...ATRUST_OWNER, role: 'AXGroup' },
   }));
   const flow = recording.finish();
 
-  assert.deepEqual(flow.steps[0].target, { kind: 'element', role: 'statictext', name: '切换新地址' });
-  assert.ok(recording.captureWarnings.some(warning => warning.code === 'CLICK_NAMED_BY_NEARBY_CONTROL'));
-  assert.equal(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_ELEMENT_CLICK'), false);
+  assert.deepEqual(flow.steps[0].target, { kind: 'point', point: [725, 710] });
+  assert.equal(recording.captureWarnings.some(warning => warning.code === 'CLICK_NAMED_BY_NEARBY_CONTROL'), false);
+  assert.ok(recording.captureWarnings.some(warning => warning.code === 'UNTARGETED_ELEMENT_CLICK'));
   assert.equal(flowV2Check.Check(flow), true);
 });
 
