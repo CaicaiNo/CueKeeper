@@ -13,7 +13,6 @@ use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 
 struct AppState {
     server: Mutex<Option<server::Workbench>>,
-    url: Mutex<Option<String>>,
     log_dir: std::path::PathBuf,
 }
 
@@ -31,28 +30,45 @@ fn main() {
             let _ = std::fs::create_dir_all(&log_dir);
             app.manage(AppState {
                 server: Mutex::new(None),
-                url: Mutex::new(None),
                 log_dir: log_dir.clone(),
             });
 
             install_menu(app)?;
 
-            let window = WebviewWindowBuilder::new(
-                app,
-                "main",
-                WebviewUrl::App("index.html".into()),
-            )
-            .title("CueKeeper")
-            .inner_size(1280.0, 860.0)
-            .min_inner_size(980.0, 640.0)
-            .center()
-            .on_navigation(|url| allowed_navigation(url))
-            .build()?;
+            // Start the bundled workbench before creating the window. Loading
+            // the local URL directly avoids a custom-scheme-to-http navigation
+            // that can leave the loading page spinning on macOS.
+            let (target, startup_error) = match server::start(app.handle()) {
+                Ok(workbench) => match workbench.url.parse::<tauri::Url>() {
+                    Ok(url) => {
+                        if let Some(state) = app.try_state::<AppState>() {
+                            *state.server.lock().unwrap() = Some(workbench);
+                        }
+                        (WebviewUrl::External(url), None)
+                    }
+                    Err(error) => {
+                        drop(workbench);
+                        (
+                            WebviewUrl::App("index.html".into()),
+                            Some(format!("工作台地址无效：{error}")),
+                        )
+                    }
+                },
+                Err(error) => (WebviewUrl::App("index.html".into()), Some(error)),
+            };
+
+            let window = WebviewWindowBuilder::new(app, "main", target)
+                .title("CueKeeper")
+                .inner_size(1280.0, 860.0)
+                .min_inner_size(980.0, 640.0)
+                .center()
+                .on_navigation(|url| allowed_navigation(url))
+                .build()?;
             window.show()?;
             window.set_focus()?;
-
-            let handle = app.handle().clone();
-            std::thread::spawn(move || start_workbench(handle));
+            if let Some(error) = startup_error {
+                show_error(app.handle(), &error);
+            }
 
             // Ask once per app install, not on every launch. A missed prompt
             // leaves the guide and the menu as the explicit way back in.
@@ -176,34 +192,6 @@ fn menu_event(app: &tauri::AppHandle, id: &str) {
             }
         }
         _ => {}
-    }
-}
-
-fn start_workbench(handle: tauri::AppHandle) {
-    match server::start(&handle) {
-        Ok(workbench) => {
-            let url = workbench.url.clone();
-            if let Some(state) = handle.try_state::<AppState>() {
-                *state.url.lock().unwrap() = Some(url.clone());
-                *state.server.lock().unwrap() = Some(workbench);
-            }
-            let main = handle.clone();
-            let _ = handle.run_on_main_thread(move || {
-                let Some(window) = main.get_webview_window("main") else {
-                    return;
-                };
-                match url.parse::<tauri::Url>() {
-                    Ok(url) => {
-                        let _ = window.navigate(url);
-                    }
-                    Err(error) => show_error(&main, &format!("工作台地址无效：{error}")),
-                }
-            });
-        }
-        Err(error) => {
-            let main = handle.clone();
-            let _ = handle.run_on_main_thread(move || show_error(&main, &error));
-        }
     }
 }
 
