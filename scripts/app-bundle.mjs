@@ -9,10 +9,6 @@ export const BUNDLE_ID = 'com.cuekeeper.app';
 export const BUNDLE_NAME = 'CueKeeper';
 export const APP_NAME = BUNDLE_NAME;
 export const MINIMUM_MACOS = '11.0';
-export const CAPTURE_BUNDLE_ID = 'com.cuekeeper.capture';
-export const CAPTURE_NAME = 'CueKeeper Capture';
-export const CAPTURE_EXECUTABLE = 'cuekeeper-capture';
-export const CAPTURE_VERSION = '1.0.0';
 
 export function xmlEscape(value) {
   return String(value)
@@ -60,6 +56,8 @@ export function infoPlist({
   <string>public.app-category.developer-tools</string>
   <key>LSMinimumSystemVersion</key>
   <string>${xmlEscape(minimumSystemVersion)}</string>
+  <key>NSAccessibilityUsageDescription</key>
+  <string>CueKeeper 需要辅助功能和输入监控来录制与回放桌面操作。</string>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSHumanReadableCopyright</key>
@@ -71,75 +69,6 @@ export function infoPlist({
 </dict>
 </plist>
 `;
-}
-
-/** The Info.plist for the nested capture app. Only this app needs TCC. */
-export function captureInfoPlist({
-  version = CAPTURE_VERSION, identifier = CAPTURE_BUNDLE_ID, name = CAPTURE_NAME,
-  executable = CAPTURE_EXECUTABLE, icon = 'AppIcon',
-  minimumSystemVersion = MINIMUM_MACOS,
-}) {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleDevelopmentRegion</key>
-  <string>zh_CN</string>
-  <key>CFBundleDisplayName</key>
-  <string>${xmlEscape(name)}</string>
-  <key>CFBundleExecutable</key>
-  <string>${xmlEscape(executable)}</string>
-  <key>CFBundleIconFile</key>
-  <string>${xmlEscape(icon)}</string>
-  <key>CFBundleIdentifier</key>
-  <string>${xmlEscape(identifier)}</string>
-  <key>CFBundleInfoDictionaryVersion</key>
-  <string>6.0</string>
-  <key>CFBundleName</key>
-  <string>${xmlEscape(name)}</string>
-  <key>CFBundlePackageType</key>
-  <string>APPL</string>
-  <key>CFBundleShortVersionString</key>
-  <string>${xmlEscape(version)}</string>
-  <key>CFBundleSupportedPlatforms</key>
-  <array>
-    <string>MacOSX</string>
-  </array>
-  <key>CFBundleVersion</key>
-  <string>1</string>
-  <key>LSMinimumSystemVersion</key>
-  <string>${xmlEscape(minimumSystemVersion)}</string>
-  <key>LSUIElement</key>
-  <true/>
-  <key>NSAccessibilityUsageDescription</key>
-  <string>CueKeeper Capture 需要辅助功能和输入监控来录制桌面操作。</string>
-  <key>NSHighResolutionCapable</key>
-  <true/>
-  <key>NSHumanReadableCopyright</key>
-  <string>Copyright © 2026 CueKeeper</string>
-  <key>NSPrincipalClass</key>
-  <string>NSApplication</string>
-</dict>
-</plist>
-`;
-}
-
-/** Wrap the recorder executable in its own background app bundle. */
-export function assembleCaptureApp({
-  binary, outDir, iconPath, version = CAPTURE_VERSION, appName = CAPTURE_NAME,
-}) {
-  if (!existsSync(binary)) throw new Error(`capture binary not found: ${binary}`);
-  if (!existsSync(iconPath)) throw new Error(`capture icon not found: ${iconPath}`);
-  const appDir = join(outDir, `${appName}.app`);
-  rmSync(appDir, { recursive: true, force: true });
-  const contents = join(appDir, 'Contents');
-  mkdirSync(join(contents, 'MacOS'), { recursive: true });
-  mkdirSync(join(contents, 'Resources'), { recursive: true });
-  cpSync(binary, join(contents, 'MacOS', CAPTURE_EXECUTABLE));
-  chmodSync(join(contents, 'MacOS', CAPTURE_EXECUTABLE), 0o755);
-  cpSync(iconPath, join(contents, 'Resources', 'AppIcon.icns'));
-  writeFileSync(join(contents, 'Info.plist'), captureInfoPlist({ version }));
-  return appDir;
 }
 
 /**
@@ -183,16 +112,6 @@ export function signApp(appDir) {
     const path = join(appDir, relative);
     if (!existsSync(path)) continue;
     run('codesign', ['--force', '--sign', '-', '--timestamp=none', path]);
-  }
-  const captureApp = join(
-    appDir, 'Contents', 'Resources', 'cuekeeper', 'helpers', `${CAPTURE_NAME}.app`,
-  );
-  if (existsSync(captureApp)) {
-    const captureBinary = join(captureApp, 'Contents', 'MacOS', CAPTURE_EXECUTABLE);
-    if (existsSync(captureBinary)) {
-      run('codesign', ['--force', '--sign', '-', '--timestamp=none', captureBinary]);
-    }
-    run('codesign', ['--force', '--sign', '-', '--timestamp=none', captureApp]);
   }
   run('codesign', ['--force', '--sign', '-', '--timestamp=none', appDir]);
   run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', appDir]);

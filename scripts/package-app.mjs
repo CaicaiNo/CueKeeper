@@ -11,7 +11,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { APP_NAME, assembleApp, assembleCaptureApp, CAPTURE_NAME, signApp, zipApp } from './app-bundle.mjs';
+import { APP_NAME, assembleApp, signApp, zipApp } from './app-bundle.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -154,11 +154,6 @@ function main() {
     version,
     iconPath,
   });
-  const captureApp = assembleCaptureApp({
-    binary: join(releaseDir, 'lib', 'dist', 'cuekeeper-capture'),
-    outDir: join(appDir, 'Contents', 'Resources', 'cuekeeper', 'helpers'),
-    iconPath,
-  });
   if (options.sign) signApp(appDir);
 
   let archive;
@@ -178,7 +173,6 @@ function main() {
     ok: true,
     data: {
       app: appDir,
-      captureApp,
       ...(archive ? { archive, sha256 } : {}),
       notes,
       version,
@@ -190,7 +184,6 @@ function main() {
   else {
     console.log(`Packaged ${APP_NAME}.app`);
     console.log(`  app    ${appDir}`);
-    console.log(`  helper ${captureApp}`);
     if (archive) console.log(`  zip    ${archive}\n  sha256 ${sha256}`);
     console.log(`  notes  ${notes}`);
   }

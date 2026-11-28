@@ -286,9 +286,9 @@ export async function startWorkbench(options: {
   recordHealth?: () => Promise<RecordHealth>;
   /** Tests replace the macOS Settings opener used by the first-run guide. */
   openSettings?: (id: 'accessibility' | 'input-monitoring') => void;
-  /** Tests replace the Finder reveal for the recorder binary. */
+  /** Tests replace the Finder reveal for the app that owns the TCC grant. */
   revealRecorder?: () => void;
-  /** Tests replace copying the recorder app path to the macOS clipboard. */
+  /** Tests replace copying the app path to the macOS clipboard. */
   copyRecorderPath?: () => void;
   /** Tests replace the in-app recorder permission prompt. */
   requestRecorderPermissions?: () => void;
@@ -339,9 +339,9 @@ export async function startWorkbench(options: {
   const revealRecorder = options.revealRecorder ?? (() => {
     if (process.platform !== 'darwin') throw new Error('Finder reveal is available on macOS only');
     // The path is resolved on the server; the page cannot ask Finder to reveal
-    // an arbitrary file. System Settings accepts the bundle, not the raw
-    // binary, so prefer the nested app when it exists.
-    spawn('/usr/bin/open', ['-R', process.env.CUEKEEPER_CAPTURE_APP?.trim() || recorderBinary()], {
+    // an arbitrary file. macOS attributes the recorder's TCC grant to the app
+    // that launched it, so the Privacy lists need CueKeeper.app.
+    spawn('/usr/bin/open', ['-R', process.env.CUEKEEPER_APP_PATH?.trim() || recorderBinary()], {
       stdio: 'ignore', detached: true,
     }).unref();
   });
@@ -349,21 +349,12 @@ export async function startWorkbench(options: {
     if (process.platform !== 'darwin') throw new Error('Clipboard access is available on macOS only');
     // pbcopy is the clipboard the System Settings file picker pastes from.
     const child = spawn('/usr/bin/pbcopy', [], { stdio: ['pipe', 'ignore', 'ignore'] });
-    child.stdin?.end(process.env.CUEKEEPER_CAPTURE_APP?.trim() || recorderBinary());
+    child.stdin?.end(process.env.CUEKEEPER_APP_PATH?.trim() || recorderBinary());
   });
   const requestRecorderPermissions = options.requestRecorderPermissions ?? (() => {
     if (process.platform !== 'darwin') throw new Error('Recorder permission prompts are available on macOS only');
-    const captureApp = process.env.CUEKEEPER_CAPTURE_APP?.trim();
-    if (captureApp) {
-      // Launch the nested app through LaunchServices so TCC attributes the
-      // grant to CueKeeper Capture.
-      spawn('/usr/bin/open', ['-a', captureApp, '--args', '--request-permissions'], {
-        stdio: 'ignore', detached: true,
-      }).unref();
-      return;
-    }
-    // The helper calls AXIsProcessTrustedWithOptions and CGRequestListenEventAccess
-    // itself, so the system adds the embedded recorder to the correct lists.
+    // Spawn the recorder as a child of the workbench, so macOS attributes the
+    // request to CueKeeper.app: the same responsible process used for recording.
     spawn(recorderBinary(), ['--request-permissions'], { stdio: 'ignore', detached: true }).unref();
   });
   const workRoot = workdirRoot();

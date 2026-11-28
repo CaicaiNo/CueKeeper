@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { assembleApp, assembleCaptureApp, captureInfoPlist, infoPlist } from '../scripts/app-bundle.mjs';
+import { assembleApp, infoPlist } from '../scripts/app-bundle.mjs';
 
 test('the app bundle carries the shell, the release and the icon', async t => {
   const root = await mkdtemp(join(tmpdir(), 'cuekeeper-app-'));
@@ -38,6 +38,7 @@ test('the app bundle carries the shell, the release and the icon', async t => {
   assert.match(plist, /<string>9\.8\.7<\/string>/);
   assert.match(plist, /<string>CueKeeper<\/string>/);
   assert.match(plist, /<string>AppIcon<\/string>/);
+  assert.match(plist, /<key>NSAccessibilityUsageDescription<\/key>/);
   if (process.platform === 'darwin') {
     execFileSync('plutil', ['-lint', join(app, 'Contents', 'Info.plist')], { stdio: 'ignore' });
   }
@@ -46,31 +47,4 @@ test('the app bundle carries the shell, the release and the icon', async t => {
 test('the plist escapes metadata', () => {
   const plist = infoPlist({ version: '1.0.0', name: 'Cue & Keeper' });
   assert.match(plist, /Cue &amp; Keeper/);
-});
-
-
-test('the nested capture app owns its own bundle identity', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'cuekeeper-capture-app-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const binary = join(root, 'cuekeeper-capture');
-  await writeFile(binary, 'recorder\n');
-  const icon = join(root, 'icon.icns');
-  await writeFile(icon, 'icon\n');
-
-  const app = assembleCaptureApp({
-    binary, outDir: join(root, 'helpers'), iconPath: icon,
-  });
-  assert.match(app, /CueKeeper Capture\.app$/);
-  assert.equal(
-    await readFile(join(app, 'Contents', 'MacOS', 'cuekeeper-capture'), 'utf8'),
-    'recorder\n');
-  const plist = await readFile(join(app, 'Contents', 'Info.plist'), 'utf8');
-  assert.match(plist, /<string>com\.cuekeeper\.capture<\/string>/);
-  assert.match(plist, /<string>CueKeeper Capture<\/string>/);
-  assert.match(plist, /<key>LSUIElement<\/key>/);
-  assert.match(plist, /<key>NSAccessibilityUsageDescription<\/key>/);
-  assert.equal(captureInfoPlist({}).includes('com.cuekeeper.capture'), true);
-  if (process.platform === 'darwin') {
-    execFileSync('plutil', ['-lint', join(app, 'Contents', 'Info.plist')], { stdio: 'ignore' });
-  }
 });

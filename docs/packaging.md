@@ -198,8 +198,6 @@ CueKeeper.app/Contents/
     runtime/node
     lib/dist/                # CLI、录制器、原生辅助二进制
     lib/workbench/           # 现有工作台
-    helpers/
-      CueKeeper Capture.app  # 拥有系统权限的子 App
 ```
 
 ### 构建
@@ -238,10 +236,9 @@ release/
 
 - App 启动 `runtime/node lib/dist/cli.js workbench --port 17899`，窗口加载 `http://127.0.0.1:17899`。
 - 关闭 App 会结束 Node 进程组，录制器随工作台一起停止。
-- 首次启动由 App 启动内置的 `CueKeeper Capture.app`，只由这个子 App 申请「辅助功能 / 输入监控」；外壳和工作台本身不需要系统权限。
-- `CueKeeper Capture.app` 的 bundle id 是 `com.cuekeeper.capture`，录制器 `cuekeeper-capture` 就是它的主程序。macOS 的授权对象是这个子 App，不是外壳。
-- 输入监控通常不会自动把子 App 加进列表。引导里的「打开设置」会同时打开对应面板，并在 Finder 中选中 `CueKeeper Capture.app`：把它拖进列表即可；也可以点列表下的 ＋ 后按 ⌘⇧G 粘贴「复制」的完整路径。
-- 工作台健康检查把授权对象显示为 `CueKeeper Capture.app`；菜单「CueKeeper → 在 Finder 中显示录制器」可再次定位。
+- 首次启动由 App 启动内置录制器。macOS 把这次权限请求归到负责启动它的 `CueKeeper.app` 上；录制时也是同一条责任链，所以两个隐私列表里的授权对象都是主 App，而不是 `cuekeeper-capture`。
+- 输入监控通常不会自动把 App 加进列表。引导里的「打开设置」会同时打开对应面板，并在 Finder 中选中 `CueKeeper.app`：把它拖进列表即可；也可以点列表下的 ＋ 后按 ⌘⇧G 粘贴「复制」的完整路径。
+- 工作台健康检查把授权对象显示为 `CueKeeper.app`；菜单「CueKeeper → 在 Finder 中显示 CueKeeper」可再次定位。
 - 日志：`~/Library/Logs/com.cuekeeper.app/workbench.log`；菜单「视图 → 打开日志目录」可直接打开。
 
 ### 签名与分发
@@ -249,7 +246,7 @@ release/
 当前只做 ad-hoc 签名，没有 Developer ID 和公证：
 
 - 首次打开可能需要右键 App →「打开」，或在「系统设置 → 隐私与安全性」选择「仍要打开」。
-- 重新构建 App 本体或内置录制器后，ad-hoc 签名（cdhash）变化，macOS 会要求重新授权。
+- 重新构建 App 本体后，ad-hoc 签名（cdhash）变化，macOS 会要求重新授权；授权对象是 `CueKeeper.app`。
 - 正式分发需要 Developer ID 签名、公证和稳定 bundle identity；届时 App 更新可以沿用授权。
 
 App 使用固定端口 17899，便于工作台 `localStorage` 保持稳定。若端口被命令行工作台占用，App 会在启动页显示日志路径并退出，不会静默换端口。

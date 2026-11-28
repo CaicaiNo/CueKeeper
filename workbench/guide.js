@@ -22,7 +22,7 @@ const permissionCopy = {
   },
   recorder: {
     name: '录制器',
-    why: 'App 内置的 CueKeeper Capture；系统权限授予这个子 App。',
+    why: 'App 内置的录制器；macOS 把权限算在启动它的 CueKeeper 上。',
     status: '未授权',
   },
   'agent-desktop': {
@@ -94,7 +94,7 @@ export function createGuide({ dialog, dom, onStart }) {
       el('p', { className: 'muted guide-hint' },
         '点“请求权限”弹出系统授权；输入监控通常还要手动添加。'),
       el('p', { className: 'muted guide-hint' },
-        '点“打开设置”会在 Finder 中选中 CueKeeper Capture：把它拖进列表，或点 ＋ 后按 ⌘⇧G 粘贴复制的路径。'),
+        'macOS 把内置录制器的权限算在 CueKeeper 上：点“打开设置”会在 Finder 中选中 CueKeeper，把它拖进列表；或点 ＋ 后按 ⌘⇧G 粘贴复制的路径。'),
       recorderRow());
     start.disabled = true;
   }
@@ -123,8 +123,8 @@ export function createGuide({ dialog, dom, onStart }) {
       // The permission row already names the settings pane if the shortcut
       // cannot be opened.
     }
-    // Input Monitoring does not add a nested helper by itself. Show the app in
-    // Finder so it can be dragged into the list, or picked with the + button.
+    // Input Monitoring does not add the app by itself. Show CueKeeper in Finder
+    // so it can be dragged into the list, or picked with the + button.
     await revealRecorder();
   }
 
@@ -162,7 +162,7 @@ export function createGuide({ dialog, dom, onStart }) {
   }
 
   function recorderRow() {
-    const path = health?.recorderAppPath || health?.recorderPath;
+    const path = health?.appPath || health?.recorderPath;
     if (!path) return undefined;
     const name = path.split('/').filter(Boolean).at(-1) ?? path;
     return el('div', { className: 'guide-recorder' },
@@ -172,7 +172,7 @@ export function createGuide({ dialog, dom, onStart }) {
         style: 'small', icon: 'copy', iconOnly: true, title: '复制完整路径',
       }),
       button('显示', () => void revealRecorder(), {
-        style: 'small', icon: 'folder', iconOnly: true, title: '在 Finder 中显示 CueKeeper Capture',
+        style: 'small', icon: 'folder', iconOnly: true, title: '在 Finder 中显示 CueKeeper',
       }));
   }
 
