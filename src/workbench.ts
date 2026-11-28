@@ -288,8 +288,6 @@ export async function startWorkbench(options: {
   openSettings?: (id: 'accessibility' | 'input-monitoring') => void;
   /** Tests replace the Finder reveal for the recorder binary. */
   revealRecorder?: () => void;
-  /** Tests replace the Finder reveal for the app bundle in app mode. */
-  revealApp?: () => void;
   /** Tests replace the sidecar reader a live run uses to prefill parameters. */
   resolveInputValues?: (flowPath: string, flowId: string) => Promise<InputValuesRead>;
   /** Tests replace the private directory a live run writes its inputs file to. */
@@ -339,13 +337,6 @@ export async function startWorkbench(options: {
     // The path is resolved on the server; the page cannot ask Finder to reveal
     // an arbitrary file.
     spawn('/usr/bin/open', ['-R', binary], { stdio: 'ignore', detached: true }).unref();
-  });
-  const revealApp = options.revealApp ?? (() => {
-    if (process.platform !== 'darwin') throw new Error('Finder reveal is available on macOS only');
-    const bundle = process.env.CUEKEEPER_APP_PATH?.trim();
-    if (!bundle || !bundle.endsWith('.app')) throw new Error('CueKeeper.app is not available');
-    // The shell supplies this path; the page cannot choose what Finder reveals.
-    spawn('/usr/bin/open', ['-R', bundle], { stdio: 'ignore', detached: true }).unref();
   });
   const workRoot = workdirRoot();
   const workdirFailure = await prepareWorkdir(workRoot);
@@ -659,10 +650,6 @@ export async function startWorkbench(options: {
     }
     if (path === '/api/guide/reveal-recorder') {
       revealRecorder();
-      return send(response, 200, { opened: true });
-    }
-    if (path === '/api/guide/reveal-app') {
-      revealApp();
       return send(response, 200, { opened: true });
     }
     if (path === '/api/record/start') return send(response, 200, await recorder.start(data));
