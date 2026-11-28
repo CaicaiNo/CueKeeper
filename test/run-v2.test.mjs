@@ -2024,7 +2024,7 @@ function rightClickFallbackWindow(id, title) {
       window: { id, title },
       tree: {
         role: 'window', name: title, bounds: { x: 100, y: 100, width: 800, height: 600 }, children: [{
-          role: 'outline', ref_id: `@${id.replace('-', '')}:e1`, bounds: { x: 110, y: 130, width: 780, height: 500 }, children: [{
+          role: 'outline', name: 'Files', ref_id: `@${id.replace('-', '')}:e1`, bounds: { x: 110, y: 130, width: 780, height: 500 }, children: [{
             role: 'row', name: 'README.md', ref_id: `@${id.replace('-', '')}:e2`, bounds: { x: 110, y: 140, width: 780, height: 24 },
             states: ['selected'], available_actions: ['RightClick'], children: [{
               role: 'statictext', value: 'README.md', ref_id: `@${id.replace('-', '')}:e3`,
@@ -2062,6 +2062,113 @@ test('a right-click fallback proves the selected row it will actually press', as
   // recorded outline.
   assert.deepEqual(callsOf(world, 'click'), [['click', '@w97:e2']]);
   assert.equal(entry(report, 'right-control').windowFallback?.reason, 'only_window');
+});
+
+test('a single-window fallback never clicks a Finder sidebar item before proving the target', async t => {
+  const { world, run } = finderWorld(t, {
+    windows: [finderWindow('w-97', '桌面', [{
+      role: 'outline', name: '边栏', ref_id: '@w97:e6',
+      bounds: { x: 100, y: 100, width: 180, height: 500 }, children: [{
+        role: 'treeitem', name: 'git', ref_id: '@w97:e7',
+        bounds: { x: 110, y: 150, width: 160, height: 24 }, states: [],
+      }],
+    }, {
+      role: 'outline', name: 'Files', ref_id: '@w97:e2',
+      bounds: { x: 300, y: 100, width: 600, height: 500 }, children: [{
+        role: 'row', name: 'README.md', ref_id: '@w97:e3',
+        bounds: { x: 310, y: 140, width: 500, height: 24 }, states: [], children: [],
+      }],
+    }])],
+    focused: 'w-97',
+  });
+  const report = await run(parseFlowV2({
+    version: 2, id: 'finder-sidebar-fallback', name: 'Finder sidebar fallback',
+    appPaths: { [finderApp]: finderPath },
+    steps: [{
+      id: 'click-control', kind: 'click',
+      scope: { kind: 'window', app: finderApp, windowKey: 'git', windowTitle: 'git' },
+      target: { kind: 'element', role: 'row', name: 'README.md' },
+    }],
+  }));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w97:e3']],
+    'the fallback proof does not press the sidebar item first');
+  assert.equal(callsOf(world, 'snapshotWindow').length, 1, 'the proof tree is reused by the click');
+});
+
+test('a right-click fallback ignores a selected row in another container', async t => {
+  const { world, run } = finderWorld(t, {
+    windows: [finderWindow('w-97', '桌面', [{
+      role: 'outline', name: 'Files', ref_id: '@w97:e1',
+      bounds: { x: 100, y: 100, width: 300, height: 500 }, children: [],
+    }, {
+      role: 'outline', name: 'Other', ref_id: '@w97:e2',
+      bounds: { x: 500, y: 100, width: 300, height: 500 }, children: [{
+        role: 'row', name: 'Other.txt', ref_id: '@w97:e3',
+        bounds: { x: 510, y: 140, width: 200, height: 24 },
+        states: ['selected'], available_actions: ['RightClick'], children: [],
+      }],
+    }])],
+    focused: 'w-97',
+  });
+  await run(fallbackRightClickFlow());
+  // The recorded outline exists but holds no selection. Another outline's
+  // selected row is not this step's evidence, so it must never be pressed.
+  assert.deepEqual(callsOf(world, 'click').filter(call => call[1] === '@w97:e3'), []);
+});
+
+test('a fallback target that changes during readiness is refused with zero input', async t => {
+  const window = finderWindow('w-97', '桌面', [{
+    role: 'outline', name: 'Files', ref_id: '@w97:e1',
+    bounds: { x: 100, y: 100, width: 800, height: 500 }, children: [{
+      role: 'row', name: 'README.md', ref_id: '@w97:e2',
+      bounds: { x: 110, y: 140, width: 700, height: 24 },
+      states: ['selected'], available_actions: ['RightClick'], children: [],
+    }, {
+      role: 'row', name: 'Other.txt', ref_id: '@w97:e4',
+      bounds: { x: 110, y: 170, width: 700, height: 24 },
+      states: [], available_actions: ['RightClick'], children: [],
+    }],
+  }]);
+  const { world, run } = finderWorld(t, { windows: [window], focused: 'w-97' });
+  const rows = window.data.tree.children[0].children;
+  paintOnRead(world, (_window, index) => {
+    rows[0].states = index === 1 ? ['selected'] : [];
+    rows[1].states = index === 1 ? [] : ['selected'];
+  });
+  const report = await run(gatedFallbackFlow({
+    id: 'right-control', kind: 'click', button: 'right',
+    scope: { kind: 'window', app: finderApp, windowKey: 'git', windowTitle: 'git' },
+    target: { kind: 'element', role: 'outline', name: 'Files' },
+  }));
+  const failed = entry(report, 'right-control');
+  assert.equal(failed.code, 'TARGET_NOT_READY');
+  assert.match(failed.message, /fallback target changed after it was proven/);
+  assert.deepEqual(callsOf(world, 'click'), []);
+});
+
+test('a slow fallback proof carries its read time into the stability budget', async t => {
+  const { world, run } = finderWorld(t, {
+    windows: [retitledWindow('w-97', '桌面', 'README.md')],
+    focused: 'w-97',
+  });
+  const real = world.desktop.snapshotWindow.bind(world.desktop);
+  let reads = 0;
+  world.desktop.snapshotWindow = async id => {
+    if (id === 'w-97') {
+      reads += 1;
+      await new Promise(resolve => setTimeout(resolve, 1450));
+    }
+    return real(id);
+  };
+  const report = await run(gatedFallbackFlow({
+    id: 'click-control', kind: 'click',
+    scope: { kind: 'window', app: finderApp, windowKey: 'git', windowTitle: 'git' },
+    target: { kind: 'element', role: 'statictext', name: 'README.md' },
+  }));
+  assert.equal(report.status, 'passed', JSON.stringify(report.entries));
+  assert.ok(reads >= 2, `the proof read slow trees twice (${reads})`);
+  assert.deepEqual(callsOf(world, 'click'), [['click', '@w97:e1']]);
 });
 
 test('a fallback binding is reused by the next step on the same key without a second proof', async t => {

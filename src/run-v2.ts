@@ -529,12 +529,36 @@ function hoverPoint(node: Node, recorded: Point | undefined, snapshot: Snapshot)
   return centre;
 }
 
+/** Whether one locator resolves to a node inside another locator's node. */
+function locatorInNode(snapshot: Snapshot, outer: ElementLocator, inner: ElementLocator): boolean {
+  try {
+    const parent = resolve(snapshot, outer).node;
+    const child = resolve(snapshot, inner).node;
+    return flatten(parent).some(({ node }) => node === child);
+  } catch {
+    return false;
+  }
+}
+
+/** A stable key for one click target, for pinning a fallback proof. */
+function clickLocatorKey(locator: ElementLocator): string {
+  return JSON.stringify([locator.role, locator.name, locator.identifier, locator.path, locator.index]);
+}
+
 /** The item a right click on a container really targets. */
 function rightClickTarget(snapshot: Snapshot, button: string | undefined, locator: ElementLocator): ElementLocator {
   if (button !== 'right') return locator;
   const containers = new Set(['outline', 'list', 'table', 'tree', 'group', 'scrollarea']);
   if (!containers.has(locator.role ?? '')) return locator;
-  const selected = flatten(snapshot.tree).filter(({ node }) => node.ref && node.states.includes('selected'));
+  // Only a selected item inside the recorded container is this step's target;
+  // another outline's selection is not evidence for this right click.
+  let container: Node;
+  try {
+    container = resolve(snapshot, locator).node;
+  } catch {
+    return locator;
+  }
+  const selected = flatten(container).filter(({ node }) => node.ref && node.states.includes('selected'));
   // The file name in Finder's list view is a textfield that accepts RightClick;
   // the row around it may only accept Click.
   const rightClickable = selected.filter(({ node }) => (node.actions ?? []).includes('RightClick'));
@@ -813,9 +837,13 @@ class StepRunner {
     // taken inside this proof's budget and the step dispatches from it, so it is
     // not read again just to count a read.
     let proved: Snapshot | undefined;
+    let provedTookMs = 0;
+    let pinnedTarget: string | undefined;
     let fallbackUsed = this.resolver.hasFallback(step.scope.windowKey);
     const fallbackProof = fallback === undefined ? undefined : async (candidate: WindowInfo) => {
+      const started = performance.now();
       const snapshot = await fallback(candidate);
+      provedTookMs = performance.now() - started;
       proved = snapshot;
       fallbackUsed = true;
       return snapshot;
@@ -962,6 +990,11 @@ class StepRunner {
               this.resolver.confirmForeground(binding, cancel.signal, () => live(problem)),
               deadline, () => fail(problem, reads));
             live(problem);
+            if (fallbackUsed && proved !== undefined && step.kind === 'click') {
+              // Pin the control the fallback proof accepted. Later reads may
+              // settle, but they may not silently switch to another selected row.
+              pinnedTarget ??= clickLocatorKey(this.clickTargetOf(step, proved).locator);
+            }
           }
           const reuse = selectionRead;
           selectionRead = undefined;
@@ -974,6 +1007,7 @@ class StepRunner {
             // The fallback proof already read this tree and proved the target in
             // it; reading it again would only duplicate the same evidence.
             snapshot = proved;
+            tookMs = provedTookMs;
             proved = undefined;
           } else {
             const started = performance.now();
@@ -997,6 +1031,15 @@ class StepRunner {
           }
           reads += 1;
           read = this.readinessOf(snapshot, binding!, step);
+          if (pinnedTarget !== undefined && step.kind === 'click') {
+            let current: string;
+            try {
+              current = clickLocatorKey(this.clickTargetOf(step, snapshot).locator);
+            } catch {
+              throw fail('the fallback target could not be re-proven', reads);
+            }
+            if (current !== pinnedTarget) throw fail('the fallback target changed after it was proven', reads);
+          }
         } catch (error) {
           const fault = toFault(error);
           // A fallback the proof refused is a decision, not a slow window: the
@@ -1190,8 +1233,11 @@ class StepRunner {
     snapshot: Snapshot,
   ): { locator: ElementLocator; resolved: Actionable } {
     const target = step.target as ElementLocator;
+    const previous = this.lastClickTarget;
     const locator = step.button === 'right' && target.identifier === undefined
-      ? (this.lastClickTarget ?? rightClickTarget(snapshot, step.button, target))
+      ? (previous && locatorInNode(snapshot, target, previous)
+        ? previous
+        : rightClickTarget(snapshot, step.button, target))
       : target;
     return { locator, resolved: actionable(snapshot, addressable(locator)) };
   }

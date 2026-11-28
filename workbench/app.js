@@ -5,7 +5,6 @@ import {
   shellDraft, shellSummary, dragSummary, undoCondition, visibleRows, locatorDetail, targetLabel, roleLabel,
   V2_COPYABLE_KINDS, V2_INSERT_KINDS, V2_TARGET_KINDS, assertCheck, checkLabel, diffItems, diffSummary,
   filterStepsByScope, scopeKey, scopeOptions, statusMap, stepTemplate, stepTiming, v2StepLabel, gapReason,
-  windowFallbackCount,
   checkpointWaitFacts, pickCandidateLabel, durationLabel, sessionDurationLabel, stateCheckLabel,
   defaultLibraryExpanded, libraryGroups, toggleLibraryGroup,
 } from './model.js';
@@ -1401,7 +1400,7 @@ function v2DryRun() {
     const blocked = report.entries.filter(entry => entry.status === 'blocked');
     // The dry run cannot open a window; it only says how many steps could use
     // the app's front window when their recorded title is gone.
-    const fallbacks = windowFallbackCount(v2Flow());
+    const fallbacks = state.v2?.windowFallbackCount ?? 0;
     status(`dry-run ${resultStatus[report.status] ?? report.status} · ${report.entries.length} 步` +
       (blocked.length ? ` · ${blocked.length} 步需确认` : failed.length ? ` · ${failed.length} 步异常` : '') +
       (fallbacks

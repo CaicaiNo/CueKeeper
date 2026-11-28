@@ -202,7 +202,7 @@ export class ScopeResolver {
       chosen = picked.window;
       sharedTitle = picked.reason;
     }
-    if (!chosen && repair && scope.app === 'com.apple.finder' && (fallback === undefined || owned.length === 1)) {
+    if (!chosen && repair && scope.app === 'com.apple.finder' && fallback === undefined) {
       // Finder's sidebar view ("最近使用") is a window title the replay can
       // reopen: the recorded click on that view only exists because the view
       // was already open. Pressing the sidebar item is preparation, not a

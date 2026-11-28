@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { startWorkbench } from '../dist/workbench.js';
-import { windowFallbackCount } from '../workbench/model.js';
+import { windowFallbackSteps } from '../dist/flow-v2.js';
 
 // The real `workbench/app.js` runs against the small DOM stand-in, so a fallback
 // entry is read through the same render path the browser uses.
@@ -94,7 +94,7 @@ test('a fallback result is a yellow marker with a recorded → actual tooltip, n
     'a step without a fallback is unchanged');
 
   // The dry run announces the count once, from the same rule the CLI uses.
-  const count = windowFallbackCount(flow);
+  const count = windowFallbackSteps(flow).length;
   assert.ok(count > 0, `the fixture has fallback-capable steps (${count})`);
   const statusText = document.getElementById('status').textContent;
   const sentence = `${count} 个窗口步骤在记录窗口不存在时会尝试退回该 App 的前台窗口（需目标唯一）`;

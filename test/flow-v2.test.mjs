@@ -13,7 +13,7 @@ import {
 } from '../dist/flow-v2.js';
 import { loadSession } from '../dist/workbench-session.js';
 import { startWorkbench } from '../dist/workbench.js';
-import { scopeDescription, sessionDurationLabel, windowFallbackCount } from '../workbench/model.js';
+import { scopeDescription, sessionDurationLabel } from '../workbench/model.js';
 
 const example = name => JSON.parse(readFileSync(new URL(`../examples/${name}.json`, import.meta.url), 'utf8'));
 const schema = name => JSON.parse(readFileSync(new URL(`../schemas/${name}.schema.json`, import.meta.url), 'utf8'));
@@ -466,8 +466,6 @@ test('a window fallback is counted for element input steps and announced by the 
   assert.deepEqual(windowFallbackSteps(parsed).map(step => step.id), ['click-save', 'type-body', 'drag-row']);
   assert.equal(stepSupportsWindowFallback(parsed.steps[5]), false);
   assert.equal(stepSupportsWindowFallback(parsed.steps[6]), false, 'a menu item goes through the menu surface');
-  // The workbench page computes its dry-run hint from the same rule.
-  assert.equal(windowFallbackCount(parsed), 3);
 
   const report = dryRunFlowV2(parsed);
   assert.equal(report.status, 'passed');
