@@ -890,6 +890,9 @@ async function v2Call(route, payload = {}) {
     state.v2Busy = false;
     renderV2();
     renderTimeline();
+    // The action inspector reads the current v2 step too. An already-open
+    // detail must follow an edit or delete instead of waiting for another click.
+    renderInspector();
   }
 }
 
@@ -901,6 +904,7 @@ async function v2Save() {
     state.v2 = result.v2;
     renderV2();
     renderTimeline();
+    renderInspector();
     status(`已保存工作流 · ${result.output}`, 'success');
   } catch (error) {
     status(error.message, 'error');
@@ -917,6 +921,7 @@ async function v2Undo() {
     retireDryRunReport();
     renderV2();
     renderTimeline();
+    renderInspector();
   }
 }
 
@@ -930,6 +935,7 @@ async function v2Redo() {
     retireDryRunReport();
     renderV2();
     renderTimeline();
+    renderInspector();
   }
 }
 
