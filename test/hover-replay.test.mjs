@@ -107,10 +107,19 @@ else if (command === 'validate') data = null;
 console.log(JSON.stringify({ version: '1', command, ok: true, data }));
 `, { mode: 0o700 });
 
+  // The hover path must not depend on the machine's current secure-input
+  // focus, which is unrelated to the pointer proof under test.
+  const recorder = join(dir, 'cuekeeper-capture');
+  writeFileSync(recorder, `#!/usr/bin/env node
+const command = process.argv[2];
+console.log(JSON.stringify(command === '--system-dialog-state'
+  ? { visible: false } : { secure: false }));
+`, { mode: 0o700 });
   const env = {
     ...process.env,
     CUEKEEPER_AGENT_DESKTOP: driver,
     CUEKEEPER_APP_IDENTITY: identity,
+    CUEKEEPER_RECORDER: recorder,
     CUEKEEPER_STATE_DIR: join(dir, 'state'),
   };
   const run = (flow) => {
