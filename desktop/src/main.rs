@@ -105,6 +105,8 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
     let accessibility =
         MenuItemBuilder::with_id("open_accessibility", "打开辅助功能设置").build(app)?;
     let input = MenuItemBuilder::with_id("open_input_monitoring", "打开输入监控设置").build(app)?;
+    let show_capture =
+        MenuItemBuilder::with_id("show_capture", "在 Finder 中显示录制器").build(app)?;
     let guide = MenuItemBuilder::with_id("open_guide", "使用引导").build(app)?;
     let reload = MenuItemBuilder::with_id("reload", "重新加载工作台").build(app)?;
     let logs = MenuItemBuilder::with_id("open_logs", "打开日志目录").build(app)?;
@@ -114,6 +116,7 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
         .about_with_text("关于 CueKeeper", None)
         .separator()
         .item(&request)
+        .item(&show_capture)
         .item(&accessibility)
         .item(&input)
         .separator()
@@ -160,6 +163,7 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
 fn menu_event(app: &tauri::AppHandle, id: &str) {
     match id {
         "request_permissions" => request_recorder(app),
+        "show_capture" => reveal_capture(app),
         "open_accessibility" => permissions::open_pane("accessibility"),
         "open_input_monitoring" => permissions::open_pane("input-monitoring"),
         "open_guide" => eval(app, "document.getElementById('guide-button')?.click()"),
@@ -182,6 +186,21 @@ fn menu_event(app: &tauri::AppHandle, id: &str) {
 
 fn request_recorder(app: &tauri::AppHandle) {
     if let Ok(paths) = paths::resolve(app) {
+        let capture_app = paths.root.join("helpers").join("CueKeeper Capture.app");
+        if capture_app.is_dir() {
+            // Launch the nested app through LaunchServices so TCC attributes
+            // the prompt to CueKeeper Capture, not to the shell.
+            let _ = std::process::Command::new("/usr/bin/open")
+                .arg("-a")
+                .arg(&capture_app)
+                .arg("--args")
+                .arg("--request-permissions")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            return;
+        }
         let recorder = paths.root.join("lib").join("dist").join("cuekeeper-capture");
         let _ = std::process::Command::new(recorder)
             .arg("--request-permissions")
@@ -189,6 +208,18 @@ fn request_recorder(app: &tauri::AppHandle) {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn();
+    }
+}
+
+fn reveal_capture(app: &tauri::AppHandle) {
+    if let Ok(paths) = paths::resolve(app) {
+        let capture_app = paths.root.join("helpers").join("CueKeeper Capture.app");
+        let target = if capture_app.is_dir() {
+            capture_app
+        } else {
+            paths.root.join("lib").join("dist").join("cuekeeper-capture")
+        };
+        permissions::reveal_path(&target);
     }
 }
 

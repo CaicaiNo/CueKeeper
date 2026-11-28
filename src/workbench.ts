@@ -288,6 +288,8 @@ export async function startWorkbench(options: {
   openSettings?: (id: 'accessibility' | 'input-monitoring') => void;
   /** Tests replace the Finder reveal for the recorder binary. */
   revealRecorder?: () => void;
+  /** Tests replace copying the recorder app path to the macOS clipboard. */
+  copyRecorderPath?: () => void;
   /** Tests replace the in-app recorder permission prompt. */
   requestRecorderPermissions?: () => void;
   /** Tests replace the sidecar reader a live run uses to prefill parameters. */
@@ -337,11 +339,29 @@ export async function startWorkbench(options: {
   const revealRecorder = options.revealRecorder ?? (() => {
     if (process.platform !== 'darwin') throw new Error('Finder reveal is available on macOS only');
     // The path is resolved on the server; the page cannot ask Finder to reveal
-    // an arbitrary file.
-    spawn('/usr/bin/open', ['-R', recorderBinary()], { stdio: 'ignore', detached: true }).unref();
+    // an arbitrary file. System Settings accepts the bundle, not the raw
+    // binary, so prefer the nested app when it exists.
+    spawn('/usr/bin/open', ['-R', process.env.CUEKEEPER_CAPTURE_APP?.trim() || recorderBinary()], {
+      stdio: 'ignore', detached: true,
+    }).unref();
+  });
+  const copyRecorderPath = options.copyRecorderPath ?? (() => {
+    if (process.platform !== 'darwin') throw new Error('Clipboard access is available on macOS only');
+    // pbcopy is the clipboard the System Settings file picker pastes from.
+    const child = spawn('/usr/bin/pbcopy', [], { stdio: ['pipe', 'ignore', 'ignore'] });
+    child.stdin?.end(process.env.CUEKEEPER_CAPTURE_APP?.trim() || recorderBinary());
   });
   const requestRecorderPermissions = options.requestRecorderPermissions ?? (() => {
     if (process.platform !== 'darwin') throw new Error('Recorder permission prompts are available on macOS only');
+    const captureApp = process.env.CUEKEEPER_CAPTURE_APP?.trim();
+    if (captureApp) {
+      // Launch the nested app through LaunchServices so TCC attributes the
+      // grant to CueKeeper Capture.
+      spawn('/usr/bin/open', ['-a', captureApp, '--args', '--request-permissions'], {
+        stdio: 'ignore', detached: true,
+      }).unref();
+      return;
+    }
     // The helper calls AXIsProcessTrustedWithOptions and CGRequestListenEventAccess
     // itself, so the system adds the embedded recorder to the correct lists.
     spawn(recorderBinary(), ['--request-permissions'], { stdio: 'ignore', detached: true }).unref();
@@ -659,6 +679,10 @@ export async function startWorkbench(options: {
     if (path === '/api/guide/reveal-recorder') {
       revealRecorder();
       return send(response, 200, { opened: true });
+    }
+    if (path === '/api/guide/copy-recorder-path') {
+      copyRecorderPath();
+      return send(response, 200, { copied: true });
     }
     if (path === '/api/guide/request-recorder-permissions') {
       requestRecorderPermissions();

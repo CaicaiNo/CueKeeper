@@ -36,3 +36,19 @@ pub fn open_path(path: &Path) {
         let _ = std::process::Command::new("explorer").arg(path).spawn();
     }
 }
+
+/// Show a path in Finder with the item selected, so an app bundle can be
+/// dragged into the Privacy lists.
+pub fn reveal_path(path: &Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("/usr/bin/open")
+            .arg("-R")
+            .arg(path)
+            .spawn();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        open_path(path);
+    }
+}

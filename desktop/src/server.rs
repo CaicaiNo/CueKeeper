@@ -104,6 +104,17 @@ pub fn start(app: &tauri::AppHandle) -> Result<Workbench, String> {
         // The guide uses this to name the app bundle that owns the TCC grant.
         command.env("CUEKEEPER_APP_PATH", bundle);
     }
+    let capture_app = paths.root.join("helpers").join("CueKeeper Capture.app");
+    let capture_binary = capture_app
+        .join("Contents")
+        .join("MacOS")
+        .join("cuekeeper-capture");
+    if capture_binary.is_file() {
+        // The nested capture app owns Accessibility and Input Monitoring; the
+        // shell and its Node engine stay permission-free.
+        command.env("CUEKEEPER_RECORDER", &capture_binary);
+        command.env("CUEKEEPER_CAPTURE_APP", &capture_app);
+    }
     prepare_environment(&mut command, &paths);
     #[cfg(unix)]
     {

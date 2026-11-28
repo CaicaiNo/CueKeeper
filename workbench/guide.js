@@ -22,8 +22,8 @@ const permissionCopy = {
   },
   recorder: {
     name: '录制器',
-    why: 'CueKeeper 的桌面录制组件；系统权限实际授予这个文件。',
-    status: '未就绪',
+    why: 'App 内置的 CueKeeper Capture；系统权限授予这个子 App。',
+    status: '未授权',
   },
   'agent-desktop': {
     name: '桌面代理',
@@ -92,7 +92,9 @@ export function createGuide({ dialog, dom, onStart }) {
               : undefined);
         })),
       el('p', { className: 'muted guide-hint' },
-        '点“请求权限”弹出系统授权；也可以点每项的“打开设置”手动勾选。'),
+        '点“请求权限”弹出系统授权；输入监控通常还要手动添加。'),
+      el('p', { className: 'muted guide-hint' },
+        '点“打开设置”会在 Finder 中选中 CueKeeper Capture：把它拖进列表，或点 ＋ 后按 ⌘⇧G 粘贴复制的路径。'),
       recorderRow());
     start.disabled = true;
   }
@@ -121,6 +123,9 @@ export function createGuide({ dialog, dom, onStart }) {
       // The permission row already names the settings pane if the shortcut
       // cannot be opened.
     }
+    // Input Monitoring does not add a nested helper by itself. Show the app in
+    // Finder so it can be dragged into the list, or picked with the + button.
+    await revealRecorder();
   }
 
   async function revealRecorder() {
@@ -135,27 +140,39 @@ export function createGuide({ dialog, dom, onStart }) {
     }
   }
 
-  function copyPath(path) {
+  async function copyPath(path) {
     if (!path) return;
+    try {
+      // Copy through the workbench: pbcopy is the clipboard System Settings
+      // pastes from, and it does not depend on WKWebView clipboard support.
+      const response = await fetch('/api/guide/copy-recorder-path', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', [healthHeader]: '1' },
+        body: '{}',
+      });
+      if (response.ok) return;
+    } catch {
+      // Fall through to the page clipboard.
+    }
     try {
       void navigator.clipboard?.writeText(path);
     } catch {
-      // Some embedded pages disable the clipboard; the code element remains
-      // selectable by hand.
+      // Some embedded pages disable the clipboard; the path remains selectable.
     }
   }
 
   function recorderRow() {
-    const path = health?.recorderPath;
+    const path = health?.recorderAppPath || health?.recorderPath;
     if (!path) return undefined;
+    const name = path.split('/').filter(Boolean).at(-1) ?? path;
     return el('div', { className: 'guide-recorder' },
       el('span', { className: 'guide-recorder-label' }, '授权对象'),
-      el('code', { title: path }, path),
-      button('复制', () => copyPath(path), {
-        style: 'small', icon: 'copy', iconOnly: true, title: '复制路径',
+      el('code', { title: path }, name),
+      button('复制', () => void copyPath(path), {
+        style: 'small', icon: 'copy', iconOnly: true, title: '复制完整路径',
       }),
       button('显示', () => void revealRecorder(), {
-        style: 'small', icon: 'folder', iconOnly: true, title: '在 Finder 中显示录制器',
+        style: 'small', icon: 'folder', iconOnly: true, title: '在 Finder 中显示 CueKeeper Capture',
       }));
   }
 

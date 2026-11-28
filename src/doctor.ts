@@ -87,6 +87,8 @@ export interface RecordHealth {
   nextSteps: string[];
   /** The exact recorder binary these checks were run against. */
   recorderPath?: string;
+  /** The nested app bundle that owns the recorder's TCC grant. */
+  recorderAppPath?: string;
   /** The app bundle that owns the TCC grant when running inside CueKeeper.app. */
   appPath?: string;
 }
@@ -427,11 +429,13 @@ export async function captureHealth(options: DoctorOptions = {}): Promise<Record
   const root = options.root ?? defaultRoot();
   const env = options.env ?? process.env;
   const appPath = env.CUEKEEPER_APP_PATH?.trim();
+  const recorderAppPath = env.CUEKEEPER_CAPTURE_APP?.trim();
   return {
     ok: blocking.length === 0,
     blocking,
     nextSteps: report.nextSteps,
     recorderPath: recorderPath(root, env),
+    ...(recorderAppPath ? { recorderAppPath } : {}),
     ...(appPath ? { appPath } : {}),
   };
 }
