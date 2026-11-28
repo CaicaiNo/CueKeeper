@@ -79,6 +79,12 @@ const gapOriginChars = 480;
  * again, because nothing else can prove the tree still describes the screen.
  */
 const defaultSnapshotTtlMs = 30_000;
+/** The app whose clicks navigate the window out from under them. */
+const finderBundleId = 'com.apple.finder';
+/** Finder shortcuts that replace the window's content before the next click. */
+const finderNavigationKeys = new Set(['up', 'down', '[', ']', 'g']);
+/** How close a named control may sit to an anonymous hit before it is suspect. */
+const nearbyPointTolerance = 24;
 /** How many window trees may stay cached at once; the least recently used goes. */
 const defaultCachedWindows = 8;
 /**
@@ -189,6 +195,12 @@ type WindowBinding = {
   cache?: WindowTreeCache;
   /** The tree read after the last click here, which is the screen the next click is made against. */
   settled?: { snapshot: Snapshot; at: number };
+  /**
+   * A Finder navigation key moved this window after the last tree read. Trees
+   * older than this are the screen before the navigation and cannot name the
+   * next click; a later read may.
+   */
+  navigatedAt?: number;
 };
 
 /**
@@ -328,6 +340,30 @@ function parentOf(tree: Node, target: Node): Node | undefined {
   return undefined;
 }
 
+/**
+ * One pass over a tree: every node with its path, its parent, and the located
+ * form a locator is built from. The fallback target rules climb and descend the
+ * same tree several times, and re-walking it for each neighbour would turn one
+ * click on a large Electron page into a quadratic search.
+ */
+function indexTree(tree: Node) {
+  const byNode = new Map<Node, Located>();
+  const parents = new Map<Node, Node>();
+  const visit = (node: Node, path: string[]) => {
+    const entry: Located = { node, path: [...path, node.role] };
+    byNode.set(node, entry);
+    for (const child of node.children) {
+      parents.set(child, node);
+      visit(child, entry.path);
+    }
+  };
+  visit(tree, []);
+  return {
+    parentOf: (node: Node): Node | undefined => parents.get(node),
+    located: (node: Node): Located | undefined => byNode.get(node),
+  };
+}
+
 /** The text a node shows as its own label, when the driver put it in the value. */
 function area(bounds?: Node['bounds']): number {
   if (!bounds) return 0;
@@ -364,6 +400,12 @@ function focusedTarget(focus: CaptureFocus | undefined): ElementLocator | undefi
   if (!role) return undefined;
   const name = nativeLabel(focus.name);
   return { kind: 'element', role: bareRole(role), ...(name ? { name } : {}) };
+}
+
+/** The window title a tree was read under: a window snapshot's root names it. */
+function windowTitleOf(snapshot: Snapshot): string | undefined {
+  const name = (snapshot.tree.name ?? '').trim();
+  return name || undefined;
 }
 
 /** A display label is stored, never the raw window title from arbitrary apps. */
@@ -442,6 +484,10 @@ export class GlobalRecording {
   private lastClick?: {
     at: number; point: Point; index: number; scope: string; locator: string; button: 'left' | 'right';
   };
+  /** Warning codes for a step that is still a screen point, keyed by step index. */
+  private pointClickWarning = new Map<number, Set<string>>();
+  /** Codes set by the point-producing helpers; consumed when their step is pushed. */
+  private pendingPointWarning = new Set<string>();
   private textAnchor?: { at: number; scope: string; locator: ElementLocator };
   /**
    * Focused-element evidence the helper already carried, per window and focus
@@ -497,6 +543,8 @@ export class GlobalRecording {
    */
   /** The tree read each window has under way, so a click can wait for it. */
   private readonly settling = new Map<string, Promise<undefined>>();
+  /** Finder windows whose pre-click read is queued or running. */
+  private readonly prewarming = new Set<string>();
 
   private pendingGapClick?: HeldClick;
   /** The event being consumed, kept so a gap can name the handler that raised it. */
@@ -550,6 +598,14 @@ export class GlobalRecording {
 
   get captureWarnings(): CaptureWarning[] {
     return [...this.notes].map(([code, message]) => ({ code, message }));
+  }
+
+  /**
+   * Warnings that still describe a step kept at its screen point. A point that
+   * a later press or text event upgraded to an element no longer counts.
+   */
+  get clickWarnings(): string[] {
+    return [...new Set([...this.pointClickWarning.values()].flatMap(codes => [...codes]))];
   }
 
   get stepCount() {
@@ -678,7 +734,7 @@ export class GlobalRecording {
     // startup noise (a click that dismissed a dialog, a queued gap); it must not
     // become the first thing the flow reports. A scope gap is dropped later
     // regardless of its time, because it names no window either.
-    if (this.startupOpen && !this.steps.length && !this.bindingFor(event)) {
+    if (this.startupOpen && !this.steps.length && !this.bindingFor(event, { updateTitle: false })) {
       this.startupDropped += 1;
       return;
     }
@@ -772,9 +828,56 @@ export class GlobalRecording {
     }
     if (!this.current) {
       this.current = { app: binding.app, key: binding.key };
+      this.prewarmFileWindow(binding);
       return;
     }
     if (this.current.key !== binding.key) this.ensureScope(binding);
+    this.prewarmFileWindow(binding);
+  }
+
+  /**
+   * Reads a Finder window before the next click in it.
+   *
+   * A click on a Finder file or folder navigates the window: by the time the
+   * click's own tree read runs, the window holds the folder it opened and the
+   * item that was clicked is gone, so the click can only be a screen point. A
+   * tree read as soon as the window becomes current describes the screen the
+   * click will be made against, and `preClickTree` names the item from it.
+   *
+   * The read is bounded, off the event stream and only spent when the window
+   * has no tree yet: a click that lands first keeps its own evidence, and a
+   * failed read costs nothing. Only Finder is prewarmed — its trees are small
+   * and its clicks are the ones that replace the window under the pointer;
+   * every other app still reads on demand.
+   */
+  private prewarmFileWindow(binding: WindowBinding) {
+    if (binding.app !== finderBundleId || this.ended || this.secureOpen) return;
+    const id = this.bindingId(binding);
+    if (this.prewarming.has(id)) return;
+    if (this.reusableTree(binding)) return;
+    const epoch = this.secureEpoch;
+    this.prewarming.add(id);
+    const task = async () => {
+      try {
+        if (this.ended || epoch !== this.secureEpoch || this.secureOpen) return;
+        if (this.reusableTree(binding)) return;
+        this.snapshotReads += 1;
+        const at = this.now();
+        const snapshot = await this.read(this.windowFor(binding), this.snapshotBudgetMs);
+        // A read that finished across a secure boundary describes the prompt,
+        // not this window.
+        if (this.ended || epoch !== this.secureEpoch) return;
+        // The read may have started before a Finder navigation key and returned
+        // after it; it describes the old directory and must not be cached.
+        if (binding.navigatedAt !== undefined && at <= binding.navigatedAt) return;
+        this.cacheTree(binding, snapshot, at);
+      } catch {
+        // A prewarm is opportunistic; the click keeps its own evidence.
+      } finally {
+        this.prewarming.delete(id);
+      }
+    };
+    this.scheduleSettle(task);
   }
 
   private async onClick(event: Extract<CaptureEvent, { kind: 'click' }>) {
@@ -785,6 +888,11 @@ export class GlobalRecording {
       this.pendingDockGap = { at: event.t };
       return;
     }
+    const owner = event.owner;
+    const prior = owner?.pid !== undefined && owner.windowNumber !== undefined
+      ? this.bindings.get(`${owner.pid}:${owner.processInstance ?? 0}:${owner.windowNumber}`)
+      : undefined;
+    const priorTitle = prior?.title;
     const binding = this.bindingFor(event);
     if (!binding) {
       // A click that names no window has no window to be replayed in, so a gap
@@ -860,7 +968,10 @@ export class GlobalRecording {
     this.ensureScope(binding);
     // A recovered click that still cannot become a step leaves the gap behind
     // the navigation: navigation alone would hide the press it was holding.
-    if (!(await this.recordClick(binding, event, { requireElement: recovering })) && recovering) {
+    if (!(await this.recordClick(binding, event, {
+      requireElement: recovering,
+      priorTitle: priorTitle ?? binding.title,
+    })) && recovering) {
       this.pushGap('CAPTURE_SCOPE_UNVERIFIED');
     }
   }
@@ -912,10 +1023,12 @@ export class GlobalRecording {
    */
   private async recordClick(
     binding: WindowBinding, event: Extract<CaptureEvent, { kind: 'click' }>,
-    { requireElement = false } = {},
+    { requireElement = false, priorTitle }: { requireElement?: boolean; priorTitle?: string } = {},
   ): Promise<boolean> {
-    const scope = this.windowScope(binding);
+    let scope = this.windowScope(binding);
     const scopeId = scopeKey(scope);
+    const finder = binding.app === finderBundleId;
+    this.pendingPointWarning = new Set();
     const button = event.button ?? 'left';
     const count = Math.max(1, Math.min(3, event.count ?? 1));
     // A click moves the caret and can select another control: any burst that
@@ -939,6 +1052,7 @@ export class GlobalRecording {
     // field the helper proved, which needs no read either.
     const needsTree = !hitRole || (!hitName && !fieldHit);
     let target: ClickTarget | undefined;
+    let currentTree: Snapshot | undefined;
     if (!needsTree) {
       if (fieldHit) {
         // Electron exposes its text surface as a container above the editable
@@ -968,6 +1082,11 @@ export class GlobalRecording {
       // made against, so finishing it first is what keeps a click in a freshly
       // drawn page named instead of reduced to a bare point.
       await this.settledBefore(binding);
+      // The tree read before the click is kept here, before the click's own read
+      // can retire the window cache: a Finder click retitles its window, and the
+      // cached tree is the only screen that still holds the item that was
+      // clicked.
+      const before = this.settledLookup(binding, event);
       // Evidence that cannot name the element is the only case that still needs
       // the tree: a failed read keeps whatever the helper proved on its own.
       const read = await this.snapshot(binding, {
@@ -976,14 +1095,39 @@ export class GlobalRecording {
       });
       const snapshot = read?.snapshot;
       if (snapshot) {
+        currentTree = snapshot;
         const hit = this.contentHit(snapshot, event.point);
-        if (!hit) {
+        // A Finder click on a file or folder opens it. When the tree read after
+        // the click is already the directory it opened, everything in it belongs
+        // to a screen the user never clicked: the same point can sit on another
+        // file, so naming from it records a target the user never chose.
+        // A Finder navigation key already replaced the screen before this
+        // click, so the bound title is no longer the screen clicked; only a
+        // title change caused by this click itself makes the tree unusable.
+        const keyNavigation = finder && binding.navigatedAt !== undefined;
+        const navigated = finder && this.describesOtherWindow(binding, event, snapshot, {
+          recordedTitle: !keyNavigation,
+          recordedTitleValue: priorTitle,
+        });
+        if (hit?.node.secure) {
+          this.enterSecure();
+          return false;
+        }
+        if (finder && before.target) {
+          // Target and scope come from one screen: the tree read before the
+          // click. Its title is the window the click was made in, whatever the
+          // helper read after the navigation.
+          target = before.target;
+          const title = before.title && displayTitle(before.title);
+          if (title && title !== scope.windowTitle) {
+            scope = { ...scope, windowTitle: title };
+          }
+        } else if (navigated) {
+          target = this.navigatedFileClick(binding, event, snapshot);
+        } else if (!hit) {
           // Blank space: the window root answers every point inside the window,
           // and a click on it names nothing a replay could address.
           target = this.blankClick(binding, event, snapshot);
-        } else if (hit.node.secure) {
-          this.enterSecure();
-          return false;
         } else {
           // Electron editors expose their text surface as a group above the
           // editable control. When the click lands inside the focused editable
@@ -1010,9 +1154,19 @@ export class GlobalRecording {
             // element evidence is the remaining proof of identity; without it
             // the click keeps its point and says so — unless it landed on blank
             // space, where there is nothing a point could replay.
-            target = this.settledTarget(binding, event) ?? this.labelTarget(binding, snapshot, hit) ??
-              this.evidenceTarget(event) ?? this.identifiedTarget(snapshot, hit) ??
-              this.ancestorLabel(snapshot, hit) ?? this.untargetedClick(binding, event, snapshot);
+            const named = (finder ? undefined : before.target) ?? this.labelTarget(binding, snapshot, hit) ??
+              this.evidenceTarget(event) ?? this.identifiedTarget(snapshot, hit, { container: true }) ??
+              this.pressableAncestorTarget(snapshot, hit);
+            if (named) {
+              target = named;
+            } else {
+              // Ambiguity ends the search: a labelled ancestor is a bigger
+              // control that may or may not be the one meant, and the whole
+              // point of the warning is that the recording refuses to guess.
+              const nearby = this.nearbyControlTarget(snapshot, hit, event.point);
+              target = nearby === 'ambiguous' ? this.untargetedClick(binding, event, snapshot)
+                : nearby ?? this.ancestorLabel(snapshot, hit) ?? this.untargetedClick(binding, event, snapshot);
+            }
           }
           if (target?.kind === 'element') this.noteUnpressable(snapshot, target);
         }
@@ -1020,8 +1174,17 @@ export class GlobalRecording {
         // The helper could not read the tree for this click. When it also saw
         // no element role, one read here can still name the element and record
         // the path/index that tells two same-named controls apart.
-        if (!nativeLabel(event.owner?.role)) {
+        if (finder && before.target) {
+          // Same rule as above: the screen the click was made on names it, and
+          // its title is the window the step belongs to.
+          target = before.target;
+          const title = before.title && displayTitle(before.title);
+          if (title && title !== scope.windowTitle) {
+            scope = { ...scope, windowTitle: title };
+          }
+        } else if (!nativeLabel(event.owner?.role)) {
           const captured = await this.snapshot(binding, { gapOnFailure: false });
+          currentTree = captured?.snapshot;
           const hit = captured ? this.hit(captured.snapshot, event.point) : undefined;
           // The second read has to honour the same secure rule as the first;
           // naming a protected control from here would replay a click on it.
@@ -1029,11 +1192,30 @@ export class GlobalRecording {
             this.enterSecure();
             return false;
           }
-          target = hit && hit.node.ref ? toLocator(captured!.snapshot, hit) : this.nativeTarget(binding, event);
+          if (captured && finder && this.describesOtherWindow(binding, event, captured.snapshot, {
+            recordedTitle: binding.navigatedAt === undefined,
+            recordedTitleValue: priorTitle,
+          })) {
+            target = this.navigatedFileClick(binding, event, captured.snapshot);
+          } else {
+            target = hit && hit.node.ref ? toLocator(captured!.snapshot, hit) : this.nativeTarget(binding, event);
+          }
         } else {
           target = this.nativeTarget(binding, event);
         }
       }
+    }
+    // The navigation key has now been consumed by the first click on its new
+    // screen; later clicks use the settle read this one schedules. The step
+    // belongs to the directory Finder shows after the key.
+    if (finder) {
+      if (binding.navigatedAt !== undefined && currentTree) {
+        const observed = windowTitleOf(currentTree);
+        if (observed && !this.describesOtherWindow(binding, event, currentTree, { recordedTitle: false })) {
+          scope = { ...scope, windowTitle: displayTitle(observed) };
+        }
+      }
+      binding.navigatedAt = undefined;
     }
     // A click can open a sheet or switch the page before its own tree read ran;
     // reading the window once the change has drawn keeps the screen this click
@@ -1058,6 +1240,7 @@ export class GlobalRecording {
         // second press of the same gesture: the double click keeps its control.
         if (step.target.kind === 'point' && target.kind === 'element') {
           (step as { target: ClickTarget }).target = target;
+          this.pointClickWarning.delete(previous.index);
         }
         previous.at = event.t;
         previous.point = event.point;
@@ -1073,6 +1256,10 @@ export class GlobalRecording {
     // The step limit drops a click without throwing; reporting success here
     // would let the caller believe the press survived.
     if (this.steps.length === before) return false;
+    if (target.kind === 'point' && this.pendingPointWarning.size) {
+      this.pointClickWarning.set(this.steps.length - 1, new Set(this.pendingPointWarning));
+    }
+    this.pendingPointWarning = new Set();
     if (this.steps.length && this.steps[this.steps.length - 1].kind === 'click') {
       this.lastClick = {
         at: event.t, point: event.point, index: this.steps.length - 1,
@@ -1124,7 +1311,7 @@ export class GlobalRecording {
     if (settled) return settled;
     this.warn('NATIVE_POINT_FALLBACK',
       'A click was kept at its screen point because the helper had no element evidence and reading its window tree failed; edit it into an element before replay');
-    return { kind: 'point', point: event.point };
+    return this.pointTarget('NATIVE_POINT_FALLBACK', event.point);
   }
 
   /**
@@ -1153,7 +1340,7 @@ export class GlobalRecording {
     }
     this.warn('UNTARGETED_ELEMENT_CLICK',
       `A click landed on empty space and named no element (${settled.miss}; ${geometry}); it is kept at its screen point and must be edited into an element before replay`);
-    return { kind: 'point', point: event.point };
+    return this.pointTarget('UNTARGETED_ELEMENT_CLICK', event.point);
   }
 
   /**
@@ -1161,16 +1348,132 @@ export class GlobalRecording {
    * AXDOMIdentifier, Cocoa's AXIdentifier. The identifier is a better target than
    * a nearby label: it addresses this exact element and survives a renamed one.
    */
-  private identifiedTarget(snapshot: Snapshot, hit: Located): ClickTarget | undefined {
+  private identifiedTarget(snapshot: Snapshot, hit: Located, { container = false } = {}): ClickTarget | undefined {
     if (!hit.node.identifier) return undefined;
     if (hit.node.secure) return undefined;
     // An identifier on a page container addresses the container, not what the
-    // pointer hit; only a control or a leaf can stand for the click.
+    // pointer hit; only a control, a leaf, or — for a click the helper proved
+    // reached this window — a container the size of a control can stand for it.
     if (scopeRoles.has(hit.node.role)) return undefined;
-    if (hit.node.children.length && !pressable(hit.node)) return undefined;
+    if (hit.node.children.length && !pressable(hit.node) &&
+        (!container || area(hit.node.bounds) > area(snapshot.tree.bounds) * 0.25)) return undefined;
     this.warn('CLICK_NAMED_BY_IDENTIFIER',
       'The control clicked exposes no accessible name; the step addresses it by its accessibility identifier');
     return toLocator(snapshot, hit) as ClickTarget;
+  }
+
+  /**
+   * The nearest ancestor that both carries an identity (a name or an
+   * accessibility identifier) and accepts a press. An Electron page can wrap
+   * the real control in several anonymous groups, so the pointer hits a
+   * container while the pressable control sits above it — the aTrust
+   * "切换接入地址" row is one. A window, a page or a control sized like part of
+   * the layout is never the thing the click meant.
+   */
+  private pressableAncestorTarget(snapshot: Snapshot, hit: Located): ClickTarget | undefined {
+    const tree = snapshot.tree;
+    const names = elementNames(tree);
+    const index = indexTree(tree);
+    let current: Node = hit.node;
+    for (let depth = 0; depth < 8; depth += 1) {
+      const parent = index.parentOf(current);
+      if (!parent || scopeRoles.has(parent.role)) return undefined;
+      if (parent.secure || editableRole(parent.role)) return undefined;
+      const named = (names.get(parent) ?? '').trim();
+      const identified = (parent.identifier ?? '').trim();
+      const layout = area(parent.bounds) > area(tree.bounds) * 0.25;
+      if ((named || identified) && pressable(parent) && !layout) {
+        const located = index.located(parent);
+        if (!located) return undefined;
+        this.warn('CLICK_NAMED_BY_PRESSABLE_ANCESTOR',
+          'The control clicked exposes no identity of its own; the step presses the clickable control it belongs to');
+        return toLocator(snapshot, located) as ClickTarget;
+      }
+      current = parent;
+    }
+    return undefined;
+  }
+
+  /**
+   * The one control under an anonymous hit that the click meant: the deepest
+   * named or identified node whose own bounds cover the point, or a sibling
+   * that covers it when the wrapper is split into an unnamed hit area and its
+   * label.
+   *
+   * Only a unique candidate is used. Proximity alone is not proof: a control
+   * that merely sits within one control's width of the point did not receive
+   * the click, and replaying it would press a place the user never clicked.
+   * Two named controls under the same point also keep the point, with a warning.
+   */
+  private nearbyControlTarget(snapshot: Snapshot, hit: Located, point: Point): ClickTarget | 'ambiguous' | undefined {
+    const tree = snapshot.tree;
+    const names = elementNames(tree);
+    const index = indexTree(tree);
+    const windowArea = area(tree.bounds);
+    // Only a control the driver can act on can stand for the click. A plain
+    // label next to the point is a description of some other control, and
+    // aiming the replay at its centre would press the wrong place entirely.
+    const addressable = (node: Node) => {
+      if (node.secure || node.states.includes('hidden') || scopeRoles.has(node.role) || editableRole(node.role)) return false;
+      if (area(node.bounds) > windowArea * 0.25) return false;
+      if (!node.ref && !pressable(node)) return false;
+      return Boolean((names.get(node) ?? '').trim() || (node.identifier ?? '').trim());
+    };
+    // The landing point must be inside the candidate itself; a label merely
+    // near the click is not evidence that its control received the press.
+    const covering = (node: Node) => !!node.bounds && contains(node.bounds, point);
+    // Nearness is not proof, but it is a reason not to let a bigger labelled
+    // ancestor absorb the click: the operator must edit the point by hand.
+    const near = (node: Node) => {
+      const bounds = node.bounds;
+      if (!bounds) return false;
+      const dx = Math.max(bounds.x - point[0], 0, point[0] - (bounds.x + bounds.width));
+      const dy = Math.max(bounds.y - point[1], 0, point[1] - (bounds.y + bounds.height));
+      return dx <= nearbyPointTolerance && dy <= nearbyPointTolerance;
+    };
+    const innermost = (candidates: Node[]): Node[] => {
+      // A named wrapper and one of its named children are one candidate: the
+      // control is the deeper one, so a wrapper never hides what it contains.
+      return candidates.filter(node => !candidates.some(other => other !== node && flatten(node).some(entry => entry.node === other)));
+    };
+    const descendants: Node[] = [];
+    const walk = (node: Node, depth: number) => {
+      for (const child of node.children) {
+        if (child.secure) continue;
+        if (addressable(child) && (covering(child) || near(child))) descendants.push(child);
+        if (depth < 8) walk(child, depth + 1);
+      }
+    };
+    walk(hit.node, 0);
+    const parent = index.parentOf(hit.node);
+    const siblings = parent
+      ? parent.children.filter(child => child !== hit.node && (covering(child) || near(child)) && addressable(child))
+      : [];
+    const candidates = innermost([...descendants, ...siblings]);
+    const covered = candidates.filter(covering);
+    if (covered.length === 1) {
+      const located = index.located(covered[0]);
+      if (!located) return undefined;
+      this.warn('CLICK_NAMED_BY_NEARBY_CONTROL',
+        'The control clicked exposes no identity of its own; the step uses the single named control that covers the point');
+      return toLocator(snapshot, located) as ClickTarget;
+    }
+    if (candidates.length) {
+      const labels = candidates.map(node => {
+        const name = (names.get(node) ?? '').trim() || (node.identifier ?? '').trim();
+        return `${node.role}${name ? ` "${name.slice(0, 24)}"` : ''}`;
+      });
+      const what = covered.length > 1
+        ? `${covered.length} named controls cover the click`
+        : `${candidates.length} named control${candidates.length === 1 ? '' : 's'} sit near the click but do not cover it`;
+      this.warn('CLICK_AMBIGUOUS_CANDIDATES',
+        `${what} (${labels.join(', ')}); which one it meant cannot be proven, so it keeps its screen point`);
+      this.pendingPointWarning.add('CLICK_AMBIGUOUS_CANDIDATES');
+      // The caller must not go on to a bigger labelled ancestor: the point was
+      // ambiguous among the controls that actually sit under or near it.
+      return 'ambiguous';
+    }
+    return undefined;
   }
 
   /**
@@ -1206,6 +1509,58 @@ export class GlobalRecording {
   }
 
   /**
+   * Whether a tree read after a Finder click shows a different window title
+   * than the one the click reported. A Finder click opens the item it landed
+   * on, so the read that follows can be the folder it opened: everything in
+   * that tree belongs to a screen the user never clicked.
+   */
+  private describesOtherWindow(
+    binding: WindowBinding,
+    event: Extract<CaptureEvent, { kind: 'click' }>,
+    snapshot: Snapshot,
+    { recordedTitle = true, recordedTitleValue = binding.title }: {
+      recordedTitle?: boolean;
+      recordedTitleValue?: string;
+    } = {},
+  ): boolean {
+    const reported = (event.owner?.windowTitle ?? '').trim();
+    const recorded = (recordedTitleValue ?? '').trim();
+    const observed = windowTitleOf(snapshot);
+    if (!observed || (!reported && !recorded)) return false;
+    const observedTitle = displayTitle(observed);
+    // The event title can already be the destination directory when the click
+    // itself navigated. Compare the bound title too: when either differs, the
+    // tree is a screen the click did not start on.
+    return (reported !== '' && observedTitle !== displayTitle(reported)) ||
+      (recordedTitle && recorded !== '' && observedTitle !== displayTitle(recorded));
+  }
+
+  /**
+   * A Finder click that opened the item it landed on, with no tree from before
+   * it: the new directory may hold another file under the same point, and
+   * naming that file would replay a click the user never made. The click keeps
+   * its screen point and says why.
+   */
+  private navigatedFileClick(
+    binding: WindowBinding,
+    event: Extract<CaptureEvent, { kind: 'click' }>,
+    snapshot: Snapshot,
+  ): ClickTarget {
+    const observed = displayTitle(windowTitleOf(snapshot));
+    this.warn('UNTARGETED_FILE_CLICK',
+      `A Finder click hit no named file item (the window read after it is titled "${observed}", not "${displayTitle(binding.title)}": ` +
+      'the click opened a folder before its tree could be read, so only the point it landed on is left); ' +
+      'it is kept at its screen point and must be edited into a named element before replay');
+    return this.pointTarget('UNTARGETED_FILE_CLICK', event.point);
+  }
+
+  /** A point target and the warning that still describes it, if it stays one. */
+  private pointTarget(warning: string, point: Point): ClickTarget {
+    this.pendingPointWarning.add(warning);
+    return { kind: 'point', point };
+  }
+
+  /**
    * A click with no proven element identity. Keeping the role alone would make
    * the step click whichever same-role element happens to be there, so the tree
    * from before the click names the element when it can; otherwise the point
@@ -1225,7 +1580,7 @@ export class GlobalRecording {
     this.warn(file ? 'UNTARGETED_FILE_CLICK' : 'UNTARGETED_ELEMENT_CLICK', file
       ? `A Finder click hit no named file item (${settled.miss}${where}); it is kept at its screen point and must be edited into a named element before replay`
       : `A click hit no named element (${settled.miss}${where}); it is kept at its screen point and must be edited into a named element before replay`);
-    return { kind: 'point', point: event.point };
+    return this.pointTarget(file ? 'UNTARGETED_FILE_CLICK' : 'UNTARGETED_ELEMENT_CLICK', event.point);
   }
 
   /** The chain of elements a point sat in, innermost first, for a report. */
@@ -1306,6 +1661,10 @@ export class GlobalRecording {
       // A read that completed across a secure boundary describes the screen of
       // the prompt, not of the window: it is discarded, not cached.
       if (!snapshot || this.ended || epoch !== this.secureEpoch) return;
+      // The read may have started before a Finder navigation key and returned
+      // after it; it describes the old directory and must not become the tree
+      // the next click is named from.
+      if (binding.navigatedAt !== undefined && at <= binding.navigatedAt) return;
       const changed = !binding.settled || signature(snapshot.tree) !== signature(binding.settled.snapshot.tree);
       // A slower read can finish after a later one; the newer read wins.
       if (!binding.settled || binding.settled.at <= at) binding.settled = { snapshot, at };
@@ -1344,8 +1703,52 @@ export class GlobalRecording {
    * back too late to hold an element. Nothing is used that is newer than the
    * click, and a tree older than the window cache is not trusted either.
    */
-  private settledTarget(binding: WindowBinding, event: Extract<CaptureEvent, { kind: 'click' }>): ClickTarget | undefined {
-    return this.settledLookup(binding, event).target;
+  private settledTarget(
+    binding: WindowBinding, event: Extract<CaptureEvent, { kind: 'click' }>, options: { cache?: boolean } = {},
+  ): ClickTarget | undefined {
+    return this.settledLookup(binding, event, options).target;
+  }
+
+  /**
+   * The tree this window was read as before the click: the read a previous
+   * click scheduled (the screen the next click is made against), or the tree a
+   * hover, a prewarm or an earlier gesture left in the window cache. Only a
+   * tree that was read before the click may stand for it, and only while it is
+   * still young enough to describe the same screen.
+   *
+   * The cached tree is deliberately consulted even when the window has been
+   * retitled since: a Finder click that opens a folder retitles its window
+   * before the click can be read again, and the tree from before it is exactly
+   * the screen the click was made against.
+   */
+  private preClickTree(
+    binding: WindowBinding,
+    event: Extract<CaptureEvent, { kind: 'click' }>,
+    { cache: useCache = true } = {},
+  ): { snapshot?: Snapshot; title?: string; source?: 'settled' | 'cache'; miss: string } {
+    const settled = binding.settled;
+    const cache = useCache ? binding.cache : undefined;
+    if (!settled && !cache) return { miss: 'no window tree was read before the click' };
+    const reasons: string[] = [];
+    for (const [source, entry] of [['settled', settled], ['cache', cache]] as const) {
+      if (!entry) continue;
+      if (entry.at > event.seen) {
+        reasons.push(`${source} tree started after the click did`);
+        continue;
+      }
+      if (binding.navigatedAt !== undefined && entry.at <= binding.navigatedAt) {
+        reasons.push(`${source} tree was read before a Finder navigation key`);
+        continue;
+      }
+      if (event.seen - entry.at > this.snapshotTtlMs) {
+        reasons.push(`${source} tree was too old`);
+        continue;
+      }
+      // The title this tree was read under: a Finder click that navigates must
+      // record the window it was made in, not the directory it opened.
+      return { snapshot: entry.snapshot, title: windowTitleOf(entry.snapshot), source, miss: '' };
+    }
+    return { miss: `the only trees read before it were unusable (${reasons.join('; ')})` };
   }
 
   /**
@@ -1356,30 +1759,38 @@ export class GlobalRecording {
   private settledLookup(
     binding: WindowBinding,
     event: Extract<CaptureEvent, { kind: 'click' }>,
-  ): { target?: ClickTarget; miss: string; nothing?: boolean } {
-    const settled = binding.settled;
-    if (!settled) return { miss: 'no window tree was read before the click' };
-    if (settled.at > event.seen) return { miss: 'the tree read before it started after the click did' };
-    if (event.seen - settled.at > this.snapshotTtlMs) return { miss: 'the tree read before it was too old' };
-    const hit = this.hit(settled.snapshot, event.point);
-    if (!hit) return { miss: `the tree read before it did not cover the point (its root ${boundsLabel(settled.snapshot.tree.bounds)})` };
+    { cache = true } = {},
+  ): { target?: ClickTarget; title?: string; miss: string; nothing?: boolean } {
+    const pre = this.preClickTree(binding, event, { cache });
+    const snapshot = pre.snapshot;
+    if (!snapshot) return { miss: pre.miss };
+    const hit = this.hit(snapshot, event.point);
+    if (!hit) return { miss: `the tree read before it did not cover the point (its root ${boundsLabel(snapshot.tree.bounds)})` };
     // The window covered the point but nothing inside it did: the screen really
-    // was empty there. A window whose bounds no longer cover the point says
-    // nothing about what was under it, so that case stays unknown.
-    const nothing = this.contentHit(settled.snapshot, event.point) === undefined;
-    const identity = clickIdentity(settled.snapshot.tree, hit);
+    // was empty there. Only the tree a click scheduled right after the previous
+    // one proves that; an older cached tree may describe a screen that has
+    // since changed, so it may name a click but never delete one.
+    const nothing = pre.source === 'settled'
+      ? this.contentHit(snapshot, event.point) === undefined
+      : undefined;
+    const identity = clickIdentity(snapshot.tree, hit);
     // A window or page is a scope, not a control: a click on its empty surface
     // must not be recorded as "click the window".
     if (identity && !scopeRoles.has(identity.node.role)) {
-      this.warn('CLICK_NAMED_FROM_SETTLED_TREE',
-        'The click changed the screen before its window could be read, so it is named from the tree that was on screen when it was made');
-      return { target: toLocator(settled.snapshot, identity) as ClickTarget, miss: '' };
+      this.warn(pre.source === 'cache' ? 'CLICK_NAMED_FROM_CACHED_TREE' : 'CLICK_NAMED_FROM_SETTLED_TREE',
+        pre.source === 'cache'
+          ? 'The click changed the screen before its window could be read, so it is named from the window tree the recording had already read for it'
+          : 'The click changed the screen before its window could be read, so it is named from the tree that was on screen when it was made');
+      return { target: toLocator(snapshot, identity) as ClickTarget, title: pre.title, miss: '' };
     }
-    const label = this.labelTarget(binding, settled.snapshot, hit);
-    if (label) return { target: label, miss: '' };
-    const identified = this.identifiedTarget(settled.snapshot, hit);
-    if (identified) return { target: identified, miss: '' };
-    return { miss: 'the tree read before it named nothing at the point', nothing };
+    const label = this.labelTarget(binding, snapshot, hit);
+    if (label) return { target: label, title: pre.title, miss: '' };
+    // A held, unproven click is named only by what the point itself proves: the
+    // press may have gone to a window above this one, so a nearby control is
+    // not evidence that it received the click.
+    const identified = this.identifiedTarget(snapshot, hit);
+    if (identified) return { target: identified, title: pre.title, miss: '' };
+    return { title: pre.title, miss: 'the tree read before it named nothing at the point', nothing };
   }
 
   /**
@@ -2081,6 +2492,7 @@ export class GlobalRecording {
     if (!contains(focusBounds(event.focus), click.point)) return;
     (step as { target: ElementLocator }).target = target;
     click.locator = locatorKey(target);
+    this.pointClickWarning.delete(click.index);
     this.warn('CLICK_RETARGETED_TO_TEXT',
       'A click recorded as its container was retargeted to the editable control the following text proved');
   }
@@ -2105,6 +2517,7 @@ export class GlobalRecording {
     const target = toLocator(snapshot, field);
     (step as { target: ElementLocator }).target = target;
     click.locator = locatorKey(target);
+    this.pointClickWarning.delete(click.index);
     this.warn('CLICK_RETARGETED_TO_TEXT',
       'A click recorded as its container was retargeted to the editable control the following text proved');
   }
@@ -2120,6 +2533,13 @@ export class GlobalRecording {
       return;
     }
     if (!this.claim(event, binding)) return;
+    if (binding.app === finderBundleId && event.modifiers.includes('meta') && finderNavigationKeys.has(event.key)) {
+      // ⌘↑ / ⌘[ / ⌘] / ⌘⇧G replace the directory under the window. Any tree
+      // read before the key is the screen before the navigation and must not
+      // name the next click; the key itself is still recorded.
+      binding.navigatedAt = event.seen;
+      this.dropBeforeClickTrees(binding);
+    }
     this.ensureScope(binding);
     this.endBursts();
     // The key event's own focused-element evidence is the freshest proof of
@@ -2199,7 +2619,7 @@ export class GlobalRecording {
     });
   }
 
-  private bindingFor(event: CaptureEvent): WindowBinding | undefined {
+  private bindingFor(event: CaptureEvent, { updateTitle = true }: { updateTitle?: boolean } = {}): WindowBinding | undefined {
     const owner = event.owner;
     if (!owner?.app || !bundleIdPattern.test(owner.app)) return undefined;
     if (!owner.pid) return undefined;
@@ -2210,7 +2630,7 @@ export class GlobalRecording {
     if (existing) {
       // The same native window can retitle; the key keeps following it. A
       // surface that names no title says nothing about the window it proves.
-      if ((owner.windowTitle ?? '').trim() !== '' && existing.title !== title) existing.title = title;
+      if (updateTitle && (owner.windowTitle ?? '').trim() !== '' && existing.title !== title) existing.title = title;
       this.lastWindow = { binding: existing, generation: event.focusGeneration };
       return existing;
     }
@@ -2489,9 +2909,10 @@ export class GlobalRecording {
     return cache.snapshot;
   }
 
-  private cacheTree(binding: WindowBinding, snapshot: Snapshot) {
+  private cacheTree(binding: WindowBinding, snapshot: Snapshot, at = this.now()) {
+    if (binding.navigatedAt !== undefined && at <= binding.navigatedAt) return;
     const id = this.bindingId(binding);
-    binding.cache = { snapshot, at: this.now(), title: binding.title, bounds: snapshot.tree.bounds };
+    binding.cache = { snapshot, at, title: binding.title, bounds: snapshot.tree.bounds };
     this.cacheOrder = this.cacheOrder.filter(entry => entry !== id);
     this.cacheOrder.push(id);
     while (this.cacheOrder.length > this.maxCachedWindows) {
@@ -2505,6 +2926,12 @@ export class GlobalRecording {
     const id = this.bindingId(binding);
     binding.cache = undefined;
     this.cacheOrder = this.cacheOrder.filter(entry => entry !== id);
+  }
+
+  /** Drop both pre-click trees after a navigation key changed the window. */
+  private dropBeforeClickTrees(binding: WindowBinding) {
+    binding.settled = undefined;
+    this.dropTree(binding);
   }
 
   /** Drops every cached tree; a secure interval leaves nothing to reuse. */
@@ -2703,7 +3130,7 @@ export class GlobalRecording {
     // the screen the following event changed.
     const settled = this.settledLookup(pending.binding, {
       point: pending.point, seen: pending.seen,
-    } as Extract<CaptureEvent, { kind: 'click' }>);
+    } as Extract<CaptureEvent, { kind: 'click' }>, { cache: false });
     this.ensureScope(pending.binding);
     if (settled.nothing) {
       this.warn('CLICK_UNPROVEN',
@@ -2716,13 +3143,22 @@ export class GlobalRecording {
         `A click on ${pending.where} at ${pending.point[0]},${pending.point[1]} could not be proven to target an element; it is kept at its screen point and must be edited into an element before replay`);
     }
     const scope = this.windowScope(pending.binding);
+    const before = this.steps.length;
     this.push({ kind: 'click', scope, target }, pending.at);
-    const step = this.steps[this.steps.length - 1];
-    if (step?.kind === 'click') {
-      this.lastClick = {
-        at: pending.at, point: pending.point, index: this.steps.length - 1,
-        scope: scopeKey(scope), locator: locatorKey(target), button: 'left',
-      };
+    // A step limit can drop this click. It then has no step to describe, so it
+    // must not leave a warning (or a last-click anchor) behind for a step that
+    // was never written.
+    if (this.steps.length > before) {
+      if (target.kind === 'point') {
+        this.pointClickWarning.set(this.steps.length - 1, new Set(['CLICK_UNPROVEN']));
+      }
+      const step = this.steps[this.steps.length - 1];
+      if (step?.kind === 'click') {
+        this.lastClick = {
+          at: pending.at, point: pending.point, index: this.steps.length - 1,
+          scope: scopeKey(scope), locator: locatorKey(target), button: 'left',
+        };
+      }
     }
   }
 
@@ -2848,6 +3284,8 @@ export interface GlobalCaptureResult {
   lifecycle: LifecycleEvent[];
   /** How many window trees the recording read; reused trees are not counted. */
   snapshotReads: number;
+  /** Warnings that still describe a click kept at its screen point. */
+  clickWarnings: string[];
 }
 
 function indicatorConfirmed(value: unknown) {
@@ -3078,5 +3516,6 @@ export async function recordGlobal(
     lifecycle: recording.lifecycle,
     inputValues: recording.recordedInputValues(),
     snapshotReads: recording.snapshotReadCount,
+    clickWarnings: recording.clickWarnings,
   };
 }

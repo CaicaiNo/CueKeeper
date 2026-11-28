@@ -929,9 +929,27 @@ async function main() {
         ...result.warnings, ...ime.warnings(),
         ...(inputValuesWarning ? [{ code: 'INPUT_VALUES_WRITE_FAILED', message: inputValuesWarning }] : []),
       ];
+      // How much of this recording a dry run can accept: every click that is
+      // still a screen point has to be turned into an element by hand, and the
+      // warnings say why. The percentage is a recording-quality number, not a
+      // replay guarantee.
+      const clicks = result.flow.steps.filter(
+        (step): step is Extract<FlowV2['steps'][number], { kind: 'click' }> => step.kind === 'click',
+      );
+      const elementClicks = clicks.filter(step => step.target.kind === 'element').length;
+      const pointClicks = clicks.length - elementClicks;
+      // Only warnings that still describe a point step count. A double click can
+      // upgrade the first point to an element, and the old warning must not stay.
+      const pointWarnings = result.clickWarnings;
       const data = {
         version: 2, output: saved, flowId: result.flow.id, actions: result.flow.steps.length,
         snapshotReads: result.snapshotReads,
+        ...(clicks.length ? {
+          clicks: {
+            total: clicks.length, element: elementClicks, point: pointClicks,
+            ...(pointWarnings.length ? { warnings: pointWarnings } : {}),
+          },
+        } : {}),
         ...(writtenInputValues ? { inputValues: writtenInputValues } : {}),
         ...(result.lifecycle.length ? { lifecycle: result.lifecycle.length } : {}),
         ...(workbench ? { workbench } : {}),
@@ -940,6 +958,11 @@ async function main() {
         ...(warnings.length ? { warnings } : {}),
       };
       const lines = [`Saved ${result.flow.steps.length} global steps to ${saved}${result.partial ? ' (partial flow)' : ''}`];
+      if (clicks.length) {
+        const share = Math.round((elementClicks / clicks.length) * 100);
+        lines.push(`点击目标 ${elementClicks}/${clicks.length} 为元素（${share}%）` +
+          (pointClicks ? `，${pointClicks} 个保留屏幕坐标${pointWarnings.length ? `：${pointWarnings.join(', ')}` : ''}` : ''));
+      }
       // The recording's accessibility cost: a window is read once, so this stays
       // small even when the flow has hundreds of steps.
       lines.push(`窗口树读取 ${result.snapshotReads} 次`);
