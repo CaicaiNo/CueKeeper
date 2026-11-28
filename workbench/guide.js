@@ -37,7 +37,7 @@ export function createGuide({ dialog, dom, onStart }) {
     if (health.ok === true) {
       healthBox.append(
         el('div', { className: 'guide-state ok' }, '环境就绪'),
-        recorderRow(health.recorderPath));
+        targetRow());
       start.disabled = false;
       return;
     }
@@ -52,7 +52,8 @@ export function createGuide({ dialog, dom, onStart }) {
         check.id === 'accessibility' || check.id === 'input-monitoring'
           ? button('设置', () => void openSettings(check.id), { style: 'small' })
           : undefined))),
-      recorderRow(health.recorderPath));
+      health.appPath ? muted('首次启动时系统会请求权限；在设置里勾选 CueKeeper。') : undefined,
+      targetRow());
     start.disabled = true;
   }
 
@@ -81,8 +82,19 @@ export function createGuide({ dialog, dom, onStart }) {
     }
   }
 
-  function copyRecorderPath() {
-    const path = health?.recorderPath;
+  async function revealApp() {
+    try {
+      await fetch('/api/guide/reveal-app', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', [healthHeader]: '1' },
+        body: '{}',
+      });
+    } catch {
+      // The path is printed next to the button; Finder is a convenience.
+    }
+  }
+
+  function copyPath(path) {
     if (!path) return;
     try {
       void navigator.clipboard?.writeText(path);
@@ -92,13 +104,20 @@ export function createGuide({ dialog, dom, onStart }) {
     }
   }
 
-  function recorderRow(path) {
+  function pathRow(label, path, reveal, revealTitle) {
     if (!path) return undefined;
     return el('div', { className: 'guide-recorder' },
-      el('span', { className: 'guide-recorder-label' }, '录制器'),
+      el('span', { className: 'guide-recorder-label' }, label),
       el('code', { title: path }, path),
-      button('复制', copyRecorderPath, { style: 'small', icon: 'copy', iconOnly: true, title: '复制路径' }),
-      button('显示', () => void revealRecorder(), { style: 'small', icon: 'folder', iconOnly: true, title: '在 Finder 中显示' }));
+      button('复制', () => copyPath(path), { style: 'small', icon: 'copy', iconOnly: true, title: '复制路径' }),
+      button('显示', () => void reveal(), { style: 'small', icon: 'folder', iconOnly: true, title: revealTitle }));
+  }
+
+  function targetRow() {
+    if (health?.appPath) {
+      return pathRow('应用', health.appPath, revealApp, '在 Finder 中显示 CueKeeper');
+    }
+    return pathRow('录制器', health?.recorderPath, revealRecorder, '在 Finder 中显示录制器');
   }
 
   async function check() {
@@ -134,7 +153,7 @@ export function createGuide({ dialog, dom, onStart }) {
       el('div', { className: 'guide stack-list' },
         healthBox,
         el('ol', { className: 'guide-steps' },
-          step('1', '授权录制器', '辅助功能 + 输入监控'),
+          step('1', '授权应用', '辅助功能 + 输入监控'),
           step('2', '录制操作', '倒计时 → 操作 → 停止'),
           step('3', '检查流程', 'dry-run 处理黄色步骤'),
           step('4', '回放报告', '实时回放，查看结果')),

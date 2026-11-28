@@ -104,6 +104,17 @@ xattr -dr com.apple.quarantine ~/Applications/cuekeeper-<version>-macos-<arch>
 
 产物结构、打包命令、校验和、版本命名与签名边界见 [打包与分发](docs/packaging.md)。
 
+### macOS App（CueKeeper.app）
+
+在源码目录构建原生 App 外壳。它不改变现有工作台和引擎，只是把 Node 运行时、`dist`、`workbench` 和录制器装进一个可双击的 App：
+
+```sh
+npm run app:package
+open release/CueKeeper.app
+```
+
+产物是 `release/CueKeeper.app` 和 `release/CueKeeper-<version>-macos-<arch>.zip`。首次启动会请求辅助功能和输入监控，授权对象是 **CueKeeper**；录制器作为子进程继承授权。构建需要 Rust 工具链，选项和签名边界见 [打包与分发](docs/packaging.md#macos-app-外壳)。
+
 ### 从源码运行（开发者）
 
 需要 macOS、Node.js 22+（自带 npm 10+）。GitHub Actions 在 `macos-latest` 上执行相同的安装、构建、测试和录制器编译，工作流见 `.github/workflows/ci.yml`。

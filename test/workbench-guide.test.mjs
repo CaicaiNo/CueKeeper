@@ -14,6 +14,7 @@ const buttonByText = (node, text) => node.querySelectorAll('button').find(candid
 async function bootPage(t, health) {
   const settingsCalls = [];
   const revealCalls = [];
+  const revealAppCalls = [];
   const root = await mkdtemp(join(tmpdir(), 'cuekeeper-guide-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const directory = join(root, 'run');
@@ -30,6 +31,7 @@ async function bootPage(t, health) {
     allowShell: false, signal: cancellation.signal,
     openSettings: id => settingsCalls.push(id),
     revealRecorder: () => revealCalls.push(true),
+    revealApp: () => revealAppCalls.push(true),
   });
   t.after(async () => { cancellation.abort(); await started.closed; });
 
@@ -56,7 +58,7 @@ async function bootPage(t, health) {
   await import(`../workbench/app.js?guide=${Date.now()}`);
   await sleep(30);
   return {
-    document, flow, url: started.url, settingsCalls, revealCalls,
+    document, flow, url: started.url, settingsCalls, revealCalls, revealAppCalls,
     healthCalls: () => healthCalls, startCalls: () => startCalls,
   };
 }
@@ -83,7 +85,7 @@ test('the workbench serves the guide module and opens the requested settings pan
   const dialog = document.getElementById('guide-dialog');
   assert.equal(dialog.open, true, 'the guide opens');
   assert.match(dialog.textContent, /4 步开始/);
-  assert.match(dialog.textContent, /授权录制器/);
+  assert.match(dialog.textContent, /授权应用/);
   assert.match(dialog.textContent, /录制操作/);
   assert.match(dialog.textContent, /检查流程/);
   assert.match(dialog.textContent, /回放报告/);
@@ -100,7 +102,7 @@ test('the workbench serves the guide module and opens the requested settings pan
   await sleep(50);
   assert.deepEqual(settingsCalls, ['accessibility'], 'the guide opens the accessibility pane');
 
-  buttonByText(dialog, '在 Finder 中显示').click();
+  buttonByText(dialog, '在 Finder 中显示录制器').click();
   await sleep(50);
   assert.deepEqual(revealCalls, [true], 'the guide reveals the exact recorder binary');
 
@@ -108,6 +110,34 @@ test('the workbench serves the guide module and opens the requested settings pan
   buttonByText(dialog, '重新检查环境').click();
   await sleep(50);
   assert.ok(healthCalls() > before, 'recheck probes the recorder again');
+});
+
+test('the guide names the app bundle as the permission target in app mode', async t => {
+  const appPath = '/Users/sheng/Applications/CueKeeper.app';
+  const blocked = {
+    ok: false,
+    blocking: [
+      { id: 'accessibility', label: 'accessibility', status: 'fail', detail: 'not granted for the recorder' },
+      { id: 'input-monitoring', label: 'input monitoring', status: 'fail', detail: 'not granted for the recorder' },
+    ],
+    nextSteps: ['Open System Settings and enable CueKeeper.'],
+    appPath,
+    recorderPath: '/Users/sheng/Documents/git/cuekeeper/dist/cuekeeper-capture',
+  };
+  const { document, revealAppCalls, revealCalls } = await bootPage(t, blocked);
+  document.getElementById('guide-button').click();
+  await sleep(50);
+  const dialog = document.getElementById('guide-dialog');
+  assert.match(dialog.textContent, /授权应用/);
+  assert.match(dialog.textContent, /CueKeeper\.app/);
+  assert.match(dialog.textContent, new RegExp(appPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.doesNotMatch(dialog.textContent, /cuekeeper-capture/,
+    'app mode names the app instead of the helper binary');
+
+  buttonByText(dialog, '在 Finder 中显示 CueKeeper').click();
+  await sleep(50);
+  assert.deepEqual(revealAppCalls, [true], 'the guide reveals the app bundle');
+  assert.deepEqual(revealCalls, [], 'app mode does not reveal the helper binary');
 });
 
 test('a blocked record button opens the guide instead of starting a recording', async t => {

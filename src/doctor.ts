@@ -87,6 +87,8 @@ export interface RecordHealth {
   nextSteps: string[];
   /** The exact recorder binary these checks were run against. */
   recorderPath?: string;
+  /** The app bundle that owns the TCC grant when running inside CueKeeper.app. */
+  appPath?: string;
 }
 
 /** The checks a `record --global` run needs; anything else does not gate it. */
@@ -423,10 +425,13 @@ export async function captureHealth(options: DoctorOptions = {}): Promise<Record
   const report = await diagnose(options);
   const blocking = report.checks.filter(check => check.status === 'fail' && recordingGate.has(check.id));
   const root = options.root ?? defaultRoot();
+  const env = options.env ?? process.env;
+  const appPath = env.CUEKEEPER_APP_PATH?.trim();
   return {
     ok: blocking.length === 0,
     blocking,
     nextSteps: report.nextSteps,
-    recorderPath: recorderPath(root, options.env ?? process.env),
+    recorderPath: recorderPath(root, env),
+    ...(appPath ? { appPath } : {}),
   };
 }
