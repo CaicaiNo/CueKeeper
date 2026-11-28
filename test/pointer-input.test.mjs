@@ -17,7 +17,9 @@ const example = name => JSON.parse(readFileSync(new URL(`../examples/${name}.jso
 const fixture = example('textedit.snapshot');
 const signal = new AbortController().signal;
 const snapshot = parseSnapshot(fixture.data, fixture.target);
-const editor = { kind: 'element', role: 'textfield', name: '' };
+const editor = {
+  kind: 'element', role: 'textfield', name: '', path: ['window', 'scrollarea', 'textfield'],
+};
 const target = fixture.target;
 const flowFor = steps => parseFlow({
   version: 1, id: 'pointer-flow', name: 'Pointer input', target, steps,

@@ -14,7 +14,9 @@ import { Recording, record } from '../dist/record.js';
 const example = name => JSON.parse(readFileSync(new URL(`../examples/${name}.json`, import.meta.url), 'utf8'));
 const fixture = example('textedit.snapshot');
 const target = fixture.target;
-const editor = { kind: 'element', role: 'textfield', name: '' };
+const editor = {
+  kind: 'element', role: 'textfield', name: '', path: ['window', 'scrollarea', 'textfield'],
+};
 const center = [420, 319];
 const buttonPoint = [520, 410];
 const signal = new AbortController().signal;

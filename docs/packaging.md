@@ -144,6 +144,39 @@ Result: ready
 
 `record` 在调用 agent-desktop 之前跑同一套录制器预检。录制器缺失、不可执行或权限未授予时以退出码 `2` 结束，错误码分别是 `RECORDER_MISSING`、`RECORDER_UNUSABLE`、`PERMISSIONS_REQUIRED`，并附系统设置入口；不会出现“先启动录制、再弹出权限框”的中间态。预检无法判定权限（例如录制器输出异常）时继续录制，由录制器自身报错，保持原有错误路径。
 
+## macOS App 外壳（CueKeeper.app）
+
+现有引擎和工作台保持不变；App 只加一层原生外壳：
+
+```sh
+npm run app:package
+# 产物：
+#   release/CueKeeper.app
+#   release/CueKeeper-<version>-macos-<arch>.zip
+#   release/CueKeeper-<version>-macos-<arch>.zip.sha256
+```
+
+- 外壳：Rust + Tauri 2，macOS 用系统 WKWebView 加载本地工作台，不是 Electron。
+- 包内：`Contents/Resources/cuekeeper/` 放 `runtime/node`、`lib/dist`（含录制器）、`lib/workbench`；启动时由 Rust 启动 Node 工作台并加载 `http://127.0.0.1:17899`。
+- 权限：首次启动由 App 调用 `AXIsProcessTrustedWithOptions` 和 `IOHIDRequestAccess`，系统会把 **CueKeeper** 加入「辅助功能 / 输入监控」并弹窗。录制器是 App 的子进程，继承 App 的 TCC 授权。
+- 引导：App 模式下的 `GET /api/record/health` 返回 `appPath`，工作台引导显示「应用」和 `CueKeeper.app`，不再让用户去 Finder 找裸二进制。
+- 生命周期：退出 App 时向 Node 进程组发 `SIGTERM`，让正在录制的 helper 有机会收尾。
+- 日志：`~/Library/Logs/com.cuekeeper.app/workbench.log`；菜单「视图 → 打开日志目录」。
+- 权限请求只会在每次安装后的首次启动自动发起一次；之后用引导或菜单「请求录制权限」，不会每次启动都弹。
+- 引导同时列出 CueKeeper 和内置录制器；如果 macOS 只在辅助功能里列出录制器，用该行的「显示」直接定位 `cuekeeper-capture` 再添加。
+- App 启动 Node 前会把 `~/.local/bin`、`/opt/homebrew/bin`、`/usr/local/bin` 和内置 Node 运行时加入 PATH，并设置 `CUEKEEPER_AGENT_DESKTOP`；因此 LaunchServices 的极简 PATH 不会再导致 agent-desktop 缺失。
+- 「请求权限」会启动 App 内置的录制器，由它弹出系统的辅助功能/输入监控授权；不需要在 Finder 里找二进制。
+
+构建要求：Rust 1.77+（`cargo` 在 PATH 或在 `~/.cargo/bin`）、macOS、Node 22+。参数与目录包类似：`--skip-build`、`--skip-recorder`、`--skip-rust`、`--no-sign`、`--no-zip`、`--out`、`--version`。
+
+图标按 Apple 的 1024 pt macOS 模板绘制：824 pt 圆角方、100 pt 透明边、185.4 pt 圆角，PNG 四周透明，不会出现白底。需要改图标时运行 `npm run app:icon`，它会调用 `desktop/icons/make-icon.swift` 并重新生成 `icon.png`/`icon.icns`。
+
+首次打开：ad-hoc 签名未公证；若 Gatekeeper 拦截，右键 → 打开。安装建议把 App 放到 `~/Applications` 或 `/Applications` 后再授权，移动 App 会被 macOS 视为新位置。
+
+签名边界：ad-hoc 签名的授权跟 cdhash 走，重新构建 App 本体后可能需要重新授权；重新编译录制器不需要，因为 TCC 授权在 App 上。正式分发需要 Developer ID + 公证。
+
+已知限制：首次启动固定使用 17899；如果命令行工作台已占用该端口，App 会拒绝启动并在加载页显示日志路径。App 暂未实现自动更新。
+
 ## 已知限制
 
 - 未签名、未公证：Gatekeeper 需要用户手动放行一次；企业分发、自动更新不在本单。
@@ -151,3 +184,72 @@ Result: ready
 - 重新编译录制器会导致重新授权；若后续加 Developer ID，应改为稳定签名身份。
 - 需要真机验收的项（干净 macOS 用户走 doctor → 录制 → 工作台 → 回放 → 报告、Gatekeeper 首次打开、覆盖安装后的权限行为）登记在 HAOC-76，不在夜间离线任务里执行。
 - Windows 分发未开始，口径见 [Windows 平台](windows.md)。
+
+## macOS App 外壳
+
+`CueKeeper.app` 是现有工作台的原生外壳：界面和引擎不变，App 只负责窗口、内置运行时、进程生命周期和 macOS 权限入口。它使用 Rust/Tauri 2 和系统 WebView，不引入 Electron。
+
+```
+CueKeeper.app/Contents/
+  Info.plist
+  MacOS/CueKeeper            # Rust 外壳
+  Resources/AppIcon.icns
+  Resources/cuekeeper/       # 目录发布包
+    runtime/node
+    lib/dist/                # CLI、录制器、原生辅助二进制
+    lib/workbench/           # 现有工作台
+```
+
+### 构建
+
+前置：macOS、Node 22+、Rust（`cargo` 在 PATH，或 `~/.cargo/bin/cargo`）。
+
+```sh
+npm run app:package
+# 等价于 node scripts/package-app.mjs
+
+open release/CueKeeper.app
+```
+
+产物：
+
+```
+release/
+  CueKeeper.app
+  CueKeeper-<version>-macos-<arch>.zip
+  CueKeeper-<version>-macos-<arch>.zip.sha256
+  CueKeeper-<version>-RELEASE.md
+```
+
+常用选项：
+
+| 参数 | 用途 |
+| --- | --- |
+| `--skip-build` | 复用已有 `dist/` |
+| `--skip-recorder` | 复用已有 `dist/cuekeeper-capture` |
+| `--skip-rust` | 复用 `desktop/target/release/CueKeeper` |
+| `--no-sign` | 不执行 ad-hoc codesign（仅调试） |
+| `--no-zip` | 只产出 `.app` |
+| `--json` | 输出单行 JSON 摘要 |
+
+### 运行行为
+
+- App 启动 `runtime/node lib/dist/cli.js workbench --port 17899`，窗口加载 `http://127.0.0.1:17899`。
+- 关闭 App 会结束 Node 进程组，录制器随工作台一起停止。
+- 首次启动由 App 启动内置录制器。macOS 把这次权限请求归到负责启动它的 `CueKeeper.app` 上；录制时也是同一条责任链，所以两个隐私列表里的授权对象都是主 App，而不是 `cuekeeper-capture`。
+- 输入监控通常不会自动把 App 加进列表。引导里的「打开设置」会同时打开对应面板，并在 Finder 中选中 `CueKeeper.app`：把它拖进列表即可；也可以点列表下的 ＋ 后按 ⌘⇧G 粘贴「复制」的完整路径。
+- 工作台健康检查把授权对象显示为 `CueKeeper.app`；菜单「CueKeeper → 在 Finder 中显示 CueKeeper」可再次定位。
+- 回放报告的「导出报告」由工作台写入 `~/.cuekeeper/exports/`，并在 Finder 中选中该文件；不再依赖浏览器下载。
+- 日志：`~/Library/Logs/com.cuekeeper.app/workbench.log`；菜单「视图 → 打开日志目录」可直接打开。
+
+### 签名与分发
+
+当前只做 ad-hoc 签名，没有 Developer ID 和公证：
+
+- 首次打开可能需要右键 App →「打开」，或在「系统设置 → 隐私与安全性」选择「仍要打开」。
+- 重新构建 App 本体后，ad-hoc 签名（cdhash）变化，macOS 会要求重新授权；授权对象是 `CueKeeper.app`。
+- 正式分发需要 Developer ID 签名、公证和稳定 bundle identity；届时 App 更新可以沿用授权。
+
+App 使用固定端口 17899，便于工作台 `localStorage` 保持稳定。若端口被命令行工作台占用，App 会在启动页显示日志路径并退出，不会静默换端口。
+
+`npm test` 中的 `test/app-bundle.test.mjs` 只检查 App 目录、Info.plist 和资源布局；Rust/Tauri 编译需要本机工具链，当前不在 CI 的快速 job 中执行。

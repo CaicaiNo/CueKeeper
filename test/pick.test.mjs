@@ -94,7 +94,9 @@ test('pick lists TextEdit textfields from a saved snapshot without touching the 
   assert.deepEqual(data.path, ['window', 'scrollarea', 'textfield']);
   assert.deepEqual(data.point, [419, 319]);
   assert.deepEqual(data.frame, { x: 112, y: 130, width: 615, height: 378 });
-  assert.deepEqual(data.locator, { kind: 'element', role: 'textfield', name: '' });
+  assert.deepEqual(data.locator, {
+    kind: 'element', role: 'textfield', name: '', path: ['window', 'scrollarea', 'textfield'],
+  });
 });
 
 test('a picked locator drops into a flow and passes validate and offline resolution', async t => {

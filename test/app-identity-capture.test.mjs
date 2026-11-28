@@ -31,7 +31,9 @@ test('a path-fixed recording keeps only element locators and persists the path',
   const captured = recording.finish();
   assert.equal(captured.target.appPath, '/Applications/B copy.app');
   assert.deepEqual(captured.steps.map(step => step.kind), ['click']);
-  assert.deepEqual(captured.steps[0].target, { kind: 'element', role: 'textfield', name: '' });
+  assert.deepEqual(captured.steps[0].target, {
+    kind: 'element', role: 'textfield', name: '', path: ['window', 'scrollarea', 'textfield'],
+  });
 
   // An old flow still records a point click when no path was selected.
   const legacy = new Recording(flow.target);
